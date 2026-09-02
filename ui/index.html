@@ -115,10 +115,28 @@
 
         <div class="filter-chips" id="myaddons-filters" role="group" aria-label="Filter addons by status"></div>
 
+        <!-- E11: bulk-action bar, shown whenever at least one row checkbox is checked. -->
+        <div class="selection-bar" id="myaddons-selection-bar" hidden>
+          <span class="selection-bar-count" id="myaddons-selection-count"></span>
+          <button type="button" class="link-btn" id="myaddons-clear-selection">Clear</button>
+          <div class="selection-bar-actions">
+            <button type="button" class="btn btn-outline" id="myaddons-bulk-update">
+              <svg class="icon"><use href="#icon-refresh"></use></svg>
+              <span>Update selected</span>
+            </button>
+            <button type="button" class="btn btn-outline" id="myaddons-bulk-ignore">Ignore selected</button>
+            <button type="button" class="btn btn-danger-outline" id="myaddons-bulk-uninstall">
+              <svg class="icon"><use href="#icon-trash"></use></svg>
+              <span>Uninstall selected</span>
+            </button>
+          </div>
+        </div>
+
         <div class="table-scroll">
           <table class="addon-table" id="myaddons-table" hidden>
             <thead>
               <tr>
+                <th class="col-checkbox"><input type="checkbox" class="chk" id="myaddons-select-all" aria-label="Select all addons"></th>
                 <th class="col-addon" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="name" title="Sort by Addon name">Addon<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="installed" title="Sort by Installed version">Installed<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="latest" title="Sort by Latest available version">Latest<span class="sort-indicator" aria-hidden="true"></span></button></th>
@@ -143,6 +161,16 @@
             <h3>No addons tracked yet</h3>
             <p>Add your first addon by CurseForge Project ID or link.</p>
             <button type="button" class="btn btn-accent" id="myaddons-empty-add">Add addon</button>
+          </div>
+
+          <!-- Round 4 fix: distinct from #myaddons-empty above - shown when the
+               status filter/search text narrows a non-empty addon list down to
+               zero rows, instead of leaving a bare table with just headers. -->
+          <div class="empty-state" id="myaddons-empty-filtered" hidden>
+            <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
+            <h3>No addons match</h3>
+            <p>Try a different search term, or clear the active status filter.</p>
+            <button type="button" class="btn btn-outline" id="myaddons-clear-filters">Clear filters</button>
           </div>
 
           <div class="error-state" id="myaddons-error" hidden>
@@ -313,6 +341,20 @@
             <div id="untracked-list" class="untracked-list"></div>
           </section>
 
+          <section class="settings-group" id="settings-backup">
+            <h3>Backup &amp; restore</h3>
+            <p class="muted-text">Export your addon list (pins, ignored updates, release channel) to a file, or restore one you exported earlier.</p>
+            <div class="btn-row">
+              <button type="button" class="btn btn-outline" id="btn-export">
+                <svg class="icon"><use href="#icon-download"></use></svg>
+                <span>Export addon list</span>
+              </button>
+              <button type="button" class="btn btn-outline" id="btn-import">Import addon list</button>
+              <input type="file" id="import-file-input" accept="application/json,.json" hidden>
+            </div>
+            <p class="form-msg" id="backup-msg" hidden></p>
+          </section>
+
           <section class="settings-group" id="settings-maintenance">
             <h3>Maintenance</h3>
             <div class="btn-row">
@@ -322,6 +364,19 @@
               <button type="button" class="btn btn-outline" id="btn-open-backups">Open backups folder</button>
             </div>
             <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
+          </section>
+
+          <section class="settings-group" id="settings-diagnostics">
+            <h3>Diagnostics</h3>
+            <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, API key, disk space.</p>
+            <div class="btn-row">
+              <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
+                <svg class="icon"><use href="#icon-shield"></use></svg>
+                <span>Run</span>
+              </button>
+              <button type="button" class="btn btn-outline" id="btn-copy-diagnostics" hidden>Copy report</button>
+            </div>
+            <div class="diag-list" id="diagnostics-list"></div>
           </section>
 
           <section class="settings-group" id="settings-about">

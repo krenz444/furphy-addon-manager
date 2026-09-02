@@ -3,7 +3,11 @@
 param(
     [string]$Source = $PSScriptRoot,
     [string]$Dest = 'C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync',
-    [switch]$SkipServerCheck
+    [switch]$SkipServerCheck,
+    # After a successful deploy, mirror code + docs into this git checkout and commit/push it.
+    [string]$RepoPath = 'C:\Users\drops\Documents\furphy-addon-manager',
+    [string]$Message = '',
+    [switch]$NoPush
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -91,3 +95,35 @@ if (-not $SkipServerCheck) {
     "server shut down cleanly"
 }
 "DEPLOY OK $stamp"
+
+# 6. Mirror into the git repo and push (keeps github.com/krenz444/furphy-addon-manager current).
+if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
+    foreach ($f in @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'deploy.ps1', 'iterate.workflow.js')) {
+        $s = Join-Path $Source $f
+        if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath $f) -Force }
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs'), (Join-Path $RepoPath 'launcher') | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
+    Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
+    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md')) {
+        $s = Join-Path $Source $f
+        if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
+    }
+    foreach ($f in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
+        $s = Join-Path $retail $f
+        if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "launcher\$f") -Force }
+    }
+    Push-Location $RepoPath
+    try {
+        git add -A | Out-Null
+        $pending = git status --porcelain
+        if ($pending) {
+            if (-not $Message) { $Message = "Deploy $stamp" }
+            git commit -q -m $Message -m 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' | Out-Null
+            $pushOut = git push 2>&1
+            "repo: committed and pushed ($((git rev-parse --short HEAD)))"
+        } else {
+            "repo: nothing changed"
+        }
+    } finally { Pop-Location }
+}

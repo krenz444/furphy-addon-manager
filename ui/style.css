@@ -426,6 +426,27 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .filter-chip.is-active .filter-chip-count { background: var(--accent); color: var(--accent-text); }
 
 /* ==========================================================================
+   Selection bar (My Addons bulk actions)
+   ========================================================================== */
+
+/* E11: appears above the table whenever at least one row checkbox is
+   checked. Tinted like the active filter chip (accent border/tint) so it
+   reads as "something is selected" at a glance without a new color token. */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin: 0 2px 8px;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+}
+.selection-bar-count { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.selection-bar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+
+/* ==========================================================================
    Addon table
    ========================================================================== */
 
@@ -441,10 +462,12 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   font-weight: 600;
   padding: 0 12px 6px;
 }
+.addon-table .col-checkbox { width: 34px; padding-left: 14px; }
 .addon-table .col-version { width: 110px; }
 .addon-table .col-status { width: 150px; }
 .addon-table .col-updated { width: 140px; }
 .addon-table .col-menu { width: 44px; }
+.addon-table td.checkbox-cell { padding-left: 14px; }
 
 /* At the app's documented 1000px minimum window width, the content area
    (1000 - 232px sidebar - 48px .main padding = 720px) is narrower than the
@@ -458,6 +481,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   .addon-table { min-width: 680px; }
   .addon-table .col-updated,
   .addon-table .updated-cell { display: none; }
+  .updated-fallback { display: inline-block; }
 }
 
 /* Sortable column headers: a plain-looking button that inherits the <th>'s
@@ -544,6 +568,12 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .status-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 
 .updated-cell { color: var(--text-muted); font-size: 12.5px; cursor: default; }
+
+/* Round 4 fix: fallback copy of the Updated cell's relative time, folded into
+   the status cell - hidden here, shown only inside the max-width:1100px
+   media query below where the real Updated column is dropped, so the
+   information doesn't just disappear with no affordance at narrow widths. */
+.updated-fallback { display: none; font-size: 11px; color: var(--text-faint); cursor: default; }
 
 .menu-wrap { display: flex; justify-content: flex-end; }
 /* Portalled to <body> with fixed positioning (see Components.Dropdown) so it is
@@ -700,6 +730,11 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .radio-option input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 .radio-option:has(input:checked) { color: var(--text); }
 
+/* E11: plain checkbox used by the My Addons header "select all" and each row's
+   selection checkbox - same sizing/accent-color language as .radio-option's. */
+.chk { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; margin: 0; }
+.chk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
 .switch-track { position: absolute; inset: 0; background: var(--bg-3); border-radius: 999px; transition: background var(--fast); border: 1px solid var(--border); }
@@ -752,6 +787,26 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .about-list > div { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
 .about-list dt { color: var(--text-faint); }
 .about-list dd { margin: 0; color: var(--text-muted); }
+
+/* E10: Settings > Diagnostics results list. Same "dot + name + detail" row
+   shape as .dep-row (E3), but its own class names/colors: ok/fail here maps
+   to success/danger (a real pass/fail), not .dep-row's installed/missing
+   (success/warning, since a missing dependency isn't itself an error). */
+.diag-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.diag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+.diag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.diag-dot.is-ok { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
+.diag-dot.is-fail { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-tint); }
+.diag-name { font-weight: 600; font-size: 12.5px; color: var(--text); min-width: 170px; flex: none; }
+.diag-detail { font-size: 12px; color: var(--text-faint); flex: 1; min-width: 0; overflow-wrap: anywhere; }
 
 /* ==========================================================================
    Drawer
@@ -1026,3 +1081,5 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 [data-density="compact"] .filter-chip { padding: 3px 8px; }
 [data-density="compact"] .status-cell { gap: 3px; }
 [data-density="compact"] .dep-row { padding: 6px 10px; }
+[data-density="compact"] .diag-row { padding: 6px 10px; }
+[data-density="compact"] .selection-bar { padding: 5px 10px; margin-bottom: 6px; }
