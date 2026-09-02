@@ -114,16 +114,23 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "launcher\$f") -Force }
     }
     Push-Location $RepoPath
+    # git writes progress to stderr; under $ErrorActionPreference = 'Stop' PowerShell 5.1 would turn
+    # that into a terminating error, so relax it for this block and rely on exit codes instead.
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        git add -A | Out-Null
-        $pending = git status --porcelain
+        git add -A 2>$null | Out-Null
+        $pending = git status --porcelain 2>$null
         if ($pending) {
             if (-not $Message) { $Message = "Deploy $stamp" }
-            git commit -q -m $Message -m 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' | Out-Null
-            $pushOut = git push 2>&1
-            "repo: committed and pushed ($((git rev-parse --short HEAD)))"
+            git commit -q -m $Message -m 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' 2>$null | Out-Null
+            $null = cmd /c 'git push --quiet 2>&1'
+            if ($LASTEXITCODE -eq 0) { "repo: committed and pushed ($((git rev-parse --short HEAD)))" } else { "repo: committed, but push FAILED (exit $LASTEXITCODE) - run 'git push' in $RepoPath" }
         } else {
             "repo: nothing changed"
         }
-    } finally { Pop-Location }
+    } finally {
+        $ErrorActionPreference = $savedEap
+        Pop-Location
+    }
 }

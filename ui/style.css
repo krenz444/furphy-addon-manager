@@ -12,6 +12,7 @@
   --bg-3: #303338;   /* hover state on raised elements */
   --border: #2f3136;
   --border-soft: #26282d;
+  --border-hover: #3a3d43; /* border/scrollbar-thumb hover state, one step lighter than --border */
 
   /* text */
   --text: #e7e7ea;
@@ -71,6 +72,7 @@
   --bg-3: #e2e5ea;
   --border: #d9dbe0;
   --border-soft: #e7e9ec;
+  --border-hover: #c3c6cc; /* one step darker than --border, light-theme's equivalent "stands out on hover" step */
 
   --text: #1b1c1f;
   --text-muted: #52545b;
@@ -132,7 +134,7 @@ button { font-family: inherit; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
-*::-webkit-scrollbar-thumb:hover { background: #3a3d43; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--border-hover); background-clip: padding-box; }
 
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -266,7 +268,7 @@ button { font-family: inherit; }
 .btn-accent:hover:not(:disabled) { background: var(--accent-hover); }
 
 .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
-.btn-outline:hover:not(:disabled) { background: var(--bg-2); border-color: #3a3d43; }
+.btn-outline:hover:not(:disabled) { background: var(--bg-2); border-color: var(--border-hover); }
 
 .btn-ghost { background: transparent; color: var(--text-muted); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
@@ -452,7 +454,19 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 
 .table-scroll { overflow-x: auto; }
 
-.addon-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; min-width: 900px; }
+/* table-layout: fixed makes every column width below authoritative. Under
+   the previous default (auto) layout, the Addon-name column had no width
+   of its own anywhere in this file, so the browser was free to grow it to
+   fit its content (logo + name + author) - which is exactly how the
+   Round 5 regression slipped past its own fix: the narrow-breakpoint rule
+   below claimed a table min-width of 810px on paper, but the real rendered
+   table (measured live, with actual row content) came out to 836px, wider
+   than even that wrong number, because the unconstrained name column simply
+   took whatever extra room auto-layout let it have. Fixed layout removes
+   that gap - every column (including .col-addon, given an explicit width
+   below) is honored exactly, so the numbers in this file are now the real
+   rendered width, not just an estimate of it. */
+.addon-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0 6px; min-width: 1030px; }
 .addon-table thead th {
   text-align: left;
   font-size: 11px;
@@ -465,20 +479,31 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .addon-table .col-checkbox { width: 34px; padding-left: 14px; }
 .addon-table .col-version { width: 110px; }
 .addon-table .col-status { width: 150px; }
+.addon-table .col-compat { width: 150px; }
 .addon-table .col-updated { width: 140px; }
 .addon-table .col-menu { width: 44px; }
 .addon-table td.checkbox-cell { padding-left: 14px; }
 
 /* At the app's documented 1000px minimum window width, the content area
    (1000 - 232px sidebar - 48px .main padding = 720px) is narrower than the
-   table's normal 900px min-width, forcing a horizontal scroll to reach
+   table's normal min-width, forcing a horizontal scroll to reach
    Latest/Updated even though the kebab column is pinned. Below ~1100px,
    drop the lowest-priority column (Updated - still visible via the row's
    own hover/full-date title, and sortable via the header even while hidden)
-   and shrink the table's min-width to match what's actually hidden, so the
-   remaining columns fit without scrolling. */
+   and shrink every remaining column - including the Addon name column,
+   uncapped everywhere else, now given a real width here so table-layout:
+   fixed has a number to enforce - so the total genuinely fits in 720px.
+   Column budget at this breakpoint (checkbox 34 + name 190 + installed 78
+   + latest 78 + status 128 + compat 140 + menu 44 = 692px, min-width below)
+   leaves a ~28px buffer under the 720px floor, verified against a live
+   render of this file at window widths 1000-1100px (not just arithmetic on
+   paper, which is what produced the previous, still-too-wide 810px). */
 @media (max-width: 1100px) {
-  .addon-table { min-width: 680px; }
+  .addon-table { min-width: 692px; }
+  .addon-table .col-addon { width: 190px; }
+  .addon-table .col-version { width: 78px; }
+  .addon-table .col-status { width: 128px; }
+  .addon-table .col-compat { width: 140px; }
   .addon-table .col-updated,
   .addon-table .updated-cell { display: none; }
   .updated-fallback { display: inline-block; }
@@ -535,10 +560,33 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   font-weight: 700; font-size: 15px; color: #fff;
 }
 .addon-names { min-width: 0; }
-.addon-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.addon-name { font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; min-width: 0; }
+.addon-name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .addon-author { font-size: 12px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.version-text { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+/* E12 (Wago second source): a small source badge next to the addon name
+   (My Addons rows, Wago Browse cards) - orange-tinted for CurseForge's own
+   accent, a neutral info tint for Wago so the two read as clearly distinct
+   at a glance without competing with the status chip's own colors. */
+.source-badge {
+  flex: none; display: inline-flex; align-items: center; padding: 1px 6px;
+  border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.source-badge.is-cf { background: var(--accent-tint); color: var(--accent-hover); }
+.source-badge.is-wago { background: var(--info-tint); color: var(--info); }
+
+/* E12: "Also on Wago/CurseForge" cross-link in the drawer header, when the
+   tracked record's own toc revealed the other source's id. */
+.drawer-crosssource { margin-top: -4px; }
+
+/* display:inline-block + the overflow trio below let a long version string
+   ellipsis inside whatever the column's fixed width (style.css .col-version,
+   both the base and narrow-breakpoint values) actually allows, instead of
+   wrapping to a second line - table-layout:fixed enforces that width now
+   regardless of content, so an unhandled overflow here would previously
+   have just grown the column (and the whole table) wider than intended. */
+.version-text { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .version-text.is-empty { color: var(--text-faint); }
 
 .chip {
@@ -657,7 +705,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   cursor: pointer;
   transition: border-color var(--fast), transform var(--fast), background var(--fast);
 }
-.browse-card:hover { border-color: #3a3d43; background: var(--bg-2); }
+.browse-card:hover { border-color: var(--border-hover); background: var(--bg-2); }
 .browse-card-top { display: flex; gap: 10px; align-items: center; }
 .browse-card .addon-logo, .browse-card .addon-logo-fallback { width: 44px; height: 44px; border-radius: var(--radius); font-size: 16px; }
 .browse-card-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -678,6 +726,12 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .browse-card-footer .btn { width: 100%; }
 
 .loadmore-wrap { display: flex; justify-content: center; padding: 16px 0 40px; }
+
+/* E12: Browse's CurseForge/Wago source switch - sits above both the no-key
+   panel and the shared search/grid content, always visible, reusing the
+   same .segmented control Settings > Appearance's Density/Theme toggles
+   already define. */
+.browse-source-row { padding: 16px 0 0; }
 
 .nokey-panel { display: flex; gap: 16px; align-items: flex-start; padding-top: 24px; flex-wrap: wrap; }
 .nokey-card {
@@ -724,6 +778,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .settings-row-text { min-width: 0; }
 .settings-row-label { font-size: 13px; color: var(--text); }
 .settings-row-value { font-size: 12.5px; color: var(--text-faint); word-break: break-all; margin-top: 2px; }
+/* E13: the checkAddonVersion read-only row's explanatory paragraph - tightens
+   a plain <p class="muted-text">'s default browser margin to match the rest
+   of this settings-row's compact vertical rhythm. */
+.settings-row-col > .muted-text { margin: 6px 0 0; }
 
 .radio-group { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .radio-option { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -780,7 +838,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .untracked-info { flex: 1; min-width: 160px; }
 .untracked-folder { font-weight: 600; font-size: 13px; }
 .untracked-meta { font-size: 12px; color: var(--text-faint); }
-.untracked-actions { display: flex; gap: 6px; align-items: center; }
+/* E12: an untracked row can now show up to two one-click Adopt buttons (CF
+   id and/or Wago id, from -Scan's toc parse) plus the manual-id input/Adopt/
+   Delete buttons - wrap rather than overflow at the app's 1000px floor width. */
+.untracked-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .untracked-actions input { width: 130px; }
 
 .about-list { display: flex; flex-direction: column; gap: 6px; }
@@ -905,6 +966,14 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .dep-dot.is-installed { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
 .dep-dot.is-missing { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-tint); }
 .dep-name { flex: 1; min-width: 140px; font-size: 12.5px; color: var(--text); }
+
+/* E13: drawer Overview's Compatibility section - same "heading + one info
+   row" shape as .deps-section immediately above, reusing its .deps-heading;
+   its own row/detail classes since the row holds a chip + free text, not a
+   dep-dot + name + button. */
+.compat-section { margin-top: 16px; }
+.compat-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.compat-detail { font-size: 12px; }
 
 .versions-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; }
 .versions-table th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--text-faint); padding: 0 10px 4px; }

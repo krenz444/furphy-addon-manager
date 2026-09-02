@@ -44,6 +44,13 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 ### Round 4 (started 07:35, requested by Eric) - E4 export/import, E10 diagnostics, E11 bulk actions + all deferred low-severity bugs
 - Live check first: the game-launch command (`addon-sync.ps1 -Launcher -Quiet`) ran in 18 s, 36 up-to-date, 1 updated, no warnings.
 
+### Round 4 result (07:35 - ~09:50, deployed 12:50, pushed to GitHub)
+- 19 agents. Audit 19 findings (all applied incl. every deferred low-severity bug: stale drawer tabs, ignore-menu icon, stale key-test message, "Pinning" job label, Add-dialog URL handling, empty filtered-list state, natural name sort, narrow-width Updated info, dependents listed in the uninstall confirm; plus the UX auditor's find that the 5-second poll rebuilt the table under the mouse and swallowed clicks - now skipped when state is unchanged).
+- E4 export/import (Settings > Backup & restore), E10 diagnostics (Settings > Diagnostics with copy report), E11 bulk actions (checkboxes, Update/Ignore/Uninstall selected). Multi-id CLI arguments are joined with commas (the bug found during the audit is covered).
+- Tests: CLI 8/8, server 27/27, UI 26/26, first try. Deployed 12:50 (backup AddonSync-backup-20260902-1250.zip) and committed to github.com/krenz444/furphy-addon-manager.
+
+### Round 5 (started 12:52) - E12 Wago Addons source (keyless), E13 compatibility column, mock/docs cleanups, /api/open serverlog
+
 ### Midnight Season 2 compatibility audit (08:40)
 - Client 12.1.0.69587 (Interface 120100). 34/37 addons are on today's newest CurseForge file AND declare 120100 / are tagged 12.1.0 (AlterEgo 1.6.5 and MDT 6.2.11 pulled during the audit). WoW's `checkAddonVersion` is 0, so out-of-date addons still load.
 - Stale (not built for 12.1): BetterAddonList (1.4.7, 2026-06-14, 12.0.7), MinimapButtonBag-Reborn (4.0.29, 2026-04-22, 12.0.5), X Practice (2026-07-07, 12.0.7). Research on function/successors running (results appended below).
