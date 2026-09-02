@@ -49,7 +49,10 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 - E4 export/import (Settings > Backup & restore), E10 diagnostics (Settings > Diagnostics with copy report), E11 bulk actions (checkboxes, Update/Ignore/Uninstall selected). Multi-id CLI arguments are joined with commas (the bug found during the audit is covered).
 - Tests: CLI 8/8, server 27/27, UI 26/26, first try. Deployed 12:50 (backup AddonSync-backup-20260902-1250.zip) and committed to github.com/krenz444/furphy-addon-manager.
 
-### Round 5 (started 12:52) - E12 Wago Addons source (keyless), E13 compatibility column, mock/docs cleanups, /api/open serverlog
+### Round 5 (12:52 - 15:52, deployed + pushed 15:53) - E12 Wago Addons source (keyless), E13 compatibility column, cleanups
+- 21 agents. Audit 27 findings applied (notable: CurseForge API key could leak into an error message from the key-test path - fixed; unbounded proxy cache - bounded; URL-encoding in /api/open; aria-selected on drawer tabs; About uptime freezing; console.curseforge.com links in the no-key panel; mock data no longer names WeakAuras; docs state Midnight/S2 context; /api/open gained serverlog).
+- E12: records carry source/slug/wagoId/curseId; `-Add wago:<slug>`/Wago URLs; Wago releases/versions/pin/rollback/remove; server /api/wago/search|categories|resolve|addons/{slug}|releases|gallery with Inertia version cached in state.json; UI Browse source switch, Wago badges, "Also on" cross-source actions, Wago changelogs keyless. E13: compat per record (ok / stale-minor / stale / unknown) from .toc Interfaces + newest file game versions vs the client build from .build.info; Compatibility column + Stale filter; client build in diagnostics and Settings.
+- Tests: CLI 10/10, server 25/25, UI 17/17 (2nd attempt). CAVEAT: the testers verified Wago offline only (fixtures/mocks) - live addons.wago.io verification done by hand after deploy (see below).
 
 ### Midnight Season 2 compatibility audit (08:40)
 - Client 12.1.0.69587 (Interface 120100). 34/37 addons are on today's newest CurseForge file AND declare 120100 / are tagged 12.1.0 (AlterEgo 1.6.5 and MDT 6.2.11 pulled during the audit). WoW's `checkAddonVersion` is 0, so out-of-date addons still load.

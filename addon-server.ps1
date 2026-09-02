@@ -500,14 +500,59 @@ function Split-TocDepList {
     Write-Output -NoEnumerate $result
 }
 
+function Get-PrimaryTocFile {
+    <#
+      Fix pass: duplicate of addon-sync.ps1's identically-named function
+      (this script never dot-sources the CLI) - picks the .toc file WoW
+      retail actually loads for one installed folder, out of however many
+      game-flavor variants a package ships in the same folder (a base
+      "<folder>.toc" for one client, often NOT retail, alongside a
+      "<folder>_Mainline.toc"/"<folder>-Mainline.toc" specifically for
+      retail). Order: "<folder>_Mainline.toc", "<folder>-Mainline.toc",
+      "<folder>.toc", else the first .toc found. $null when there is none.
+      Never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FolderPath,
+        [Parameter(Mandatory = $true)][string]$FolderName
+    )
+
+    $tocFiles = Get-ChildItem -LiteralPath $FolderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
+    if (-not $tocFiles) {
+        return $null
+    }
+    # Built with -f, not "$FolderName_Mainline.toc" - PowerShell would parse
+    # the latter as ${FolderName_Mainline} (underscore is a valid identifier
+    # character), not $FolderName followed by literal text.
+    $preferredNames = @(
+        ('{0}_Mainline.toc' -f $FolderName),
+        ('{0}-Mainline.toc' -f $FolderName),
+        ('{0}.toc' -f $FolderName)
+    )
+    foreach ($preferredName in $preferredNames) {
+        foreach ($t in $tocFiles) {
+            if ($t.Name -eq $preferredName) { return $t }
+        }
+    }
+    foreach ($t in $tocFiles) { return $t }
+    return $null
+}
+
 function Get-TocInterfaceValues {
     <#
       Reads "## Interface:"/"## Interface-Mainline:" from one folder's
-      primary .toc into int64s. Never throws; empty list when unavailable.
-      -AddonsPath is not Mandatory (Handle-State can reach here with an
-      unresolvable AddOns path, $null - a Mandatory [string] parameter
-      rejects an explicit $null argument outright, distinct from simply
-      omitting it, rather than degrading gracefully).
+      primary .toc (Get-PrimaryTocFile's Mainline-first selection) into
+      int64s. Never throws; empty list when unavailable. -AddonsPath is not
+      Mandatory (Handle-State can reach here with an unresolvable AddOns
+      path, $null - a Mandatory [string] parameter rejects an explicit
+      $null argument outright, distinct from simply omitting it, rather
+      than degrading gracefully).
+
+      Fix pass: when the chosen file has any "## Interface-Mainline:"
+      line(s), those win outright and plain "## Interface:" line(s) in that
+      same file are ignored (they describe a different client's build, not
+      an additional retail value to union in) - see addon-sync.ps1's
+      identical function for the full rationale.
     #>
     param(
         [string]$AddonsPath,
@@ -524,10 +569,7 @@ function Get-TocInterfaceValues {
         Write-Output -NoEnumerate $result
         return
     }
-    $tocFiles = Get-ChildItem -LiteralPath $folderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
-    $chosen = $null
-    foreach ($t in $tocFiles) { if ($t.BaseName -eq $FolderName) { $chosen = $t; break } }
-    if (-not $chosen) { foreach ($t in $tocFiles) { $chosen = $t; break } }
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
     if (-not $chosen) {
         Write-Output -NoEnumerate $result
         return
@@ -539,13 +581,25 @@ function Get-TocInterfaceValues {
         Write-Output -NoEnumerate $result
         return
     }
+    $mainlineValues = New-Object 'System.Collections.Generic.List[object]'
+    $plainValues = New-Object 'System.Collections.Generic.List[object]'
     foreach ($line in $lines) {
-        if ($line -match '^\s*##\s*(Interface|Interface-Mainline)\s*:\s*(.*)$') {
-            foreach ($piece in (Split-TocDepList -Value $Matches[2])) {
+        if ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$') {
+            foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
                 $ival = [int64]0
-                if ([int64]::TryParse($piece, [ref]$ival)) { $result.Add([int64]$ival) }
+                if ([int64]::TryParse($piece, [ref]$ival)) { $mainlineValues.Add([int64]$ival) }
+            }
+        } elseif ($line -match '^\s*##\s*Interface\s*:\s*(.*)$') {
+            foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
+                $ival = [int64]0
+                if ([int64]::TryParse($piece, [ref]$ival)) { $plainValues.Add([int64]$ival) }
             }
         }
+    }
+    if ($mainlineValues.Count -gt 0) {
+        foreach ($v in $mainlineValues) { $result.Add($v) }
+    } else {
+        foreach ($v in $plainValues) { $result.Add($v) }
     }
     Write-Output -NoEnumerate $result
 }
@@ -2369,6 +2423,14 @@ function ConvertFrom-WagoSearchCardHtml {
       the <h3> title, and a cdn.wago.io thumbnail <img src>, per SPEC's own
       description of what to look for. Never throws: a card whose markup
       doesn't match a given piece just leaves that field $null.
+
+      Fix pass: the thumbnail regex used to require a quoted src="..."
+      attribute, but Wago's actual server-rendered card markup emits it
+      UNQUOTED on its own line (e.g. "src=https://cdn.wago.io/thumbnails/
+      xyz.png") - verified live, every card's thumbnail came back $null.
+      Quotes are now optional around the URL, matched non-greedily against
+      whitespace/">"/a matching quote so it still stops at the right place
+      whichever style a given card uses.
     #>
     param([string]$Html)
 
@@ -2378,7 +2440,7 @@ function ConvertFrom-WagoSearchCardHtml {
     $thumb = $null
     if ($Html -match 'href="https://addons\.wago\.io/addons/([a-z0-9-]+)"') { $slug = $Matches[1] }
     if ($Html -match '<h3[^>]*>([^<]*)</h3>') { $name = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
-    if ($Html -match 'src="(https://cdn\.wago\.io/thumbnails/[^"]*)"') { $thumb = $Matches[1] }
+    if ($Html -match 'src=["'']?(https://cdn\.wago\.io/thumbnails/[^"''\s>]+)') { $thumb = $Matches[1] }
     if (-not $slug) { return $null }
     return [PSCustomObject]@{ slug = $slug; name = $name; thumbnail = $thumb }
 }
