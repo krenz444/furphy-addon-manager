@@ -141,6 +141,7 @@
                 <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="installed" title="Sort by Installed version">Installed<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="latest" title="Sort by Latest available version">Latest<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-status" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="status" title="Sort by Status">Status<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-compat">Compat</th>
                 <th class="col-updated" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="updated" title="Sort by when it was last updated">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-menu"></th>
               </tr>
@@ -185,13 +186,23 @@
       <!-- ===================== Browse ===================== -->
       <section id="view-browse" class="view" data-view-root="browse" hidden>
 
+        <!-- E12 (Wago second source): visible regardless of key status, since
+             Wago never needs one - switching to it must work even while the
+             CurseForge no-key panel below is showing. -->
+        <div class="browse-source-row">
+          <div class="segmented" id="browse-source-switch" role="group" aria-label="Addon source">
+            <button type="button" class="segmented-btn is-active" data-source-value="curseforge">CurseForge</button>
+            <button type="button" class="segmented-btn" data-source-value="wago">Wago Addons</button>
+          </div>
+        </div>
+
         <div class="nokey-panel" id="browse-nokey" hidden>
           <div class="nokey-card">
             <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
             <h2>Browse needs a free CurseForge API key</h2>
             <ol class="nokey-steps">
-              <li>Sign in or create an account at <strong>console.curseforge.com</strong></li>
-              <li>Open <strong>API Keys</strong> and generate one</li>
+              <li>Sign in or create an account at <a href="https://console.curseforge.com" target="_blank" rel="noopener noreferrer">console.curseforge.com</a></li>
+              <li>Open <a href="https://console.curseforge.com/#/api-keys" target="_blank" rel="noopener noreferrer">API Keys</a> and generate one</li>
               <li>Paste it in Settings</li>
             </ol>
             <button type="button" class="btn btn-accent" id="btn-nokey-settings">Go to Settings</button>
@@ -276,6 +287,13 @@
                 <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
               </div>
               <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
+            </div>
+            <!-- E13: read-only info, not a manager setting - WoW's own
+                 checkAddonVersion cvar (WTF\Config.wtf). -->
+            <div class="settings-row settings-row-col">
+              <div class="settings-row-label">Out-of-date addon loading (checkAddonVersion)</div>
+              <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
+              <p class="muted-text">This is WoW&rsquo;s own setting, not a WoW Addon Manager setting &mdash; it controls whether the character-select screen blocks addons the client thinks are out of date. &ldquo;0&rdquo; (disabled) lets them load anyway, which pairs well with this manager keeping them updated; &ldquo;1&rdquo; (enabled) is the game&rsquo;s default warning/block. Change it in-game via the AddOns list, not here.</p>
             </div>
           </section>
 

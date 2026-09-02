@@ -67,22 +67,65 @@ const Mock = (function () {
   const jobs = [];
 
   const addons = [
-    { name: "WeakAuras", projectId: 68304, fileId: 111, version: "5.20.1", fileName: "WeakAuras-5.20.1.zip", installedAt: new Date(Date.now() - 3 * 3600e3).toISOString(), folders: ["WeakAuras"], author: "Stanzilla", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: { fileId: 112, version: "5.21.0" } },
+    // Round 5 fix: this mock roster is dev-only fixture data, but naming a
+    // real addon that no longer exists in Midnight (12.x) misleads anyone
+    // reading the source - WeakAuras has no Midnight-era build. Swapped for
+    // Auctionator, a real addon still current in Season 2 on 12.1.0.
+    // E13: tocInterfaces/compat/latestGameVersions/latestFileDate exercise
+    // the Compatibility column/chip and the drawer's compat section without
+    // a real server - Auctionator is "ok" (matches the mock client build),
+    // BigWigs below is "stale-minor" (12.0.x only), BonusRollConfirm is
+    // "unknown" (no evidence at all, e.g. a record that predates E13).
+    { name: "Auctionator", projectId: 68304, fileId: 111, version: "5.20.1", fileName: "Auctionator-5.20.1.zip", installedAt: new Date(Date.now() - 3 * 3600e3).toISOString(), folders: ["Auctionator"], author: "Sylvanaar", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: { fileId: 112, version: "5.21.0" }, tocInterfaces: [120100], compat: "ok", latestGameVersions: ["12.1.0"], latestFileDate: new Date(Date.now() - 3 * 3600e3).toISOString() },
     // E3: requiredDeps/optionalDeps/missingDeps/missingOptionalDeps exercise
     // the drawer's Overview dependency list and the row's "Missing: n" chip
     // without a real server - DetailsFramework isn't itself a mock addon, so
     // it shows up missing; Bagnon is (installed), so it shows up satisfied.
     { name: "Details! Damage Meter", projectId: 25301, fileId: 220, version: "18.2", fileName: "Details-18.2.zip", installedAt: new Date(Date.now() - 26 * 3600e3).toISOString(), folders: ["Details"], author: "Tercioo", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null, requiredDeps: ["DetailsFramework"], optionalDeps: ["Bagnon"], missingDeps: ["DetailsFramework"], missingOptionalDeps: [] },
-    { name: "BigWigs Bossmods", projectId: 33818, fileId: 305, version: "424.3", fileName: "BigWigs-424.3.zip", installedAt: new Date(Date.now() - 9 * 24 * 3600e3).toISOString(), folders: ["BigWigs"], author: "Ammo", ignoreUpdates: false, pinnedFileId: 305, releaseType: null, updateAvailable: null },
+    { name: "BigWigs Bossmods", projectId: 33818, fileId: 305, version: "424.3", fileName: "BigWigs-424.3.zip", installedAt: new Date(Date.now() - 9 * 24 * 3600e3).toISOString(), folders: ["BigWigs"], author: "Ammo", ignoreUpdates: false, pinnedFileId: 305, releaseType: null, updateAvailable: null, tocInterfaces: [120007], compat: "stale-minor", latestGameVersions: ["12.0.7"], latestFileDate: new Date(Date.now() - 9 * 24 * 3600e3).toISOString() },
     { name: "Bagnon", projectId: 24560, fileId: 88, version: "10.6", fileName: "Bagnon-10.6.zip", installedAt: new Date(Date.now() - 40 * 24 * 3600e3).toISOString(), folders: ["Bagnon"], author: "Tuller", ignoreUpdates: true, pinnedFileId: null, releaseType: null, previousFileId: 85, previousVersion: "10.5", updateAvailable: { fileId: 91, version: "10.9" } },
-    { name: "BonusRollConfirm", projectId: 1521253, fileId: 8720783, version: "1.0.2", fileName: "BonusRollConfirm-1.0.2.zip", installedAt: new Date(Date.now() - 400 * 24 * 3600e3).toISOString(), folders: ["BonusRollConfirm"], author: "krenz", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null }
+    { name: "BonusRollConfirm", projectId: 1521253, fileId: 8720783, version: "1.0.2", fileName: "BonusRollConfirm-1.0.2.zip", installedAt: new Date(Date.now() - 400 * 24 * 3600e3).toISOString(), folders: ["BonusRollConfirm"], author: "krenz", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null },
+    // E12 (Wago second source): a Wago-sourced tracked addon, exercising the
+    // My Addons source badge, the drawer's Wago branches, and "Also on
+    // CurseForge" (curseId set, matching a real dual-hosted addon in spirit)
+    // without the real server.
+    { name: "Simple Damage Meter", projectId: null, fileId: "r7k2m9q1", version: "3.4.0", fileName: "simple-damage-meter-r7k2m9q1.zip", installedAt: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), folders: ["SimpleDamageMeter"], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: "SDM001", slug: "simple-damage-meter", curseId: "654321", updateAvailable: { fileId: "r8n4p2s3", version: "3.5.0" } }
   ];
+
+  const wagoBrowsePool = [
+    { slug: "simple-damage-meter", name: "Simple Damage Meter", thumbnail: "" },
+    { slug: "tidy-bags", name: "Tidy Bags", thumbnail: "" },
+    { slug: "quick-camera", name: "Quick Camera", thumbnail: "" },
+    { slug: "raid-cooldowns", name: "Raid Cooldowns", thumbnail: "" }
+  ];
+  const wagoCategoriesMock = [
+    { id: 1, display_name: "Combat" },
+    { id: 2, display_name: "Interface" },
+    { id: 3, display_name: "Utility" }
+  ];
+  function fakeWagoReleases(slug) {
+    const out = [];
+    for (let i = 0; i < 5; i++) {
+      out.push({
+        id: slug.slice(0, 3) + "-r" + (5 - i),
+        addon_id: 1,
+        size: 30000 + i * 5000,
+        label: (5 - i) + ".0.0",
+        stability: i === 1 ? "beta" : (i === 4 ? "alpha" : "stable"),
+        changelog: i === 0 ? "## What's new\n- Fixed a bug\n- **Improved** performance" : "",
+        created_at: new Date(Date.now() - i * 12 * 24 * 3600e3).toISOString(),
+        supported_retail_patches: ["12.1.0"],
+        download_link: "https://cdn.wago.io/mock/" + slug + "/" + i + ".zip"
+      });
+    }
+    return out;
+  }
 
   let lastRun = {
     timestamp: new Date(Date.now() - 5 * 60e3).toISOString(),
     summary: "1 updated, 3 up to date, 1 ignored",
     rows: [
-      { status: "Updated", name: "WeakAuras", version: "5.20.1" },
+      { status: "Updated", name: "Auctionator", version: "5.20.1" },
       { status: "Up-to-date", name: "Details! Damage Meter", version: "18.2" },
       { status: "Pinned", name: "BigWigs Bossmods", version: "424.3" },
       { status: "Ignored", name: "Bagnon", version: "10.6" },
@@ -129,8 +172,8 @@ const Mock = (function () {
   function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
 
   function jobLines(kind) {
-    if (kind === "check") return ["Checking 5 addons against CurseForge...", "WeakAuras: update available (5.21.0)", "Bagnon: update available (10.9)", "Check complete."];
-    if (kind === "sync") return ["Syncing addons...", "WeakAuras: downloading 5.21.0...", "WeakAuras: installed.", "Sync complete."];
+    if (kind === "check") return ["Checking 5 addons against CurseForge...", "Auctionator: update available (5.21.0)", "Bagnon: update available (10.9)", "Check complete."];
+    if (kind === "sync") return ["Syncing addons...", "Auctionator: downloading 5.21.0...", "Auctionator: installed.", "Sync complete."];
     if (kind === "add") return ["Resolving project...", "Downloading latest file...", "Installed."];
     if (kind === "remove") return ["Removing addon and its folders...", "Removed."];
     if (kind === "install") return ["Downloading selected version...", "Installed."];
@@ -165,17 +208,23 @@ const Mock = (function () {
       job.finishedAt = new Date().toISOString();
       job.exitCode = 0;
 
+      // E12: an addon's Mock-side key, matching Store.addonKey exactly - a
+      // "sync"/"install"/"rollback" job's params always carry this form
+      // (never a numeric-only id for a Wago row), so every id-matching
+      // branch below compares against it rather than bare a.projectId.
+      function mockKey(a) { return a.source === "wago" ? "wago:" + a.slug : a.projectId; }
+
       if (kind === "check") {
         updatesCheckedAt = new Date().toISOString();
         job.results = [
-          { status: "Would-update", name: "WeakAuras", version: "5.21.0", projectId: 68304, fileId: 112 },
+          { status: "Would-update", name: "Auctionator", version: "5.21.0", projectId: 68304, fileId: 112 },
           { status: "Would-update", name: "Bagnon", version: "10.9", projectId: 24560, fileId: 91 }
         ];
       } else if (kind === "sync") {
         const ids = params && params.ids;
         addons.forEach(function (a) {
           if (a.ignoreUpdates && !(params && params.force)) return;
-          if (ids && ids.indexOf(a.projectId) === -1) return;
+          if (ids && ids.indexOf(mockKey(a)) === -1) return;
           if (a.updateAvailable) {
             a.previousFileId = a.fileId;
             a.previousVersion = a.version;
@@ -190,11 +239,44 @@ const Mock = (function () {
         });
         lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
       } else if (kind === "add") {
-        const pid = params.projectId;
-        const name = "New Addon " + pid;
-        const rec = { name: name, projectId: pid, fileId: params.fileId || pid * 10, version: "1.0.0", fileName: name + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [name], author: "SomeAuthor", ignoreUpdates: false, pinnedFileId: params.fileId || null, releaseType: null, updateAvailable: null };
-        addons.push(rec);
-        job.results = [{ status: "Installed", name: name, version: "1.0.0", projectId: pid, fileId: rec.fileId }];
+        // E12: a Wago add posts {source:'wago', slug, fileId?} instead of a
+        // projectId (see Actions.installLatestWago/addByWagoSlug) - mirrors
+        // the real server's Start-Job normalization, just inline here since
+        // Mock has no separate CLI process to normalize params for.
+        if (params.source === "wago" && params.slug) {
+          const slug = params.slug;
+          const existing = addons.find(function (a) { return a.source === "wago" && a.slug === slug; });
+          if (existing) { job.results = [{ status: "Skipped", name: existing.name, version: existing.version, projectId: null, fileId: existing.fileId, wagoSlug: slug }]; return; }
+          const name = "New Wago Addon (" + slug + ")";
+          const fid = params.fileId || (slug + "-r1");
+          const rec = { name: name, projectId: null, fileId: fid, version: "1.0.0", fileName: name + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [name], author: null, ignoreUpdates: false, pinnedFileId: params.fileId || null, releaseType: null, source: "wago", wagoId: null, slug: slug, curseId: null, updateAvailable: null };
+          addons.push(rec);
+          job.results = [{ status: "Installed", name: name, version: "1.0.0", projectId: null, fileId: fid, wagoSlug: slug }];
+        } else {
+          const pid = params.projectId;
+          const name = "New Addon " + pid;
+          const rec = { name: name, projectId: pid, fileId: params.fileId || pid * 10, version: "1.0.0", fileName: name + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [name], author: "SomeAuthor", ignoreUpdates: false, pinnedFileId: params.fileId || null, releaseType: null, updateAvailable: null };
+          addons.push(rec);
+          job.results = [{ status: "Installed", name: name, version: "1.0.0", projectId: pid, fileId: rec.fileId, wagoSlug: null }];
+        }
+      } else if (kind === "switch-source") {
+        // E12: mirrors the real server's two-phase remove-then-add, but as
+        // one atomic step here (Mock has no multi-phase job machinery).
+        const oldKey = params.projectId;
+        const idx = addons.findIndex(function (a) { return (a.source === "wago" ? "wago:" + a.slug : a.projectId) === oldKey; });
+        const oldName = idx !== -1 ? addons[idx].name : "addon";
+        if (idx !== -1) addons.splice(idx, 1);
+        if (params.toSource === "wago") {
+          const rec = { name: oldName, projectId: null, fileId: params.toTarget + "-r1", version: "1.0.0", fileName: oldName + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [oldName], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: params.toTarget, slug: params.toTarget, curseId: null, updateAvailable: null };
+          addons.push(rec);
+          job.results = [{ status: "Installed", name: oldName, version: "1.0.0", projectId: null, fileId: rec.fileId, wagoSlug: rec.slug }];
+        } else {
+          const pid = Number(params.toTarget);
+          const rec = { name: oldName, projectId: pid, fileId: pid * 10, version: "1.0.0", fileName: oldName + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [oldName], author: "SomeAuthor", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null };
+          addons.push(rec);
+          job.results = [{ status: "Installed", name: oldName, version: "1.0.0", projectId: pid, fileId: rec.fileId, wagoSlug: null }];
+        }
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
       } else if (kind === "remove") {
         // E11: bulk uninstall posts projectIds (array); the single per-row
         // kebab "Uninstall" still posts a single projectId - normalize both
@@ -203,14 +285,15 @@ const Mock = (function () {
         const removeIds = (params && params.projectIds && params.projectIds.length) ? params.projectIds : [params.projectId];
         job.results = [];
         removeIds.forEach(function (pid) {
-          const idx = addons.findIndex(function (a) { return a.projectId === pid; });
+          // E12: pid may be a "wago:<slug>" key as well as a numeric projectId.
+          const idx = addons.findIndex(function (a) { return (a.source === "wago" ? "wago:" + a.slug : a.projectId) === pid; });
           if (idx !== -1) {
-            job.results.push({ status: "Removed", name: addons[idx].name, version: addons[idx].version, projectId: pid });
+            job.results.push({ status: "Removed", name: addons[idx].name, version: addons[idx].version, projectId: addons[idx].projectId, wagoSlug: addons[idx].slug });
             addons.splice(idx, 1);
           }
         });
       } else if (kind === "install") {
-        const a = addons.find(function (x) { return x.projectId === params.projectId; });
+        const a = addons.find(function (x) { return mockKey(x) === params.projectId; });
         if (a) {
           a.pinnedFileId = params.fileId;
           if (a.fileId !== params.fileId) { a.fileId = params.fileId; a.installedAt = new Date().toISOString(); job.results = [{ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }]; }
@@ -243,7 +326,7 @@ const Mock = (function () {
         }
         job.results.push({ status: "Launched", name: "World of Warcraft" });
       } else if (kind === "rollback") {
-        const a = addons.find(function (x) { return x.projectId === params.projectId; });
+        const a = addons.find(function (x) { return mockKey(x) === params.projectId; });
         if (a && a.previousFileId !== null && a.previousFileId !== undefined) {
           const replacedFileId = a.fileId, replacedVersion = a.version;
           a.fileId = a.previousFileId;
@@ -298,7 +381,9 @@ const Mock = (function () {
       const q = u.searchParams;
 
       if (p === "/api/state") {
-        return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt };
+        // E13: fixed mock client build - matches the "ok" Auctionator/
+        // "stale-minor" BigWigs fixtures seeded above.
+        return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, clientBuild: "12.1.0.69587", clientInterface: 120100 };
       }
       if (p === "/api/ping") return { ok: true, version: "mock-1.0", uptime: 1234 };
       if (p === "/api/jobs" && method === "GET") return jobs.slice(0, 20);
@@ -372,7 +457,9 @@ const Mock = (function () {
             { name: "Disk space", ok: true, detail: "412.6 GB free on C:\\" },
             { name: "PowerShell version", ok: true, detail: "5.1.19041.4291" },
             { name: "Server uptime", ok: true, detail: "12m" },
-            { name: "Last sync", ok: true, detail: lastRun ? lastRun.timestamp : "never" }
+            { name: "Last sync", ok: true, detail: lastRun ? lastRun.timestamp : "never" },
+            // E13: mirrors the real server's Test-DiagClientBuild row.
+            { name: "WoW client build", ok: true, detail: "12.1.0.69587" }
           ]
         };
       }
@@ -439,6 +526,39 @@ const Mock = (function () {
         }
         return { __status: 404, error: "not found" };
       }
+      // E12 (Wago second source) - keyless, mirrors the real server's
+      // /api/wago/* shapes closely enough to exercise Browse's Wago tab and
+      // the drawer's Wago branches without a real server.
+      if (p === "/api/wago/search") {
+        const wq = (q.get("q") || "").toLowerCase();
+        const list = wagoBrowsePool.filter(function (x) { return !wq || x.name.toLowerCase().indexOf(wq) !== -1; });
+        return { items: list, page: 1, lastPage: 1, total: list.length };
+      }
+      if (p === "/api/wago/categories") return { data: wagoCategoriesMock };
+      const wagoAddonMatch = p.match(/^\/api\/wago\/addons\/([^/]+)$/);
+      if (wagoAddonMatch) {
+        const slug = decodeURIComponent(wagoAddonMatch[1]);
+        const found = wagoBrowsePool.find(function (x) { return x.slug === slug; }) || { slug: slug, name: slug };
+        return {
+          addon: { id: "MOCK" + slug, slug: slug, display_name: found.name, summary: "A tidy little Wago addon.", thumbnail_image: "", categories: [{ id: 1, display_name: "Utility" }], website: "", source_url: "", is_unlisted: false },
+          description: "## " + found.name + "\nA **mock** description with a [link](https://addons.wago.io/addons/" + slug + ") for offline testing.\n- Fast\n- Lightweight",
+          metadata: { last_update: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), download_count: 42000, like_count: 310, developers: [{ name: "MockDev" }] }
+        };
+      }
+      const wagoReleasesMatch = p.match(/^\/api\/wago\/addons\/([^/]+)\/releases$/);
+      if (wagoReleasesMatch) {
+        const slug = decodeURIComponent(wagoReleasesMatch[1]);
+        return { data: { data: fakeWagoReleases(slug), current_page: 1, last_page: 1, per_page: 10, total: 5 } };
+      }
+      const wagoGalleryMatch = p.match(/^\/api\/wago\/addons\/([^/]+)\/gallery$/);
+      if (wagoGalleryMatch) return { gallery: { images: [] } };
+      if (p === "/api/wago/resolve") {
+        const url = q.get("url") || "";
+        const m = url.match(/\/addons\/([a-z0-9-]+)/i);
+        if (m) return { slug: m[1] };
+        if (/^[a-z0-9-]+$/i.test(url)) return { slug: url };
+        return { __status: 404, error: "not found" };
+      }
       if (p === "/api/open" && method === "POST") return { ok: true };
       if (p === "/api/shutdown" && method === "POST") return { ok: true };
       return { __status: 404, error: "no mock route for " + method + " " + p };
@@ -446,7 +566,9 @@ const Mock = (function () {
   };
 
   function currentSettings() {
-    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, hasApiKey: hasKey, apiKeyHint: hasKey ? mockSettings.cfApiKey.slice(-4) : "", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_" };
+    // E13: checkAddonVersion is fixed mock data (read-only info, WTF\Config.wtf
+    // - never set via PUT /api/settings, real or mock).
+    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, hasApiKey: hasKey, apiKeyHint: hasKey ? mockSettings.cfApiKey.slice(-4) : "", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0" };
   }
 })();
 
@@ -562,7 +684,75 @@ const Utils = (function () {
     return t ? t[0].toUpperCase() : "?";
   }
 
-  return { qs: qs, qsa: qsa, el: el, icon: icon, escapeHtml: escapeHtml, debounce: debounce, relativeTime: relativeTime, fullDate: fullDate, formatBytes: formatBytes, formatNumber: formatNumber, releaseLabel: releaseLabel, releaseChipClass: releaseChipClass, colorForName: colorForName, firstLetter: firstLetter };
+  // E12 (Wago second source): an addon's "id" is a number (its CurseForge
+  // projectId) for a CurseForge-sourced record, or the string "wago:<slug>"
+  // for a Wago-sourced one (which has no numeric projectId at all - see
+  // Store.addonKey). Every place that used to do a bare Number(id) before
+  // posting a job/looking up a record now goes through this instead, so a
+  // "wago:..." key passes through untouched instead of becoming NaN.
+  function normalizeId(id) {
+    if (typeof id === "string" && id.toLowerCase().indexOf("wago:") === 0) return id;
+    return Number(id);
+  }
+
+  // E13 (compatibility audit): converts a numeric toc/client Interface value
+  // (major*10000 + minor*100 + patch, e.g. 120100) back into the dotted
+  // "major.minor.patch" form addon devs and CurseForge/Wago both use
+  // (e.g. "12.1.0"). Returns null for a non-finite/missing input.
+  function interfaceToVersion(n) {
+    const iface = Number(n);
+    if (!isFinite(iface) || iface <= 0) return null;
+    const major = Math.floor(iface / 10000);
+    const minor = Math.floor((iface % 10000) / 100);
+    const patch = iface % 100;
+    return major + "." + minor + "." + patch;
+  }
+
+  // E13: turns one addon's compat/tocInterfaces/latestGameVersions/
+  // latestFileDate (all from /api/state, computed server-side) into a
+  // {label, cls, title} triple - the chip text/color/tooltip shared by the
+  // My Addons Compatibility column and the drawer Overview's compat section.
+  // clientInterface comes from Store.state.clientInterface, passed in rather
+  // than read directly so this stays a pure function like the rest of Utils.
+  function compatDisplay(addon, clientInterface) {
+    const compat = addon && addon.compat;
+    const tocIfaces = (addon && addon.tocInterfaces) || [];
+    const latestVersions = (addon && addon.latestGameVersions) || [];
+    const bestOwnVersion = tocIfaces.length ? interfaceToVersion(tocIfaces[0]) : (latestVersions[0] || null);
+    const clientVersion = interfaceToVersion(clientInterface);
+    const clientMajorMinor = clientVersion ? clientVersion.split(".").slice(0, 2).join(".") : null;
+
+    let label, cls;
+    if (compat === "ok") {
+      cls = "chip-success";
+      label = "Built for " + (clientMajorMinor || "current patch");
+    } else if (compat === "stale-minor") {
+      cls = "chip-warning";
+      label = "Older patch" + (bestOwnVersion ? " (" + bestOwnVersion + ")" : "");
+    } else if (compat === "stale") {
+      cls = "chip-danger";
+      label = "Not for Midnight";
+    } else {
+      cls = "chip-muted";
+      label = "Unknown";
+    }
+
+    const detailBits = [];
+    detailBits.push(tocIfaces.length
+      ? "Toc Interface: " + tocIfaces.map(function (n) { return interfaceToVersion(n) + " (" + n + ")"; }).join(", ")
+      : "Toc Interface: none declared");
+    if (latestVersions.length) {
+      let s = "Newest known file supports: " + latestVersions.join(", ");
+      if (addon.latestFileDate) s += " (checked " + fullDate(addon.latestFileDate) + ")";
+      detailBits.push(s);
+    }
+    return { label: label, cls: cls, title: detailBits.join(" · ") };
+  }
+
+  return {
+    qs: qs, qsa: qsa, el: el, icon: icon, escapeHtml: escapeHtml, debounce: debounce, relativeTime: relativeTime, fullDate: fullDate, formatBytes: formatBytes, formatNumber: formatNumber, releaseLabel: releaseLabel, releaseChipClass: releaseChipClass, colorForName: colorForName, firstLetter: firstLetter, normalizeId: normalizeId,
+    interfaceToVersion: interfaceToVersion, compatDisplay: compatDisplay
+  };
 })();
 
 /* ==========================================================================
@@ -634,6 +824,69 @@ const Sanitize = (function () {
   }
 
   return { render: render };
+})();
+
+/* ==========================================================================
+   Markdown (E12) - a deliberately minimal markdown-to-HTML converter for
+   Wago's description/changelog text (SPEC documents both as "markdown", not
+   HTML like CurseForge's own description/changelog endpoints). Covers just
+   headings, bold, italic, links, and lists per the roadmap's own "a minimal
+   markdown-to-HTML converter for headings/bold/lists/links is fine,
+   sanitized" - the output is HTML markup, still always run through
+   Sanitize.render before insertion, exactly like CurseForge's HTML
+   descriptions/changelogs already are, so a malicious/malformed markdown
+   link or heading can't smuggle anything unsafe through either.
+   ========================================================================== */
+const Markdown = (function () {
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function inline(text) {
+    let s = escapeHtml(text);
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
+    return s;
+  }
+
+  function toHtml(md) {
+    const lines = String(md == null ? "" : md).replace(/\r\n/g, "\n").split("\n");
+    const out = [];
+    let listOpen = false;
+    let para = [];
+
+    function flushPara() {
+      if (para.length) { out.push("<p>" + para.join(" ") + "</p>"); para = []; }
+    }
+    function closeList() {
+      if (listOpen) { out.push("</ul>"); listOpen = false; }
+    }
+
+    lines.forEach(function (raw) {
+      const line = raw.trim();
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      const item = line.match(/^[-*]\s+(.*)$/);
+      if (heading) {
+        flushPara(); closeList();
+        const level = heading[1].length;
+        out.push("<h" + level + ">" + inline(heading[2]) + "</h" + level + ">");
+      } else if (item) {
+        flushPara();
+        if (!listOpen) { out.push("<ul>"); listOpen = true; }
+        out.push("<li>" + inline(item[1]) + "</li>");
+      } else if (line.length === 0) {
+        flushPara(); closeList();
+      } else {
+        closeList();
+        para.push(inline(line));
+      }
+    });
+    flushPara(); closeList();
+    return out.join("");
+  }
+
+  return { toHtml: toHtml };
 })();
 
 /* ==========================================================================
@@ -726,6 +979,15 @@ const Api = (function () {
     cfChangelog: function (id, fileId) { return request("GET", "/api/cf/mods/" + id + "/files/" + fileId + "/changelog"); },
     cfResolve: function (url) { return request("GET", "/api/cf/resolve" + qs({ url: url })); },
 
+    // E12 (Wago second source): keyless, no NoKey/409 handling needed -
+    // Wago never requires an API key.
+    wagoSearch: function (params) { return request("GET", "/api/wago/search" + qs(params)); },
+    wagoCategories: function () { return request("GET", "/api/wago/categories"); },
+    wagoAddon: function (slug) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug)); },
+    wagoReleases: function (slug, params) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug) + "/releases" + qs(params)); },
+    wagoGallery: function (slug) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug) + "/gallery"); },
+    wagoResolve: function (url) { return request("GET", "/api/wago/resolve" + qs({ url: url })); },
+
     openWhat: function (what, extra) { return request("POST", "/api/open", Object.assign({ what: what }, extra || {})); },
     shutdown: function () { return request("POST", "/api/shutdown"); }
   };
@@ -761,6 +1023,10 @@ const Store = (function () {
     job: null,
     jobLabel: null,        // client-chosen human title for the job panel, set by Actions.startJob
     updatesCheckedAt: null,
+    // E13 (compatibility audit): the WoW client's own build string/Interface
+    // number, from /api/state (server reads .build.info once at startup).
+    clientBuild: null,
+    clientInterface: null,
 
     myaddonsSearch: "",
     myaddonsFilter: "all",   // 'all' | 'updates' | 'pinned' | 'ignored' | 'failed' | 'missingdeps'
@@ -768,23 +1034,35 @@ const Store = (function () {
     myaddonsSelection: [],   // E11: array of checked projectIds, driving the checkbox column/selection bar. Not persisted - resets on reload like search/filter.
 
     browse: {
+      // E12: which marketplace Browse is currently showing - a top-level
+      // switch, not per-view state, since switching sources resets the
+      // whole result set/pagination the same way changing the query would.
+      source: "curseforge",   // 'curseforge' | 'wago'
       loaded: false,
       loading: false,
       error: null,
       query: "",
       categoryId: "",
       sortField: 2,
+      sort: "popular",         // Wago's own sort param (SPEC: e.g. popular/updated/downloads/name)
       index: 0,
+      page: 1,                 // Wago pagination is page-based, not index/pageSize
       pageSize: 20,
       results: [],
       totalCount: 0,
+      lastPage: 1,
       categories: [],
       categoriesLoading: false
     },
 
     drawer: {
       open: false,
-      projectId: null,      // numeric CurseForge project id being shown
+      // E12: projectId is now the addon's general KEY - a number for
+      // CurseForge (unchanged), or the string "wago:<slug>" for Wago (see
+      // Store.addonKey / Utils.normalizeId). source records which so every
+      // drawer render function knows which branch to take.
+      projectId: null,
+      source: "curseforge",   // 'curseforge' | 'wago'
       slug: null,
       tracked: false,        // true when this project has a local addon record
       tab: "overview",
@@ -798,7 +1076,16 @@ const Store = (function () {
       changelogFileId: null,
       changelogHtml: null,
       changelogLoading: false,
-      screenshotsLoaded: false
+      screenshotsLoaded: false,
+      // E12 Wago-specific drawer state (all $null/unused for a CurseForge drawer).
+      wagoAddon: null,          // {addon, description, metadata} from /api/wago/addons/{slug}
+      wagoAddonLoading: false,
+      wagoAddonError: null,
+      wagoReleases: null,       // flat array (this build fetches page 1 only - see renderVersions)
+      wagoReleasesLoading: false,
+      wagoReleasesError: null,
+      wagoGallery: null,
+      wagoGalleryLoading: false
     },
 
     installingAdd: null        // {kind:'add'|'install', projectId} optimistic marker while a dialog-triggered job is being posted
@@ -812,8 +1099,24 @@ const Store = (function () {
     try { localStorage.setItem(SORT_PREF_KEY, JSON.stringify(sort)); } catch (e) { /* storage unavailable - sort still applies for this load */ }
   }
 
+  // E12: an addon's stable key - its numeric CurseForge projectId, or
+  // "wago:<slug>" for a Wago-sourced record (projectId is null there). Every
+  // place that used to read addon.projectId directly to identify a row/
+  // start a job now goes through this instead.
+  function addonKey(addon) {
+    if (addon && addon.source === "wago") return "wago:" + addon.slug;
+    return addon ? addon.projectId : null;
+  }
+
   function addonByProjectId(id) {
-    return state.addons.find(function (a) { return a.projectId === Number(id); });
+    const key = Utils.normalizeId(id);
+    if (typeof key === "string" && key.toLowerCase().indexOf("wago:") === 0) {
+      const ref = key.slice(5).toLowerCase();
+      return state.addons.find(function (a) {
+        return a.source === "wago" && (((a.slug || "").toLowerCase() === ref) || ((a.wagoId || "").toLowerCase() === ref));
+      });
+    }
+    return state.addons.find(function (a) { return a.projectId === key; });
   }
 
   // True while a running job plausibly affects this project (drives "Installing..." chips).
@@ -821,13 +1124,19 @@ const Store = (function () {
     const j = state.job;
     if (!j || j.state !== "running") return false;
     const p = j.params || {};
-    const pid = Number(projectId);
-    if (j.kind === "sync") return !p.ids || p.ids.indexOf(pid) !== -1;
+    const pid = Utils.normalizeId(projectId);
+    if (j.kind === "sync") return !p.ids || p.ids.map(Utils.normalizeId).indexOf(pid) !== -1;
     // E11: a bulk uninstall's remove job carries projectIds (array) instead
     // of a single projectId - check membership there first; a single-row
     // remove (still just projectId) falls through to the shared check below.
-    if (j.kind === "remove" && p.projectIds && p.projectIds.length) return p.projectIds.map(Number).indexOf(pid) !== -1;
-    if (j.kind === "install" || j.kind === "remove" || j.kind === "add" || j.kind === "rollback") return Number(p.projectId) === pid;
+    if (j.kind === "remove" && p.projectIds && p.projectIds.length) return p.projectIds.map(Utils.normalizeId).indexOf(pid) !== -1;
+    if (j.kind === "install" || j.kind === "remove" || j.kind === "add" || j.kind === "rollback" || j.kind === "switch-source") {
+      // E12: a brand-new Wago add posts {source:'wago', slug} rather than a
+      // projectId (there's no existing record yet to derive a key from) -
+      // matched against the row's own "wago:<slug>" key on that side instead.
+      if (p.source === "wago" && p.slug) return pid === "wago:" + p.slug;
+      return Utils.normalizeId(p.projectId) === pid;
+    }
     if (j.kind === "launch") return true; // a launch job runs a full sync first
     // E4: an import job's params carry the whole imported addons[] list -
     // "Installing..." only lights up rows actually named in that file.
@@ -859,28 +1168,30 @@ const Store = (function () {
   // Set so it round-trips cleanly through the JSON.stringify comparisons
   // elsewhere in this module (unused here, but keeps the type consistent
   // with every other piece of array-shaped state in Store).
-  function isSelected(projectId) { return state.myaddonsSelection.indexOf(Number(projectId)) !== -1; }
+  // E12: the selection array holds addonKey() values (a mix of numbers and
+  // "wago:<slug>" strings is fine - normalizeId leaves either kind alone).
+  function isSelected(projectId) { return state.myaddonsSelection.indexOf(Utils.normalizeId(projectId)) !== -1; }
   function toggleSelected(projectId) {
-    const pid = Number(projectId);
+    const pid = Utils.normalizeId(projectId);
     const idx = state.myaddonsSelection.indexOf(pid);
     if (idx === -1) state.myaddonsSelection.push(pid); else state.myaddonsSelection.splice(idx, 1);
   }
   function selectIds(ids) {
     (ids || []).forEach(function (id) {
-      const pid = Number(id);
+      const pid = Utils.normalizeId(id);
       if (state.myaddonsSelection.indexOf(pid) === -1) state.myaddonsSelection.push(pid);
     });
   }
   function deselectIds(ids) {
     const drop = {};
-    (ids || []).forEach(function (id) { drop[Number(id)] = true; });
+    (ids || []).forEach(function (id) { drop[Utils.normalizeId(id)] = true; });
     state.myaddonsSelection = state.myaddonsSelection.filter(function (id) { return !drop[id]; });
   }
   function clearSelection() { state.myaddonsSelection = []; }
   function selectedAddons() {
     const want = {};
     state.myaddonsSelection.forEach(function (id) { want[id] = true; });
-    return state.addons.filter(function (a) { return want[a.projectId]; });
+    return state.addons.filter(function (a) { return want[addonKey(a)]; });
   }
   // Drops any selected id that no longer names a tracked addon (removed by
   // this or another job) - called from Views.myAddons.render() so a stale id
@@ -888,13 +1199,13 @@ const Store = (function () {
   function pruneSelection() {
     if (!state.myaddonsSelection.length) return;
     const present = {};
-    state.addons.forEach(function (a) { present[a.projectId] = true; });
+    state.addons.forEach(function (a) { present[addonKey(a)] = true; });
     const pruned = state.myaddonsSelection.filter(function (id) { return present[id]; });
     if (pruned.length !== state.myaddonsSelection.length) state.myaddonsSelection = pruned;
   }
 
   return {
-    state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
     isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection
   };
 })();
@@ -1142,7 +1453,17 @@ Components.Chip = (function () {
       // below, which is also derived from lastRunStatusFor rather than a
       // stored record field.
       const rolledBack = Store.lastRunStatusFor(addon.name) === "Rolled-back";
-      return build("Pinned · " + addon.version, "chip-info", rolledBack ? "Rolled back — unpin to resume updates." : null);
+      // Round 5 fix: an addon can be pinned AND have ignoreUpdates set at the
+      // same time (e.g. "Pin current version" on an already-ignored addon) -
+      // this branch returns before the Ignored check below ever runs, so that
+      // second state had no chip of its own and was otherwise only visible via
+      // the kebab menu wording or the Ignored filter-chip count. Folded into
+      // the same tooltip the rollback signal above already uses rather than
+      // adding a second chip/DOM element for one more boolean.
+      const notes = [];
+      if (rolledBack) notes.push("Rolled back — unpin to resume updates.");
+      if (addon.ignoreUpdates) notes.push("Updates are also ignored for this addon.");
+      return build("Pinned · " + addon.version, "chip-info", notes.length ? notes.join(" ") : null);
     }
     if (addon.ignoreUpdates) return build("Ignored", "chip-muted");
     if (addon.updateAvailable) return build("Update available", "chip-warning");
@@ -1152,6 +1473,14 @@ Components.Chip = (function () {
 
   function build(label, cls, title) {
     return Utils.el("span", { class: "chip " + cls, title: title || null }, [Utils.el("span", { class: "chip-dot" }), label]);
+  }
+
+  // E13 (compatibility audit): the My Addons Compatibility column's chip -
+  // Utils.compatDisplay does the actual label/color/tooltip computation
+  // (shared with the drawer Overview's compat section), this just builds it.
+  function forCompat(addon) {
+    const info = Utils.compatDisplay(addon, Store.state.clientInterface);
+    return build(info.label, info.cls, info.title);
   }
 
   function forJobStatus(status) {
@@ -1164,7 +1493,7 @@ Components.Chip = (function () {
     return build(status, map[status] || "chip-muted");
   }
 
-  return { forAddon: forAddon, build: build, forJobStatus: forJobStatus };
+  return { forAddon: forAddon, build: build, forCompat: forCompat, forJobStatus: forJobStatus };
 })();
 
 /* ---------- Addon/mod logo (image if known, else an initial on a coloured tile) ---------- */
@@ -1209,19 +1538,29 @@ Components.Drawer = (function () {
 
   function open(pid, opts) {
     opts = opts || {};
-    const addon = Store.addonByProjectId(pid);
+    // E12: pid is either a number (CurseForge) or a "wago:<slug>" key -
+    // Utils.normalizeId leaves either alone; source is derived from it (or
+    // from opts.source, for a Browse Wago card which has no local record to
+    // read source off of yet - see Views.browse.card).
+    const key = Utils.normalizeId(pid);
+    const isWago = opts.source === "wago" || (typeof key === "string" && key.toLowerCase().indexOf("wago:") === 0);
+    const addon = Store.addonByProjectId(key);
+    const slug = opts.slug || (addon ? addon.slug : null) || (isWago && typeof key === "string" ? key.slice(5) : null);
     Store.set({
       drawer: {
-        open: true, projectId: Number(pid), slug: opts.slug || null, tracked: !!addon,
+        open: true, projectId: key, source: isWago ? "wago" : "curseforge", slug: slug, tracked: !!addon,
         tab: opts.tab || "overview",
         lastKnownFileId: addon ? addon.fileId : null,
-        mod: Store.getCachedMod(pid), modLoading: false, modError: null,
+        mod: isWago ? null : Store.getCachedMod(key), modLoading: false, modError: null,
         files: null, filesLoading: false, filesError: null,
         // E5: opts.changelogFileId lets a caller (Actions.whatChanged) pin the
         // Changelog tab to a specific file - e.g. the version a job just
         // installed - instead of defaulting to the newest one once files load.
         changelogFileId: opts.changelogFileId || null, changelogHtml: null, changelogLoading: false,
-        screenshotsLoaded: false
+        screenshotsLoaded: false,
+        wagoAddon: null, wagoAddonLoading: false, wagoAddonError: null,
+        wagoReleases: null, wagoReleasesLoading: false, wagoReleasesError: null,
+        wagoGallery: null, wagoGalleryLoading: false
       }
     });
     Utils.qs("#drawer-backdrop").hidden = false;
@@ -1233,7 +1572,8 @@ Components.Drawer = (function () {
     });
     renderHeader();
     selectTab(Store.state.drawer.tab);
-    if (Store.state.settings && Store.state.settings.hasApiKey && !Store.state.drawer.mod) loadMod();
+    if (isWago) { loadWagoAddon(); }
+    else if (Store.state.settings && Store.state.settings.hasApiKey && !Store.state.drawer.mod) { loadMod(); }
   }
 
   function close() {
@@ -1248,7 +1588,14 @@ Components.Drawer = (function () {
 
   function selectTab(tab) {
     Store.state.drawer.tab = tab;
-    Utils.qsa(".drawer-tab").forEach(function (btn) { btn.classList.toggle("is-active", btn.dataset.tab === tab); });
+    // Round 5 fix: the tabs carry role="tab" (index.html) but nothing ever
+    // set aria-selected, so assistive tech had no way to tell which one is
+    // active even though the visible underline/bold state was always correct.
+    Utils.qsa(".drawer-tab").forEach(function (btn) {
+      const active = btn.dataset.tab === tab;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", String(active));
+    });
     ["overview", "versions", "changelog", "screenshots"].forEach(function (t) { Utils.qs("#drawer-panel-" + t).hidden = t !== tab; });
     if (tab === "overview") renderOverview();
     else if (tab === "versions") renderVersions();
@@ -1278,6 +1625,8 @@ Components.Drawer = (function () {
       if (currentFileId !== d.lastKnownFileId) {
         d.lastKnownFileId = currentFileId;
         d.files = null; d.filesLoading = false; d.filesError = null;
+        // E12: the Wago equivalent of the same invalidation, one line below.
+        d.wagoReleases = null; d.wagoReleasesLoading = false; d.wagoReleasesError = null;
         d.changelogFileId = null; d.changelogHtml = null;
       }
     }
@@ -1286,19 +1635,24 @@ Components.Drawer = (function () {
     if (tab === "versions") renderVersions();
     else if (tab === "changelog") renderChangelog();
     // The description itself doesn't change from job state, so it's left
-    // as-is; the E3 dependency list's installed/missing status can, so that
-    // one part of the Overview panel is refreshed in place. Screenshots
-    // aren't per-file (CurseForge mod screenshots aren't keyed to a fileId),
-    // so there's nothing there to invalidate on a version change.
+    // as-is; the E3 dependency list's installed/missing status (and, as of
+    // E13, the compat verdict - a job can install a different version with a
+    // different toc Interface) can, so those parts of the Overview panel are
+    // refreshed in place. Screenshots aren't per-file (CurseForge mod
+    // screenshots aren't keyed to a fileId), so there's nothing there to
+    // invalidate on a version change.
     else if (tab === "overview") refreshDependenciesInPlace();
   }
 
-  // Swaps in a fresh dependency section without re-triggering the
+  // Swaps in fresh compat/dependency sections without re-triggering the
   // (unrelated) CurseForge description fetch that opening/switching to this
   // tab already did.
   function refreshDependenciesInPlace() {
     const panel = Utils.qs("#drawer-panel-overview");
     if (!panel) return;
+    const existingCompat = panel.querySelector(".compat-section");
+    if (existingCompat) existingCompat.remove();
+    renderCompat(panel);
     const existing = panel.querySelector(".deps-section");
     if (existing) existing.remove();
     renderDependencies(panel);
@@ -1321,8 +1675,31 @@ Components.Drawer = (function () {
     }
   }
 
+  // E12: Wago counterpart to loadMod - fetches addon/description/metadata
+  // from the server's keyless Wago proxy. Unlike CF, this never needs an
+  // API key check.
+  async function loadWagoAddon() {
+    const d = Store.state.drawer;
+    const slug = d.slug;
+    d.wagoAddonLoading = true;
+    d.wagoAddonError = null;
+    try {
+      const res = await Api.wagoAddon(slug);
+      if (Store.state.drawer.slug !== slug) return;
+      d.wagoAddon = res;
+      renderHeader();
+      if (d.tab === "overview") renderOverview();
+      if (d.tab === "screenshots") renderScreenshots();
+    } catch (err) {
+      if (Store.state.drawer.slug === slug) { d.wagoAddonError = err; renderHeader(); if (d.tab === "overview") renderOverview(); }
+    } finally {
+      if (Store.state.drawer.slug === slug) d.wagoAddonLoading = false;
+    }
+  }
+
   function renderHeader() {
     const d = Store.state.drawer;
+    if (d.source === "wago") { renderWagoHeader(); return; }
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
     const mod = d.mod;
     const name = mod ? mod.name : (addon ? addon.name : ("Project " + d.projectId));
@@ -1363,6 +1740,13 @@ Components.Drawer = (function () {
     links.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, mod ? mod.slug : d.slug); } }, [Utils.icon("external"), "CurseForge"]));
     children.push(Utils.el("div", { class: "drawer-links" }, links));
 
+    // E12: the tracked record's own toc-parsed wagoId reveals a CurseForge
+    // addon is ALSO on Wago - offers a one-job reinstall from there instead
+    // of leaving the reader to go find and re-add it by hand.
+    if (addon && addon.wagoId) {
+      children.push(Utils.el("div", { class: "drawer-crosssource" }, [Actions.switchSourceButton(addon, "wago", addon.wagoId)]));
+    }
+
     children.push(Utils.el("div", { class: "drawer-primary-action" }, [primaryActionButton(addon, mod)]));
 
     const container = Utils.qs("#drawer-header");
@@ -1370,24 +1754,111 @@ Components.Drawer = (function () {
     children.forEach(function (c) { if (c) container.appendChild(c); });
   }
 
+  // E12: Wago's own header render, kept as a fully separate function rather
+  // than threading `if (d.source === "wago")` branches through every line of
+  // the CurseForge one above - the two sources' metadata shapes (addon/
+  // metadata/description vs. mod) share almost nothing structurally.
+  function renderWagoHeader() {
+    const d = Store.state.drawer;
+    const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
+    const wa = d.wagoAddon;
+    const waAddon = wa ? wa.addon : null;
+    const meta = wa ? wa.metadata : null;
+    const name = (waAddon && waAddon.display_name) || (addon ? addon.name : d.slug);
+    const developers = (meta && meta.developers && meta.developers.length) ? meta.developers.map(function (x) { return x.name; }).join(", ") : (addon ? addon.author : null);
+    const thumb = waAddon ? waAddon.thumbnail_image : null;
+
+    const children = [
+      Utils.el("div", { class: "drawer-header-top" }, [
+        Components.Logo.build({ projectId: d.projectId, name: name, thumbnailUrl: thumb }, 56),
+        Utils.el("div", {}, [
+          Utils.el("div", { class: "drawer-title" }, [name]),
+          developers ? Utils.el("div", { class: "drawer-author" }, ["by " + developers]) : null
+        ])
+      ])
+    ];
+
+    if (meta) {
+      const metaRow = [
+        Utils.el("span", {}, [Utils.formatNumber(meta.download_count) + " downloads"]),
+        Utils.el("span", {}, [Utils.formatNumber(meta.like_count) + " likes"]),
+        meta.last_update ? Utils.el("span", { title: Utils.fullDate(meta.last_update) }, ["updated " + Utils.relativeTime(meta.last_update)]) : null
+      ];
+      children.push(Utils.el("div", { class: "drawer-meta" }, metaRow));
+    }
+    if (waAddon && waAddon.categories && waAddon.categories.length) {
+      children.push(Utils.el("div", { class: "drawer-cats" }, waAddon.categories.map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.display_name || c.name]); })));
+    }
+    if (d.wagoAddonLoading && !wa) children.push(Utils.el("div", { class: "muted-text" }, ["Loading…"]));
+    if (d.wagoAddonError && !wa) children.push(Utils.el("div", { class: "muted-text" }, ["Couldn't load addon details (" + describeError(d.wagoAddonError) + ")."]));
+
+    const links = [];
+    if (waAddon && waAddon.website) links.push(Utils.el("a", { class: "btn btn-outline", href: waAddon.website, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Website"]));
+    if (waAddon && waAddon.source_url) links.push(Utils.el("a", { class: "btn btn-outline", href: waAddon.source_url, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Source"]));
+    links.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnWago(d.slug); } }, [Utils.icon("external"), "Wago"]));
+    children.push(Utils.el("div", { class: "drawer-links" }, links));
+
+    // E12: the tracked record's own toc-parsed curseId reveals a Wago addon
+    // is ALSO on CurseForge.
+    if (addon && addon.curseId) {
+      children.push(Utils.el("div", { class: "drawer-crosssource" }, [Actions.switchSourceButton(addon, "curseforge", addon.curseId)]));
+    }
+
+    children.push(Utils.el("div", { class: "drawer-primary-action" }, [primaryActionButton(addon, null)]));
+
+    const container = Utils.qs("#drawer-header");
+    container.textContent = "";
+    children.forEach(function (c) { if (c) container.appendChild(c); });
+  }
+
   function primaryActionButton(addon, mod) {
-    const pid = Store.state.drawer.projectId;
+    const d = Store.state.drawer;
+    const pid = d.projectId;
     if (Store.jobActingOn(pid)) return Utils.el("button", { type: "button", class: "btn btn-accent", disabled: true }, ["Installing…"]);
     if (addon) {
       if (addon.updateAvailable) return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.updateNow(pid); } }, ["Update now"]);
       return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"]);
     }
+    if (d.source === "wago") {
+      return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.installLatestWago(d.slug, (d.wagoAddon && d.wagoAddon.addon) ? d.wagoAddon.addon.display_name : null); } }, ["Install"]);
+    }
     return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.installLatest(pid, mod ? mod.name : null); } }, ["Install"]);
+  }
+
+  // E12: Wago's Overview - always available, no key ever needed. props.description
+  // is documented as "plain text/markdown", not HTML like CF's - rendered
+  // through the same minimal markdown converter the Changelog tab uses,
+  // rather than treated as pre-formatted text (which would lose the
+  // headings/lists/links a real changelog-style description commonly has).
+  function renderWagoOverview() {
+    const panel = Utils.qs("#drawer-panel-overview");
+    const d = Store.state.drawer;
+    panel.textContent = "";
+    if (d.wagoAddonLoading && !d.wagoAddon) {
+      panel.appendChild(Utils.el("div", { class: "rich-content" }, ["Loading description…"]));
+    } else if (d.wagoAddonError && !d.wagoAddon) {
+      panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Couldn't load the description (" + describeError(d.wagoAddonError) + ")."]));
+    } else if (d.wagoAddon && d.wagoAddon.description) {
+      const holder = Utils.el("div", { class: "rich-content" });
+      panel.appendChild(holder);
+      Sanitize.render(holder, Markdown.toHtml(d.wagoAddon.description));
+    } else if (d.wagoAddon) {
+      panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["No description provided."]));
+    }
+    renderCompat(panel);
+    renderDependencies(panel);
   }
 
   async function renderOverview() {
     const panel = Utils.qs("#drawer-panel-overview");
+    if (Store.state.drawer.source === "wago") { renderWagoOverview(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
       const cached = Store.getCachedMod(projectId());
       if (cached && cached.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [cached.summary]));
       panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see descriptions, changelogs and screenshots."])]));
+      renderCompat(panel);
       renderDependencies(panel);
       return;
     }
@@ -1400,11 +1871,13 @@ Components.Drawer = (function () {
       const holder = Utils.el("div", { class: "rich-content" });
       panel.appendChild(holder);
       Sanitize.render(holder, res.data);
+      renderCompat(panel);
       renderDependencies(panel);
     } catch (err) {
       if (projectId() !== pid) return;
       panel.textContent = "";
       panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Couldn't load the description (" + describeError(err) + ")."]));
+      renderCompat(panel);
       renderDependencies(panel);
     }
   }
@@ -1435,6 +1908,28 @@ Components.Drawer = (function () {
     panel.appendChild(section);
   }
 
+  // E13 (compatibility audit): drawer Overview's counterpart to the My
+  // Addons Compatibility column - same Utils.compatDisplay computation, just
+  // rendered as a labeled row instead of a bare table-cell chip. Local-record
+  // only (tocInterfaces/compat/latestGameVersions all come from /api/state),
+  // so a Browse-only drawer (no tracked addon yet) renders nothing here,
+  // same guard shape as renderDependencies just above.
+  function renderCompat(panel) {
+    const d = Store.state.drawer;
+    if (!d.tracked) return;
+    const addon = Store.addonByProjectId(d.projectId);
+    if (!addon || !addon.compat) return;
+    const info = Utils.compatDisplay(addon, Store.state.clientInterface);
+    const section = Utils.el("div", { class: "compat-section" }, [
+      Utils.el("div", { class: "deps-heading" }, ["Compatibility"]),
+      Utils.el("div", { class: "compat-row" }, [
+        Components.Chip.build(info.label, info.cls),
+        Utils.el("span", { class: "muted-text compat-detail" }, [info.title])
+      ])
+    ]);
+    panel.appendChild(section);
+  }
+
   function depList(names, missingNames) {
     return Utils.el("ul", { class: "deps-list" }, names.map(function (name) {
       const missing = missingNames.indexOf(name) !== -1;
@@ -1449,9 +1944,92 @@ Components.Drawer = (function () {
     }));
   }
 
+  // E12: fetches page 1 of a Wago addon's releases (SPEC: 10/page). Later
+  // pages are not paginated into this tab in this build - the Versions tab
+  // has no "load more" affordance of its own anywhere in the base spec, and
+  // the newest ~10 releases cover the pin/changelog/install use cases this
+  // tab exists for; a -Files-style "see everything" view is a follow-up.
+  function loadWagoReleases() {
+    const d = Store.state.drawer;
+    if (d.wagoReleases || d.wagoReleasesLoading) return;
+    d.wagoReleasesLoading = true;
+    const slug = d.slug;
+    Api.wagoReleases(slug, { page: 1 }).then(function (res) {
+      if (Store.state.drawer.slug !== slug) return;
+      const paginator = res.data || {};
+      d.wagoReleases = paginator.data || [];
+      d.wagoReleasesLoading = false;
+      if (d.tab === "versions") renderVersions();
+      if (d.tab === "changelog") renderChangelog();
+    }).catch(function (err) {
+      if (Store.state.drawer.slug !== slug) return;
+      d.wagoReleasesError = err; d.wagoReleasesLoading = false;
+      if (d.tab === "versions") renderVersions();
+    });
+  }
+
+  function wagoStabilityChipClass(stability) {
+    const s = (stability || "").toLowerCase();
+    return s === "alpha" ? "chip-danger" : s === "beta" ? "chip-warning" : "chip-success";
+  }
+  function wagoStabilityLabel(stability) {
+    const s = (stability || "").toLowerCase();
+    return s === "alpha" ? "Alpha" : s === "beta" ? "Beta" : "Release";
+  }
+
+  function renderWagoVersions() {
+    const panel = Utils.qs("#drawer-panel-versions");
+    const d = Store.state.drawer;
+    if (!d.wagoReleases && !d.wagoReleasesLoading) loadWagoReleases();
+    panel.textContent = "";
+    if (d.wagoReleasesLoading && !d.wagoReleases) { panel.appendChild(Utils.el("div", { class: "skeleton-row" })); return; }
+    if (d.wagoReleasesError && !d.wagoReleases) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Couldn't load versions (" + describeError(d.wagoReleasesError) + ")."])); return; }
+    if (!d.wagoReleases || !d.wagoReleases.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No releases found for this addon."])); return; }
+
+    const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
+    const table = Utils.el("table", { class: "versions-table" }, [
+      Utils.el("thead", {}, [Utils.el("tr", {}, ["Version", "Channel", "Retail Patches", "Date", "", ""].map(function (h) { return Utils.el("th", {}, [h]); }))]),
+      Utils.el("tbody", {}, d.wagoReleases.map(function (r) { return wagoVersionRow(r, addon); }))
+    ]);
+    panel.appendChild(table);
+  }
+
+  function wagoVersionRow(release, addon) {
+    const tags = [];
+    const relId = String(release.id);
+    if (addon && String(addon.fileId) === relId) tags.push(Utils.el("span", { class: "version-tag installed" }, ["Installed"]));
+    if (addon && String(addon.pinnedFileId) === relId) tags.push(Utils.el("span", { class: "version-tag pinned" }, ["Pinned"]));
+    if (addon && String(addon.previousFileId) === relId) tags.push(Utils.el("span", { class: "version-tag previous" }, ["Previous"]));
+    const patches = (release.supported_retail_patches && release.supported_retail_patches.length) ? release.supported_retail_patches.join(", ") : "-";
+    return Utils.el("tr", {}, [
+      Utils.el("td", {}, [
+        Utils.el("span", {}, [release.label]),
+        Utils.el("span", { class: "version-size" }, [" · " + Utils.formatBytes(release.size)])
+      ].concat(tags)),
+      Utils.el("td", {}, [Utils.el("span", { class: "chip " + wagoStabilityChipClass(release.stability) }, [wagoStabilityLabel(release.stability)])]),
+      Utils.el("td", {}, [patches]),
+      Utils.el("td", { title: Utils.fullDate(release.created_at) }, [Utils.relativeTime(release.created_at)]),
+      Utils.el("td", {}, [release.changelog ? Utils.el("button", { type: "button", class: "link-btn", onclick: function () { selectTab("changelog"); loadWagoChangelogFor(relId); } }, ["Changelog"]) : null]),
+      Utils.el("td", {}, [wagoVersionButton(release, addon)])
+    ]);
+  }
+
+  function wagoVersionButton(release, addon) {
+    const d = Store.state.drawer;
+    if (Store.jobActingOn(d.projectId)) return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true, title: "Another task is running" }, ["Installing…"]);
+    const relId = String(release.id);
+    if (addon) {
+      if (String(addon.pinnedFileId) === relId) return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, ["Pinned"]);
+      const label = String(addon.fileId) === relId ? "Pin this version" : "Install";
+      return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installVersion(d.projectId, relId, label === "Pin this version" ? ("Pinning " + addon.name) : undefined); } }, [label]);
+    }
+    return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.addWagoWithVersion(d.slug, relId); } }, ["Install"]);
+  }
+
   function renderVersions() {
     const panel = Utils.qs("#drawer-panel-versions");
     const d = Store.state.drawer;
+    if (d.source === "wago") { renderWagoVersions(); return; }
     if (!d.files && !d.filesLoading) {
       d.filesLoading = true;
       const pid = projectId();
@@ -1524,8 +2102,47 @@ Components.Drawer = (function () {
     return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.addWithVersion(pid, file.id); } }, ["Install"]);
   }
 
+  // E12: Wago's changelog is per-release text already present on the
+  // release object itself (release.changelog) - no separate fetch needed,
+  // unlike CurseForge's changelog (its own endpoint per file id). Always
+  // available, no key needed.
+  function loadWagoChangelogFor(releaseId) {
+    const d = Store.state.drawer;
+    d.changelogFileId = releaseId;
+    if (d.tab === "changelog") renderChangelog();
+  }
+
+  function renderWagoChangelog() {
+    const panel = Utils.qs("#drawer-panel-changelog");
+    const d = Store.state.drawer;
+    panel.textContent = "";
+    if (!d.wagoReleases && !d.wagoReleasesLoading) loadWagoReleases();
+    if (!d.wagoReleases) {
+      panel.appendChild(Utils.el("div", { class: "rich-content" }, ["Loading versions…"]));
+      return;
+    }
+    if (!d.wagoReleases.length) {
+      panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No releases found for this addon."]));
+      return;
+    }
+    const select = Utils.el("select", { class: "select", onchange: function (ev) { loadWagoChangelogFor(ev.target.value); } },
+      d.wagoReleases.map(function (r) { return Utils.el("option", { value: r.id }, [r.label]); }));
+    panel.appendChild(Utils.el("div", { class: "changelog-select-row" }, [Utils.el("span", { class: "muted-text" }, ["Version:"]), select]));
+    const startId = d.changelogFileId || String(d.wagoReleases[0].id);
+    select.value = startId;
+    const release = d.wagoReleases.filter(function (r) { return String(r.id) === String(startId); })[0];
+    const body = Utils.el("div", { class: "rich-content" });
+    panel.appendChild(body);
+    if (release && release.changelog) {
+      Sanitize.render(body, Markdown.toHtml(release.changelog));
+    } else {
+      body.textContent = "No changelog provided for this version.";
+    }
+  }
+
   function renderChangelog() {
     const panel = Utils.qs("#drawer-panel-changelog");
+    if (Store.state.drawer.source === "wago") { renderWagoChangelog(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
@@ -1570,8 +2187,53 @@ Components.Drawer = (function () {
     }
   }
 
+  // E12: Wago's gallery shape is documented in SPEC as "inspect and
+  // document" - genuinely unverified against the live site (no Wago
+  // requests were made during this build). Renders defensively: tries the
+  // handful of plausible shapes (an array of urls, or objects carrying url/
+  // thumbnailUrl/src/image) and falls back to an empty state rather than
+  // guessing wrong and throwing.
+  function wagoGalleryImages(gallery) {
+    if (!gallery) return [];
+    const raw = Array.isArray(gallery) ? gallery : (gallery.images || gallery.screenshots || gallery.gallery || []);
+    return (raw || []).map(function (item) {
+      if (typeof item === "string") return { full: item, thumb: item };
+      const full = item.url || item.image || item.full || item.src || "";
+      const thumb = item.thumbnailUrl || item.thumbnail || item.thumb || full;
+      return { full: full, thumb: thumb };
+    }).filter(function (x) { return x.full; });
+  }
+
+  function renderWagoScreenshots() {
+    const panel = Utils.qs("#drawer-panel-screenshots");
+    const d = Store.state.drawer;
+    panel.textContent = "";
+    if (!d.wagoGallery && !d.wagoGalleryLoading) {
+      d.wagoGalleryLoading = true;
+      const slug = d.slug;
+      Api.wagoGallery(slug).then(function (res) {
+        if (Store.state.drawer.slug !== slug) return;
+        d.wagoGallery = res.gallery || res;
+        d.wagoGalleryLoading = false;
+        if (d.tab === "screenshots") renderScreenshots();
+      }).catch(function () {
+        if (Store.state.drawer.slug !== slug) return;
+        d.wagoGallery = {};
+        d.wagoGalleryLoading = false;
+        if (d.tab === "screenshots") renderScreenshots();
+      });
+    }
+    if (d.wagoGalleryLoading && !d.wagoGallery) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Loading…"])); return; }
+    const images = wagoGalleryImages(d.wagoGallery);
+    if (!images.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No screenshots provided."])); return; }
+    panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, images.map(function (s) {
+      return Utils.el("img", { class: "screenshot-thumb", src: s.thumb, alt: "", loading: "lazy", onclick: function () { Components.Lightbox.open(s.full); } });
+    })));
+  }
+
   function renderScreenshots() {
     const panel = Utils.qs("#drawer-panel-screenshots");
+    if (Store.state.drawer.source === "wago") { renderWagoScreenshots(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
@@ -1617,7 +2279,7 @@ Components.JobPanel = (function () {
   function titleFor(job) {
     if (Store.state.jobLabel) return Store.state.jobLabel;
     if (!job) return "Working…";
-    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Importing addon list" };
+    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Importing addon list", "switch-source": "Reinstalling from another source" };
     return map[job.kind] || "Working…";
   }
 
@@ -1628,8 +2290,13 @@ Components.JobPanel = (function () {
   // does not, so this quietly omits the button there rather than throwing).
   function whatChangedButton(r) {
     if (r.status !== "Updated" && r.status !== "Installed") return null;
-    if (r.projectId === undefined || r.projectId === null) return null;
-    return Utils.el("button", { type: "button", class: "link-btn job-result-whatchanged", onclick: function () { Actions.whatChanged(r.projectId, r.fileId); } }, ["What changed"]);
+    // E12: a Wago row's projectId is always null (it has none) - its
+    // stable key comes from the additive wagoSlug field instead (see
+    // addon-sync.ps1's -Json contract). Still omitted for a synthesized
+    // last-run pseudo-job row, which carries neither.
+    const key = (r.projectId !== undefined && r.projectId !== null) ? r.projectId : (r.wagoSlug ? "wago:" + r.wagoSlug : null);
+    if (key === null) return null;
+    return Utils.el("button", { type: "button", class: "link-btn job-result-whatchanged", onclick: function () { Actions.whatChanged(key, r.fileId); } }, ["What changed"]);
   }
 
   function show(job) {
@@ -1755,7 +2422,7 @@ const Actions = (function () {
 
   function updateNow(projectId) {
     const addon = Store.addonByProjectId(projectId);
-    return startJob("sync", { ids: [Number(projectId)] }, "Updating " + (addon ? addon.name : "addon"));
+    return startJob("sync", { ids: [Utils.normalizeId(projectId)] }, "Updating " + (addon ? addon.name : "addon"));
   }
 
   function forceReinstallAll() { return startJob("sync", { force: true }, "Force reinstalling all addons"); }
@@ -1770,8 +2437,13 @@ const Actions = (function () {
     if (!addon) return [];
     const targetFolders = (addon.folders || []).map(function (f) { return String(f).toLowerCase(); });
     if (!targetFolders.length) return [];
+    // E12: keyed comparison, not a bare projectId === projectId - two
+    // different Wago-sourced addons both have projectId === null, which
+    // would otherwise compare equal and wrongly exclude every OTHER Wago
+    // addon from this check whenever the target itself is Wago-sourced.
+    const targetKey = Store.addonKey(addon);
     return Store.state.addons.filter(function (other) {
-      if (other.projectId === addon.projectId) return false;
+      if (Store.addonKey(other) === targetKey) return false;
       const req = other.requiredDeps || [];
       return req.some(function (dep) { return targetFolders.indexOf(String(dep).toLowerCase()) !== -1; });
     });
@@ -1792,7 +2464,7 @@ const Actions = (function () {
       confirmLabel: "Uninstall"
     });
     if (!ok) return;
-    return startJob("remove", { projectId: Number(projectId) }, "Removing " + name);
+    return startJob("remove", { projectId: Utils.normalizeId(projectId) }, "Removing " + name);
   }
 
   // E11: bulk actions from the My Addons selection bar/checkbox column.
@@ -1824,7 +2496,7 @@ const Actions = (function () {
       confirmLabel: "Uninstall"
     });
     if (!ok) return;
-    const ids = selected.map(function (a) { return Number(a.projectId); });
+    const ids = selected.map(function (a) { return Store.addonKey(a); });
     const label = "Removing " + ids.length + " addon" + (ids.length === 1 ? "" : "s");
     const started = await startJob("remove", { projectIds: ids }, label);
     if (started) Store.clearSelection();
@@ -1845,7 +2517,7 @@ const Actions = (function () {
     let failCount = 0;
     for (let i = 0; i < selected.length; i++) {
       try {
-        const res = await Api.setIgnore(selected[i].projectId, ignore);
+        const res = await Api.setIgnore(Store.addonKey(selected[i]), ignore);
         Store.state.addons = res.addons;
       } catch (err) {
         failCount++;
@@ -1863,7 +2535,7 @@ const Actions = (function () {
 
   function installVersion(projectId, fileId, label) {
     const addon = Store.addonByProjectId(projectId);
-    return startJob("install", { projectId: Number(projectId), fileId: fileId }, label || ("Installing " + (addon ? addon.name : "addon")));
+    return startJob("install", { projectId: Utils.normalizeId(projectId), fileId: fileId }, label || ("Installing " + (addon ? addon.name : "addon")));
   }
 
   // Round 4 fix: pinning the currently-installed file is a config change, not
@@ -1883,12 +2555,42 @@ const Actions = (function () {
   function rollback(projectId) {
     const addon = Store.addonByProjectId(projectId);
     const target = addon && addon.previousVersion ? (" to " + addon.previousVersion) : "";
-    return startJob("rollback", { projectId: Number(projectId) }, "Rolling back " + (addon ? addon.name : "addon") + target);
+    return startJob("rollback", { projectId: Utils.normalizeId(projectId) }, "Rolling back " + (addon ? addon.name : "addon") + target);
   }
 
-  function installLatest(projectId, name) { return startJob("add", { projectId: Number(projectId) }, "Installing " + (name || "addon")); }
-  function addWithVersion(projectId, fileId) { return startJob("add", { projectId: Number(projectId), fileId: fileId }, "Installing addon"); }
-  function addByProjectId(projectId) { return startJob("add", { projectId: Number(projectId) }, "Adding addon"); }
+  function installLatest(projectId, name) { return startJob("add", { projectId: Utils.normalizeId(projectId) }, "Installing " + (name || "addon")); }
+  function addWithVersion(projectId, fileId) { return startJob("add", { projectId: Utils.normalizeId(projectId), fileId: fileId }, "Installing addon"); }
+  function addByProjectId(projectId) { return startJob("add", { projectId: Utils.normalizeId(projectId) }, "Adding addon"); }
+
+  // E12 (Wago second source): a brand-new Wago add has no existing record
+  // yet to derive a "wago:<slug>" key from, so these post {source:'wago',
+  // slug, fileId?} instead of a projectId, per SPEC's documented job body -
+  // the server normalizes it to that same key before it ever reaches
+  // Build-CliArgs (see addon-server.ps1 Start-Job).
+  function installLatestWago(slug, name) { return startJob("add", { source: "wago", slug: slug }, "Installing " + (name || "addon")); }
+  function addWagoWithVersion(slug, releaseId) { return startJob("add", { source: "wago", slug: slug, fileId: releaseId }, "Installing addon"); }
+  function addByWagoSlug(slug) { return startJob("add", { source: "wago", slug: slug }, "Adding addon"); }
+
+  function openOnWago(slug) { return openWhat("url", { url: "https://addons.wago.io/addons/" + encodeURIComponent(slug) }); }
+
+  // E12: "Also on CurseForge/Wago" cross-link, shown in the drawer header
+  // when the tracked record's OWN toc revealed the other source's id -
+  // uninstalls the current package and re-adds it fresh from that other
+  // source, as one job (kind 'switch-source'). toTarget is a numeric
+  // CurseForge project id (switching TO CurseForge) or a Wago slug/id
+  // string (switching TO Wago, matching -Add's own wago: token contract -
+  // no "wago:" prefix here, the server adds it).
+  function switchSource(addon, toSource, toTarget) {
+    const label = "Reinstalling " + addon.name + " from " + (toSource === "wago" ? "Wago" : "CurseForge");
+    return startJob("switch-source", { projectId: Store.addonKey(addon), toSource: toSource, toTarget: toTarget }, label);
+  }
+  function switchSourceButton(addon, toSource, toTarget) {
+    const label = "Also on " + (toSource === "wago" ? "Wago" : "CurseForge");
+    return Utils.el("button", {
+      type: "button", class: "link-btn", disabled: Store.jobActingOn(Store.addonKey(addon)),
+      onclick: function () { switchSource(addon, toSource, toTarget); }
+    }, [label + " — reinstall from there"]);
+  }
 
   // E5: a job result row's "What changed" control. With a key, jumps straight
   // to the Changelog tab pinned to the file that was just installed (the only
@@ -1896,7 +2598,10 @@ const Actions = (function () {
   // without one, Changelog is itself key-gated, so falls back to Versions,
   // which already tags the installed/pinned file without any CurseForge call.
   function whatChanged(projectId, fileId) {
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
+    // E12: Wago's changelog needs no key at all (unlike CurseForge's, which
+    // is key-gated) - a Wago row's key always goes straight to Changelog.
+    const isWago = typeof projectId === "string" && projectId.toLowerCase().indexOf("wago:") === 0;
+    const hasKey = isWago || !!(Store.state.settings && Store.state.settings.hasApiKey);
     if (hasKey) Components.Drawer.open(projectId, { tab: "changelog", changelogFileId: fileId });
     else Components.Drawer.open(projectId, { tab: "versions" });
   }
@@ -1963,7 +2668,18 @@ const Actions = (function () {
   }
 
   function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Adopting " + folder); }
+  // E12: one-click adoption from the Wago id/slug -Scan found in the
+  // untracked folder's own .toc (## X-Wago-ID) - same shape as
+  // installLatestWago, just with an "Adopting..." label to match `adopt`'s.
+  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Adopting " + folder); }
 
+  // Round 5 fix: each individual Settings control (a release-channel radio,
+  // the auto-update toggle) calls saveSettings independently, so flipping
+  // two or three of them in quick succession used to stack that many
+  // identical "Settings saved." toasts on screen at once. Coalesces rapid
+  // successive successful saves into a single toast, fired a moment after
+  // the last one settles rather than after every individual call.
+  let saveToastTimer = null;
   async function saveSettings(patch) {
     try {
       const res = await Api.putSettings(patch);
@@ -1971,7 +2687,8 @@ const Actions = (function () {
       App.renderChrome();
       if (Store.state.view === "settings") Views.settings.render();
       if (Store.state.view === "browse") Views.browse.render();
-      Components.Toast.show("Settings saved.", "success");
+      clearTimeout(saveToastTimer);
+      saveToastTimer = setTimeout(function () { Components.Toast.show("Settings saved.", "success"); }, 300);
       return res;
     } catch (err) {
       Components.Toast.show("Couldn't save settings: " + describeError(err), "error");
@@ -1989,7 +2706,7 @@ const Actions = (function () {
     catch (err) { Components.Toast.show("Couldn't open that: " + describeError(err), "error"); }
   }
 
-  function openOnCurseForge(projectId, slug) { return openWhat("curseforge", { projectId: Number(projectId), slug: slug || undefined }); }
+  function openOnCurseForge(projectId, slug) { return openWhat("curseforge", { projectId: Utils.normalizeId(projectId), slug: slug || undefined }); }
 
   // E3: "Search CurseForge" on a missing dependency, from the drawer's
   // Overview tab. With a key, Browse can search directly, so switch there
@@ -2025,7 +2742,7 @@ const Actions = (function () {
     const submitBtn = Utils.qs("#add-addon-submit");
     function fail(msg) { errorBox.textContent = msg; errorBox.hidden = false; errorBox.className = "form-msg is-error"; }
 
-    if (!value) { fail("Enter a Project ID or a CurseForge URL."); return; }
+    if (!value) { fail("Enter a Project ID, a CurseForge URL, or a Wago addon URL."); return; }
 
     if (/^\d+$/.test(value)) {
       Components.Dialogs.closeAdd();
@@ -2033,8 +2750,20 @@ const Actions = (function () {
       return;
     }
 
+    // E12: a "wago:<slug-or-id>" token or a full wago URL needs no API key
+    // (unlike a CurseForge URL below) and no server round-trip to resolve -
+    // a Wago addon's identity already IS its slug/id.
+    const wagoMatch = value.match(/^wago:(.+)$/i) || value.match(/^https?:\/\/addons\.wago\.io\/addons\/([a-z0-9-]+)/i);
+    if (wagoMatch) {
+      const ref = wagoMatch[1].trim();
+      if (!ref) { fail("That doesn't look like a valid Wago reference."); return; }
+      Components.Dialogs.closeAdd();
+      await addByWagoSlug(ref);
+      return;
+    }
+
     if (value.toLowerCase().indexOf("curseforge.com") === -1) {
-      fail("Enter a numeric Project ID, or a curseforge.com addon URL.");
+      fail("Enter a numeric Project ID, a curseforge.com addon URL, or a wago.io addon URL.");
       return;
     }
     if (!Store.state.settings || !Store.state.settings.hasApiKey) {
@@ -2080,10 +2809,13 @@ const Actions = (function () {
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
-    deleteUntracked: deleteUntracked, adopt: adopt, saveSettings: saveSettings, testKey: testKey,
+    deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings, testKey: testKey,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, submitAddInput: submitAddInput,
     whatChanged: whatChanged, showLastRunDetails: showLastRunDetails, importAddons: importAddons,
-    updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected
+    updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
+    // E12 (Wago second source)
+    installLatestWago: installLatestWago, addWagoWithVersion: addWagoWithVersion, addByWagoSlug: addByWagoSlug,
+    openOnWago: openOnWago, switchSource: switchSource, switchSourceButton: switchSourceButton
   };
 })();
 
@@ -2105,7 +2837,12 @@ Views.myAddons = (function () {
     { key: "pinned", label: "Pinned" },
     { key: "ignored", label: "Ignored" },
     { key: "failed", label: "Failed" },
-    { key: "missingdeps", label: "Missing deps" }
+    { key: "missingdeps", label: "Missing deps" },
+    // E13: covers both "Older patch" and "Not for Midnight" - anything the
+    // Compatibility column would flag as needing a look, not just the worst
+    // case; "unknown" (no evidence either way) is deliberately excluded, same
+    // as the header's "N addons need attention" count below.
+    { key: "stale", label: "Stale" }
   ];
 
   function addonMissingDeps(a) { return (a && a.missingDeps) || []; }
@@ -2126,8 +2863,16 @@ Views.myAddons = (function () {
     if (filter === "ignored") return !!a.ignoreUpdates;
     if (filter === "failed") return Store.lastRunStatusFor(a.name) === "Failed";
     if (filter === "missingdeps") return addonMissingDeps(a).length > 0;
+    if (filter === "stale") return isStale(a);
     return true; // "all"
   }
+
+  // E13: an addon "needs attention" when the compat check found real
+  // evidence it's behind (stale/stale-minor) - "unknown" (no evidence at
+  // all, e.g. no .build.info or no toc Interface/latestGameVersions yet)
+  // is not itself a red flag, so it's excluded from both this and the
+  // header's count below.
+  function isStale(a) { return a.compat === "stale" || a.compat === "stale-minor"; }
 
   function filterCounts() {
     const all = Store.state.addons;
@@ -2154,7 +2899,7 @@ Views.myAddons = (function () {
   }
 
   function statusRank(a) {
-    if (Store.jobActingOn(a.projectId)) return 0;
+    if (Store.jobActingOn(Store.addonKey(a))) return 0;
     if (Store.lastRunStatusFor(a.name) === "Failed") return 1;
     if (a.updateAvailable) return 2;
     if (a.pinnedFileId !== null && a.pinnedFileId !== undefined) return 3;
@@ -2180,15 +2925,39 @@ Views.myAddons = (function () {
     return sortableName(a).localeCompare(sortableName(b), undefined, { numeric: true, sensitivity: "base" });
   }
 
+  // Round 5 fix: the Installed/Latest columns compared version strings with
+  // a plain localeCompare, which sorts lexically, not numerically - "v10.0"
+  // landed ahead of "v2.0". Splits each string into dot-separated segments
+  // (a leading "v" stripped first), compares segment-by-segment as numbers,
+  // and falls back to a plain string compare for any segment that isn't
+  // purely numeric (release tags, "1.0.0-beta", etc.).
+  function compareVersionStrings(a, b) {
+    const pa = String(a || "").replace(/^v/i, "").split(".");
+    const pb = String(b || "").replace(/^v/i, "").split(".");
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+      const sa = pa[i], sb = pb[i];
+      if (sa === undefined) return sb === undefined ? 0 : -1;
+      if (sb === undefined) return 1;
+      const na = Number(sa), nb = Number(sb);
+      if (!isNaN(na) && !isNaN(nb)) {
+        if (na !== nb) return na - nb;
+      } else if (sa !== sb) {
+        return sa < sb ? -1 : 1;
+      }
+    }
+    return 0;
+  }
+
   // One comparator per sortable column (Addon/Installed/Latest/Status/Updated
   // headers); the click handler in bindOnce() flips `dir` to invert whichever
   // one this returns.
   function compareValues(a, b, column) {
-    if (column === "installed") return (a.version || "").localeCompare(b.version || "");
+    if (column === "installed") return compareVersionStrings(a.version, b.version);
     if (column === "latest") {
       const av = a.updateAvailable ? a.updateAvailable.version : "";
       const bv = b.updateAvailable ? b.updateAvailable.version : "";
-      return av.localeCompare(bv);
+      return compareVersionStrings(av, bv);
     }
     if (column === "status") return statusRank(a) - statusRank(b) || compareNames(a.name, b.name);
     if (column === "updated") return new Date(a.installedAt || 0) - new Date(b.installedAt || 0);
@@ -2257,7 +3026,7 @@ Views.myAddons = (function () {
       if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
       return;
     }
-    const selectedCount = list.filter(function (a) { return Store.isSelected(a.projectId); }).length;
+    const selectedCount = list.filter(function (a) { return Store.isSelected(Store.addonKey(a)); }).length;
     if (selectAll) {
       selectAll.checked = list.length > 0 && selectedCount === list.length;
       selectAll.indeterminate = selectedCount > 0 && selectedCount < list.length;
@@ -2342,25 +3111,42 @@ Views.myAddons = (function () {
     let text = total + (total === 1 ? " addon" : " addons");
     if (updates > 0) text += " · " + updates + " update" + (updates === 1 ? "" : "s") + " available";
     text += " · " + checked;
+    // E13: "Client 12.1.0.69587 · N addons need attention" - only appended
+    // once the client build is actually known, and the attention clause only
+    // when there's something to flag (a spotless "0 need attention" clause
+    // on every load would just be noise).
+    if (Store.state.clientBuild) {
+      text += " · Client " + Store.state.clientBuild;
+      const staleCount = Store.state.addons.filter(isStale).length;
+      if (staleCount > 0) text += " · " + staleCount + (staleCount === 1 ? " addon needs" : " addons need") + " attention";
+    }
     if (list.length !== total) text = list.length + " of " + text;
     summary.textContent = text;
 
     LogoCache.ensure(list.map(function (a) { return a.projectId; }), render);
   }
 
+  // E12: a tiny source badge (CF/Wago) next to each row's name, so a mixed
+  // tracked list stays legible about where each addon actually comes from.
+  function sourceBadge(a) {
+    const isWago = a.source === "wago";
+    return Utils.el("span", { class: "source-badge " + (isWago ? "is-wago" : "is-cf"), title: isWago ? "Wago Addons" : "CurseForge" }, [isWago ? "Wago" : "CF"]);
+  }
+
   function row(a) {
+    const key = Store.addonKey(a);
     const logo = Components.Logo.build({ projectId: a.projectId, name: a.name }, 40);
     const tr = Utils.el("tr", { class: "addon-row" }, [
       Utils.el("td", { class: "checkbox-cell" }, [
         Utils.el("input", {
-          type: "checkbox", class: "chk", checked: Store.isSelected(a.projectId), "aria-label": "Select " + a.name,
-          onchange: function () { Store.toggleSelected(a.projectId); render(); }
+          type: "checkbox", class: "chk", checked: Store.isSelected(key), "aria-label": "Select " + a.name,
+          onchange: function () { Store.toggleSelected(key); render(); }
         })
       ]),
       Utils.el("td", {}, [Utils.el("div", { class: "addon-identity" }, [
         logo,
         Utils.el("div", { class: "addon-names" }, [
-          Utils.el("div", { class: "addon-name" }, [a.name]),
+          Utils.el("div", { class: "addon-name" }, [Utils.el("span", { class: "addon-name-text" }, [a.name]), sourceBadge(a)]),
           Utils.el("div", { class: "addon-author" }, [a.author || "Unknown author"])
         ])
       ])]),
@@ -2376,12 +3162,13 @@ Views.myAddons = (function () {
         // the real column is hidden, so the information isn't simply lost.
         Utils.el("span", { class: "updated-fallback", title: Utils.fullDate(a.installedAt) }, ["Updated " + Utils.relativeTime(a.installedAt)])
       ])]),
+      Utils.el("td", {}, [Components.Chip.forCompat(a)]),
       Utils.el("td", { class: "updated-cell", title: Utils.fullDate(a.installedAt) }, [Utils.relativeTime(a.installedAt)]),
       Utils.el("td", {}, [kebab(a)])
     ]);
     tr.addEventListener("click", function (ev) {
       if (ev.target.closest(".menu-wrap") || ev.target.closest(".checkbox-cell")) return;
-      Components.Drawer.open(a.projectId, { tab: "overview" });
+      Components.Drawer.open(key, { tab: "overview", source: a.source });
     });
     return tr;
   }
@@ -2398,23 +3185,25 @@ Views.myAddons = (function () {
   }
 
   function menuItems(a) {
-    const busy = Store.jobActingOn(a.projectId);
+    const key = Store.addonKey(a);
+    const isWago = a.source === "wago";
+    const busy = Store.jobActingOn(key);
     const pinned = a.pinnedFileId !== null && a.pinnedFileId !== undefined;
     const hasPrevious = a.previousFileId !== null && a.previousFileId !== undefined;
     const items = [
-      { label: "Update now", icon: "refresh", disabled: busy, onSelect: function () { Actions.updateNow(a.projectId); } },
-      { label: "Versions…", icon: "list", onSelect: function () { Components.Drawer.open(a.projectId, { tab: "versions" }); } },
+      { label: "Update now", icon: "refresh", disabled: busy, onSelect: function () { Actions.updateNow(key); } },
+      { label: "Versions…", icon: "list", onSelect: function () { Components.Drawer.open(key, { tab: "versions", source: a.source }); } },
       null,
       pinned
-        ? { label: "Unpin", icon: "pin", disabled: busy, onSelect: function () { Actions.unpin(a.projectId); } }
-        : { label: "Pin current version", icon: "pin", disabled: busy, onSelect: function () { Actions.pinCurrent(a.projectId); } }
+        ? { label: "Unpin", icon: "pin", disabled: busy, onSelect: function () { Actions.unpin(key); } }
+        : { label: "Pin current version", icon: "pin", disabled: busy, onSelect: function () { Actions.pinCurrent(key); } }
     ];
     // E1: only offered when a local backup of the previous version exists to
     // restore from (addon.previousFileId set). A conditional `null` entry
     // here would render as a visible separator, not disappear, so this is
     // pushed rather than ternary'd into the array above.
     if (hasPrevious) {
-      items.push({ label: "Roll back to " + (a.previousVersion || "previous version"), icon: "history", disabled: busy, onSelect: function () { Actions.rollback(a.projectId); } });
+      items.push({ label: "Roll back to " + (a.previousVersion || "previous version"), icon: "history", disabled: busy, onSelect: function () { Actions.rollback(key); } });
     }
     items.push(
       // Round 4 fix: reuses the existing eye-off sprite icon (already defined
@@ -2423,11 +3212,24 @@ Views.myAddons = (function () {
       // label sat flush-left while every sibling item's label is indented past
       // an icon column, breaking the menu's alignment.
       a.ignoreUpdates
-        ? { label: "Stop ignoring", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(a.projectId, false); } }
-        : { label: "Ignore updates", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(a.projectId, true); } },
-      { label: "Open on CurseForge", icon: "external", onSelect: function () { Actions.openOnCurseForge(a.projectId); } },
+        ? { label: "Stop ignoring", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(key, false); } }
+        : { label: "Ignore updates", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(key, true); } },
+      // E12: source-aware "Open on ..." entry.
+      isWago
+        ? { label: "Open on Wago", icon: "external", onSelect: function () { Actions.openOnWago(a.slug); } }
+        : { label: "Open on CurseForge", icon: "external", onSelect: function () { Actions.openOnCurseForge(key); } }
+    );
+    // E12: "Also on Wago/CurseForge" - only when the tracked record's own
+    // toc-parsed id revealed the other source, same condition the drawer
+    // header's cross-source button uses.
+    if (isWago && a.curseId) {
+      items.push({ label: "Reinstall from CurseForge", icon: "refresh", disabled: busy, onSelect: function () { Actions.switchSource(a, "curseforge", a.curseId); } });
+    } else if (!isWago && a.wagoId) {
+      items.push({ label: "Reinstall from Wago", icon: "refresh", disabled: busy, onSelect: function () { Actions.switchSource(a, "wago", a.wagoId); } });
+    }
+    items.push(
       null,
-      { label: "Uninstall", icon: "trash", danger: true, disabled: busy, onSelect: function () { Actions.uninstall(a.projectId); } }
+      { label: "Uninstall", icon: "trash", danger: true, disabled: busy, onSelect: function () { Actions.uninstall(key); } }
     );
     return items;
   }
@@ -2463,7 +3265,7 @@ Views.myAddons = (function () {
     // not the full underlying selection, so a search or status filter never
     // silently sweeps up rows the user can't see.
     Utils.qs("#myaddons-select-all").addEventListener("change", function (ev) {
-      const visibleIds = filteredSorted().map(function (a) { return a.projectId; });
+      const visibleIds = filteredSorted().map(function (a) { return Store.addonKey(a); });
       if (ev.target.checked) Store.selectIds(visibleIds); else Store.deselectIds(visibleIds);
       render();
     });
@@ -2478,24 +3280,48 @@ Views.myAddons = (function () {
 
 /* ---------- Browse ---------- */
 Views.browse = (function () {
+  // E12 (Wago second source): a source switch above the CF no-key panel and
+  // the shared search/grid content - Wago never needs a key, so switching
+  // to it must work even when CurseForge's own no-key panel is showing.
+  function renderSourceSwitch() {
+    const source = Store.state.browse.source;
+    Utils.qsa("#browse-source-switch .segmented-btn").forEach(function (btn) {
+      btn.classList.toggle("is-active", btn.dataset.sourceValue === source);
+    });
+  }
+
   function render() {
+    renderSourceSwitch();
+    const b = Store.state.browse;
+    Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
+    if (b.source === "wago") {
+      Utils.qs("#browse-nokey").hidden = true;
+      Utils.qs("#browse-content").hidden = false;
+      if (!b.categories.length && !b.categoriesLoading) loadWagoCategories();
+      if (!b.loaded && !b.loading) searchWago(true);
+      renderResults();
+      return;
+    }
+
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     Utils.qs("#browse-nokey").hidden = hasKey;
     Utils.qs("#browse-content").hidden = !hasKey;
     if (!hasKey) return;
 
-    if (!Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCategories();
-    if (!Store.state.browse.loaded && !Store.state.browse.loading) search(true);
+    if (!Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCfCategories();
+    if (!Store.state.browse.loaded && !Store.state.browse.loading) searchCf(true);
 
     renderResults();
   }
 
-  async function loadCategories() {
+  async function loadCfCategories() {
     Store.state.browse.categoriesLoading = true;
     try {
       const res = await Api.cfCategories();
       Store.state.browse.categories = res.data || [];
       const sel = Utils.qs("#browse-category");
+      sel.textContent = "";
+      sel.appendChild(Utils.el("option", { value: "" }, ["All categories"]));
       (res.data || []).forEach(function (c) { sel.appendChild(Utils.el("option", { value: c.id }, [c.name])); });
     } catch (err) {
       /* category filter degrades to "All categories" only */
@@ -2504,7 +3330,23 @@ Views.browse = (function () {
     }
   }
 
-  async function search(reset) {
+  async function loadWagoCategories() {
+    Store.state.browse.categoriesLoading = true;
+    try {
+      const res = await Api.wagoCategories();
+      Store.state.browse.categories = res.data || [];
+      const sel = Utils.qs("#browse-category");
+      sel.textContent = "";
+      sel.appendChild(Utils.el("option", { value: "" }, ["All categories"]));
+      (res.data || []).forEach(function (c) { sel.appendChild(Utils.el("option", { value: c.id }, [c.display_name || c.name])); });
+    } catch (err) {
+      /* category filter degrades to "All categories" only */
+    } finally {
+      Store.state.browse.categoriesLoading = false;
+    }
+  }
+
+  async function searchCf(reset) {
     const b = Store.state.browse;
     if (reset) { b.index = 0; b.results = []; }
     b.loading = true;
@@ -2525,8 +3367,37 @@ Views.browse = (function () {
     renderResults();
   }
 
+  async function searchWago(reset) {
+    const b = Store.state.browse;
+    if (reset) { b.page = 1; b.results = []; }
+    b.loading = true;
+    b.error = null;
+    renderResults();
+    try {
+      const res = await Api.wagoSearch({ q: b.query, categoryId: b.categoryId, sort: b.sort, page: b.page });
+      const items = res.items || [];
+      b.results = reset ? items : b.results.concat(items);
+      b.totalCount = res.total || b.results.length;
+      b.lastPage = res.lastPage || b.page;
+      b.loaded = true;
+      b.loading = false;
+    } catch (err) {
+      b.loading = false;
+      b.error = err;
+    }
+    renderResults();
+  }
+
+  // The one function bound to the search/category/sort/load-more controls -
+  // dispatches to whichever source is currently active so bindOnce() below
+  // needs no source-specific wiring of its own.
+  function search(reset) {
+    return Store.state.browse.source === "wago" ? searchWago(reset) : searchCf(reset);
+  }
+
   function renderResults() {
     const b = Store.state.browse;
+    const isWago = b.source === "wago";
     const grid = Utils.qs("#browse-grid");
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
@@ -2559,10 +3430,10 @@ Views.browse = (function () {
 
     grid.hidden = false;
     grid.textContent = "";
-    b.results.forEach(function (m) { grid.appendChild(card(m)); });
+    b.results.forEach(function (m) { grid.appendChild(isWago ? wagoCard(m) : card(m)); });
 
     summary.textContent = b.results.length + " of " + Utils.formatNumber(b.totalCount) + " results";
-    loadMoreWrap.hidden = b.loading || b.results.length >= b.totalCount;
+    loadMoreWrap.hidden = b.loading || (isWago ? b.page >= b.lastPage : b.results.length >= b.totalCount);
   }
 
   function card(m) {
@@ -2592,16 +3463,62 @@ Views.browse = (function () {
     return node;
   }
 
+  // E12: Wago's search results are parsed HTML card snippets (slug/name/
+  // thumbnail only - see SPEC's verified Wago facts) rather than a full mod
+  // object, so this card is necessarily sparser than CurseForge's (no
+  // summary/downloads/categories - that detail only exists on the addon's
+  // own /addons/{slug} page, fetched once the drawer opens).
+  function wagoCard(item) {
+    const key = "wago:" + item.slug;
+    const tracked = !!Store.addonByProjectId(key);
+    const busy = Store.jobActingOn(key);
+    const btn = tracked
+      ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
+      : Utils.el("button", { type: "button", class: "btn btn-accent", disabled: busy, onclick: function (ev) { ev.stopPropagation(); Actions.installLatestWago(item.slug, item.name); } }, [busy ? "Installing…" : "Install"]);
+
+    const node = Utils.el("div", { class: "browse-card" }, [
+      Utils.el("div", { class: "browse-card-top" }, [
+        Components.Logo.build({ projectId: null, name: item.name, thumbnailUrl: item.thumbnail }, 44),
+        Utils.el("div", {}, [
+          Utils.el("div", { class: "browse-card-title" }, [item.name || item.slug]),
+          Utils.el("div", { class: "source-badge is-wago" }, ["Wago"])
+        ])
+      ]),
+      Utils.el("div", { class: "browse-card-footer" }, [btn])
+    ]);
+    node.addEventListener("click", function () { Components.Drawer.open(key, { tab: "overview", slug: item.slug, source: "wago" }); });
+    return node;
+  }
+
   function bindOnce() {
+    Utils.qsa("#browse-source-switch .segmented-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const source = btn.dataset.sourceValue;
+        if (Store.state.browse.source === source) return;
+        Store.set({ browse: Object.assign({}, Store.state.browse, {
+          source: source, loaded: false, loading: false, error: null, results: [],
+          query: "", categoryId: "", categories: [], categoriesLoading: false,
+          index: 0, page: 1
+        }) });
+        Utils.qs("#browse-search").value = "";
+        renderSortOptions();
+        render();
+      });
+    });
+
     Utils.qs("#browse-search").addEventListener("input", Utils.debounce(function (ev) {
       Store.state.browse.query = ev.target.value;
       search(true);
     }, 400));
     Utils.qs("#browse-category").addEventListener("change", function (ev) { Store.state.browse.categoryId = ev.target.value; search(true); });
-    Utils.qs("#browse-sort").addEventListener("change", function (ev) { Store.state.browse.sortField = Number(ev.target.value); search(true); });
+    Utils.qs("#browse-sort").addEventListener("change", function (ev) {
+      if (Store.state.browse.source === "wago") Store.state.browse.sort = ev.target.value;
+      else Store.state.browse.sortField = Number(ev.target.value);
+      search(true);
+    });
     Utils.qs("#btn-load-more").addEventListener("click", function () {
       const b = Store.state.browse;
-      b.index += b.pageSize;
+      if (b.source === "wago") b.page += 1; else b.index += b.pageSize;
       search(false);
     });
     Utils.qs("#btn-nokey-settings").addEventListener("click", function () { App.switchView("settings"); });
@@ -2620,6 +3537,27 @@ Views.browse = (function () {
     });
   }
 
+  // Swaps #browse-sort's options between CurseForge's (numeric sortField)
+  // and Wago's (a sort keyword) whenever the source switch changes -
+  // SPEC's Wago facts leave the exact set of working sort values open
+  // ("document which work"), so this offers the four the roadmap itself
+  // names (popular/updated/downloads/name) as the best-documented set.
+  function renderSortOptions() {
+    const sel = Utils.qs("#browse-sort");
+    sel.textContent = "";
+    if (Store.state.browse.source === "wago") {
+      [["popular", "Popularity"], ["updated", "Last updated"], ["downloads", "Total downloads"], ["name", "Name"]].forEach(function (pair) {
+        sel.appendChild(Utils.el("option", { value: pair[0] }, ["Sort: " + pair[1]]));
+      });
+      sel.value = Store.state.browse.sort;
+    } else {
+      [["2", "Popularity"], ["3", "Last updated"], ["4", "Name"], ["6", "Total downloads"]].forEach(function (pair) {
+        sel.appendChild(Utils.el("option", { value: pair[0] }, ["Sort: " + pair[1]]));
+      });
+      sel.value = String(Store.state.browse.sortField);
+    }
+  }
+
   return { render: render, search: search, bindOnce: bindOnce };
 })();
 
@@ -2628,6 +3566,10 @@ Views.settings = (function () {
   let untrackedList = [];
   let untrackedLoading = false;
   let untrackedError = null;
+  // Round 5 fix: distinguishes "Scan has never run" from "Scan ran and found
+  // nothing" - both used to render the identical "click Scan to look" copy,
+  // so a real zero-result scan gave no visible confirmation it had run at all.
+  let untrackedScanned = false;
   let apikeyVisible = false;
   // E10: Diagnostics panel state - null diagChecks means "never run yet"
   // (distinct from an empty array, which /api/diagnostics never actually
@@ -2642,6 +3584,9 @@ Views.settings = (function () {
 
     Utils.qs("#settings-wow-root").textContent = s.wowRoot || "—";
     Utils.qs("#settings-addons-path").textContent = s.addonsPath || "—";
+    // E13: read-only info sourced from WTF\Config.wtf, not a manager setting
+    // - see index.html's explanatory paragraph next to this row.
+    Utils.qs("#settings-checkaddonversion").textContent = checkAddonVersionText(s.checkAddonVersion);
 
     ["1", "2", "3"].forEach(function (v) { Utils.qs("#radio-release-" + v).checked = String(s.releaseType) === v; });
     Utils.qs("#toggle-autoupdate").checked = !!s.autoUpdateOnLaunch;
@@ -2664,10 +3609,37 @@ Views.settings = (function () {
     if (busy) reinstall.title = "Another task is running"; else reinstall.removeAttribute("title");
   }
 
+  // E13: WoW's own checkAddonVersion cvar - display text for the value
+  // settings.checkAddonVersion carries (a raw string, whatever's actually in
+  // WTF\Config.wtf, or null when the file/setting isn't there yet).
+  function checkAddonVersionText(value) {
+    if (value === "0") return "Disabled (0) — out-of-date addons load anyway";
+    if (value === "1") return "Enabled (1) — WoW warns about/blocks out-of-date addons";
+    if (value === null || value === undefined) return "Unknown (WTF\\Config.wtf not found)";
+    return value; // some other value WoW itself wrote - shown verbatim rather than guessed at
+  }
+
   function formatUptime(seconds) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     return h > 0 ? (h + "h " + m + "m") : (m + "m");
+  }
+
+  // Round 5 fix: About > Server uptime is a live extrapolation
+  // (App.getServerUptime(), computed from a single /api/ping fetched once at
+  // startup) but was only ever painted by the full render() pass above -
+  // which the idle poll's `changed` gate (App.reloadState) skips whenever
+  // nothing else in /api/state actually changed, since ping-derived uptime
+  // isn't part of that diff. Sitting on Settings with no other state change
+  // therefore froze the displayed value until leaving and re-entering the
+  // view forced a full repaint. This repaints just the one element on its
+  // own short ticker (see App.startUptimeTicker) without going through the
+  // full render()/state-diff path.
+  function renderUptimeOnly() {
+    const el = Utils.qs("#about-uptime");
+    if (!el) return;
+    const uptime = App.getServerUptime();
+    el.textContent = uptime !== null ? formatUptime(uptime) : "—";
   }
 
   // E7: reflects the persisted density/theme choice (Prefs, already applied
@@ -2689,29 +3661,52 @@ Views.settings = (function () {
     box.textContent = "";
     if (untrackedLoading) { box.appendChild(Utils.el("div", { class: "skeleton-row" })); return; }
     if (untrackedError) { box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't scan: " + describeError(untrackedError)])); return; }
-    if (!untrackedList.length) { box.appendChild(Utils.el("p", { class: "muted-text" }, ["No untracked folders found yet. Click Scan to look."])); return; }
+    if (!untrackedList.length) {
+      const msg = untrackedScanned ? "Scanned — no untracked folders found." : "No untracked folders found yet. Click Scan to look.";
+      box.appendChild(Utils.el("p", { class: "muted-text" }, [msg]));
+      return;
+    }
     untrackedList.forEach(function (u) { box.appendChild(untrackedRow(u)); });
   }
 
   function untrackedRow(u) {
     const idInput = Utils.el("input", { type: "text", placeholder: "Project ID" });
     const busy = Store.isBusy();
+    const actions = [idInput];
+    // E12: -Scan reports whatever curseId/wagoId it found in the folder's own
+    // .toc (## X-Curse-Project-ID / ## X-Wago-ID) - offer a one-click adopt
+    // straight from either id, ahead of the manual Project-ID input, when
+    // the toc already answers the question.
+    if (u.curseId) {
+      actions.push(Utils.el("button", {
+        type: "button", class: "btn btn-outline", disabled: busy,
+        title: "Adopt as CurseForge project " + u.curseId,
+        onclick: function () { Actions.adopt(u.folder, Number(u.curseId)); }
+      }, ["Adopt (CF " + u.curseId + ")"]));
+    }
+    if (u.wagoId) {
+      actions.push(Utils.el("button", {
+        type: "button", class: "btn btn-outline", disabled: busy,
+        title: "Adopt as Wago addon " + u.wagoId,
+        onclick: function () { Actions.adoptWago(u.folder, u.wagoId); }
+      }, ["Adopt (Wago)"]));
+    }
+    actions.push(
+      Utils.el("button", {
+        type: "button", class: "btn btn-outline", disabled: busy, onclick: function () {
+          const v = idInput.value.trim();
+          if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric Project ID first.", "warning"); return; }
+          Actions.adopt(u.folder, Number(v));
+        }
+      }, ["Adopt"]),
+      Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"])
+    );
     return Utils.el("div", { class: "untracked-row" }, [
       Utils.el("div", { class: "untracked-info" }, [
         Utils.el("div", { class: "untracked-folder" }, [u.folder]),
         Utils.el("div", { class: "untracked-meta" }, [u.title ? (u.title + (u.version ? " · " + u.version : "")) : (u.hasToc ? "No title in .toc" : "No .toc file")])
       ]),
-      Utils.el("div", { class: "untracked-actions" }, [
-        idInput,
-        Utils.el("button", {
-          type: "button", class: "btn btn-outline", disabled: busy, onclick: function () {
-            const v = idInput.value.trim();
-            if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric Project ID first.", "warning"); return; }
-            Actions.adopt(u.folder, Number(v));
-          }
-        }, ["Adopt"]),
-        Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"])
-      ])
+      Utils.el("div", { class: "untracked-actions" }, actions)
     ]);
   }
 
@@ -2720,6 +3715,7 @@ Views.settings = (function () {
     try {
       const res = await Api.scan();
       untrackedList = res.untracked || [];
+      untrackedScanned = true;
     } catch (err) {
       untrackedError = err;
     } finally {
@@ -2951,7 +3947,7 @@ Views.settings = (function () {
     });
   }
 
-  return { render: render, bindOnce: bindOnce, rescan: rescan };
+  return { render: render, bindOnce: bindOnce, rescan: rescan, renderUptimeOnly: renderUptimeOnly };
 })();
 
 /* ==========================================================================
@@ -2962,6 +3958,7 @@ const App = (function () {
   let idleTimer = null;
   let jobPollTimer = null;
   let autoCheckTimer = null;
+  let uptimeTimer = null;
   let serverVersion = null;
   let serverUptimeAtFetch = null;
   let serverUptimeFetchedAt = null;
@@ -3076,6 +4073,8 @@ const App = (function () {
       const nextLastRun = data.lastRun || null;
       const nextJob = data.job || (afterJob ? null : Store.state.job);
       const nextCheckedAt = data.updatesCheckedAt || null;
+      const nextClientBuild = data.clientBuild || null;
+      const nextClientInterface = data.clientInterface || null;
 
       // Round 4 fix: the idle poll (every 5s, see scheduleIdlePoll below) used
       // to call renderCurrentView() unconditionally on every tick, even when
@@ -3092,11 +4091,13 @@ const App = (function () {
         || JSON.stringify(nextSettings) !== JSON.stringify(Store.state.settings)
         || JSON.stringify(nextLastRun) !== JSON.stringify(Store.state.lastRun)
         || JSON.stringify(nextJob) !== JSON.stringify(Store.state.job)
-        || nextCheckedAt !== Store.state.updatesCheckedAt;
+        || nextCheckedAt !== Store.state.updatesCheckedAt
+        || nextClientBuild !== Store.state.clientBuild;
 
       Store.set({
         addons: nextAddons, settings: nextSettings, lastRun: nextLastRun,
         job: nextJob, updatesCheckedAt: nextCheckedAt,
+        clientBuild: nextClientBuild, clientInterface: nextClientInterface,
         loadingState: false, stateError: null
       });
       if (!afterJob) resumeJobPollingIfNeeded();
@@ -3187,12 +4188,27 @@ const App = (function () {
     return serverUptimeAtFetch + Math.floor((Date.now() - serverUptimeFetchedAt) / 1000);
   }
 
+  // Round 5 fix: ticks the About panel's Server uptime line on its own short
+  // timer, independent of reloadState's full-state diff (see the "changed"
+  // comment there - ping-derived uptime was never part of it). Only touches
+  // the DOM while Settings is the active view; a no-op otherwise.
+  function startUptimeTicker() {
+    clearInterval(uptimeTimer);
+    uptimeTimer = setInterval(function () {
+      if (Store.state.view === "settings") Views.settings.renderUptimeOnly();
+    }, 5000);
+  }
+
   // E7: '/' keyboard shortcut - focuses whichever search box belongs to the
   // view currently on screen; a no-op in Settings and in Browse without a key
   // (its search box is hidden behind the no-key panel).
   function focusCurrentSearch() {
     if (Store.state.view === "myaddons") { Utils.qs("#myaddons-search").focus(); return; }
-    if (Store.state.view === "browse" && Store.state.settings && Store.state.settings.hasApiKey) { Utils.qs("#browse-search").focus(); }
+    // E12: Wago's search box is always usable (no key needed), regardless of
+    // whether a CurseForge key is configured - only gate on the key when
+    // Browse is actually showing the CurseForge source.
+    const canFocusBrowseSearch = Store.state.browse.source === "wago" || !!(Store.state.settings && Store.state.settings.hasApiKey);
+    if (Store.state.view === "browse" && canFocusBrowseSearch) { Utils.qs("#browse-search").focus(); }
   }
 
   function wireGlobal() {
@@ -3269,6 +4285,7 @@ const App = (function () {
     await reloadState(false);
     startIdlePolling();
     scheduleAutoCheck();
+    startUptimeTicker();
   }
 
   return {

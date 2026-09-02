@@ -36,6 +36,11 @@
                         0 or negative disables idle exit.
    -OpenBrowser        After starting, launch Edge in app mode pointed at the
                         server (falls back to the default browser).
+   -BuildInfoPath <path>  Overrides the .build.info file read for the client
+                        build/compat check (E13), computed once at startup.
+                        Default: the .build.info next to the resolved AddOns
+                        path's game root. Intended for tests - never reads
+                        the real WoW folder when given.
 =====================================================================
 #>
 
@@ -44,7 +49,8 @@ param(
     [string]$Root,
     [string]$AddonsPath,
     [int]$IdleMinutes = 20,
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [string]$BuildInfoPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -284,6 +290,10 @@ function Get-SettingsView {
         apiKeyHint         = $hint
         addonsPath         = (Resolve-EffectiveAddonsPath)
         wowRoot            = (Get-WowRootPath)
+        # E13: read-only info, not a manager setting - WoW's own
+        # checkAddonVersion cvar from WTF\Config.wtf. PUT /api/settings never
+        # accepts this key; it exists only for Settings > Game to display.
+        checkAddonVersion = (Get-CheckAddonVersionSetting)
     }
 }
 
@@ -375,6 +385,50 @@ function Get-WowRootPath {
     }
 }
 
+# E13 (compatibility audit): mirrors addon-sync.ps1's identical function -
+# see its own doc comment for why .build.info sits three levels above
+# <root>\_retail_\Interface\AddOns.
+function Get-DefaultBuildInfoPath {
+    param([string]$AddonsPathResolved)
+
+    if (-not $AddonsPathResolved) { return $null }
+    try {
+        $interfaceDir = Split-Path -Path $AddonsPathResolved -Parent
+        if (-not $interfaceDir) { return $null }
+        $retailDir = Split-Path -Path $interfaceDir -Parent
+        if (-not $retailDir) { return $null }
+        $wowRootDir = Split-Path -Path $retailDir -Parent
+        if (-not $wowRootDir) { return $null }
+        return Join-Path -Path $wowRootDir -ChildPath '.build.info'
+    } catch {
+        return $null
+    }
+}
+
+# E13: WoW's own checkAddonVersion cvar (WTF\Config.wtf, alongside the game
+# root Get-WowRootPath already resolves - "SET checkAddonVersion "0"" means
+# out-of-date addons load anyway) - read-only display info for Settings >
+# Game, per roadmap E13. Returns the string value ("0"/"1"/whatever WoW
+# wrote) or $null when Config.wtf/the setting isn't there yet (a fresh
+# install that has never had the option toggled). Never throws.
+function Get-CheckAddonVersionSetting {
+    $wowRoot = Get-WowRootPath
+    if (-not $wowRoot) { return $null }
+    $configPath = Join-Path -Path (Join-Path -Path $wowRoot -ChildPath 'WTF') -ChildPath 'Config.wtf'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return $null }
+    try {
+        $lines = Get-Content -LiteralPath $configPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\s*SET\s+checkAddonVersion\s+"([^"]*)"') {
+            return $Matches[1]
+        }
+    }
+    return $null
+}
+
 # =====================================================================
 # Dependencies (E3) - live missingDeps for /api/state, mirroring
 # addon-sync.ps1's Get-AddonsFolderSet/Get-MissingDeps (this script is
@@ -417,6 +471,195 @@ function Get-MissingDeps {
         }
     }
     Write-Output -NoEnumerate $missing
+}
+
+# =====================================================================
+# Compatibility audit (E13) - mirrors addon-sync.ps1's identical functions
+# (Split-TocDepList / Get-TocInterfaceValues / Get-PackageTocInterfaces /
+# Get-AddonCompat / Get-ClientBuildInfo) - this script never dot-sources the
+# CLI, same duplication pattern already used for Resolve-EffectiveAddonsPath/
+# Get-PresentAddonFolders/Get-MissingDeps above. See the CLI's own doc
+# comments for the full rationale; kept terse here.
+# =====================================================================
+
+function Split-TocDepList {
+    <# Splits one toc tag's comma- or space-separated value into pieces; blank pieces dropped; tolerates $null/empty. #>
+    param([string]$Value)
+
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $Value) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    $pieces = $null
+    if ($Value.IndexOf(',') -ge 0) { $pieces = $Value -split ',' } else { $pieces = $Value -split '\s+' }
+    foreach ($piece in $pieces) {
+        $trimmed = $piece.Trim()
+        if ($trimmed.Length -gt 0) { $result.Add($trimmed) }
+    }
+    Write-Output -NoEnumerate $result
+}
+
+function Get-TocInterfaceValues {
+    <#
+      Reads "## Interface:"/"## Interface-Mainline:" from one folder's
+      primary .toc into int64s. Never throws; empty list when unavailable.
+      -AddonsPath is not Mandatory (Handle-State can reach here with an
+      unresolvable AddOns path, $null - a Mandatory [string] parameter
+      rejects an explicit $null argument outright, distinct from simply
+      omitting it, rather than degrading gracefully).
+    #>
+    param(
+        [string]$AddonsPath,
+        [Parameter(Mandatory = $true)][string]$FolderName
+    )
+
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $AddonsPath) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    $folderPath = Join-Path -Path $AddonsPath -ChildPath $FolderName
+    if (-not (Test-Path -LiteralPath $folderPath)) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    $tocFiles = Get-ChildItem -LiteralPath $folderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
+    $chosen = $null
+    foreach ($t in $tocFiles) { if ($t.BaseName -eq $FolderName) { $chosen = $t; break } }
+    if (-not $chosen) { foreach ($t in $tocFiles) { $chosen = $t; break } }
+    if (-not $chosen) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $chosen.FullName -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Output -NoEnumerate $result
+        return
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\s*##\s*(Interface|Interface-Mainline)\s*:\s*(.*)$') {
+            foreach ($piece in (Split-TocDepList -Value $Matches[2])) {
+                $ival = [int64]0
+                if ([int64]::TryParse($piece, [ref]$ival)) { $result.Add([int64]$ival) }
+            }
+        }
+    }
+    Write-Output -NoEnumerate $result
+}
+
+function Get-PackageTocInterfaces {
+    <# Unions Get-TocInterfaceValues across every folder of a record, deduped. #>
+    param($AddonsPath, $Folders)
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[int64]'
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    # Plain foreach, not @($Folders) - matches the CLI's identical function
+    # exactly (see its own note on the machine's List[object]/@() quirk);
+    # $Folders is a JSON-parsed record property here (never a List[object]
+    # in practice), but there is no reason to risk it.
+    foreach ($folderName in $Folders) {
+        foreach ($v in (Get-TocInterfaceValues -AddonsPath $AddonsPath -FolderName $folderName)) {
+            if ($seen.Add([int64]$v)) { $result.Add([int64]$v) }
+        }
+    }
+    Write-Output -NoEnumerate $result
+}
+
+function Get-AddonCompat {
+    <# ok / stale-minor / stale / unknown - see addon-sync.ps1's Get-AddonCompat for the full contract. #>
+    param($TocInterfaces, $LatestGameVersions, $ClientInterface)
+
+    if (-not $ClientInterface) { return 'unknown' }
+    $clientInterfaceInt = [int64]$ClientInterface
+    $clientMajor = [int]([math]::Floor($clientInterfaceInt / 10000))
+    $clientMinor = [int]([math]::Floor(($clientInterfaceInt % 10000) / 100))
+    $clientPatch = [int]($clientInterfaceInt % 100)
+    $clientVersionText = "$clientMajor.$clientMinor.$clientPatch"
+
+    $hasEvidence = $false
+    $sameMajor = $false
+
+    # Plain foreach, not @($TocInterfaces) - the machine's documented quirk:
+    # @() wrapped around a List[object] (TocInterfaces is exactly that, from
+    # Get-PackageTocInterfaces) throws "Argument types do not match".
+    foreach ($iface in $TocInterfaces) {
+        if ($null -eq $iface) { continue }
+        $ifaceInt = [int64]0
+        if (-not [int64]::TryParse([string]$iface, [ref]$ifaceInt)) { continue }
+        $hasEvidence = $true
+        if ($ifaceInt -eq $clientInterfaceInt) { return 'ok' }
+        $ifaceMajor = [int]([math]::Floor($ifaceInt / 10000))
+        if ($ifaceMajor -eq $clientMajor) { $sameMajor = $true }
+    }
+
+    foreach ($gv in $LatestGameVersions) {
+        if (-not $gv) { continue }
+        $gvText = ([string]$gv).Trim()
+        if ($gvText.Length -eq 0) { continue }
+        $hasEvidence = $true
+        if ($gvText -eq $clientVersionText) { return 'ok' }
+        $gvParts = $gvText -split '\.'
+        if ($gvParts.Count -ge 1) {
+            $gvMajor = 0
+            if ([int]::TryParse($gvParts[0], [ref]$gvMajor) -and ($gvMajor -eq $clientMajor)) { $sameMajor = $true }
+        }
+    }
+
+    if (-not $hasEvidence) { return 'unknown' }
+    if ($sameMajor) { return 'stale-minor' }
+    return 'stale'
+}
+
+function Get-ClientBuildInfo {
+    <# Reads .build.info's "wow" (retail) row -> {clientBuild; clientInterface}. See addon-sync.ps1's identical function for the full contract; never throws. #>
+    param([string]$BuildInfoPath)
+
+    $result = [PSCustomObject]@{ clientBuild = $null; clientInterface = $null }
+    if (-not $BuildInfoPath -or -not (Test-Path -LiteralPath $BuildInfoPath -PathType Leaf)) {
+        return $result
+    }
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $BuildInfoPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $result
+    }
+    if (-not $lines -or $lines.Count -lt 2) { return $result }
+
+    $headerCols = $lines[0] -split '\|'
+    $versionIdx = -1
+    $productIdx = -1
+    for ($i = 0; $i -lt $headerCols.Count; $i++) {
+        $colName = ($headerCols[$i] -split '!')[0].Trim()
+        if ($colName -eq 'Version') { $versionIdx = $i }
+        if ($colName -eq 'Product') { $productIdx = $i }
+    }
+    if ($versionIdx -lt 0 -or $productIdx -lt 0) { return $result }
+
+    for ($r = 1; $r -lt $lines.Count; $r++) {
+        $line = $lines[$r]
+        if (-not $line -or $line.Trim().Length -eq 0) { continue }
+        $cols = $line -split '\|'
+        if ($cols.Count -le $productIdx -or $cols.Count -le $versionIdx) { continue }
+        if ($cols[$productIdx].Trim() -eq 'wow') {
+            $versionText = $cols[$versionIdx].Trim()
+            $result.clientBuild = $versionText
+            $parts = $versionText -split '\.'
+            if ($parts.Count -ge 3) {
+                $maj = 0
+                $min = 0
+                $pat = 0
+                if ([int]::TryParse($parts[0], [ref]$maj) -and [int]::TryParse($parts[1], [ref]$min) -and [int]::TryParse($parts[2], [ref]$pat)) {
+                    $result.clientInterface = ($maj * 10000) + ($min * 100) + $pat
+                }
+            }
+            break
+        }
+    }
+    return $result
 }
 
 # =====================================================================
@@ -644,11 +887,33 @@ function Start-Job {
         return (Start-ImportJob -JobId $jobId -StartedAt $startedAt -Params $Params)
     }
 
+    # E12: switch-source (uninstall the tracked addon, then add it fresh from
+    # the OTHER source) is, like import, a multi-phase job - see
+    # Start-SwitchSourceJob/Complete-SwitchSourcePhase.
+    if ($Kind -eq 'switch-source') {
+        return (Start-SwitchSourceJob -JobId $jobId -StartedAt $startedAt -Params $Params)
+    }
+
     $cliKind = $Kind
     $launchAfter = $false
     if ($Kind -eq 'launch') {
         $cliKind = 'sync'
         $launchAfter = $true
+    }
+
+    # E12: a NEW Wago add/install (no existing record yet, so no projectId-
+    # equivalent key to reuse) is posted as {source:'wago', slug, fileId?}
+    # per SPEC rather than a bare projectId. Build-CliArgs's 'add'/'install'
+    # cases already just [string]-cast Params.projectId/fileId generically
+    # (they always have, even before E12 - see their own comments), so
+    # normalizing to the same "wago:<slug>" token addon-sync.ps1's -Add/-Only
+    # classifier already accepts lets both cases run completely unchanged
+    # below - an ADD/INSTALL targeting an ALREADY-TRACKED Wago addon (e.g.
+    # the kebab menu's "Update now"/Versions-tab "Install") instead posts
+    # projectId directly as that same "wago:<slug>" string (the addon's own
+    # Store.addonKey), which needs no normalization here at all.
+    if (($cliKind -eq 'add' -or $cliKind -eq 'install') -and $Params -and $Params.source -and (([string]$Params.source).ToLowerInvariant() -eq 'wago') -and $Params.slug) {
+        $Params = Add-Member -InputObject $Params -NotePropertyName 'projectId' -NotePropertyValue ('wago:' + [string]$Params.slug) -Force -PassThru
     }
 
     try {
@@ -980,16 +1245,21 @@ function Save-CheckState {
     }
 
     $body = [PSCustomObject]@{
-        updatesCheckedAt = $Script:UpdatesCheckedAt
-        updateAvailable  = $Script:UpdateAvailable
-        lastRun          = $Script:LastRun
-        jobs             = $jobViews.ToArray()
+        updatesCheckedAt   = $Script:UpdatesCheckedAt
+        updateAvailable    = $Script:UpdateAvailable
+        lastRun            = $Script:LastRun
+        jobs               = $jobViews.ToArray()
+        # E12: persists the Wago Inertia asset version across a restart, per
+        # SPEC's documented "cache the version in state.json" - saves the
+        # very first Wago proxy call after a restart the plain-HTML
+        # handshake round-trip it would otherwise need to pay again.
+        wagoInertiaVersion = $Script:WagoInertiaVersion
     }
     try {
         # -InputObject (not a pipe): piping a single-property object through
         # ConvertTo-Json risks the same single-element unwrap quirk documented
         # for arrays elsewhere in this codebase, and -InputObject sidesteps it.
-        $json = ConvertTo-Json -InputObject $body -Depth 12
+        $json = ConvertTo-Json -InputObject $body -Depth 8
         $tmpPath = "$Script:StatePath.tmp"
         $encoding = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
@@ -1043,6 +1313,9 @@ function Load-CheckState {
         }
         if ($null -ne $obj.lastRun) {
             $Script:LastRun = $obj.lastRun
+        }
+        if ($null -ne $obj.wagoInertiaVersion) {
+            $Script:WagoInertiaVersion = [string]$obj.wagoInertiaVersion
         }
         if ($null -ne $obj.jobs) {
             $loadedJobs = New-Object 'System.Collections.Generic.List[object]'
@@ -1101,6 +1374,43 @@ function Load-CheckState {
     }
 }
 
+function Get-UpdateAvailableKeyForRecord {
+    <#
+      E12: the key $Script:UpdateAvailable is keyed by for one addon record -
+      the numeric CurseForge project id (unchanged from before E12) when
+      present, else "wago:<slug>" for a Wago-sourced record (which has no
+      numeric projectId at all). $null when neither is available (should not
+      happen for a well-formed record, but never throws).
+    #>
+    param($Record)
+
+    if ($null -ne $Record.projectId) {
+        return [string]$Record.projectId
+    }
+    if ($Record.source -eq 'wago' -and $Record.slug) {
+        return 'wago:' + $Record.slug
+    }
+    return $null
+}
+
+function Get-UpdateAvailableKeyForRow {
+    <#
+      E12: the same key, derived from a JOB RESULT ROW instead of a full
+      record - a row carries `projectId` (unchanged) and, additively,
+      `wagoSlug` (see SPEC's addon-sync.ps1 -Json contract) rather than the
+      full record shape Get-UpdateAvailableKeyForRecord reads.
+    #>
+    param($Row)
+
+    if ($Row.projectId) {
+        return [string]$Row.projectId
+    }
+    if ($Row.wagoSlug) {
+        return 'wago:' + $Row.wagoSlug
+    }
+    return $null
+}
+
 function Apply-JobCompletionSideEffects {
     <#
       Updates in-memory updateAvailable / lastRun bookkeeping from a
@@ -1124,11 +1434,16 @@ function Apply-JobCompletionSideEffects {
         $Script:UpdatesCheckedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         $Script:UpdateAvailable = @{}
         foreach ($r in $rows) {
-            if ($r.status -eq 'Would-update' -and $r.projectId) {
-                $Script:UpdateAvailable[[string]$r.projectId] = @{ fileId = $r.fileId; version = $r.version }
+            if ($r.status -eq 'Would-update') {
+                # E12: keyed by projectId when present, else "wago:<slug>" -
+                # see Get-UpdateAvailableKeyForRow.
+                $key = Get-UpdateAvailableKeyForRow -Row $r
+                if ($key) {
+                    $Script:UpdateAvailable[$key] = @{ fileId = $r.fileId; version = $r.version }
+                }
             }
         }
-    } elseif ($action -eq 'sync' -or $action -eq 'add' -or $action -eq 'remove' -or $action -eq 'rollback' -or $action -eq 'import') {
+    } elseif ($action -eq 'sync' -or $action -eq 'add' -or $action -eq 'remove' -or $action -eq 'rollback' -or $action -eq 'import' -or $action -eq 'switch-source') {
         # E1: a completed rollback pins the addon to the restored file, same
         # as an explicit Pin - it has no update pending against that pin
         # until the next check, so any stale "update available" entry for
@@ -1137,11 +1452,13 @@ function Apply-JobCompletionSideEffects {
         # its -Add / -Only+-FileId phases) need exactly the same clearing -
         # this branch already keys off $rows (built from the caller's own
         # $Job.results, not $Parsed.action-specific data), so 'import' only
-        # needed adding to this condition, nothing else.
+        # needed adding to this condition, nothing else. E12: 'switch-source'
+        # (uninstall-then-add-from-the-other-source) joins the same way, for
+        # the same reason.
         foreach ($r in $rows) {
-            if (($r.status -eq 'Updated' -or $r.status -eq 'Installed' -or $r.status -eq 'Pinned' -or $r.status -eq 'Rolled-back') -and $r.projectId) {
-                $key = [string]$r.projectId
-                if ($Script:UpdateAvailable.ContainsKey($key)) {
+            if ($r.status -eq 'Updated' -or $r.status -eq 'Installed' -or $r.status -eq 'Pinned' -or $r.status -eq 'Rolled-back') {
+                $key = Get-UpdateAvailableKeyForRow -Row $r
+                if ($key -and $Script:UpdateAvailable.ContainsKey($key)) {
                     $Script:UpdateAvailable.Remove($key)
                 }
             }
@@ -1262,6 +1579,194 @@ function Complete-ImportPhase {
     return $Job
 }
 
+# =====================================================================
+# switch-source (E12): "Reinstall from Wago/CurseForge" - uninstalls the
+# tracked addon and adds it fresh from the OTHER source, as one job. Built
+# as its own small two-phase job (mirroring Start-ImportJob/Start-ImportPhase/
+# Complete-ImportPhase's shape exactly, but kept as a separate, dedicated set
+# of functions rather than generalizing those - a switch is always exactly
+# two phases, known up front, with no per-addon plan-building step import's
+# Build-ImportPlan needs) rather than trying to fold two CLI invocations into
+# Build-CliArgs's single-invocation-per-kind contract.
+# =====================================================================
+
+function Start-SwitchSourcePhase {
+    <# Launches phase 0 (-Remove) or phase 1 (-Add) of a switch-source job. Mirrors Start-ImportPhase. #>
+    param($Job)
+
+    $Job.PhaseIndex = $Job.PhaseIndex + 1
+    $cliArgs = $Job.Phases[$Job.PhaseIndex]
+
+    if (-not (Test-Path -LiteralPath $Script:JobsDir)) {
+        New-Item -ItemType Directory -Path $Script:JobsDir -Force | Out-Null
+    }
+    $outFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).out"
+    $errFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).err"
+
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs
+
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $proc.Handle | Out-Null
+    } catch {
+        Write-ServerLog "Failed to start switch-source phase $($Job.PhaseIndex) for job $($Job.id): $($_.Exception.Message)"
+        return $false
+    }
+
+    $Job.Process = $proc
+    $Job.OutFile = $outFile
+    $Job.ErrFile = $errFile
+    return $true
+}
+
+function Start-SwitchSourceJob {
+    <#
+      Builds the two-phase plan (-Remove <current>, then -Add <target on the
+      other source>) and starts phase 0. Params: {projectId (the addon's
+      CURRENT key - a numeric CurseForge id, or the "wago:<slug>" string
+      Store.addonKey already uses for a Wago row), toSource ('wago'|
+      'curseforge'), toTarget (a numeric CurseForge project id, or a Wago
+      slug/id string - NOT pre-prefixed with "wago:", this function adds
+      that)}.
+    #>
+    param(
+        [string]$JobId,
+        [string]$StartedAt,
+        $Params
+    )
+
+    $currentTarget = [string]$Params.projectId
+    $toSource = ([string]$Params.toSource).ToLowerInvariant()
+    $toTargetRaw = [string]$Params.toTarget
+    $newTarget = if ($toSource -eq 'wago') { 'wago:' + $toTargetRaw } else { $toTargetRaw }
+
+    $removeArgs = New-Object 'System.Collections.Generic.List[object]'
+    $removeArgs.Add('-Remove')
+    $removeArgs.Add($currentTarget)
+
+    $addArgs = New-Object 'System.Collections.Generic.List[object]'
+    $addArgs.Add('-Add')
+    $addArgs.Add($newTarget)
+
+    $phases = New-Object 'System.Collections.Generic.List[object]'
+    $phases.Add($removeArgs)
+    $phases.Add($addArgs)
+
+    $job = [PSCustomObject]@{
+        id            = $JobId
+        kind          = 'switch-source'
+        params        = $Params
+        state         = 'running'
+        startedAt     = $StartedAt
+        finishedAt    = $null
+        exitCode      = $null
+        log           = New-Object 'System.Collections.Generic.List[object]'
+        results       = New-Object 'System.Collections.Generic.List[object]'
+        error         = $null
+        Process       = $null
+        OutFile       = $null
+        ErrFile       = $null
+        SyncLogOffset = 0
+        LaunchAfter   = $false
+        Phases        = $phases
+        PhaseIndex    = -1
+    }
+
+    if (Test-Path -LiteralPath $Script:SyncLogPath) {
+        $job.SyncLogOffset = (Get-Item -LiteralPath $Script:SyncLogPath).Length
+    }
+
+    Add-JobToHistory -Job $job
+    $Script:CurrentJob = $job
+
+    $started = Start-SwitchSourcePhase -Job $job
+    if (-not $started) {
+        $job.state = 'failed'
+        $job.error = 'Failed to start switch-source'
+        $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Script:CurrentJob = $null
+        Save-CheckState
+    }
+    return @{ Busy = $false; Job = $job }
+}
+
+function Complete-SwitchSourcePhase {
+    <# Finalizes one phase's exited process; mirrors Complete-ImportPhase. #>
+    param($Job)
+
+    $exitCode = $Job.Process.ExitCode
+
+    $stdout = ''
+    try {
+        if (Test-Path -LiteralPath $Job.OutFile) {
+            $stdout = [System.IO.File]::ReadAllText($Job.OutFile, [System.Text.Encoding]::UTF8)
+        }
+    } catch { $stdout = '' }
+
+    $stderr = ''
+    try {
+        if (Test-Path -LiteralPath $Job.ErrFile) {
+            $stderr = [System.IO.File]::ReadAllText($Job.ErrFile, [System.Text.Encoding]::UTF8)
+        }
+    } catch { $stderr = '' }
+
+    try {
+        if (Test-Path -LiteralPath $Job.OutFile) { Remove-Item -LiteralPath $Job.OutFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $Job.ErrFile) { Remove-Item -LiteralPath $Job.ErrFile -Force -ErrorAction SilentlyContinue }
+    } catch { }
+
+    $parsed = $null
+    $parseError = $null
+    if ($stdout -and $stdout.Trim().Length -gt 0) {
+        try {
+            $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $parseError = $_.Exception.Message
+        }
+    }
+
+    if ($exitCode -ne 0 -or -not $parsed) {
+        $Job.exitCode = $exitCode
+        $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Job.state = 'failed'
+        $errMsg = $stderr
+        if (-not $errMsg -and $parseError) { $errMsg = "Could not parse CLI output as JSON: $parseError" }
+        if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
+        $phaseName = if ($Job.PhaseIndex -eq 0) { 'Remove' } else { 'Add' }
+        $Job.error = "Switch-source phase $phaseName ($($Job.PhaseIndex + 1) of $($Job.Phases.Count)) failed: $errMsg"
+        if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+        Save-CheckState
+        return $Job
+    }
+
+    if ($parsed.results) {
+        foreach ($r in @($parsed.results)) { $Job.results.Add($r) }
+    }
+
+    $hasMorePhases = ($Job.PhaseIndex + 1) -lt $Job.Phases.Count
+    if ($hasMorePhases) {
+        $started = Start-SwitchSourcePhase -Job $Job
+        if (-not $started) {
+            $Job.exitCode = $exitCode
+            $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $Job.state = 'failed'
+            $Job.error = "Failed to start switch-source phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count)"
+            if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+            Save-CheckState
+        }
+        return $Job
+    }
+
+    $Job.exitCode = 0
+    $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $Job.state = 'done'
+    Apply-JobCompletionSideEffects -Job $Job -Parsed ([PSCustomObject]@{ action = 'switch-source' })
+
+    if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+    Save-CheckState
+    return $Job
+}
+
 function Update-JobStatus {
     <#
       Refreshes one job: while it is still running, tails sync.log since the
@@ -1343,6 +1848,10 @@ function Update-JobStatus {
     # completely unchanged.
     if ($Job.kind -eq 'import') {
         return (Complete-ImportPhase -Job $Job)
+    }
+    # E12: switch-source is likewise a multi-phase job (see Start-SwitchSourceJob).
+    if ($Job.kind -eq 'switch-source') {
+        return (Complete-SwitchSourcePhase -Job $Job)
     }
 
     $exitCode = $Job.Process.ExitCode
@@ -1605,6 +2114,28 @@ function Invoke-CfApi {
     }
 
     if ($Method -eq 'GET' -and $statusCode -ge 200 -and $statusCode -lt 300) {
+        # Round 5: bound the cache's growth. An entry is only ever evicted
+        # lazily, on a re-request of that SAME key, once its 5-minute TTL has
+        # passed (see the read path above) - a long browsing session hitting
+        # many distinct search/mod/category URLs would otherwise accumulate
+        # entries with no upper bound at all. Before adding a new entry, once
+        # the cache is large enough to be worth the scan, drop every already-
+        # expired entry (same TTL the read path already enforces); if that
+        # still leaves it oversized (many distinct URLs all still fresh),
+        # clear it outright rather than add a more complex LRU scheme for
+        # what is, worst case, one extra upstream re-fetch per key afterward.
+        if ($Script:CfCache.Count -ge 200) {
+            $now = Get-Date
+            $staleKeys = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($k in $Script:CfCache.Keys) {
+                $age = $now - $Script:CfCache[$k].Time
+                if ($age.TotalSeconds -ge 300) { $staleKeys.Add($k) }
+            }
+            foreach ($k in $staleKeys) { $Script:CfCache.Remove($k) }
+            if ($Script:CfCache.Count -ge 200) {
+                $Script:CfCache.Clear()
+            }
+        }
         $Script:CfCache[$cacheKey] = @{ Time = (Get-Date); StatusCode = $statusCode; Body = $bodyText }
     }
 
@@ -1665,6 +2196,338 @@ function Test-CfApiKey {
         }
         return @{ ok = $false; message = $_.Exception.Message }
     }
+}
+
+# =====================================================================
+# Wago Addons proxy (E12) - keyless. Mirrors addon-sync.ps1's own Wago
+# functions closely (same Inertia handshake/pacing/retry shape), duplicated
+# here rather than dot-sourced - this script is always launched standalone
+# and never dot-sources the CLI, the same pattern already used for
+# Resolve-EffectiveAddonsPath/Get-PresentAddonFolders elsewhere in this file.
+# Verified facts live in SPEC.md's "Wago Addons access facts" section.
+# =====================================================================
+
+function Get-WagoExceptionStatusCode {
+    param($ErrorRecord)
+    $code = 0
+    try {
+        if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Response) {
+            $code = [int]$ErrorRecord.Exception.Response.StatusCode
+        }
+    } catch {
+        $code = 0
+    }
+    return $code
+}
+
+function Invoke-WagoHttpRequest {
+    <# Server-side counterpart to addon-sync.ps1's Invoke-WagoRequest - same 300ms pacing, same 429/503 retry-once-after-5s. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [hashtable]$Headers
+    )
+
+    $mergedHeaders = @{ 'Accept' = 'text/html, application/xhtml+xml' }
+    if ($Headers) {
+        foreach ($k in $Headers.Keys) { $mergedHeaders[$k] = $Headers[$k] }
+    }
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+
+    $maxAttempts = 2
+    $attempt = 0
+    $lastError = $null
+    $result = $null
+
+    while ($attempt -lt $maxAttempts) {
+        $attempt++
+        $shouldRetry = $false
+        $lastError = $null
+        try {
+            $result = Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $userAgent -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        } catch {
+            $lastError = $_
+            $statusCode = Get-WagoExceptionStatusCode -ErrorRecord $_
+            if (($statusCode -eq 429 -or $statusCode -eq 503) -and ($attempt -lt $maxAttempts)) {
+                Write-ServerLog "HTTP $statusCode from $Uri (Wago) - waiting 5 seconds and retrying"
+                $shouldRetry = $true
+            }
+        }
+        Start-Sleep -Milliseconds 300
+        if (-not $lastError) { return $result }
+        if (-not $shouldRetry) { throw $lastError }
+        Start-Sleep -Seconds 5
+    }
+    if ($lastError) { throw $lastError }
+    return $result
+}
+
+function Get-WagoInertiaHandshake {
+    <# Plain-HTML handshake: reads #app's data-page JSON, returns {version; props}. #>
+    param([Parameter(Mandatory = $true)][string]$PageUri)
+
+    $response = Invoke-WagoHttpRequest -Uri $PageUri -Headers @{ 'Accept' = 'text/html, application/xhtml+xml' }
+    if (-not $response -or -not $response.Content) {
+        throw "Empty response reading Wago page $PageUri"
+    }
+    if ($response.Content -notmatch 'id="app"[^>]*data-page="([^"]*)"') {
+        throw "Could not find #app data-page attribute on Wago page $PageUri"
+    }
+    $decoded = [System.Net.WebUtility]::HtmlDecode($Matches[1])
+    $page = $decoded | ConvertFrom-Json -ErrorAction Stop
+    if (-not $page.version) {
+        throw "Wago page data-page JSON had no version field ($PageUri)"
+    }
+    return [PSCustomObject]@{ version = $page.version; props = $page.props }
+}
+
+function Invoke-WagoInertiaJson {
+    <#
+      Fetches one Wago page's props via the X-Inertia XHR protocol.
+      $Script:WagoInertiaVersion caches the working version for the life of
+      this server process (persisted to/reloaded from state.json - see
+      Save-CheckState/Load-CheckState) so only the FIRST Wago request this
+      process ever makes pays the plain-HTML handshake; a 409 (version
+      changed server-side) refreshes it and retries once, per SPEC.
+    #>
+    param([Parameter(Mandatory = $true)][string]$PageUri)
+
+    if (-not $Script:WagoInertiaVersion) {
+        $handshake = Get-WagoInertiaHandshake -PageUri $PageUri
+        $Script:WagoInertiaVersion = $handshake.version
+        return $handshake.props
+    }
+
+    $headers = @{
+        'X-Inertia'         = 'true'
+        'X-Inertia-Version' = $Script:WagoInertiaVersion
+        'X-Requested-With'  = 'XMLHttpRequest'
+        'Accept'            = 'text/html, application/xhtml+xml'
+    }
+
+    try {
+        $response = Invoke-WagoHttpRequest -Uri $PageUri -Headers $headers
+    } catch {
+        $statusCode = Get-WagoExceptionStatusCode -ErrorRecord $_
+        if ($statusCode -eq 409) {
+            Write-ServerLog "Wago Inertia version stale, refreshing ($PageUri)"
+            $handshake = Get-WagoInertiaHandshake -PageUri $PageUri
+            $Script:WagoInertiaVersion = $handshake.version
+            $headers['X-Inertia-Version'] = $Script:WagoInertiaVersion
+            $response = Invoke-WagoHttpRequest -Uri $PageUri -Headers $headers
+        } else {
+            throw
+        }
+    }
+
+    if (-not $response -or -not $response.Content) {
+        throw "Empty response from Wago Inertia request $PageUri"
+    }
+    $json = $response.Content | ConvertFrom-Json -ErrorAction Stop
+    return $json.props
+}
+
+function Get-WagoCached {
+    <#
+      5-minute in-memory cache around Invoke-WagoInertiaJson, keyed by the
+      full page URI - mirrors Invoke-CfApi's $Script:CfCache cache/cleanup
+      shape (kept as its own separate hashtable/function rather than sharing
+      CfCache, so a bug in one proxy's cache handling can't reach the
+      other's).
+    #>
+    param([Parameter(Mandatory = $true)][string]$PageUri)
+
+    if ($Script:WagoCache.ContainsKey($PageUri)) {
+        $entry = $Script:WagoCache[$PageUri]
+        $age = (Get-Date) - $entry.Time
+        if ($age.TotalSeconds -lt 300) {
+            return $entry.Props
+        }
+        $Script:WagoCache.Remove($PageUri)
+    }
+
+    $props = Invoke-WagoInertiaJson -PageUri $PageUri
+
+    if ($Script:WagoCache.Count -ge 200) {
+        $now = Get-Date
+        $staleKeys = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($k in $Script:WagoCache.Keys) {
+            $age = $now - $Script:WagoCache[$k].Time
+            if ($age.TotalSeconds -ge 300) { $staleKeys.Add($k) }
+        }
+        foreach ($k in $staleKeys) { $Script:WagoCache.Remove($k) }
+        if ($Script:WagoCache.Count -ge 200) { $Script:WagoCache.Clear() }
+    }
+    $Script:WagoCache[$PageUri] = @{ Time = (Get-Date); Props = $props }
+    return $props
+}
+
+function ConvertFrom-WagoSearchCardHtml {
+    <#
+      SPEC's verified Wago facts document /?search=... as returning
+      props.addons.data[] items that are server-rendered HTML CARD SNIPPETS,
+      not plain objects - parsed here with regexes for the addon URL (slug),
+      the <h3> title, and a cdn.wago.io thumbnail <img src>, per SPEC's own
+      description of what to look for. Never throws: a card whose markup
+      doesn't match a given piece just leaves that field $null.
+    #>
+    param([string]$Html)
+
+    if (-not $Html) { return $null }
+    $slug = $null
+    $name = $null
+    $thumb = $null
+    if ($Html -match 'href="https://addons\.wago\.io/addons/([a-z0-9-]+)"') { $slug = $Matches[1] }
+    if ($Html -match '<h3[^>]*>([^<]*)</h3>') { $name = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
+    if ($Html -match 'src="(https://cdn\.wago\.io/thumbnails/[^"]*)"') { $thumb = $Matches[1] }
+    if (-not $slug) { return $null }
+    return [PSCustomObject]@{ slug = $slug; name = $name; thumbnail = $thumb }
+}
+
+function Handle-WagoSearch {
+    <# GET /api/wago/search?q=&categoryId=&sort=&page= -> {items, page, lastPage, total}. #>
+    param($Context, $RouteMatch)
+
+    $q = $Context.Request.QueryString
+    $search = $q['q']
+    $categoryId = $q['categoryId']
+    $sort = $q['sort']
+    $page = Get-QueryOrDefault -QueryString $q -Name 'page' -Default '1'
+
+    $uri = 'https://addons.wago.io/?game_version=retail&page=' + [System.Uri]::EscapeDataString($page)
+    if ($search) { $uri += '&search=' + [System.Uri]::EscapeDataString($search) }
+    if ($categoryId) { $uri += '&category=' + [System.Uri]::EscapeDataString($categoryId) }
+    if ($sort) { $uri += '&sort=' + [System.Uri]::EscapeDataString($sort) }
+
+    try {
+        $props = Get-WagoCached -PageUri $uri
+    } catch {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+
+    $items = New-Object 'System.Collections.Generic.List[object]'
+    $paginator = $props.addons
+    if ($paginator -and $paginator.data) {
+        foreach ($cardHtml in @($paginator.data)) {
+            $card = ConvertFrom-WagoSearchCardHtml -Html ([string]$cardHtml)
+            if ($card) { $items.Add($card) }
+        }
+    }
+
+    $body = [PSCustomObject]@{
+        items    = $items.ToArray()
+        page     = $(if ($paginator -and $paginator.current_page) { [int]$paginator.current_page } else { 1 })
+        lastPage = $(if ($paginator -and $paginator.last_page) { [int]$paginator.last_page } else { 1 })
+        total    = $(if ($paginator -and $paginator.total) { [int]$paginator.total } else { $items.Count })
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body $body
+}
+
+function Handle-WagoCategories {
+    <# GET /api/wago/categories -> props.allCategories from the search page. #>
+    param($Context, $RouteMatch)
+
+    try {
+        $props = Get-WagoCached -PageUri 'https://addons.wago.io/?game_version=retail'
+    } catch {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+    $cats = @()
+    if ($props.allCategories) { $cats = $props.allCategories }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ data = $cats }
+}
+
+function Handle-WagoAddonDetails {
+    <# GET /api/wago/addons/{slug} -> {addon, description, metadata}. #>
+    param($Context, $RouteMatch)
+
+    $slug = $RouteMatch['slug']
+    try {
+        $props = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug))
+    } catch {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+    if (-not $props -or -not $props.addon) {
+        Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'not found' }
+        return
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ addon = $props.addon; description = $props.description; metadata = $props.metadata }
+}
+
+function Handle-WagoAddonReleases {
+    <# GET /api/wago/addons/{slug}/releases?page= -> the props.releases paginator, as-is. #>
+    param($Context, $RouteMatch)
+
+    $slug = $RouteMatch['slug']
+    $q = $Context.Request.QueryString
+    $page = Get-QueryOrDefault -QueryString $q -Name 'page' -Default '1'
+    $uri = 'https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug) + '/versions?page=' + [System.Uri]::EscapeDataString($page)
+
+    try {
+        $props = Get-WagoCached -PageUri $uri
+    } catch {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+    if (-not $props -or -not $props.releases) {
+        Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'not found' }
+        return
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ data = $props.releases }
+}
+
+function Handle-WagoAddonGallery {
+    <#
+      GET /api/wago/addons/{slug}/gallery. SPEC's verified facts leave this
+      page's exact prop shape as "inspect and document" (unlike every other
+      Wago endpoint here, which SPEC nails down precisely) - relayed as-is
+      under a {gallery: <props>} wrapper rather than reshaped into a
+      specific documented shape this build cannot verify against the live
+      site (no Wago requests were made during this build - see SPEC/
+      CHANGELOG's Wago Addons access facts note).
+    #>
+    param($Context, $RouteMatch)
+
+    $slug = $RouteMatch['slug']
+    $uri = 'https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug) + '/gallery'
+    try {
+        $props = Get-WagoCached -PageUri $uri
+    } catch {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ gallery = $props }
+}
+
+function Handle-WagoResolve {
+    <#
+      GET /api/wago/resolve?url=<wago url or slug> -> {slug}. Unlike CF's
+      resolve (which needs a search API call to turn a slug into a numeric
+      id), a Wago addon's identity already IS its slug - this is pure string
+      parsing, no network call, no cache entry.
+    #>
+    param($Context, $RouteMatch)
+
+    $q = $Context.Request.QueryString
+    $raw = $q['url']
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url required' }
+        return
+    }
+    $value = $raw.Trim()
+    $slug = $null
+    if ($value -match '(?i)^https?://addons\.wago\.io/addons/([a-z0-9-]+)') {
+        $slug = $Matches[1]
+    } elseif ($value -match '^[a-zA-Z0-9-]+$') {
+        $slug = $value
+    }
+    if (-not $slug) {
+        Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'not found' }
+        return
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ slug = $slug }
 }
 
 # =====================================================================
@@ -1831,6 +2694,20 @@ function Test-DiagLastSync {
     return @{ ok = $true; detail = 'never' }
 }
 
+function Test-DiagClientBuild {
+    <#
+      E13: reports whatever $Script:ClientBuildInfo resolved at startup (from
+      .build.info, or -BuildInfoPath's override) - ok:false with an
+      explanatory detail when it could not be read, so a missing/unreadable
+      .build.info shows up as a visible diagnostic instead of every addon
+      silently reporting compat "unknown" with no obvious cause.
+    #>
+    if ($Script:ClientBuildInfo -and $Script:ClientBuildInfo.clientBuild) {
+        return @{ ok = $true; detail = $Script:ClientBuildInfo.clientBuild }
+    }
+    return @{ ok = $false; detail = 'Could not read .build.info (missing, unreadable, or no "wow" row found)' }
+}
+
 function Get-QueryOrDefault {
     param($QueryString, [string]$Name, [string]$Default)
 
@@ -1868,15 +2745,19 @@ function Handle-State {
     # E3: computed once per /api/state call and shared across every record,
     # rather than re-listing the AddOns directory per addon.
     $presentFolders = Get-PresentAddonFolders
+    # E13: likewise computed once and shared - each record's own toc parse
+    # still happens per addon, but resolving the AddOns path itself does not.
+    $compatAddonsPath = Resolve-EffectiveAddonsPath
     $addonsOut = New-Object 'System.Collections.Generic.List[object]'
     foreach ($r in $records) {
+        # E12: updateAvailable is keyed by the numeric CurseForge project id
+        # (unchanged) OR, for a Wago-sourced record (no numeric projectId at
+        # all), by "wago:<slug>" - see Get-UpdateAvailableKeyForRecord.
         $upd = $null
-        if ($null -ne $r.projectId) {
-            $key = [string]$r.projectId
-            if ($Script:UpdateAvailable.ContainsKey($key)) {
-                $u = $Script:UpdateAvailable[$key]
-                $upd = [PSCustomObject]@{ fileId = $u.fileId; version = $u.version }
-            }
+        $key = Get-UpdateAvailableKeyForRecord -Record $r
+        if ($key -and $Script:UpdateAvailable.ContainsKey($key)) {
+            $u = $Script:UpdateAvailable[$key]
+            $upd = [PSCustomObject]@{ fileId = $u.fileId; version = $u.version }
         }
         $clone = [PSCustomObject]@{}
         foreach ($p in $r.PSObject.Properties) {
@@ -1892,6 +2773,12 @@ function Handle-State {
         $missingOptionalDeps = Get-MissingDeps -DepNames $r.optionalDeps -PresentFolders $presentFolders
         $clone | Add-Member -MemberType NoteProperty -Name 'missingDeps' -Value $missingDeps.ToArray()
         $clone | Add-Member -MemberType NoteProperty -Name 'missingOptionalDeps' -Value $missingOptionalDeps.ToArray()
+        # E13: tocInterfaces/compat computed live the same way missingDeps
+        # just above is - never stored, recomputed every /api/state call.
+        $tocIfaces = Get-PackageTocInterfaces -AddonsPath $compatAddonsPath -Folders $r.folders
+        $compat = Get-AddonCompat -TocInterfaces $tocIfaces -LatestGameVersions $r.latestGameVersions -ClientInterface $Script:ClientBuildInfo.clientInterface
+        $clone | Add-Member -MemberType NoteProperty -Name 'tocInterfaces' -Value $tocIfaces.ToArray()
+        $clone | Add-Member -MemberType NoteProperty -Name 'compat' -Value $compat
         $addonsOut.Add($clone)
     }
 
@@ -1902,6 +2789,10 @@ function Handle-State {
         lastRun          = $Script:LastRun
         job              = (Get-CurrentOrLastJobSummary)
         updatesCheckedAt = $Script:UpdatesCheckedAt
+        # E13: read once at startup (Script:ClientBuildInfo) - see the
+        # Startup section - not re-read from disk on every /api/state poll.
+        clientBuild      = $Script:ClientBuildInfo.clientBuild
+        clientInterface  = $Script:ClientBuildInfo.clientInterface
     }
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
@@ -1922,14 +2813,28 @@ function Handle-JobsPost {
     }
 
     $kind = [string]$body.kind
-    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback')
+    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source')
     if (-not ($validKinds -contains $kind)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: unknown kind '$kind'" }
         return
     }
-    if ($kind -eq 'add' -and (-not $body.projectId)) {
+    # E12: a NEW Wago add (no existing record, so no projectId-equivalent key
+    # yet) is posted as {source:'wago', slug} instead of projectId - either
+    # is accepted here.
+    $hasWagoSourceSlug = [bool]($body.source -and $body.slug)
+    if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
         return
+    }
+    if ($kind -eq 'switch-source') {
+        if ((-not $body.projectId) -or (-not $body.toSource) -or (-not $body.toTarget)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId, toSource and toTarget required' }
+            return
+        }
+        if (([string]$body.toSource).ToLowerInvariant() -notin @('wago', 'curseforge')) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: toSource must be wago or curseforge' }
+            return
+        }
     }
     if ($kind -eq 'remove') {
         # E11: bulk uninstall posts projectIds (array); the per-row kebab
@@ -1941,8 +2846,12 @@ function Handle-JobsPost {
             return
         }
     }
-    if ($kind -eq 'install' -and ((-not $body.projectId) -or (-not $body.fileId))) {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId and fileId required' }
+    if ($kind -eq 'install' -and ((-not $body.projectId) -and (-not $hasWagoSourceSlug))) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
+        return
+    }
+    if ($kind -eq 'install' -and (-not $body.fileId)) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: fileId required' }
         return
     }
     if ($kind -eq 'rollback' -and (-not $body.projectId)) {
@@ -2301,6 +3210,9 @@ function Handle-Diagnostics {
     $checks.Add((New-DiagCheckRow -Name 'PowerShell version' -Result (Test-DiagPowerShellVersion)))
     $checks.Add((New-DiagCheckRow -Name 'Server uptime' -Result (Test-DiagServerUptime -UptimeSeconds ((Get-Date) - $Script:StartTime).TotalSeconds)))
     $checks.Add((New-DiagCheckRow -Name 'Last sync' -Result (Test-DiagLastSync)))
+    # E13: the client build $Script:ClientBuildInfo already resolved once at
+    # startup (roadmap: "/api/diagnostics includes the client build").
+    $checks.Add((New-DiagCheckRow -Name 'WoW client build' -Result (Test-DiagClientBuild)))
 
     Send-Json -Context $Context -StatusCode 200 -Body @{ checks = $checks.ToArray() }
 }
@@ -2494,6 +3406,15 @@ function Handle-Open {
                 # must be quoted here or notepad receives a broken multi-arg command line.
                 Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $Script:SyncLogPath + '"')
             }
+            'serverlog' {
+                # Round 5: SPEC.md's Maintenance list (section 3) names three
+                # distinct actions - "Open sync log", "Open last run report",
+                # "Open server log" - but the documented /api/open `what` enum
+                # only ever had one log target ('log', opening sync.log), so
+                # "Open server log" had no server-side target to call at all.
+                # Same quoting requirement as 'log' above (spaces/parens in ROOT).
+                Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $Script:ServerLogPath + '"')
+            }
             'folder' {
                 $addonsPath = Resolve-EffectiveAddonsPath
                 if ($addonsPath -and (Test-Path -LiteralPath $addonsPath)) {
@@ -2513,10 +3434,21 @@ function Handle-Open {
             }
             'curseforge' {
                 $url = $null
+                # Round 5: slug/projectId are POST-body-supplied strings, and
+                # Open-InBrowser hands the finished URL to Start-Process
+                # -ArgumentList as ONE unquoted string - a slug containing a
+                # literal quote+space could break out of that single argument
+                # and inject extra msedge.exe command-line switches, not just
+                # "break URL parsing". EscapeDataString (the same encoder
+                # Invoke-CfApi already uses for its own query values) percent-
+                # encodes quotes/spaces/slashes/etc., closing that off for what
+                # is meant to be a single opaque path segment; well-formed
+                # slugs/ids (lowercase-alnum-hyphen / digits) round-trip
+                # unchanged.
                 if ($body.slug) {
-                    $url = "https://www.curseforge.com/wow/addons/$($body.slug)"
+                    $url = 'https://www.curseforge.com/wow/addons/' + [System.Uri]::EscapeDataString([string]$body.slug)
                 } elseif ($body.projectId) {
-                    $url = "https://www.curseforge.com/projects/$($body.projectId)"
+                    $url = 'https://www.curseforge.com/projects/' + [System.Uri]::EscapeDataString([string]$body.projectId)
                 }
                 if (-not $url) {
                     Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'slug or projectId required' }
@@ -2632,6 +3564,12 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)/files$'; Handler = 'Handle-CfModFiles' }
     @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)$'; Handler = 'Handle-CfModGet' }
     @{ Method = 'GET'; Pattern = '^/api/cf/resolve$'; Handler = 'Handle-CfResolve' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/search$'; Handler = 'Handle-WagoSearch' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/categories$'; Handler = 'Handle-WagoCategories' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/resolve$'; Handler = 'Handle-WagoResolve' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/addons/(?<slug>[^/]+)/releases$'; Handler = 'Handle-WagoAddonReleases' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/addons/(?<slug>[^/]+)/gallery$'; Handler = 'Handle-WagoAddonGallery' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/addons/(?<slug>[^/]+)$'; Handler = 'Handle-WagoAddonDetails' }
     @{ Method = 'POST'; Pattern = '^/api/open$'; Handler = 'Handle-Open' }
     @{ Method = 'POST'; Pattern = '^/api/shutdown$'; Handler = 'Handle-Shutdown' }
 )
@@ -2708,6 +3646,7 @@ $Script:SyncLogPath = Join-Path -Path $Script:Root -ChildPath 'sync.log'
 $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
+$Script:BuildInfoPathOverride = $BuildInfoPath
 $Script:Version = '1.0.0'
 $Script:StartTime = Get-Date
 $Script:ShuttingDown = $false
@@ -2721,6 +3660,28 @@ $Script:UpdateAvailable = @{}
 $Script:LastRun = $null
 $Script:UpdatesCheckedAt = $null
 $Script:LastRequestTime = Get-Date
+# E12: Wago Addons proxy state - WagoCache mirrors CfCache (5-minute
+# response cache, same size-gated cleanup pattern); WagoInertiaVersion
+# caches the site's Inertia asset version for the life of the process (and
+# is persisted to/reloaded from state.json per SPEC's "cache the version in
+# state.json" instruction, since this server, unlike the per-run CLI, stays
+# up for a long time and would otherwise pay the plain-HTML handshake on
+# every single Wago request).
+$Script:WagoCache = @{}
+$Script:WagoInertiaVersion = $null
+
+# E13 (compatibility audit): resolved once at server startup, not re-read
+# from disk on every /api/state or /api/diagnostics call - -BuildInfoPath
+# overrides everything (never touches the real WoW folder when given, per
+# this build's test requirement); otherwise the .build.info sitting next to
+# whatever AddOns path resolves at startup. A server restart is required to
+# pick up a changed patch's .build.info, which is an acceptable tradeoff for
+# not hitting the filesystem on every poll (this app's own game-launch flow
+# already restarts the server on every "Update & Play" desktop-shortcut run).
+$Script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $(
+    if ($Script:BuildInfoPathOverride) { $Script:BuildInfoPathOverride }
+    else { Get-DefaultBuildInfoPath -AddonsPathResolved (Resolve-EffectiveAddonsPath) }
+)
 
 # E2/Round 3: reload the last check results, last run summary, and job
 # history (if any) so the "n updates" badge, the My Addons "Last run" line,
