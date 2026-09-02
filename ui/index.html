@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WoW Addon Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============================================================
+     Icon sprite sheet. All icons referenced elsewhere via
+     <svg class="icon"><use href="#icon-NAME"></use></svg>
+     ============================================================ -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 2l8 3.5v6c0 5-3.4 8.7-8 10.5C7.4 20.2 4 16.5 4 11.5v-6L12 2z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="icon-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+  <symbol id="icon-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polygon points="15,9 13.5,13.5 9,15 10.5,10.5"/></symbol>
+  <symbol id="icon-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V19a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 17.35a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.65 13 1.7 1.7 0 0 0 3 12h-.09a2 2 0 1 1 0-4H3a1.7 1.7 0 0 0 1.65-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.65 1.7 1.7 0 0 0 10 3v-.09a2 2 0 1 1 4 0V3a1.7 1.7 0 0 0 1 1.65 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.35 9c.14.36.5 1 1.65 1h.09a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/></symbol>
+  <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+  <symbol id="icon-play" viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></symbol>
+  <symbol id="icon-kebab" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></symbol>
+  <symbol id="icon-close" viewBox="0 0 24 24"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24"><polyline points="6,9 12,15 18,9"/></symbol>
+  <symbol id="icon-chevron-right" viewBox="0 0 24 24"><polyline points="9,6 15,12 9,18"/></symbol>
+  <symbol id="icon-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15,3 21,3 21,9"/><line x1="10" y1="14" x2="21" y2="3"/></symbol>
+  <symbol id="icon-pin" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5c0 3.5 5 11 5 11s5-7.5 5-11a5 5 0 0 0-5-5z"/><circle cx="12" cy="7" r="2"/></symbol>
+  <symbol id="icon-warning" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+  <symbol id="icon-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="8,12.5 11,15.5 16,9"/></symbol>
+  <symbol id="icon-alert-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="7.5" x2="12" y2="13"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
+  <symbol id="icon-inbox" viewBox="0 0 24 24"><path d="M3 12h4.5l1.5 3h6l1.5-3H21"/><path d="M5 12L4 5h16l-1 7"/><path d="M4 12v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></symbol>
+  <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><polyline points="4,7 20,7"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7,10 12,15 17,10"/><path d="M4 19h16"/></symbol>
+  <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11A8 8 0 0 0 6.3 6.3L4 8.6"/><polyline points="4,3 4,8.6 9.6,8.6"/><path d="M4 13a8 8 0 0 0 13.7 4.7L20 15.4"/><polyline points="20,21 20,15.4 14.4,15.4"/></symbol>
+  <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3,3 3,9 9,9"/><polyline points="12,7 12,12 16,14"/></symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A11 11 0 0 1 12 19c-7 0-11-7-11-7a20.7 20.7 0 0 1 4.2-5.2M9.9 4.2A10.4 10.4 0 0 1 12 4c7 0 11 7 11 7a20.6 20.6 0 0 1-2.5 3.5"/><path d="M14.1 14.1a3 3 0 1 1-4.2-4.2"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+  <symbol id="icon-spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" opacity="0.25"/><path d="M21 12a9 9 0 0 0-9-9"/></symbol>
+  <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M16 7l3 3"/><path d="M13 10l2.5 2.5"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+</svg>
+
+<div id="app">
+
+  <aside id="sidebar" class="sidebar">
+    <div class="brand">
+      <svg class="brand-icon icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
+      <span class="brand-name">WoW Addon Manager</span>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="Primary">
+      <button type="button" class="nav-item is-active" data-view="myaddons">
+        <svg class="icon nav-icon"><use href="#icon-list"></use></svg>
+        <span class="nav-label">My Addons</span>
+        <span class="nav-count" id="nav-count-total">0</span>
+        <span class="nav-badge" id="nav-count-updates" hidden>0</span>
+      </button>
+      <button type="button" class="nav-item" data-view="browse">
+        <svg class="icon nav-icon"><use href="#icon-compass"></use></svg>
+        <span class="nav-label">Browse</span>
+      </button>
+      <button type="button" class="nav-item" data-view="settings">
+        <svg class="icon nav-icon"><use href="#icon-gear"></use></svg>
+        <span class="nav-label">Settings</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <button type="button" id="btn-update-play" class="btn btn-accent btn-block btn-lg">
+        <svg class="icon"><use href="#icon-play"></use></svg>
+        <span>Update &amp; Play</span>
+      </button>
+      <button type="button" id="btn-launch-wow" class="btn btn-ghost btn-block">Launch WoW</button>
+      <div class="status-line" id="status-line">
+        <span class="status-dot" id="status-dot" data-state="connecting"></span>
+        <span id="status-text">Connecting&hellip;</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <div id="banner-offline" class="banner" hidden role="alert">
+      <svg class="icon"><use href="#icon-alert-circle"></use></svg>
+      <span>Server not reachable &mdash; restart from the desktop shortcut.</span>
+    </div>
+
+    <main id="main" class="main">
+
+      <!-- ===================== My Addons ===================== -->
+      <section id="view-myaddons" class="view" data-view-root="myaddons">
+        <header class="topbar">
+          <label class="search-field">
+            <svg class="icon search-icon"><use href="#icon-search"></use></svg>
+            <input type="search" id="myaddons-search" placeholder="Filter by name, author, or folder" autocomplete="off">
+          </label>
+          <div class="topbar-spacer"></div>
+          <button type="button" id="btn-check-updates" class="btn btn-ghost">
+            <svg class="icon"><use href="#icon-refresh"></use></svg>
+            <span>Check for updates</span>
+          </button>
+          <button type="button" id="btn-update-all" class="btn btn-accent">Update all</button>
+          <button type="button" id="btn-add-addon" class="btn btn-outline">
+            <svg class="icon"><use href="#icon-plus"></use></svg>
+            <span>Add addon</span>
+          </button>
+        </header>
+
+        <div class="list-summary" id="myaddons-summary" aria-live="polite"></div>
+
+        <div class="lastrun-line" id="myaddons-lastrun" hidden>
+          <span id="myaddons-lastrun-text"></span>
+          <button type="button" class="link-btn" id="myaddons-lastrun-details">Details</button>
+        </div>
+
+        <div class="filter-chips" id="myaddons-filters" role="group" aria-label="Filter addons by status"></div>
+
+        <div class="table-scroll">
+          <table class="addon-table" id="myaddons-table" hidden>
+            <thead>
+              <tr>
+                <th class="col-addon" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="name" title="Sort by Addon name">Addon<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="installed" title="Sort by Installed version">Installed<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="latest" title="Sort by Latest available version">Latest<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-status" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="status" title="Sort by Status">Status<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-updated" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="updated" title="Sort by when it was last updated">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-menu"></th>
+              </tr>
+            </thead>
+            <tbody id="myaddons-tbody"></tbody>
+          </table>
+
+          <div class="skeleton-list" id="myaddons-skeleton">
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+          </div>
+
+          <div class="empty-state" id="myaddons-empty" hidden>
+            <svg class="icon empty-icon"><use href="#icon-inbox"></use></svg>
+            <h3>No addons tracked yet</h3>
+            <p>Add your first addon by CurseForge Project ID or link.</p>
+            <button type="button" class="btn btn-accent" id="myaddons-empty-add">Add addon</button>
+          </div>
+
+          <div class="error-state" id="myaddons-error" hidden>
+            <svg class="icon empty-icon error-icon"><use href="#icon-alert-circle"></use></svg>
+            <h3>Couldn&rsquo;t load your addons</h3>
+            <p id="myaddons-error-msg"></p>
+            <button type="button" class="btn btn-outline" id="myaddons-retry">Retry</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== Browse ===================== -->
+      <section id="view-browse" class="view" data-view-root="browse" hidden>
+
+        <div class="nokey-panel" id="browse-nokey" hidden>
+          <div class="nokey-card">
+            <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
+            <h2>Browse needs a free CurseForge API key</h2>
+            <ol class="nokey-steps">
+              <li>Sign in or create an account at <strong>console.curseforge.com</strong></li>
+              <li>Open <strong>API Keys</strong> and generate one</li>
+              <li>Paste it in Settings</li>
+            </ol>
+            <button type="button" class="btn btn-accent" id="btn-nokey-settings">Go to Settings</button>
+          </div>
+          <div class="nokey-card">
+            <h3>Install by Project ID</h3>
+            <p class="muted-text">Works without a key. Find the Project ID in the right-hand &ldquo;About Project&rdquo; box on any CurseForge addon page.</p>
+            <form id="install-by-id-form" class="inline-form">
+              <input type="text" id="install-by-id-input" placeholder="e.g. 1521253" inputmode="numeric" autocomplete="off">
+              <button type="submit" class="btn btn-accent" id="install-by-id-submit">Install</button>
+            </form>
+            <p class="form-msg" id="install-by-id-msg" hidden></p>
+          </div>
+        </div>
+
+        <div id="browse-content">
+          <header class="topbar">
+            <label class="search-field">
+              <svg class="icon search-icon"><use href="#icon-search"></use></svg>
+              <input type="search" id="browse-search" placeholder="Search CurseForge addons" autocomplete="off">
+            </label>
+            <select id="browse-category" class="select" aria-label="Category">
+              <option value="">All categories</option>
+            </select>
+            <select id="browse-sort" class="select" aria-label="Sort">
+              <option value="2">Sort: Popularity</option>
+              <option value="3">Sort: Last updated</option>
+              <option value="4">Sort: Name</option>
+              <option value="6">Sort: Total downloads</option>
+            </select>
+          </header>
+
+          <div class="list-summary" id="browse-summary" aria-live="polite"></div>
+
+          <div class="browse-grid" id="browse-grid"></div>
+
+          <div class="skeleton-grid" id="browse-skeleton">
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+          </div>
+
+          <div class="empty-state" id="browse-empty" hidden>
+            <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
+            <h3>No results</h3>
+            <p>Try a different search term or category.</p>
+          </div>
+
+          <div class="error-state" id="browse-error" hidden>
+            <svg class="icon empty-icon error-icon"><use href="#icon-alert-circle"></use></svg>
+            <h3>Couldn&rsquo;t load results</h3>
+            <p id="browse-error-msg"></p>
+          </div>
+
+          <div class="loadmore-wrap" id="browse-loadmore-wrap" hidden>
+            <button type="button" class="btn btn-outline" id="btn-load-more">Load more</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== Settings ===================== -->
+      <section id="view-settings" class="view" data-view-root="settings" hidden>
+        <header class="topbar"><h2 class="view-title">Settings</h2></header>
+
+        <div class="settings-scroll">
+
+          <section class="settings-group" id="settings-game">
+            <h3>Game</h3>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">World of Warcraft folder</div>
+                <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
+              </div>
+              <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">AddOns folder</div>
+                <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
+              </div>
+              <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
+            </div>
+          </section>
+
+          <section class="settings-group" id="settings-updates">
+            <h3>Updates</h3>
+            <div class="settings-row settings-row-col">
+              <div class="settings-row-label">Release channel</div>
+              <div class="radio-group" id="release-radio-group">
+                <label class="radio-option"><input type="radio" name="releaseType" value="1" id="radio-release-1"><span>Release only</span></label>
+                <label class="radio-option"><input type="radio" name="releaseType" value="2" id="radio-release-2"><span>Release + Beta</span></label>
+                <label class="radio-option"><input type="radio" name="releaseType" value="3" id="radio-release-3"><span>Everything (incl. Alpha)</span></label>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Update addons automatically when launching WoW from the shortcut</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-autoupdate">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-group" id="settings-apikey">
+            <h3>CurseForge API key</h3>
+            <div class="apikey-row">
+              <div class="password-field">
+                <input type="password" id="input-apikey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
+                <button type="button" class="icon-btn" id="btn-toggle-apikey-visibility" aria-label="Show key" title="Show key">
+                  <svg class="icon"><use href="#icon-eye"></use></svg>
+                </button>
+              </div>
+              <button type="button" class="btn btn-outline" id="btn-test-apikey">Test</button>
+              <button type="button" class="btn btn-accent" id="btn-save-apikey">Save</button>
+            </div>
+            <p class="apikey-status" id="apikey-status">No key configured</p>
+            <p class="form-msg" id="apikey-test-result" hidden></p>
+          </section>
+
+          <section class="settings-group" id="settings-appearance">
+            <h3>Appearance</h3>
+            <div class="settings-row settings-row-col">
+              <div class="settings-row-label">Density</div>
+              <div class="segmented" id="density-toggle" role="group" aria-label="Table density">
+                <button type="button" class="segmented-btn" data-density-value="comfortable">Comfortable</button>
+                <button type="button" class="segmented-btn" data-density-value="compact">Compact</button>
+              </div>
+            </div>
+            <div class="settings-row settings-row-col">
+              <div class="settings-row-label">Theme</div>
+              <div class="segmented" id="theme-toggle" role="group" aria-label="Color theme">
+                <button type="button" class="segmented-btn" data-theme-value="dark">Dark</button>
+                <button type="button" class="segmented-btn" data-theme-value="light">Light</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-group" id="settings-untracked">
+            <h3>Untracked folders</h3>
+            <p class="muted-text">Folders in AddOns that aren&rsquo;t tracked by the manager.</p>
+            <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
+            <div id="untracked-list" class="untracked-list"></div>
+          </section>
+
+          <section class="settings-group" id="settings-maintenance">
+            <h3>Maintenance</h3>
+            <div class="btn-row">
+              <button type="button" class="btn btn-outline" id="btn-open-synclog">Open sync log</button>
+              <button type="button" class="btn btn-outline" id="btn-open-lastrun">Open last run report</button>
+              <button type="button" class="btn btn-outline" id="btn-open-serverlog">Open server log</button>
+              <button type="button" class="btn btn-outline" id="btn-open-backups">Open backups folder</button>
+            </div>
+            <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
+          </section>
+
+          <section class="settings-group" id="settings-about">
+            <h3>About</h3>
+            <dl class="about-list">
+              <div><dt>Version</dt><dd id="about-version">&mdash;</dd></div>
+              <div><dt>Server uptime</dt><dd id="about-uptime">&mdash;</dd></div>
+              <div><dt>Port</dt><dd id="about-port">&mdash;</dd></div>
+            </dl>
+          </section>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- ===================== Detail drawer ===================== -->
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-hidden="true">
+  <button type="button" class="drawer-close icon-btn" id="drawer-close" aria-label="Close" title="Close">
+    <svg class="icon"><use href="#icon-close"></use></svg>
+  </button>
+  <div class="drawer-scroll">
+    <div class="drawer-header" id="drawer-header"></div>
+    <div class="drawer-tabs" id="drawer-tabs" role="tablist">
+      <button type="button" class="drawer-tab is-active" data-tab="overview" role="tab">Overview</button>
+      <button type="button" class="drawer-tab" data-tab="versions" role="tab">Versions</button>
+      <button type="button" class="drawer-tab" data-tab="changelog" role="tab">Changelog</button>
+      <button type="button" class="drawer-tab" data-tab="screenshots" role="tab">Screenshots</button>
+    </div>
+    <div class="drawer-body">
+      <div class="drawer-panel" id="drawer-panel-overview"></div>
+      <div class="drawer-panel" id="drawer-panel-versions" hidden></div>
+      <div class="drawer-panel" id="drawer-panel-changelog" hidden></div>
+      <div class="drawer-panel" id="drawer-panel-screenshots" hidden></div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===================== Job progress panel ===================== -->
+<div class="job-panel" id="job-panel" hidden>
+  <div class="job-panel-bar" id="job-panel-bar">
+    <svg class="icon job-spinner" id="job-spinner"><use href="#icon-spinner"></use></svg>
+    <span class="job-title" id="job-title">Working&hellip;</span>
+    <span class="job-panel-spacer"></span>
+    <button type="button" class="icon-btn" id="job-panel-collapse" aria-label="Collapse" title="Collapse">
+      <svg class="icon"><use href="#icon-chevron-down"></use></svg>
+    </button>
+    <button type="button" class="icon-btn" id="job-panel-close" aria-label="Close" title="Close" hidden>
+      <svg class="icon"><use href="#icon-close"></use></svg>
+    </button>
+  </div>
+  <div class="job-panel-body" id="job-panel-body">
+    <pre class="job-log" id="job-log"></pre>
+    <div class="job-results" id="job-results" hidden></div>
+  </div>
+</div>
+
+<!-- ===================== Toasts ===================== -->
+<div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+<!-- ===================== Dialogs ===================== -->
+<div class="dialog-backdrop" id="dialog-backdrop" hidden></div>
+
+<div class="dialog" id="dialog-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-add-title">
+  <h3 id="dialog-add-title">Add addon</h3>
+  <p class="muted-text">Enter a numeric Project ID, or a CurseForge addon URL (requires an API key).</p>
+  <form id="add-addon-form">
+    <input type="text" id="add-addon-input" placeholder="1521253 or https://www.curseforge.com/wow/addons/..." autocomplete="off">
+    <p class="form-msg" id="add-addon-error" hidden></p>
+    <div class="dialog-footer">
+      <button type="button" class="btn btn-ghost" id="add-addon-cancel">Cancel</button>
+      <button type="submit" class="btn btn-accent" id="add-addon-submit">Add</button>
+    </div>
+  </form>
+</div>
+
+<div class="dialog dialog-confirm" id="dialog-confirm" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <h3 id="confirm-title">Are you sure?</h3>
+  <p id="confirm-message"></p>
+  <div class="dialog-footer">
+    <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+    <button type="button" class="btn btn-danger" id="confirm-ok">Confirm</button>
+  </div>
+</div>
+
+<!-- ===================== Lightbox ===================== -->
+<div class="lightbox" id="lightbox" hidden>
+  <button type="button" class="icon-btn lightbox-close" id="lightbox-close" aria-label="Close" title="Close">
+    <svg class="icon"><use href="#icon-close"></use></svg>
+  </button>
+  <img id="lightbox-img" src="" alt="">
+</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>
