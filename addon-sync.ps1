@@ -1237,10 +1237,16 @@ function Sync-SingleAddon {
                 # -FileId request whose target already matches what is on
                 # disk must still record pinnedFileId so future syncs keep
                 # honoring the pin (this is a config write, not a network
-                # action or download, so it is safe here; DryRun runs never
-                # reach Save-Config at all, so this never leaks into a
-                # DryRun's "no disk writes" guarantee).
-                $Record.pinnedFileId = $pinTarget
+                # action or download, so it is safe here for a real run).
+                # Gated on -not $DryRun: the main loop always includes
+                # $config (this same $Record) verbatim as the -Json output's
+                # "addons" array regardless of DryRun, so mutating the
+                # in-memory record here would misreport a pin as persisted
+                # in that JSON even though DryRun's Save-Config never runs to
+                # actually write it to addons.json (see CHANGELOG Round 4).
+                if (-not $DryRun) {
+                    $Record.pinnedFileId = $pinTarget
+                }
                 Write-Log -Level 'INFO' -Message "Pinned: project $projectId ($displayLabel) already on fileId $pinTarget"
                 return [PSCustomObject]@{ Status = 'Pinned'; Name = $displayLabel; Version = $Record.version }
             }

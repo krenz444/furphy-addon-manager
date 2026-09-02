@@ -89,11 +89,17 @@ function Get-MimeType {
 }
 
 function Send-Json {
-    <# Writes one JSON response and always closes the response stream. #>
+    <#
+      Writes one JSON response and always closes the response stream.
+      -FileName (E4: GET /api/export) additionally sets Content-Disposition
+      so the browser offers the response as a download instead of navigating
+      to it; omitted (the default) for every other JSON response.
+    #>
     param(
         $Context,
         [int]$StatusCode,
-        $Body
+        $Body,
+        [string]$FileName
     )
 
     $response = $Context.Response
@@ -106,6 +112,9 @@ function Send-Json {
         $response.StatusCode = $StatusCode
         $response.ContentType = 'application/json; charset=utf-8'
         $response.Headers.Set('Cache-Control', 'no-store')
+        if ($FileName) {
+            $response.Headers.Set('Content-Disposition', "attachment; filename=$FileName")
+        }
         $response.ContentLength64 = $bytes.Length
         $response.OutputStream.Write($bytes, 0, $bytes.Length)
         $Script:LastResponseStatus = $StatusCode
@@ -283,11 +292,33 @@ function Get-SettingsView {
 # =====================================================================
 
 function Get-AddonRecords {
-    <# Returns a List[object] of addon records. Missing/empty/null file -> empty list. #>
+    <#
+      Returns a List[object] of addon records. Missing/empty/null file -> empty list.
+
+      E10 fix (self-caught during this expansion's own offline verification):
+      all three exit points used to `return $list` directly. A bare `return`
+      of a collection goes through the pipeline, which PowerShell enumerates -
+      for an EMPTY list that produces zero pipeline objects (the caller gets
+      $null instead of an empty list), and for a list with EXACTLY ONE record
+      it unwraps to that single record itself (the caller gets a bare
+      PSCustomObject, not a list) - the same hazard class SPEC.md's
+      List[object]/@() quirk describes, generalized to plain `return` of any
+      enumerable. Every call site already in this file happens to use
+      `foreach ($r in (Get-AddonRecords))`, which tolerates both cases by
+      accident (foreach over $null runs zero times; foreach over a bare
+      scalar runs once, treating it as that one item) - so this had no
+      observable effect until Test-DiagAddonsJson's `.Count` usage (E10)
+      exposed it directly: a tracked-addon count of exactly 1 produced
+      "record.Count" as $null (PSCustomObject has no such property), not 1.
+      Write-Output -NoEnumerate keeps the real List[object] intact through
+      all three returns, matching the fix already applied to
+      Get-PresentAddonFolders/Get-MissingDeps (E3) for the identical pattern.
+    #>
     $list = New-Object 'System.Collections.Generic.List[object]'
 
     if (-not (Test-Path -LiteralPath $Script:AddonsJsonPath)) {
-        return $list
+        Write-Output -NoEnumerate $list
+        return
     }
 
     # Get-Content is safe here: $raw only feeds ConvertFrom-Json below and is
@@ -296,7 +327,8 @@ function Get-AddonRecords {
     # pattern that actually hangs Send-Json).
     $raw = Get-Content -LiteralPath $Script:AddonsJsonPath -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        return $list
+        Write-Output -NoEnumerate $list
+        return
     }
 
     $tmp = $raw | ConvertFrom-Json -ErrorAction Stop
@@ -306,7 +338,7 @@ function Get-AddonRecords {
             $list.Add($item)
         }
     }
-    return $list
+    Write-Output -NoEnumerate $list
 }
 
 # =====================================================================
@@ -458,11 +490,24 @@ function Build-CliArgs {
             }
         }
         'remove' {
-            if (-not ($Params -and $Params.projectId)) {
-                throw 'projectId is required for kind remove'
+            # E11 (bulk actions): the My Addons selection bar's "Uninstall
+            # selected" posts projectIds (an array, possibly length 1);
+            # every existing single-id caller (the per-row kebab menu) still
+            # posts the original singular projectId, which keeps working
+            # unchanged. Multiple ids are comma-joined into ONE -Remove
+            # token here, same reasoning as the 'sync' case above (only a
+            # single comma-joined token survives -File binding intact).
+            $ids = New-Object 'System.Collections.Generic.List[object]'
+            if ($Params -and $Params.projectIds -and @($Params.projectIds).Count -gt 0) {
+                foreach ($id in @($Params.projectIds)) { $ids.Add([string]$id) }
+            } elseif ($Params -and $Params.projectId) {
+                $ids.Add([string]$Params.projectId)
+            }
+            if ($ids.Count -eq 0) {
+                throw 'projectId or projectIds is required for kind remove'
             }
             $argsList.Add('-Remove')
-            $argsList.Add([string]$Params.projectId)
+            $argsList.Add(($ids -join ','))
         }
         'install' {
             if (-not ($Params -and $Params.projectId -and $Params.fileId)) {
@@ -590,6 +635,15 @@ function Start-Job {
         return @{ Busy = $false; Job = $job }
     }
 
+    # E4: import can take anywhere from zero to several addon-sync.ps1
+    # invocations chained in sequence (see Build-ImportPlan) rather than the
+    # exactly-one-CLI-call shape every kind below assumes, so it is built and
+    # started entirely by its own helper instead of falling through to
+    # Build-CliArgs/New-CliProcessArgs here.
+    if ($Kind -eq 'import') {
+        return (Start-ImportJob -JobId $jobId -StartedAt $startedAt -Params $Params)
+    }
+
     $cliKind = $Kind
     $launchAfter = $false
     if ($Kind -eq 'launch') {
@@ -647,6 +701,258 @@ function Start-Job {
     }
     Add-JobToHistory -Job $job
     $Script:CurrentJob = $job
+    return @{ Busy = $false; Job = $job }
+}
+
+# =====================================================================
+# Export / Import (E4)
+# =====================================================================
+
+function Build-ImportPlan {
+    <#
+      Computes the sequence of addon-sync.ps1 invocations ("phases") needed
+      to apply an imported addons-export.json body, plus any result rows
+      that need no CLI call at all. Returns a hashtable (a single object -
+      safe to `return` directly, unlike the List[object]s inside it, which
+      the caller must never re-wrap in `@()`): @{ Phases = <List[object] of
+      CliArgs Lists>; SkipRows = <List[object] of {status,name,version,
+      projectId,fileId} rows> }.
+
+      -Add is issued ONCE with every not-yet-present projectId comma-joined
+      (SPEC: "one CLI invocation with all ids" - the exact same
+      comma-joined-single-token requirement Build-CliArgs's own 'sync' case
+      already documents at length, since addon-sync.ps1 is likewise always
+      invoked as a brand-new "-File" child process here, never in-process).
+      pinnedFileId then needs its own -Only/-FileId phase PER addon (that
+      flag pair only ever targets a single project - addon-sync.ps1 itself
+      rejects more than one id alongside -FileId), including one for an
+      addon this same plan is also adding: the newest file installs first,
+      then this phase reinstalls the pinned one, exactly mirroring the
+      roadmap's own two-step wording rather than trying to fold both into
+      one -Add -FileId call (which only ever supports a single id, so it
+      cannot cover a multi-addon import). An ignoreUpdates flag needs no
+      per-addon restriction, so every id that wants it - freshly added by
+      this import or already on record - is batched into one trailing
+      -Ignore phase. releaseType is captured on export for round-tripping
+      but is deliberately NOT applied on import: no CLI flag sets a
+      record's per-addon releaseType override directly (SPEC.md's addon-
+      sync.ps1 contract has no such param), and inventing a direct
+      addons.json write here would break the "the CLI owns writes" rule
+      this whole file otherwise holds to.
+
+      An imported addon already present with neither pinnedFileId nor
+      ignoreUpdates set needs no CLI call at all - its SkipRow mirrors the
+      exact shape addon-sync.ps1's own "-Add: already present" path already
+      produces (Name/Version/FileId straight from the EXISTING record), so
+      the job's results read the same as they would if the underlying add
+      job itself had done the skipping.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$ImportAddons,
+        [Parameter(Mandatory = $true)][hashtable]$ExistingById
+    )
+
+    $phases = New-Object 'System.Collections.Generic.List[object]'
+    $skipRows = New-Object 'System.Collections.Generic.List[object]'
+
+    $seenIds = New-Object 'System.Collections.Generic.HashSet[int64]'
+    $toAddIds = New-Object 'System.Collections.Generic.List[object]'
+    $pinEntries = New-Object 'System.Collections.Generic.List[object]'
+    $ignoreIds = New-Object 'System.Collections.Generic.List[object]'
+    $ignoreSeen = New-Object 'System.Collections.Generic.HashSet[int64]'
+
+    foreach ($entry in @($ImportAddons)) {
+        if (-not $entry -or ($null -eq $entry.projectId)) { continue }
+        # NOTE: named $entryPid, not $pid - $pid (case-insensitively) is
+        # PowerShell's own read-only automatic variable holding this
+        # process's id, and assigning to it throws "Cannot overwrite
+        # variable PID because it is read-only or constant." (caught live
+        # during this build's own offline verification).
+        $entryPid = [int64]0
+        try { $entryPid = [int64]$entry.projectId } catch { continue }
+        if (-not $seenIds.Add($entryPid)) { continue }   # dedupe within the import file itself
+
+        $existingRecord = $null
+        $isNew = $true
+        if ($ExistingById.ContainsKey($entryPid)) {
+            $existingRecord = $ExistingById[$entryPid]
+            $isNew = $false
+        }
+
+        $hasPin = $false
+        $fid = [int64]0
+        if ($null -ne $entry.pinnedFileId) {
+            try { $fid = [int64]$entry.pinnedFileId; $hasPin = $true } catch { $hasPin = $false }
+        }
+        $hasIgnore = [bool]$entry.ignoreUpdates
+
+        if ($isNew) {
+            $toAddIds.Add($entryPid)
+        }
+        if ($hasPin) {
+            $pinEntries.Add([PSCustomObject]@{ ProjectId = $entryPid; FileId = $fid })
+        }
+        if ($hasIgnore -and $ignoreSeen.Add($entryPid)) {
+            $ignoreIds.Add($entryPid)
+        }
+
+        if ((-not $isNew) -and (-not $hasPin) -and (-not $hasIgnore)) {
+            $skipRows.Add([PSCustomObject]@{
+                    status    = 'Skipped'
+                    name      = $existingRecord.name
+                    version   = $existingRecord.version
+                    projectId = $existingRecord.projectId
+                    fileId    = $existingRecord.fileId
+                })
+        }
+    }
+
+    if ($toAddIds.Count -gt 0) {
+        $idStrings = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($id in $toAddIds) { $idStrings.Add([string]$id) }
+        $addArgs = New-Object 'System.Collections.Generic.List[object]'
+        $addArgs.Add('-Add')
+        $addArgs.Add(($idStrings -join ','))
+        $phases.Add($addArgs)
+    }
+
+    foreach ($pin in $pinEntries) {
+        $pinArgs = New-Object 'System.Collections.Generic.List[object]'
+        $pinArgs.Add('-Only')
+        $pinArgs.Add([string]$pin.ProjectId)
+        $pinArgs.Add('-FileId')
+        $pinArgs.Add([string]$pin.FileId)
+        $phases.Add($pinArgs)
+    }
+
+    if ($ignoreIds.Count -gt 0) {
+        $ignoreStrings = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($id in $ignoreIds) { $ignoreStrings.Add([string]$id) }
+        $ignoreArgs = New-Object 'System.Collections.Generic.List[object]'
+        $ignoreArgs.Add('-Ignore')
+        $ignoreArgs.Add(($ignoreStrings -join ','))
+        $phases.Add($ignoreArgs)
+    }
+
+    return @{ Phases = $phases; SkipRows = $skipRows }
+}
+
+function Start-ImportPhase {
+    <#
+      Launches the next not-yet-run phase of a multi-phase 'import' job
+      (see Build-ImportPlan) as a hidden addon-sync.ps1 child process -
+      exactly like the single-phase kinds below, since Update-JobStatus's
+      sync.log tailing and Process/HasExited polling don't care how many
+      phases a job has, only whether $Job.Process is currently running.
+      Only the process-launch and phase-advance bookkeeping here is
+      import-specific. Returns $true once a process is running, $false on
+      failure (the caller fails the whole job).
+    #>
+    param($Job)
+
+    $Job.PhaseIndex = $Job.PhaseIndex + 1
+    $cliArgs = $Job.Phases[$Job.PhaseIndex]
+
+    if (-not (Test-Path -LiteralPath $Script:JobsDir)) {
+        New-Item -ItemType Directory -Path $Script:JobsDir -Force | Out-Null
+    }
+    $outFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).out"
+    $errFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).err"
+
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs
+
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # See Start-Job: force the SafeProcessHandle to materialize now so
+        # that reading .ExitCode later is reliable on this machine.
+        $proc.Handle | Out-Null
+    } catch {
+        Write-ServerLog "Failed to start import phase $($Job.PhaseIndex) for job $($Job.id): $($_.Exception.Message)"
+        return $false
+    }
+
+    $Job.Process = $proc
+    $Job.OutFile = $outFile
+    $Job.ErrFile = $errFile
+    return $true
+}
+
+function Start-ImportJob {
+    <#
+      Builds and starts (or, when there is nothing at all to do, finishes
+      immediately) a multi-phase 'import' job. Split out of Start-Job so
+      every single-CLI-invocation job kind there is completely untouched by
+      this addition; called only from there, after its own Test-JobBusy
+      check has already passed.
+    #>
+    param(
+        [string]$JobId,
+        [string]$StartedAt,
+        $Params
+    )
+
+    $importAddons = @()
+    if ($Params -and ($null -ne $Params.addons)) { $importAddons = @($Params.addons) }
+
+    $existingById = @{}
+    foreach ($r in (Get-AddonRecords)) {
+        if ($r.projectId) {
+            try { $existingById[[int64]$r.projectId] = $r } catch { }
+        }
+    }
+
+    $plan = Build-ImportPlan -ImportAddons $importAddons -ExistingById $existingById
+
+    $job = [PSCustomObject]@{
+        id            = $JobId
+        kind          = 'import'
+        params        = $Params
+        state         = 'running'
+        startedAt     = $StartedAt
+        finishedAt    = $null
+        exitCode      = $null
+        log           = New-Object 'System.Collections.Generic.List[object]'
+        results       = New-Object 'System.Collections.Generic.List[object]'
+        error         = $null
+        Process       = $null
+        OutFile       = $null
+        ErrFile       = $null
+        SyncLogOffset = 0
+        LaunchAfter   = $false
+        Phases        = $plan.Phases
+        PhaseIndex    = -1
+    }
+    foreach ($row in $plan.SkipRows) { $job.results.Add($row) }
+
+    if ($job.Phases.Count -eq 0) {
+        # Every imported addon was already present with no pinnedFileId/
+        # ignoreUpdates to (re)apply - SkipRows above already covered every
+        # row, so there is no CLI process to run at all (same immediate-
+        # finish shape as the launch-without-updateFirst case above).
+        $job.state = 'done'
+        $job.exitCode = 0
+        $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        Add-JobToHistory -Job $job
+        Apply-JobCompletionSideEffects -Job $job -Parsed ([PSCustomObject]@{ action = 'import' })
+        Save-CheckState
+        return @{ Busy = $false; Job = $job }
+    }
+
+    if (Test-Path -LiteralPath $Script:SyncLogPath) {
+        $job.SyncLogOffset = (Get-Item -LiteralPath $Script:SyncLogPath).Length
+    }
+
+    Add-JobToHistory -Job $job
+    $Script:CurrentJob = $job
+
+    $started = Start-ImportPhase -Job $job
+    if (-not $started) {
+        $job.state = 'failed'
+        $job.error = 'Failed to start import'
+        $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Script:CurrentJob = $null
+        Save-CheckState
+    }
     return @{ Busy = $false; Job = $job }
 }
 
@@ -767,6 +1073,12 @@ function Load-CheckState {
                     ErrFile       = $null
                     SyncLogOffset = 0
                     LaunchAfter   = $false
+                    # E4: a reloaded job's saved state is never 'running'
+                    # (the block above forces that), so Phases/PhaseIndex are
+                    # never read for one - present here only so every Job
+                    # object in $Script:Jobs carries the same property shape.
+                    Phases        = $null
+                    PhaseIndex    = 0
                 }
                 $loadedJobs.Add($job)
 
@@ -816,12 +1128,16 @@ function Apply-JobCompletionSideEffects {
                 $Script:UpdateAvailable[[string]$r.projectId] = @{ fileId = $r.fileId; version = $r.version }
             }
         }
-    } elseif ($action -eq 'sync' -or $action -eq 'add' -or $action -eq 'remove' -or $action -eq 'rollback') {
+    } elseif ($action -eq 'sync' -or $action -eq 'add' -or $action -eq 'remove' -or $action -eq 'rollback' -or $action -eq 'import') {
         # E1: a completed rollback pins the addon to the restored file, same
         # as an explicit Pin - it has no update pending against that pin
         # until the next check, so any stale "update available" entry for
         # this project needs clearing the same way Updated/Installed/Pinned
-        # already do.
+        # already do. E4: an import's Updated/Installed/Pinned rows (from
+        # its -Add / -Only+-FileId phases) need exactly the same clearing -
+        # this branch already keys off $rows (built from the caller's own
+        # $Job.results, not $Parsed.action-specific data), so 'import' only
+        # needed adding to this condition, nothing else.
         foreach ($r in $rows) {
             if (($r.status -eq 'Updated' -or $r.status -eq 'Installed' -or $r.status -eq 'Pinned' -or $r.status -eq 'Rolled-back') -and $r.projectId) {
                 $key = [string]$r.projectId
@@ -849,6 +1165,101 @@ function Apply-JobCompletionSideEffects {
             rows      = $rows.ToArray()
         }
     }
+}
+
+function Complete-ImportPhase {
+    <#
+      Finalizes one phase of a multi-phase 'import' job once its CLI process
+      has exited: merges that phase's results into the job's CUMULATIVE
+      $Job.results (never replaced the way a single-phase job's one-shot
+      $Job.results assignment does - each phase adds to what earlier phases
+      already produced), then either starts the next phase (job stays
+      'running') or finalizes the whole job (state done/failed) once every
+      phase has run. A single failed phase fails the entire job outright -
+      later phases are never attempted - the same all-or-nothing failure
+      shape every other job kind already has.
+
+      Called only from Update-JobStatus, once its own tailing/HasExited
+      check confirms this job's current phase process has exited; keeping
+      this entirely separate from that function's own finalize logic below
+      means every other job kind's behavior there is completely untouched
+      by import's existence.
+    #>
+    param($Job)
+
+    $exitCode = $Job.Process.ExitCode
+
+    # Read with ReadAllText, NOT Get-Content - see Update-JobStatus for why
+    # (Get-Content's PSPath/PSDrive/PSProvider note properties can hang
+    # ConvertTo-Json if the string ever ends up in a response).
+    $stdout = ''
+    try {
+        if (Test-Path -LiteralPath $Job.OutFile) {
+            $stdout = [System.IO.File]::ReadAllText($Job.OutFile, [System.Text.Encoding]::UTF8)
+        }
+    } catch { $stdout = '' }
+
+    $stderr = ''
+    try {
+        if (Test-Path -LiteralPath $Job.ErrFile) {
+            $stderr = [System.IO.File]::ReadAllText($Job.ErrFile, [System.Text.Encoding]::UTF8)
+        }
+    } catch { $stderr = '' }
+
+    try {
+        if (Test-Path -LiteralPath $Job.OutFile) { Remove-Item -LiteralPath $Job.OutFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $Job.ErrFile) { Remove-Item -LiteralPath $Job.ErrFile -Force -ErrorAction SilentlyContinue }
+    } catch { }
+
+    $parsed = $null
+    $parseError = $null
+    if ($stdout -and $stdout.Trim().Length -gt 0) {
+        try {
+            $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $parseError = $_.Exception.Message
+        }
+    }
+
+    if ($exitCode -ne 0 -or -not $parsed) {
+        $Job.exitCode = $exitCode
+        $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Job.state = 'failed'
+        $errMsg = $stderr
+        if (-not $errMsg -and $parseError) { $errMsg = "Could not parse CLI output as JSON: $parseError" }
+        if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
+        $Job.error = "Import phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count) failed: $errMsg"
+        if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+        Save-CheckState
+        return $Job
+    }
+
+    if ($parsed.results) {
+        foreach ($r in @($parsed.results)) { $Job.results.Add($r) }
+    }
+
+    $hasMorePhases = ($Job.PhaseIndex + 1) -lt $Job.Phases.Count
+    if ($hasMorePhases) {
+        $started = Start-ImportPhase -Job $Job
+        if (-not $started) {
+            $Job.exitCode = $exitCode
+            $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $Job.state = 'failed'
+            $Job.error = "Failed to start import phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count)"
+            if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+            Save-CheckState
+        }
+        return $Job
+    }
+
+    $Job.exitCode = 0
+    $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $Job.state = 'done'
+    Apply-JobCompletionSideEffects -Job $Job -Parsed ([PSCustomObject]@{ action = 'import' })
+
+    if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+    Save-CheckState
+    return $Job
 }
 
 function Update-JobStatus {
@@ -888,8 +1299,16 @@ function Update-JobStatus {
             try {
                 if ($fs.Length -gt $Job.SyncLogOffset) {
                     $fs.Seek($Job.SyncLogOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    # Captured before the reader is closed below: closing the
+                    # StreamReader also closes $fs (it owns the stream by
+                    # default), so $fs.Length is no longer readable afterward.
+                    $newLength = $fs.Length
                     $reader = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
-                    $newText = $reader.ReadToEnd()
+                    try {
+                        $newText = $reader.ReadToEnd()
+                    } finally {
+                        $reader.Close()
+                    }
                     if ($newText) {
                         $lines = $newText -split "`r`n|`n"
                         foreach ($l in $lines) {
@@ -899,9 +1318,13 @@ function Update-JobStatus {
                     # Advance the offset past what was just consumed so a repeated
                     # poll while still running does not re-read and re-append the
                     # same lines every time.
-                    $Job.SyncLogOffset = $fs.Length
+                    $Job.SyncLogOffset = $newLength
                 }
             } finally {
+                # Already closed via $reader.Close() above when that path ran;
+                # closing an already-closed FileStream is a documented no-op,
+                # and this still covers the case where $reader was never
+                # created (fs.Length was <= SyncLogOffset).
                 $fs.Close()
             }
         }
@@ -911,6 +1334,15 @@ function Update-JobStatus {
 
     if (-not $Job.Process.HasExited) {
         return $Job
+    }
+
+    # E4: an 'import' job's process is one PHASE of a possibly-multi-step
+    # sequence (see Build-ImportPlan/Complete-ImportPhase) rather than the
+    # whole job, so its own finalize/advance logic is entirely separate from
+    # the single-phase logic below, which every other job kind still uses
+    # completely unchanged.
+    if ($Job.kind -eq 'import') {
+        return (Complete-ImportPhase -Job $Job)
     }
 
     $exitCode = $Job.Process.ExitCode
@@ -1155,8 +1587,14 @@ function Invoke-CfApi {
             try {
                 $stream = $errResp.GetResponseStream()
                 $sr = New-Object System.IO.StreamReader($stream)
-                $bodyText = $sr.ReadToEnd()
-                $sr.Close()
+                try {
+                    $bodyText = $sr.ReadToEnd()
+                } finally {
+                    # Closes $stream too (StreamReader owns it by default);
+                    # in a finally so a ReadToEnd() failure still releases it
+                    # instead of leaking the response stream.
+                    $sr.Close()
+                }
             } catch {
                 $bodyText = ConvertTo-Json -InputObject @{ error = $_.Exception.Message } -Compress
             }
@@ -1195,6 +1633,202 @@ function Send-CfApiResult {
         try { $response.OutputStream.Close() } catch { }
         try { $response.Close() } catch { }
     }
+}
+
+function Test-CfApiKey {
+    <#
+      Tests one CurseForge Core API key via GET /v1/games/1 (SPEC.md's "key
+      test" endpoint). Returns @{ ok; message } and never throws - every
+      failure path already resolves to a message string. E10: shared by
+      Handle-SettingsTestKey (Settings > API key > Test) and Handle-Diagnostics's
+      "CurseForge API key" check, so the two report identically instead of
+      drifting apart.
+    #>
+    param([string]$Key)
+
+    if (-not $Key -or $Key.Trim().Length -eq 0) {
+        return @{ ok = $false; message = 'No API key provided' }
+    }
+
+    $headers = @{ 'x-api-key' = $Key; 'Accept' = 'application/json' }
+    try {
+        $resp = Invoke-WebRequest -Uri 'https://api.curseforge.com/v1/games/1' -Headers $headers -Method Get -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        if ([int]$resp.StatusCode -eq 200) {
+            return @{ ok = $true; message = 'Key is valid' }
+        }
+        return @{ ok = $false; message = "CurseForge returned status $([int]$resp.StatusCode)" }
+    } catch {
+        $statusCode = 0
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
+        if ($statusCode -eq 401 -or $statusCode -eq 403) {
+            return @{ ok = $false; message = 'Key rejected by CurseForge' }
+        }
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+}
+
+# =====================================================================
+# Diagnostics (E10) - GET /api/diagnostics: a fixed battery of quick health
+# checks, each returning @{ ok; detail }. Every Test-Diag* function below is
+# self-contained (its own try/catch, never throws), so Handle-Diagnostics
+# itself needs no try/catch around any individual check - one bad check
+# degrades to a single failed row, never a 500 for the whole endpoint.
+# =====================================================================
+
+function New-DiagCheckRow {
+    param([string]$Name, [hashtable]$Result)
+    return [PSCustomObject]@{ name = $Name; ok = [bool]$Result.ok; detail = [string]$Result.detail }
+}
+
+function Test-DiagAddonsFolder {
+    <#
+      AddOns path exists AND is writable - proven by creating and deleting a
+      small temp file in it, not just a Test-Path (SPEC/roadmap: "AddOns path
+      exists and writable (create+delete temp file)").
+    #>
+    $addonsPath = Resolve-EffectiveAddonsPath
+    if (-not $addonsPath) {
+        return @{ ok = $false; detail = 'AddOns path could not be resolved (not running from inside a _retail_\AddonSync install and no -AddonsPath override)' }
+    }
+    if (-not (Test-Path -LiteralPath $addonsPath -PathType Container)) {
+        return @{ ok = $false; detail = "Does not exist: $addonsPath" }
+    }
+    $probeName = '.addonsync-diag-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 8) + '.tmp'
+    $probePath = Join-Path -Path $addonsPath -ChildPath $probeName
+    try {
+        Set-Content -LiteralPath $probePath -Value 'diagnostic probe' -Encoding UTF8 -ErrorAction Stop
+        Remove-Item -LiteralPath $probePath -Force -ErrorAction Stop
+        return @{ ok = $true; detail = $addonsPath }
+    } catch {
+        return @{ ok = $false; detail = "Not writable: $($_.Exception.Message)" }
+    } finally {
+        if (Test-Path -LiteralPath $probePath) { try { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue } catch { } }
+    }
+}
+
+function Test-DiagSettingsJson {
+    <# settings.json parses. A missing file is fine (Get-Settings creates it with defaults on next use) - only a PRESENT-but-corrupt file fails this check. #>
+    if (-not (Test-Path -LiteralPath $Script:SettingsPath)) {
+        return @{ ok = $true; detail = 'not yet created (defaults will be used)' }
+    }
+    try {
+        # Get-Content is safe here: $raw only feeds ConvertFrom-Json below and
+        # is discarded right after, never returned/serialized itself (see
+        # Update-JobStatus for the pattern that actually is hazardous).
+        $raw = Get-Content -LiteralPath $Script:SettingsPath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return @{ ok = $true; detail = 'empty (defaults will be used)' }
+        }
+        $raw | ConvertFrom-Json -ErrorAction Stop | Out-Null
+        return @{ ok = $true; detail = 'valid' }
+    } catch {
+        return @{ ok = $false; detail = $_.Exception.Message }
+    }
+}
+
+function Test-DiagAddonsJson {
+    <# addons.json parses, plus the record count. Get-AddonRecords itself throws uncaught on corrupt JSON (see its own comments) - exactly the failure this check needs to surface. #>
+    try {
+        $records = Get-AddonRecords
+        $count = $records.Count
+        $label = '{0} record{1}' -f $count, $(if ($count -eq 1) { '' } else { 's' })
+        return @{ ok = $true; detail = $label }
+    } catch {
+        return @{ ok = $false; detail = $_.Exception.Message }
+    }
+}
+
+function Test-DiagCfReachability {
+    <#
+      One keyless CurseForge "files" request for project 1521253
+      (BonusRollConfirm - SPEC.md's designated small test project), exactly
+      as roadmap item E10 calls for. Headers/user-agent mirror addon-sync.ps1's
+      Invoke-CfRequest (this script never dot-sources the CLI, so the few
+      lines needed are duplicated here - the same pattern already used for
+      Resolve-EffectiveAddonsPath/Get-PresentAddonFolders elsewhere in this
+      file). Single attempt, no 403/429 retry: a transient block IS the
+      "not reachable right now" signal this check exists to surface, not
+      something to paper over with the retry a real sync's Invoke-CfRequest
+      performs.
+    #>
+    $uri = 'https://www.curseforge.com/api/v1/mods/1521253/files?pageIndex=0&pageSize=1&sort=dateCreated&sortDescending=true&removeAlphas=true'
+    $headers = @{ 'Accept' = 'application/json'; 'Referer' = 'https://www.curseforge.com/' }
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+    try {
+        $resp = Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent $userAgent -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        if ([int]$resp.StatusCode -eq 200) {
+            return @{ ok = $true; detail = 'Reachable (HTTP 200)' }
+        }
+        return @{ ok = $false; detail = "HTTP $([int]$resp.StatusCode)" }
+    } catch {
+        $statusCode = 0
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
+        if ($statusCode -gt 0) {
+            return @{ ok = $false; detail = "HTTP $statusCode" }
+        }
+        return @{ ok = $false; detail = $_.Exception.Message }
+    }
+}
+
+function Test-DiagDiskSpace {
+    <# Free disk space (GB) on the drive holding the AddOns folder (falls back to -Root's drive if that can't be resolved). Flags red under 1 GB free - not enough headroom for even a small addon download/extract. #>
+    $path = Resolve-EffectiveAddonsPath
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { $path = $Script:Root }
+    try {
+        $driveRoot = [System.IO.Path]::GetPathRoot($path)
+        $info = New-Object System.IO.DriveInfo($driveRoot)
+        $freeGb = [math]::Round($info.AvailableFreeSpace / 1GB, 1)
+        return @{ ok = ($freeGb -ge 1); detail = "$freeGb GB free on $driveRoot" }
+    } catch {
+        return @{ ok = $false; detail = $_.Exception.Message }
+    }
+}
+
+function Test-DiagPowerShellVersion {
+    <# This whole app requires Windows PowerShell 5.1 (SPEC.md's hard constraint) - flags red if somehow running under anything older. #>
+    $v = $PSVersionTable.PSVersion
+    $ok = ($v.Major -gt 5) -or ($v.Major -eq 5 -and $v.Minor -ge 1)
+    return @{ ok = $ok; detail = $v.ToString() }
+}
+
+function Test-DiagServerUptime {
+    param([double]$UptimeSeconds)
+    $detail = $null
+    if ($UptimeSeconds -lt 60) {
+        $detail = "$([math]::Round($UptimeSeconds, 0))s"
+    } elseif ($UptimeSeconds -lt 3600) {
+        $detail = "$([math]::Floor($UptimeSeconds / 60))m"
+    } else {
+        $hours = [math]::Floor($UptimeSeconds / 3600)
+        $mins = [math]::Floor(($UptimeSeconds % 3600) / 60)
+        $detail = "${hours}h ${mins}m"
+    }
+    return @{ ok = $true; detail = $detail }
+}
+
+function Test-DiagLastSync {
+    <#
+      Timestamp of the most recent completed sync, read from last-run.txt's
+      own mtime (written by addon-sync.ps1 on every non-DryRun run, whether
+      launched through this server or the desktop shortcut's -Launcher path)
+      - a more universal signal than $Script:LastRun, which only ever
+      reflects a job run through THIS server instance. Falls back to
+      $Script:LastRun.timestamp (in-memory, or reloaded from state.json at
+      startup) when last-run.txt is not there yet, then to "never".
+    #>
+    $lastRunPath = Join-Path -Path $Script:Root -ChildPath 'last-run.txt'
+    if (Test-Path -LiteralPath $lastRunPath) {
+        try {
+            $mtime = (Get-Item -LiteralPath $lastRunPath).LastWriteTimeUtc
+            return @{ ok = $true; detail = $mtime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        } catch {
+            return @{ ok = $false; detail = $_.Exception.Message }
+        }
+    }
+    if ($Script:LastRun -and $Script:LastRun.timestamp) {
+        return @{ ok = $true; detail = [string]$Script:LastRun.timestamp }
+    }
+    return @{ ok = $true; detail = 'never' }
 }
 
 function Get-QueryOrDefault {
@@ -1297,9 +1931,15 @@ function Handle-JobsPost {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
         return
     }
-    if ($kind -eq 'remove' -and (-not $body.projectId)) {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
-        return
+    if ($kind -eq 'remove') {
+        # E11: bulk uninstall posts projectIds (array); the per-row kebab
+        # menu still posts a single projectId - either satisfies this check.
+        $hasSingle = [bool]$body.projectId
+        $hasMulti = $body.projectIds -and (@($body.projectIds).Count -gt 0)
+        if (-not $hasSingle -and -not $hasMulti) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId or projectIds required' }
+            return
+        }
     }
     if ($kind -eq 'install' -and ((-not $body.projectId) -or (-not $body.fileId))) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId and fileId required' }
@@ -1492,6 +2132,70 @@ function Handle-ScanDelete {
     Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
 }
 
+function Handle-Export {
+    <# E4: GET /api/export - the whole tracked addon list, portable enough to hand to POST /api/import later or on another machine. #>
+    param($Context, $RouteMatch)
+
+    $records = Get-AddonRecords
+    $addonsOut = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($r in $records) {
+        $addonsOut.Add([PSCustomObject]@{
+                projectId     = $r.projectId
+                name          = $r.name
+                pinnedFileId  = $r.pinnedFileId
+                ignoreUpdates = [bool]$r.ignoreUpdates
+                releaseType   = $r.releaseType
+            })
+    }
+    $body = [PSCustomObject]@{
+        format     = 'wow-addon-manager/1'
+        exportedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        addons     = $addonsOut.ToArray()
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body $body -FileName 'addons-export.json'
+}
+
+function Handle-Import {
+    <#
+      E4: POST /api/import - body is the same shape GET /api/export produces
+      (format/exportedAt/addons). Starts job kind 'import' (Start-ImportJob);
+      the format field is validated here so a wrong/foreign file 400s before
+      any job is ever created, per SPEC.
+    #>
+    param($Context, $RouteMatch)
+
+    $body = $null
+    try {
+        $body = Read-Body -Context $Context
+    } catch {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
+        return
+    }
+    if (-not $body) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: empty body' }
+        return
+    }
+    if ([string]$body.format -ne 'wow-addon-manager/1') {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: unsupported format' }
+        return
+    }
+    if ($null -eq $body.addons) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: addons required' }
+        return
+    }
+
+    $result = Start-Job -Kind 'import' -Params $body
+    if ($result.Busy) {
+        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy'; jobId = $result.Job.id }
+        return
+    }
+    if ($result.Error) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $result.Error }
+        return
+    }
+    Send-Json -Context $Context -StatusCode 202 -Body @{ jobId = $result.Job.id }
+}
+
 function Handle-SettingsGet {
     param($Context, $RouteMatch)
 
@@ -1558,28 +2262,47 @@ function Handle-SettingsTestKey {
         $settings = Get-Settings
         $key = $settings.cfApiKey
     }
-    if (-not $key -or $key.Trim().Length -eq 0) {
-        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $false; message = 'No API key provided' }
-        return
+
+    # E10: the actual key-test call (GET /v1/games/1 + status interpretation)
+    # now lives in the shared Test-CfApiKey, also used by Handle-Diagnostics's
+    # "CurseForge API key" check - this handler just supplies the key and
+    # relays the result unchanged (always 200, ok/message in the body, exactly
+    # as before this refactor).
+    Send-Json -Context $Context -StatusCode 200 -Body (Test-CfApiKey -Key $key)
+}
+
+function Handle-Diagnostics {
+    <#
+      E10: GET /api/diagnostics - runs the fixed battery of Test-Diag* checks
+      defined above and returns {checks:[{name,ok,detail}]}. Every check
+      function is self-contained and never throws, so nothing here needs (or
+      gets) a try/catch of its own.
+    #>
+    param($Context, $RouteMatch)
+
+    $checks = New-Object 'System.Collections.Generic.List[object]'
+    $checks.Add((New-DiagCheckRow -Name 'AddOns folder' -Result (Test-DiagAddonsFolder)))
+    $checks.Add((New-DiagCheckRow -Name 'settings.json' -Result (Test-DiagSettingsJson)))
+    $checks.Add((New-DiagCheckRow -Name 'addons.json' -Result (Test-DiagAddonsJson)))
+    $checks.Add((New-DiagCheckRow -Name 'CurseForge reachability' -Result (Test-DiagCfReachability)))
+
+    # "official API key valid (only if key configured)" - an unconfigured key
+    # is not itself a failure, so this reports ok:true with an explanatory
+    # detail rather than being omitted (every /api/diagnostics call always
+    # returns the same fixed set of check names).
+    $settings = Get-Settings
+    if ($settings.cfApiKey -and $settings.cfApiKey.Trim().Length -gt 0) {
+        $checks.Add((New-DiagCheckRow -Name 'CurseForge API key' -Result (Test-CfApiKey -Key $settings.cfApiKey)))
+    } else {
+        $checks.Add((New-DiagCheckRow -Name 'CurseForge API key' -Result @{ ok = $true; detail = 'No API key configured (optional)' }))
     }
 
-    $headers = @{ 'x-api-key' = $key; 'Accept' = 'application/json' }
-    try {
-        $resp = Invoke-WebRequest -Uri 'https://api.curseforge.com/v1/games/1' -Headers $headers -Method Get -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
-        if ([int]$resp.StatusCode -eq 200) {
-            Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; message = 'Key is valid' }
-        } else {
-            Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $false; message = "CurseForge returned status $([int]$resp.StatusCode)" }
-        }
-    } catch {
-        $statusCode = 0
-        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
-        if ($statusCode -eq 401 -or $statusCode -eq 403) {
-            Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $false; message = 'Key rejected by CurseForge' }
-        } else {
-            Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $false; message = $_.Exception.Message }
-        }
-    }
+    $checks.Add((New-DiagCheckRow -Name 'Disk space' -Result (Test-DiagDiskSpace)))
+    $checks.Add((New-DiagCheckRow -Name 'PowerShell version' -Result (Test-DiagPowerShellVersion)))
+    $checks.Add((New-DiagCheckRow -Name 'Server uptime' -Result (Test-DiagServerUptime -UptimeSeconds ((Get-Date) - $Script:StartTime).TotalSeconds)))
+    $checks.Add((New-DiagCheckRow -Name 'Last sync' -Result (Test-DiagLastSync)))
+
+    Send-Json -Context $Context -StatusCode 200 -Body @{ checks = $checks.ToArray() }
 }
 
 function Handle-CfSearch {
@@ -1895,9 +2618,12 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/addons/(?<id>[^/]+)/files$'; Handler = 'Handle-AddonFiles' }
     @{ Method = 'GET'; Pattern = '^/api/scan$'; Handler = 'Handle-ScanGet' }
     @{ Method = 'POST'; Pattern = '^/api/scan/delete$'; Handler = 'Handle-ScanDelete' }
+    @{ Method = 'GET'; Pattern = '^/api/export$'; Handler = 'Handle-Export' }
+    @{ Method = 'POST'; Pattern = '^/api/import$'; Handler = 'Handle-Import' }
     @{ Method = 'GET'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsGet' }
     @{ Method = 'PUT'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsPut' }
     @{ Method = 'POST'; Pattern = '^/api/settings/test-key$'; Handler = 'Handle-SettingsTestKey' }
+    @{ Method = 'GET'; Pattern = '^/api/diagnostics$'; Handler = 'Handle-Diagnostics' }
     @{ Method = 'GET'; Pattern = '^/api/cf/search$'; Handler = 'Handle-CfSearch' }
     @{ Method = 'GET'; Pattern = '^/api/cf/categories$'; Handler = 'Handle-CfCategories' }
     @{ Method = 'POST'; Pattern = '^/api/cf/mods$'; Handler = 'Handle-CfModsPost' }

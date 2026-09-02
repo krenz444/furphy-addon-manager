@@ -136,6 +136,7 @@ const Mock = (function () {
     if (kind === "install") return ["Downloading selected version...", "Installed."];
     if (kind === "launch") return ["Running pre-launch sync...", "Sync complete.", "Launching World of Warcraft..."];
     if (kind === "rollback") return ["Restoring previous version from local backup...", "Rolled back."];
+    if (kind === "import") return ["Adding new addons...", "Applying pinned versions...", "Applying ignore flags...", "Import complete."];
     return ["Working..."];
   }
 
@@ -195,8 +196,19 @@ const Mock = (function () {
         addons.push(rec);
         job.results = [{ status: "Installed", name: name, version: "1.0.0", projectId: pid, fileId: rec.fileId }];
       } else if (kind === "remove") {
-        const idx = addons.findIndex(function (a) { return a.projectId === params.projectId; });
-        if (idx !== -1) { job.results = [{ status: "Removed", name: addons[idx].name, version: addons[idx].version, projectId: params.projectId }]; addons.splice(idx, 1); }
+        // E11: bulk uninstall posts projectIds (array); the single per-row
+        // kebab "Uninstall" still posts a single projectId - normalize both
+        // to one id list so this mirrors the real server's one-job,
+        // one-result-row-per-id behavior either way.
+        const removeIds = (params && params.projectIds && params.projectIds.length) ? params.projectIds : [params.projectId];
+        job.results = [];
+        removeIds.forEach(function (pid) {
+          const idx = addons.findIndex(function (a) { return a.projectId === pid; });
+          if (idx !== -1) {
+            job.results.push({ status: "Removed", name: addons[idx].name, version: addons[idx].version, projectId: pid });
+            addons.splice(idx, 1);
+          }
+        });
       } else if (kind === "install") {
         const a = addons.find(function (x) { return x.projectId === params.projectId; });
         if (a) {
@@ -248,6 +260,28 @@ const Mock = (function () {
         // refreshes $Script:LastRun for every job action except
         // check/files/scan - needed so the Pinned chip's rollback tooltip
         // (driven by Store.lastRunStatusFor) is exercisable under ?mock=1.
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+      } else if (kind === "import") {
+        // E4: mirrors the real server's Build-ImportPlan/Start-ImportJob at a
+        // simplified level - add whatever isn't already present, apply
+        // pinnedFileId/ignoreUpdates to every imported entry (new or not),
+        // one result row per addon either way.
+        const importAddons = (params && params.addons) || [];
+        job.results = [];
+        importAddons.forEach(function (entry) {
+          const existing = addons.find(function (a) { return a.projectId === entry.projectId; });
+          if (!existing) {
+            const name = entry.name || ("Project " + entry.projectId);
+            const fid = entry.pinnedFileId || entry.projectId * 10;
+            const rec = { name: name, projectId: entry.projectId, fileId: fid, version: "1.0.0", fileName: name + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [name], author: "SomeAuthor", ignoreUpdates: !!entry.ignoreUpdates, pinnedFileId: entry.pinnedFileId || null, releaseType: entry.releaseType || null, updateAvailable: null };
+            addons.push(rec);
+            job.results.push({ status: "Installed", name: name, version: "1.0.0", projectId: entry.projectId, fileId: fid });
+          } else {
+            if (entry.pinnedFileId) existing.pinnedFileId = entry.pinnedFileId;
+            if (entry.ignoreUpdates) existing.ignoreUpdates = true;
+            job.results.push({ status: "Skipped", name: existing.name, version: existing.version, projectId: existing.projectId, fileId: existing.fileId });
+          }
+        });
         lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
       }
     }, 420);
@@ -303,11 +337,44 @@ const Mock = (function () {
         }
         return { action: "files", projectId: pid, files: files };
       }
+      // E4
+      if (p === "/api/export" && method === "GET") {
+        return {
+          format: "wow-addon-manager/1",
+          exportedAt: new Date().toISOString(),
+          addons: addons.map(function (a) { return { projectId: a.projectId, name: a.name, pinnedFileId: a.pinnedFileId, ignoreUpdates: a.ignoreUpdates, releaseType: a.releaseType }; })
+        };
+      }
+      if (p === "/api/import" && method === "POST") {
+        if (!body || body.format !== "wow-addon-manager/1" || !Array.isArray(body.addons)) return { __status: 400, error: "bad request: unsupported format" };
+        if (currentJob && currentJob.state === "running") return { __status: 409, error: "busy", jobId: currentJob.id };
+        const job = runJob("import", body);
+        if (!job) return { __status: 409, error: "busy" };
+        return { __status: 202, jobId: job.id };
+      }
       if (p === "/api/scan" && method === "GET") return { action: "scan", untracked: untracked };
       if (p === "/api/scan/delete" && method === "POST") {
         const idx = untracked.findIndex(function (x) { return x.folder === body.folder; });
         if (idx !== -1) untracked.splice(idx, 1);
         return { ok: true };
+      }
+      // E10: fixed, synthetic set of checks - same shape/order as the real
+      // server's Handle-Diagnostics - so the Settings > Diagnostics panel is
+      // exercisable under ?mock=1 without hitting the network at all.
+      if (p === "/api/diagnostics" && method === "GET") {
+        return {
+          checks: [
+            { name: "AddOns folder", ok: true, detail: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns" },
+            { name: "settings.json", ok: true, detail: "valid" },
+            { name: "addons.json", ok: true, detail: addons.length + " records" },
+            { name: "CurseForge reachability", ok: true, detail: "Reachable (HTTP 200)" },
+            { name: "CurseForge API key", ok: true, detail: hasKey ? "Key is valid" : "No API key configured (optional)" },
+            { name: "Disk space", ok: true, detail: "412.6 GB free on C:\\" },
+            { name: "PowerShell version", ok: true, detail: "5.1.19041.4291" },
+            { name: "Server uptime", ok: true, detail: "12m" },
+            { name: "Last sync", ok: true, detail: lastRun ? lastRun.timestamp : "never" }
+          ]
+        };
       }
       if (p === "/api/settings" && method === "GET") return currentSettings();
       if (p === "/api/settings" && method === "PUT") {
@@ -639,9 +706,16 @@ const Api = (function () {
     scan: function () { return request("GET", "/api/scan"); },
     scanDelete: function (folder) { return request("POST", "/api/scan/delete", { folder: folder }); },
 
+    // E4: exportAddons's response IS the file body (format/exportedAt/addons) -
+    // no {kind} wrapper, unlike postJob - and importAddons posts that same
+    // shape straight back to /api/import, which starts job kind "import".
+    exportAddons: function () { return request("GET", "/api/export"); },
+    importAddons: function (payload) { return request("POST", "/api/import", payload); },
+
     getSettings: function () { return request("GET", "/api/settings"); },
     putSettings: function (patch) { return request("PUT", "/api/settings", patch); },
     testKey: function (cfApiKey) { return request("POST", "/api/settings/test-key", cfApiKey === undefined ? {} : { cfApiKey: cfApiKey }); },
+    getDiagnostics: function () { return request("GET", "/api/diagnostics"); },
 
     cfSearch: function (params) { return request("GET", "/api/cf/search" + qs(params)); },
     cfCategories: function () { return request("GET", "/api/cf/categories"); },
@@ -691,6 +765,7 @@ const Store = (function () {
     myaddonsSearch: "",
     myaddonsFilter: "all",   // 'all' | 'updates' | 'pinned' | 'ignored' | 'failed' | 'missingdeps'
     myaddonsSort: loadSortPref(),   // {column: 'name'|'installed'|'latest'|'status'|'updated', dir: 'asc'|'desc'}
+    myaddonsSelection: [],   // E11: array of checked projectIds, driving the checkbox column/selection bar. Not persisted - resets on reload like search/filter.
 
     browse: {
       loaded: false,
@@ -713,6 +788,7 @@ const Store = (function () {
       slug: null,
       tracked: false,        // true when this project has a local addon record
       tab: "overview",
+      lastKnownFileId: null,  // addon.fileId as of the last open()/refresh() - lets refresh() detect an update
       mod: null,              // full CF mod details, once fetched
       modLoading: false,
       modError: null,
@@ -747,8 +823,15 @@ const Store = (function () {
     const p = j.params || {};
     const pid = Number(projectId);
     if (j.kind === "sync") return !p.ids || p.ids.indexOf(pid) !== -1;
+    // E11: a bulk uninstall's remove job carries projectIds (array) instead
+    // of a single projectId - check membership there first; a single-row
+    // remove (still just projectId) falls through to the shared check below.
+    if (j.kind === "remove" && p.projectIds && p.projectIds.length) return p.projectIds.map(Number).indexOf(pid) !== -1;
     if (j.kind === "install" || j.kind === "remove" || j.kind === "add" || j.kind === "rollback") return Number(p.projectId) === pid;
     if (j.kind === "launch") return true; // a launch job runs a full sync first
+    // E4: an import job's params carry the whole imported addons[] list -
+    // "Installing..." only lights up rows actually named in that file.
+    if (j.kind === "import") return (p.addons || []).some(function (a) { return Number(a.projectId) === pid; });
     return false;
   }
 
@@ -772,7 +855,48 @@ const Store = (function () {
   function cacheMods(list) { (list || []).forEach(function (m) { if (m && m.id) modCache[m.id] = m; }); }
   function getCachedMod(id) { return modCache[Number(id)] || null; }
 
-  return { state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod };
+  // E11: My Addons bulk selection. A plain array of projectIds rather than a
+  // Set so it round-trips cleanly through the JSON.stringify comparisons
+  // elsewhere in this module (unused here, but keeps the type consistent
+  // with every other piece of array-shaped state in Store).
+  function isSelected(projectId) { return state.myaddonsSelection.indexOf(Number(projectId)) !== -1; }
+  function toggleSelected(projectId) {
+    const pid = Number(projectId);
+    const idx = state.myaddonsSelection.indexOf(pid);
+    if (idx === -1) state.myaddonsSelection.push(pid); else state.myaddonsSelection.splice(idx, 1);
+  }
+  function selectIds(ids) {
+    (ids || []).forEach(function (id) {
+      const pid = Number(id);
+      if (state.myaddonsSelection.indexOf(pid) === -1) state.myaddonsSelection.push(pid);
+    });
+  }
+  function deselectIds(ids) {
+    const drop = {};
+    (ids || []).forEach(function (id) { drop[Number(id)] = true; });
+    state.myaddonsSelection = state.myaddonsSelection.filter(function (id) { return !drop[id]; });
+  }
+  function clearSelection() { state.myaddonsSelection = []; }
+  function selectedAddons() {
+    const want = {};
+    state.myaddonsSelection.forEach(function (id) { want[id] = true; });
+    return state.addons.filter(function (a) { return want[a.projectId]; });
+  }
+  // Drops any selected id that no longer names a tracked addon (removed by
+  // this or another job) - called from Views.myAddons.render() so a stale id
+  // never inflates the selection-bar count or reaches a bulk action.
+  function pruneSelection() {
+    if (!state.myaddonsSelection.length) return;
+    const present = {};
+    state.addons.forEach(function (a) { present[a.projectId] = true; });
+    const pruned = state.myaddonsSelection.filter(function (id) { return present[id]; });
+    if (pruned.length !== state.myaddonsSelection.length) state.myaddonsSelection = pruned;
+  }
+
+  return {
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
+    isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection
+  };
 })();
 
 /* ==========================================================================
@@ -1090,6 +1214,7 @@ Components.Drawer = (function () {
       drawer: {
         open: true, projectId: Number(pid), slug: opts.slug || null, tracked: !!addon,
         tab: opts.tab || "overview",
+        lastKnownFileId: addon ? addon.fileId : null,
         mod: Store.getCachedMod(pid), modLoading: false, modError: null,
         files: null, filesLoading: false, filesError: null,
         // E5: opts.changelogFileId lets a caller (Actions.whatChanged) pin the
@@ -1136,11 +1261,35 @@ Components.Drawer = (function () {
   function refresh() {
     if (!isOpen()) return;
     renderHeader();
-    const tab = Store.state.drawer.tab;
+    const d = Store.state.drawer;
+
+    // Round 4 fix: a job that updates/installs/rolls back this addon changes
+    // addon.fileId, but the cached Versions file list (d.files) and the
+    // Changelog tab's selected file (d.changelogFileId) were fetched against
+    // the OLD fileId - Versions would keep showing no "Installed" tag on the
+    // now-current file, and Changelog would keep defaulting to the file that
+    // was current before the job ran. Detect the move and drop those caches
+    // so the next render of either tab fetches fresh data. Guarded so this
+    // only fires once per actual fileId change, not on every routine
+    // 5s/800ms poll that leaves the addon untouched.
+    if (d.tracked) {
+      const addon = Store.addonByProjectId(d.projectId);
+      const currentFileId = addon ? addon.fileId : null;
+      if (currentFileId !== d.lastKnownFileId) {
+        d.lastKnownFileId = currentFileId;
+        d.files = null; d.filesLoading = false; d.filesError = null;
+        d.changelogFileId = null; d.changelogHtml = null;
+      }
+    }
+
+    const tab = d.tab;
     if (tab === "versions") renderVersions();
+    else if (tab === "changelog") renderChangelog();
     // The description itself doesn't change from job state, so it's left
     // as-is; the E3 dependency list's installed/missing status can, so that
-    // one part of the Overview panel is refreshed in place.
+    // one part of the Overview panel is refreshed in place. Screenshots
+    // aren't per-file (CurseForge mod screenshots aren't keyed to a fileId),
+    // so there's nothing there to invalidate on a version change.
     else if (tab === "overview") refreshDependenciesInPlace();
   }
 
@@ -1177,7 +1326,9 @@ Components.Drawer = (function () {
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
     const mod = d.mod;
     const name = mod ? mod.name : (addon ? addon.name : ("Project " + d.projectId));
-    const author = (mod && mod.authors && mod.authors[0] && mod.authors[0].name) || (addon ? addon.author : null);
+    // Round 4 fix: list every author CurseForge returns ("by A, B"), not just
+    // the first - mod.authors is commonly more than one name.
+    const author = (mod && mod.authors && mod.authors.length ? mod.authors.map(function (a) { return a.name; }).join(", ") : null) || (addon ? addon.author : null);
     const logoUrl = mod && mod.logo ? (mod.logo.thumbnailUrl || mod.logo.url) : null;
 
     const children = [
@@ -1191,10 +1342,16 @@ Components.Drawer = (function () {
     ];
 
     if (mod) {
-      children.push(Utils.el("div", { class: "drawer-meta" }, [
+      const meta = [
         Utils.el("span", {}, [Utils.formatNumber(mod.downloadCount) + " downloads"]),
         mod.dateModified ? Utils.el("span", { title: Utils.fullDate(mod.dateModified) }, ["updated " + Utils.relativeTime(mod.dateModified)]) : null
-      ]));
+      ];
+      // Round 4 fix: a lightweight "Popular" badge computed from data already
+      // in the CF mod response (no featured/popularity flag exists in the
+      // documented mod shape, so this uses a download-count threshold instead
+      // of fabricating one) - flagged in the SPEC section 3 stats-display ask.
+      if (mod.downloadCount >= 1000000) meta.push(Components.Chip.build("Popular", "chip-warning"));
+      children.push(Utils.el("div", { class: "drawer-meta" }, meta));
       if (mod.categories && mod.categories.length) {
         children.push(Utils.el("div", { class: "drawer-cats" }, mod.categories.map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.name]); })));
       }
@@ -1460,7 +1617,7 @@ Components.JobPanel = (function () {
   function titleFor(job) {
     if (Store.state.jobLabel) return Store.state.jobLabel;
     if (!job) return "Working…";
-    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version" };
+    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Importing addon list" };
     return map[job.kind] || "Working…";
   }
 
@@ -1603,27 +1760,119 @@ const Actions = (function () {
 
   function forceReinstallAll() { return startJob("sync", { force: true }, "Force reinstalling all addons"); }
 
+  // Round 4 fix: reverse-dependency check before uninstalling. requiredDeps
+  // (E3) names another package's declared dependency by ITS folder name(s),
+  // not its display name, so matching has to go through addon.folders -
+  // exactly the same data Get-PackageDependencies/Get-MissingDeps already
+  // key on server-side. Purely client-side (no new endpoint): every tracked
+  // addon's requiredDeps already reaches the UI via /api/state.
+  function findDependents(addon) {
+    if (!addon) return [];
+    const targetFolders = (addon.folders || []).map(function (f) { return String(f).toLowerCase(); });
+    if (!targetFolders.length) return [];
+    return Store.state.addons.filter(function (other) {
+      if (other.projectId === addon.projectId) return false;
+      const req = other.requiredDeps || [];
+      return req.some(function (dep) { return targetFolders.indexOf(String(dep).toLowerCase()) !== -1; });
+    });
+  }
+
   async function uninstall(projectId) {
     const addon = Store.addonByProjectId(projectId);
     const name = addon ? addon.name : ("project " + projectId);
+    let message = "This removes its folders from AddOns and stops tracking it. This can't be undone from here.";
+    const dependents = findDependents(addon);
+    if (dependents.length) {
+      message += " " + (dependents.length === 1 ? "1 installed addon depends" : dependents.length + " installed addons depend") +
+        " on it and may break: " + dependents.map(function (d) { return d.name; }).join(", ") + ".";
+    }
     const ok = await Components.Dialogs.confirm({
       title: "Uninstall " + name + "?",
-      message: "This removes its folders from AddOns and stops tracking it. This can't be undone from here.",
+      message: message,
       confirmLabel: "Uninstall"
     });
     if (!ok) return;
     return startJob("remove", { projectId: Number(projectId) }, "Removing " + name);
   }
 
-  function installVersion(projectId, fileId) {
-    const addon = Store.addonByProjectId(projectId);
-    return startJob("install", { projectId: Number(projectId), fileId: fileId }, "Installing " + (addon ? addon.name : "addon"));
+  // E11: bulk actions from the My Addons selection bar/checkbox column.
+
+  // "Update selected" - one sync job covering exactly the checked ids
+  // (same job kind Update all/Update now already use, just with a bigger
+  // ids array), so it goes through the identical progress-panel/results path.
+  async function updateSelected() {
+    const ids = Store.state.myaddonsSelection.slice();
+    if (!ids.length) return;
+    const label = "Updating " + ids.length + " addon" + (ids.length === 1 ? "" : "s");
+    const started = await startJob("sync", { ids: ids }, label);
+    if (started) Store.clearSelection();
+    return started;
   }
 
+  // "Uninstall selected" - one remove job covering every checked id
+  // (server comma-joins them into a single -Remove invocation), guarded by
+  // the same confirm-dialog pattern as the single-addon Uninstall above,
+  // listing every name being removed per the roadmap's "confirm listing
+  // names" requirement.
+  async function uninstallSelected() {
+    const selected = Store.selectedAddons();
+    if (!selected.length) return;
+    const names = selected.map(function (a) { return a.name; });
+    const ok = await Components.Dialogs.confirm({
+      title: "Uninstall " + selected.length + " addon" + (selected.length === 1 ? "" : "s") + "?",
+      message: "This removes their folders from AddOns and stops tracking them. This can't be undone from here. Addons: " + names.join(", ") + ".",
+      confirmLabel: "Uninstall"
+    });
+    if (!ok) return;
+    const ids = selected.map(function (a) { return Number(a.projectId); });
+    const label = "Removing " + ids.length + " addon" + (ids.length === 1 ? "" : "s");
+    const started = await startJob("remove", { projectIds: ids }, label);
+    if (started) Store.clearSelection();
+    return started;
+  }
+
+  // "Ignore selected" / "Stop ignoring" - a sequence of the same fast
+  // POST .../ignore call the single-addon kebab entry (toggleIgnore) already
+  // uses, not a job (per the roadmap: "ignore -> sequential ignore calls").
+  // Direction: if every checked addon is already ignored, the button reads
+  // "Stop ignoring" and this un-ignores all of them; otherwise it ignores
+  // all of them (re-ignoring an already-ignored one in a mixed selection is
+  // a harmless no-op).
+  async function ignoreSelected() {
+    const selected = Store.selectedAddons();
+    if (!selected.length) return;
+    const ignore = !selected.every(function (a) { return a.ignoreUpdates; });
+    let failCount = 0;
+    for (let i = 0; i < selected.length; i++) {
+      try {
+        const res = await Api.setIgnore(selected[i].projectId, ignore);
+        Store.state.addons = res.addons;
+      } catch (err) {
+        failCount++;
+      }
+    }
+    Store.clearSelection();
+    App.renderCurrentView();
+    const n = selected.length;
+    if (failCount) {
+      Components.Toast.show("Couldn't update " + failCount + " of " + n + " addon" + (n === 1 ? "" : "s") + ".", "error");
+    } else {
+      Components.Toast.show((ignore ? "Updates ignored for " : "Updates re-enabled for ") + n + " addon" + (n === 1 ? "" : "s") + ".", "success");
+    }
+  }
+
+  function installVersion(projectId, fileId, label) {
+    const addon = Store.addonByProjectId(projectId);
+    return startJob("install", { projectId: Number(projectId), fileId: fileId }, label || ("Installing " + (addon ? addon.name : "addon")));
+  }
+
+  // Round 4 fix: pinning the currently-installed file is a config change, not
+  // a reinstall-in-progress, so its job panel title says "Pinning ..." rather
+  // than reusing installVersion's default "Installing ..." label.
   function pinCurrent(projectId) {
     const addon = Store.addonByProjectId(projectId);
     if (!addon) return;
-    return installVersion(projectId, addon.fileId);
+    return installVersion(projectId, addon.fileId, "Pinning " + addon.name);
   }
 
   // E1: reinstalls the addon from its locally archived previous-version zip
@@ -1804,6 +2053,28 @@ const Actions = (function () {
     }
   }
 
+  // E4: posts an imported addons-export.json body to /api/import (job kind
+  // "import"), started/tracked the same way startJob() does for every other
+  // kind - just via Api.importAddons (a bare POST of `payload` itself, not
+  // Api.postJob's {kind, ...} wrapper), since /api/import's body IS the
+  // export shape, not a {kind} envelope. Views.settings shows the
+  // added/already-present preview and gets user confirmation before this
+  // is ever called.
+  async function importAddons(payload) {
+    if (Store.isBusy()) { Components.Toast.show("Another task is running.", "warning"); return false; }
+    Store.state.jobLabel = "Importing addon list";
+    try {
+      const res = await Api.importAddons(payload);
+      Store.state.job = { id: res.jobId, kind: "import", params: payload, state: "running", startedAt: new Date().toISOString(), finishedAt: null, exitCode: null, log: [], results: [], error: null };
+      App.onJobStarted(res.jobId);
+      return true;
+    } catch (err) {
+      if (err.status === 409) Components.Toast.show("Another task is already running.", "warning");
+      else Components.Toast.show("Couldn't start the import: " + describeError(err), "error");
+      return false;
+    }
+  }
+
   return {
     startJob: startJob, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
@@ -1811,7 +2082,8 @@ const Actions = (function () {
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adopt: adopt, saveSettings: saveSettings, testKey: testKey,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, submitAddInput: submitAddInput,
-    whatChanged: whatChanged, showLastRunDetails: showLastRunDetails
+    whatChanged: whatChanged, showLastRunDetails: showLastRunDetails, importAddons: importAddons,
+    updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected
   };
 })();
 
@@ -1890,6 +2162,24 @@ Views.myAddons = (function () {
     return 5;
   }
 
+  // Round 4 fix: WoW addon titles commonly carry bracket/symbol decoration
+  // ("<Camera> Max Distance", "[Bracket] AddonName") that sorts ahead of
+  // plain alphabetic names under a plain (or even ignorePunctuation) locale
+  // compare - Unicode collation still weighs a leading "<"/"[" before a
+  // letter, so "<Camera>..." lands ahead of "BonusRollConfirm" even though a
+  // user scanning an alphabetical list expects it among the C's. Stripping
+  // leading non-alphanumeric characters before comparing matches that
+  // expectation; an all-symbol name falls back to comparing the raw string.
+  function sortableName(name) {
+    const n = name || "";
+    const stripped = n.replace(/^[^a-z0-9]+/i, "");
+    return stripped || n;
+  }
+
+  function compareNames(a, b) {
+    return sortableName(a).localeCompare(sortableName(b), undefined, { numeric: true, sensitivity: "base" });
+  }
+
   // One comparator per sortable column (Addon/Installed/Latest/Status/Updated
   // headers); the click handler in bindOnce() flips `dir` to invert whichever
   // one this returns.
@@ -1900,9 +2190,9 @@ Views.myAddons = (function () {
       const bv = b.updateAvailable ? b.updateAvailable.version : "";
       return av.localeCompare(bv);
     }
-    if (column === "status") return statusRank(a) - statusRank(b) || a.name.localeCompare(b.name);
+    if (column === "status") return statusRank(a) - statusRank(b) || compareNames(a.name, b.name);
     if (column === "updated") return new Date(a.installedAt || 0) - new Date(b.installedAt || 0);
-    return a.name.localeCompare(b.name); // "name"
+    return compareNames(a.name, b.name); // "name"
   }
 
   function renderSortIndicators() {
@@ -1953,26 +2243,60 @@ Views.myAddons = (function () {
     Utils.qs("#myaddons-lastrun-text").textContent = "Last run: " + (lastRun.summary || "done") + " · " + Utils.relativeTime(lastRun.timestamp);
   }
 
+  // E11: hides the selection bar and, when a list is given, syncs the header
+  // "select all" checkbox's checked/indeterminate state to it. Called with no
+  // argument from every early-return branch below where the table itself is
+  // hidden (loading/error/no-addons-at-all/filtered-to-zero) - the bar has
+  // nothing to attach to in those states, mirroring how .filter-chips is
+  // hidden in the same branches.
+  function renderSelectionBar(list) {
+    const bar = Utils.qs("#myaddons-selection-bar");
+    const selectAll = Utils.qs("#myaddons-select-all");
+    if (!list) {
+      bar.hidden = true;
+      if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+      return;
+    }
+    const selectedCount = list.filter(function (a) { return Store.isSelected(a.projectId); }).length;
+    if (selectAll) {
+      selectAll.checked = list.length > 0 && selectedCount === list.length;
+      selectAll.indeterminate = selectedCount > 0 && selectedCount < list.length;
+    }
+    const selected = Store.selectedAddons();
+    if (!selected.length) { bar.hidden = true; return; }
+    bar.hidden = false;
+    Utils.qs("#myaddons-selection-count").textContent = selected.length + " selected";
+    Utils.qs("#myaddons-bulk-ignore").textContent = selected.every(function (a) { return a.ignoreUpdates; }) ? "Stop ignoring" : "Ignore selected";
+  }
+
   function render() {
+    // E11: drop any selected id that no longer names a tracked addon before
+    // anything below reads the selection (e.g. a job started elsewhere just
+    // removed it) - keeps the selection-bar count and every bulk action
+    // honest even when the row that changed wasn't part of this selection.
+    Store.pruneSelection();
     renderLastRun();
 
     const table = Utils.qs("#myaddons-table");
     const tbody = Utils.qs("#myaddons-tbody");
     const skeleton = Utils.qs("#myaddons-skeleton");
     const empty = Utils.qs("#myaddons-empty");
+    const emptyFiltered = Utils.qs("#myaddons-empty-filtered");
     const errorBox = Utils.qs("#myaddons-error");
     const summary = Utils.qs("#myaddons-summary");
     const filters = Utils.qs("#myaddons-filters");
 
     if (Store.state.loadingState) {
-      table.hidden = true; empty.hidden = true; errorBox.hidden = true; skeleton.hidden = false; filters.hidden = true;
+      table.hidden = true; empty.hidden = true; emptyFiltered.hidden = true; errorBox.hidden = true; skeleton.hidden = false; filters.hidden = true;
+      renderSelectionBar(null);
       summary.textContent = "";
       return;
     }
     skeleton.hidden = true;
 
     if (Store.state.stateError) {
-      table.hidden = true; empty.hidden = true; summary.textContent = ""; filters.hidden = true;
+      table.hidden = true; empty.hidden = true; emptyFiltered.hidden = true; summary.textContent = ""; filters.hidden = true;
+      renderSelectionBar(null);
       errorBox.hidden = false;
       Utils.qs("#myaddons-error-msg").textContent = describeError(Store.state.stateError);
       return;
@@ -1980,7 +2304,8 @@ Views.myAddons = (function () {
     errorBox.hidden = true;
 
     if (!Store.state.addons.length) {
-      table.hidden = true; empty.hidden = false; summary.textContent = ""; filters.hidden = true;
+      table.hidden = true; empty.hidden = false; emptyFiltered.hidden = true; summary.textContent = ""; filters.hidden = true;
+      renderSelectionBar(null);
       return;
     }
     empty.hidden = true;
@@ -1989,10 +2314,27 @@ Views.myAddons = (function () {
     renderFilters();
 
     const list = filteredSorted();
+
+    // Round 4 fix: a status chip or search narrowing the list to zero rows
+    // used to leave a bare table (just the column headers) with nothing
+    // explaining why - distinct from the "no addons tracked at all" state
+    // above, which never applies once at least one addon exists.
+    if (!list.length) {
+      table.hidden = true;
+      tbody.textContent = "";
+      emptyFiltered.hidden = false;
+      renderSelectionBar(null);
+      const total = Store.state.addons.length;
+      summary.textContent = "0 of " + total + (total === 1 ? " addon" : " addons");
+      return;
+    }
+    emptyFiltered.hidden = true;
+
     table.hidden = false;
     tbody.textContent = "";
     list.forEach(function (a) { tbody.appendChild(row(a)); });
     renderSortIndicators();
+    renderSelectionBar(list);
 
     const total = Store.state.addons.length;
     const updates = Store.updatesCount();
@@ -2009,6 +2351,12 @@ Views.myAddons = (function () {
   function row(a) {
     const logo = Components.Logo.build({ projectId: a.projectId, name: a.name }, 40);
     const tr = Utils.el("tr", { class: "addon-row" }, [
+      Utils.el("td", { class: "checkbox-cell" }, [
+        Utils.el("input", {
+          type: "checkbox", class: "chk", checked: Store.isSelected(a.projectId), "aria-label": "Select " + a.name,
+          onchange: function () { Store.toggleSelected(a.projectId); render(); }
+        })
+      ]),
       Utils.el("td", {}, [Utils.el("div", { class: "addon-identity" }, [
         logo,
         Utils.el("div", { class: "addon-names" }, [
@@ -2018,12 +2366,21 @@ Views.myAddons = (function () {
       ])]),
       Utils.el("td", {}, [Utils.el("span", { class: "version-text" }, [a.version || "-"])]),
       Utils.el("td", {}, [Utils.el("span", { class: "version-text" + (a.updateAvailable ? "" : " is-empty") }, [a.updateAvailable ? a.updateAvailable.version : "-"])]),
-      Utils.el("td", {}, [Utils.el("div", { class: "status-cell" }, [Components.Chip.forAddon(a), missingDepsChip(a)])]),
+      Utils.el("td", {}, [Utils.el("div", { class: "status-cell" }, [
+        Components.Chip.forAddon(a),
+        missingDepsChip(a),
+        // Round 4 fix: the Updated <th>/<td> is dropped entirely below 1100px
+        // (see the media query in style.css) with nothing telling the reader
+        // it went away. This mirrors that same relative-time text into the
+        // status cell, hidden by default and shown only at the widths where
+        // the real column is hidden, so the information isn't simply lost.
+        Utils.el("span", { class: "updated-fallback", title: Utils.fullDate(a.installedAt) }, ["Updated " + Utils.relativeTime(a.installedAt)])
+      ])]),
       Utils.el("td", { class: "updated-cell", title: Utils.fullDate(a.installedAt) }, [Utils.relativeTime(a.installedAt)]),
       Utils.el("td", {}, [kebab(a)])
     ]);
     tr.addEventListener("click", function (ev) {
-      if (ev.target.closest(".menu-wrap")) return;
+      if (ev.target.closest(".menu-wrap") || ev.target.closest(".checkbox-cell")) return;
       Components.Drawer.open(a.projectId, { tab: "overview" });
     });
     return tr;
@@ -2060,9 +2417,14 @@ Views.myAddons = (function () {
       items.push({ label: "Roll back to " + (a.previousVersion || "previous version"), icon: "history", disabled: busy, onSelect: function () { Actions.rollback(a.projectId); } });
     }
     items.push(
+      // Round 4 fix: reuses the existing eye-off sprite icon (already defined
+      // for the Settings API-key show/hide toggle) so this is the only kebab
+      // item that isn't the sole entry with no leading icon - without one, its
+      // label sat flush-left while every sibling item's label is indented past
+      // an icon column, breaking the menu's alignment.
       a.ignoreUpdates
-        ? { label: "Stop ignoring", onSelect: function () { Actions.toggleIgnore(a.projectId, false); } }
-        : { label: "Ignore updates", onSelect: function () { Actions.toggleIgnore(a.projectId, true); } },
+        ? { label: "Stop ignoring", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(a.projectId, false); } }
+        : { label: "Ignore updates", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(a.projectId, true); } },
       { label: "Open on CurseForge", icon: "external", onSelect: function () { Actions.openOnCurseForge(a.projectId); } },
       null,
       { label: "Uninstall", icon: "trash", danger: true, disabled: busy, onSelect: function () { Actions.uninstall(a.projectId); } }
@@ -2088,8 +2450,27 @@ Views.myAddons = (function () {
     Utils.qs("#btn-update-all").addEventListener("click", function () { Actions.updateAll(); });
     Utils.qs("#btn-add-addon").addEventListener("click", function () { Components.Dialogs.openAdd(); });
     Utils.qs("#myaddons-empty-add").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+    Utils.qs("#myaddons-clear-filters").addEventListener("click", function () {
+      Store.state.myaddonsSearch = "";
+      Store.state.myaddonsFilter = "all";
+      Utils.qs("#myaddons-search").value = "";
+      render();
+    });
     Utils.qs("#myaddons-retry").addEventListener("click", function () { App.reloadState(false); });
     Utils.qs("#myaddons-lastrun-details").addEventListener("click", function () { Actions.showLastRunDetails(); });
+
+    // E11: header checkbox toggles every currently visible/filtered row -
+    // not the full underlying selection, so a search or status filter never
+    // silently sweeps up rows the user can't see.
+    Utils.qs("#myaddons-select-all").addEventListener("change", function (ev) {
+      const visibleIds = filteredSorted().map(function (a) { return a.projectId; });
+      if (ev.target.checked) Store.selectIds(visibleIds); else Store.deselectIds(visibleIds);
+      render();
+    });
+    Utils.qs("#myaddons-clear-selection").addEventListener("click", function () { Store.clearSelection(); render(); });
+    Utils.qs("#myaddons-bulk-update").addEventListener("click", function () { Actions.updateSelected(); });
+    Utils.qs("#myaddons-bulk-ignore").addEventListener("click", function () { Actions.ignoreSelected(); });
+    Utils.qs("#myaddons-bulk-uninstall").addEventListener("click", function () { Actions.uninstallSelected(); });
   }
 
   return { render: render, bindOnce: bindOnce };
@@ -2248,6 +2629,12 @@ Views.settings = (function () {
   let untrackedLoading = false;
   let untrackedError = null;
   let apikeyVisible = false;
+  // E10: Diagnostics panel state - null diagChecks means "never run yet"
+  // (distinct from an empty array, which /api/diagnostics never actually
+  // returns, but is handled the same as "never run" either way).
+  let diagLoading = false;
+  let diagError = null;
+  let diagChecks = null;
 
   function render() {
     const s = Store.state.settings;
@@ -2270,6 +2657,7 @@ Views.settings = (function () {
 
     renderAppearance();
     renderUntracked();
+    renderDiagnostics();
     const busy = Store.isBusy();
     const reinstall = Utils.qs("#btn-force-reinstall");
     reinstall.disabled = busy;
@@ -2340,6 +2728,65 @@ Views.settings = (function () {
     }
   }
 
+  // E10: Settings > Diagnostics. A plain fetch-and-render, not a job - there
+  // is no CLI process or addons.json write behind /api/diagnostics, so it
+  // doesn't go through Actions.startJob's job-panel/polling machinery, the
+  // same way Untracked folders' Scan (above) doesn't either.
+  function renderDiagnostics() {
+    const box = Utils.qs("#diagnostics-list");
+    const copyBtn = Utils.qs("#btn-copy-diagnostics");
+    const runBtn = Utils.qs("#btn-run-diagnostics");
+    runBtn.disabled = diagLoading;
+    box.textContent = "";
+    if (diagLoading) {
+      box.appendChild(Utils.el("div", { class: "skeleton-row" }));
+      copyBtn.hidden = true;
+      return;
+    }
+    if (diagError) {
+      box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't run diagnostics: " + describeError(diagError)]));
+      copyBtn.hidden = true;
+      return;
+    }
+    if (!diagChecks) {
+      box.appendChild(Utils.el("p", { class: "muted-text" }, ["Click Run to check the AddOns folder, config files, CurseForge reachability, and disk space."]));
+      copyBtn.hidden = true;
+      return;
+    }
+    diagChecks.forEach(function (c) { box.appendChild(diagRow(c)); });
+    copyBtn.hidden = diagChecks.length === 0;
+  }
+
+  function diagRow(c) {
+    return Utils.el("div", { class: "diag-row" }, [
+      Utils.el("span", { class: "diag-dot " + (c.ok ? "is-ok" : "is-fail") }),
+      Utils.el("span", { class: "diag-name" }, [c.name]),
+      Utils.el("span", { class: "diag-detail" }, [c.detail || ""])
+    ]);
+  }
+
+  // Plain text for the "Copy report" button - one line per check, no markup,
+  // so it pastes cleanly into a bug report or a chat message.
+  function diagnosticsReportText() {
+    if (!diagChecks) return "";
+    const lines = ["WoW Addon Manager diagnostics - " + new Date().toLocaleString()];
+    diagChecks.forEach(function (c) { lines.push((c.ok ? "[OK]   " : "[FAIL] ") + c.name + ": " + (c.detail || "")); });
+    return lines.join("\n");
+  }
+
+  async function runDiagnostics() {
+    diagLoading = true; diagError = null; renderDiagnostics();
+    try {
+      const res = await Api.getDiagnostics();
+      diagChecks = res.checks || [];
+    } catch (err) {
+      diagError = err;
+    } finally {
+      diagLoading = false;
+      renderDiagnostics();
+    }
+  }
+
   function bindOnce() {
     ["1", "2", "3"].forEach(function (v) {
       Utils.qs("#radio-release-" + v).addEventListener("change", function () { Actions.saveSettings({ releaseType: Number(v) }); });
@@ -2371,6 +2818,16 @@ Views.settings = (function () {
       Actions.saveSettings({ cfApiKey: raw }).then(function () { input.value = ""; apikeyVisible = false; input.type = "password"; }).catch(function () { /* error already toasted by saveSettings; keep the typed key in the field so the user can retry */ });
     });
 
+    // Round 4 fix: a Test result describing the previously-typed key must not
+    // linger once the user starts editing it again - it would go on describing
+    // a value the field no longer holds.
+    Utils.qs("#input-apikey").addEventListener("input", function () {
+      const msg = Utils.qs("#apikey-test-result");
+      msg.hidden = true;
+      msg.className = "form-msg";
+      msg.textContent = "";
+    });
+
     Utils.qs("#btn-test-apikey").addEventListener("click", async function () {
       const input = Utils.qs("#input-apikey");
       const raw = input.value;
@@ -2393,6 +2850,67 @@ Views.settings = (function () {
     Utils.qs("#btn-open-serverlog").addEventListener("click", function () { Actions.openWhat("log"); });
     Utils.qs("#btn-open-backups").addEventListener("click", function () { Actions.openWhat("backups"); });
 
+    // E4: Export downloads a Blob built from the parsed /api/export response
+    // (rather than a plain `<a href="/api/export" download>`) so it works
+    // identically under ?mock=1, where there's no real URL to link to at
+    // all - every other action in this file already goes through Api the
+    // same way. Import reads the chosen file, validates its format/shape
+    // client-side up front (Handle-Import repeats this server-side, so a
+    // malformed or foreign file never starts a job either way), shows the
+    // "how many will be added / already present" preview via the existing
+    // generic confirm dialog, then starts the import job on confirm.
+    Utils.qs("#btn-export").addEventListener("click", async function () {
+      try {
+        const data = await Api.exportAddons();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "addons-export.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        Components.Toast.show("Exported " + ((data.addons && data.addons.length) || 0) + " addon(s).", "success");
+      } catch (err) {
+        Components.Toast.show("Couldn't export: " + describeError(err), "error");
+      }
+    });
+
+    Utils.qs("#btn-import").addEventListener("click", function () {
+      const input = Utils.qs("#import-file-input");
+      input.value = ""; // clears any previous selection so re-picking the same file still fires "change"
+      input.click();
+    });
+    Utils.qs("#import-file-input").addEventListener("change", async function (ev) {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      const msg = Utils.qs("#backup-msg");
+      msg.hidden = true;
+      let data;
+      try {
+        data = JSON.parse(await file.text());
+      } catch (err) {
+        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "Couldn't read that file: not valid JSON.";
+        return;
+      }
+      if (!data || data.format !== "wow-addon-manager/1" || !Array.isArray(data.addons)) {
+        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a WoW Addon Manager export.";
+        return;
+      }
+      const existingIds = new Set(Store.state.addons.map(function (a) { return a.projectId; }));
+      const toAdd = data.addons.filter(function (a) { return a && !existingIds.has(Number(a.projectId)); }).length;
+      const present = data.addons.length - toAdd;
+      const ok = await Components.Dialogs.confirm({
+        title: "Import addon list?",
+        message: data.addons.length + " addon(s) in the file — " + toAdd + " will be added, " + present + " already present.",
+        confirmLabel: "Import",
+        danger: false
+      });
+      if (!ok) return;
+      await Actions.importAddons(data);
+    });
+
     Utils.qs("#btn-scan").addEventListener("click", function () { rescan(); });
 
     Utils.qs("#btn-force-reinstall").addEventListener("click", async function () {
@@ -2402,6 +2920,34 @@ Views.settings = (function () {
         confirmLabel: "Force reinstall"
       });
       if (ok) Actions.forceReinstallAll();
+    });
+
+    Utils.qs("#btn-run-diagnostics").addEventListener("click", function () { runDiagnostics(); });
+    Utils.qs("#btn-copy-diagnostics").addEventListener("click", async function () {
+      const text = diagnosticsReportText();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        Components.Toast.show("Diagnostics report copied.", "success");
+      } catch (err) {
+        // Fallback for a context where the async Clipboard API rejects (e.g.
+        // clipboard-write permission denied) - a hidden textarea + the older
+        // execCommand path still works there.
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+          Components.Toast.show("Diagnostics report copied.", "success");
+        } catch (err2) {
+          Components.Toast.show("Couldn't copy to clipboard.", "error");
+        }
+      }
     });
   }
 
@@ -2480,7 +3026,13 @@ const App = (function () {
 
   function applyBusyToStaticButtons() {
     const busy = Store.isBusy();
-    ["btn-update-play", "btn-launch-wow", "btn-check-updates", "btn-add-addon", "myaddons-empty-add"].forEach(function (id) {
+    // E11: "Update selected"/"Uninstall selected" each start a job (sync/
+    // remove), same as Update now/Uninstall on the per-row kebab menu, which
+    // already disable during a running job - these two get the same
+    // treatment. "Ignore selected" does NOT start a job (sequential fast
+    // POST .../ignore calls), matching the per-row kebab's "Ignore updates"/
+    // "Stop ignoring" entry, which has never been busy-gated either.
+    ["btn-update-play", "btn-launch-wow", "btn-check-updates", "btn-add-addon", "myaddons-empty-add", "myaddons-bulk-update", "myaddons-bulk-uninstall"].forEach(function (id) {
       const btn = document.getElementById(id);
       if (!btn) return;
       btn.disabled = busy;
@@ -2519,13 +3071,36 @@ const App = (function () {
     try {
       const data = await Api.getState();
       markOnline(null);
+      const nextAddons = data.addons || [];
+      const nextSettings = data.settings || Store.state.settings;
+      const nextLastRun = data.lastRun || null;
+      const nextJob = data.job || (afterJob ? null : Store.state.job);
+      const nextCheckedAt = data.updatesCheckedAt || null;
+
+      // Round 4 fix: the idle poll (every 5s, see scheduleIdlePoll below) used
+      // to call renderCurrentView() unconditionally on every tick, even when
+      // the fetched state was identical to what's already on screen. My
+      // Addons' render() clears and rebuilds its whole tbody, Browse/Settings
+      // similarly repaint - doing that every 5s can tear a DOM node (an open
+      // kebab menu, a mid-click drawer tab) out from under a click that
+      // landed in the same instant. Skip the repaint when nothing changed;
+      // markOnline() above already refreshes the "checked ... ago" status
+      // line regardless, so that text doesn't go stale.
+      const changed = afterJob
+        || Store.state.loadingState || !!Store.state.stateError
+        || JSON.stringify(nextAddons) !== JSON.stringify(Store.state.addons)
+        || JSON.stringify(nextSettings) !== JSON.stringify(Store.state.settings)
+        || JSON.stringify(nextLastRun) !== JSON.stringify(Store.state.lastRun)
+        || JSON.stringify(nextJob) !== JSON.stringify(Store.state.job)
+        || nextCheckedAt !== Store.state.updatesCheckedAt;
+
       Store.set({
-        addons: data.addons || [], settings: data.settings || Store.state.settings, lastRun: data.lastRun || null,
-        job: data.job || (afterJob ? null : Store.state.job), updatesCheckedAt: data.updatesCheckedAt || null,
+        addons: nextAddons, settings: nextSettings, lastRun: nextLastRun,
+        job: nextJob, updatesCheckedAt: nextCheckedAt,
         loadingState: false, stateError: null
       });
       if (!afterJob) resumeJobPollingIfNeeded();
-      renderCurrentView();
+      if (changed) renderCurrentView();
     } catch (err) {
       markOnline(err);
       Store.set({ loadingState: false, stateError: err });

@@ -44,6 +44,17 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 ### Round 4 (started 07:35, requested by Eric) - E4 export/import, E10 diagnostics, E11 bulk actions + all deferred low-severity bugs
 - Live check first: the game-launch command (`addon-sync.ps1 -Launcher -Quiet`) ran in 18 s, 36 up-to-date, 1 updated, no warnings.
 
+### Midnight Season 2 compatibility audit (08:40)
+- Client 12.1.0.69587 (Interface 120100). 34/37 addons are on today's newest CurseForge file AND declare 120100 / are tagged 12.1.0 (AlterEgo 1.6.5 and MDT 6.2.11 pulled during the audit). WoW's `checkAddonVersion` is 0, so out-of-date addons still load.
+- Stale (not built for 12.1): BetterAddonList (1.4.7, 2026-06-14, 12.0.7), MinimapButtonBag-Reborn (4.0.29, 2026-04-22, 12.0.5), X Practice (2026-07-07, 12.0.7). Research on function/successors running (results appended below).
+- BigWigs Cataclysm/Dragonflight modules have old dates but are explicitly tagged 12.1.0 by the authors - fine.
+- WeakAuras no longer exists in Midnight; the only mention left in the app is dev-only mock data (queued for cleanup, NEXT-FIXES.md). Compatibility signals are specced as ROADMAP E13 so this audit becomes a permanent column in the app.
+- Research verdicts (each independently verified by a second agent trying to refute it; none refuted):
+  - BetterAddonList: works-but-stale, KEEP. Non-combat addon-list UI (search, sets, protect, memory column) by nebularg (BigWigs maintainer); zero 12.1 breakage reports; nothing in EllesmereUI/EQoL replaces it.
+  - MinimapButtonBag-Reborn: works-but-stale, REPLACE. Maintainer silent since Dec 2025 (open "Midnight support?" issue unanswered). Enhance QoL's "Minimap Button Sink" module (12.9.9, tagged 12.1.0) and EllesmereUI's minimap flyout already cover it - enable one in-game, then remove MBB.
+  - X Practice: works-but-stale, KEEP (low confidence). Raid-mechanics rehearsal room using ModelScene; author still shipping (July), no 12.1 file yet, no breakage reports, no substitute exists.
+  - Patch facts: 12.1.0 "Curse of Ula'tek" released 2026-08-11, Season 2 raid unlocked 2026-08-18.
+
 ## Needs your decision / action
 1. Browse/search, descriptions, changelogs, screenshots and logos need a free CurseForge API key: console.curseforge.com -> sign in -> API Keys -> generate -> paste in Settings -> Test. Two minutes; everything else works without it.
 2. The Wago app is still installed (closed, not uninstalled) - uninstall when you are happy; `WagoAppCompanion` was already removed.
