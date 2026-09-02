@@ -3538,15 +3538,22 @@ Views.browse = (function () {
   }
 
   // Swaps #browse-sort's options between CurseForge's (numeric sortField)
-  // and Wago's (a sort keyword) whenever the source switch changes -
-  // SPEC's Wago facts leave the exact set of working sort values open
-  // ("document which work"), so this offers the four the roadmap itself
-  // names (popular/updated/downloads/name) as the best-documented set.
+  // and Wago's (a sort keyword) whenever the source switch changes.
+  //
+  // Verified live defect: Wago's own site only recognises sort=name. Any
+  // other sort value (popular/updated/downloads/recent/newest/likes/
+  // trending/latest/top) makes it silently ignore the search term and
+  // return the plain popularity listing, and sort=updated returns an
+  // empty list outright. So Wago only ever offers the two values that
+  // actually work: Popularity (value "popular", meaning "send no sort
+  // param at all" - see the server's Handle-WagoSearch) and Name (value
+  // "name", the one value Wago recognises). The CurseForge-only "Last
+  // updated"/"Total downloads" options are Wago-inapplicable and omitted.
   function renderSortOptions() {
     const sel = Utils.qs("#browse-sort");
     sel.textContent = "";
     if (Store.state.browse.source === "wago") {
-      [["popular", "Popularity"], ["updated", "Last updated"], ["downloads", "Total downloads"], ["name", "Name"]].forEach(function (pair) {
+      [["popular", "Popularity"], ["name", "Name"]].forEach(function (pair) {
         sel.appendChild(Utils.el("option", { value: pair[0] }, ["Sort: " + pair[1]]));
       });
       sel.value = Store.state.browse.sort;

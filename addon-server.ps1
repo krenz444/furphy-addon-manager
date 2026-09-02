@@ -2446,7 +2446,20 @@ function ConvertFrom-WagoSearchCardHtml {
 }
 
 function Handle-WagoSearch {
-    <# GET /api/wago/search?q=&categoryId=&sort=&page= -> {items, page, lastPage, total}. #>
+    <#
+      GET /api/wago/search?q=&categoryId=&sort=&page= -> {items, page, lastPage, total}.
+
+      Verified live defect (fixed here): Wago's own site only recognises
+      sort=name. Sending ANY other sort value (popular/downloads/recent/
+      newest/likes/trending/latest/top, etc.) makes it silently IGNORE the
+      search parameter entirely and return the plain popularity listing;
+      sort=updated returns an empty list outright. Omitting sort altogether
+      is what actually gives relevance/popularity-ordered search results.
+      So: sort=name is passed through verbatim (the only value Wago
+      accepts), and every other value - including the UI's own
+      popular/relevance/empty defaults and any unrecognised value - is
+      simply never sent upstream at all.
+    #>
     param($Context, $RouteMatch)
 
     $q = $Context.Request.QueryString
@@ -2458,7 +2471,7 @@ function Handle-WagoSearch {
     $uri = 'https://addons.wago.io/?game_version=retail&page=' + [System.Uri]::EscapeDataString($page)
     if ($search) { $uri += '&search=' + [System.Uri]::EscapeDataString($search) }
     if ($categoryId) { $uri += '&category=' + [System.Uri]::EscapeDataString($categoryId) }
-    if ($sort) { $uri += '&sort=' + [System.Uri]::EscapeDataString($sort) }
+    if ($sort -eq 'name') { $uri += '&sort=name' }
 
     try {
         $props = Get-WagoCached -PageUri $uri
