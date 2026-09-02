@@ -1,0 +1,16 @@
+# Per-install state - never commit (contains the addon list, the CurseForge API key, logs and rollback zips)
+addons.json
+settings.json
+state.json
+last-run.txt
+*.log
+jobs/
+staging/
+backups/
+*.zip
+
+# Editor / OS noise
+.vs/
+.idea/
+Thumbs.db
+desktop.ini
