@@ -756,12 +756,65 @@ function Install-AddonPackage {
     Write-Output -NoEnumerate $installedFolders
 }
 
+function Get-PrimaryTocFile {
+    <#
+      Fix pass: picks the single .toc file WoW retail actually loads for one
+      installed folder, out of however many game-flavor variants a package
+      ships. Many multi-client addons (BigWigs and its bundled modules are
+      the reproduction case that surfaced this) ship one .toc per client
+      inside the SAME folder - a base "<folder>.toc" for one flavor (often
+      NOT retail - e.g. a Cataclysm-Classic build) plus a "<folder>_Mainline.
+      toc" (or "<folder>-Mainline.toc") specifically for retail, alongside
+      "_Vanilla"/"_Wrath"/"_Cata"/"_Mists" siblings that are never relevant
+      here. Every call site in this script used to pick ".toc whose basename
+      equals the folder name, else the first .toc found" - which silently
+      preferred the WRONG file whenever a same-named base .toc happened to
+      exist alongside the real "_Mainline" one (its Interface number
+      describes a different client entirely, a real source of false-positive
+      "stale" compatibility results before this fix). Order: "<folder>_
+      Mainline.toc", "<folder>-Mainline.toc", "<folder>.toc", else the first
+      .toc file found (preserves the old fallback for anything
+      unrecognized). Returns a FileInfo, or $null when the folder has no
+      .toc file at all. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FolderPath,
+        [Parameter(Mandatory = $true)][string]$FolderName
+    )
+
+    $tocFiles = Get-ChildItem -LiteralPath $FolderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
+    if (-not $tocFiles) {
+        return $null
+    }
+
+    # Built with -f rather than "$FolderName_Mainline.toc" - PowerShell would
+    # parse the latter as the variable ${FolderName_Mainline} (underscore is
+    # a valid identifier character), not $FolderName followed by literal text.
+    $preferredNames = @(
+        ('{0}_Mainline.toc' -f $FolderName),
+        ('{0}-Mainline.toc' -f $FolderName),
+        ('{0}.toc' -f $FolderName)
+    )
+    foreach ($preferredName in $preferredNames) {
+        foreach ($t in $tocFiles) {
+            if ($t.Name -eq $preferredName) {
+                return $t
+            }
+        }
+    }
+    foreach ($t in $tocFiles) {
+        return $t
+    }
+    return $null
+}
+
 function Get-TocTitle {
     <#
       Reads the "## Title:" line from the primary .toc of a freshly
-      installed addon (the folder whose .toc basename equals the folder
-      name; when several qualify, the one with no underscore in its name
-      wins). Strips WoW color codes. Returns $null if no title is found.
+      installed addon (the folder whose primary .toc resolves via
+      Get-PrimaryTocFile; when several folders qualify, the one with no
+      underscore in its name wins). Strips WoW color codes. Returns $null if
+      no title is found.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
@@ -769,10 +822,13 @@ function Get-TocTitle {
     )
 
     $candidates = New-Object 'System.Collections.Generic.List[object]'
+    $tocByFolder = @{}
     foreach ($folderName in $Folders) {
-        $tocPath = Join-Path -Path (Join-Path -Path $AddonsPath -ChildPath $folderName) -ChildPath ("$folderName.toc")
-        if (Test-Path -LiteralPath $tocPath) {
+        $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
+        $primaryToc = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName
+        if ($primaryToc) {
             $candidates.Add($folderName)
+            $tocByFolder[$folderName] = $primaryToc
         }
     }
 
@@ -791,10 +847,10 @@ function Get-TocTitle {
         $chosen = $candidates[0]
     }
 
-    $tocPath = Join-Path -Path (Join-Path -Path $AddonsPath -ChildPath $chosen) -ChildPath ("$chosen.toc")
+    $chosenToc = $tocByFolder[$chosen]
     $lines = $null
     try {
-        $lines = Get-Content -LiteralPath $tocPath -Encoding UTF8 -ErrorAction Stop
+        $lines = Get-Content -LiteralPath $chosenToc.FullName -Encoding UTF8 -ErrorAction Stop
     } catch {
         return $null
     }
@@ -817,9 +873,10 @@ function Get-FolderTocInfo {
     <#
       Reads title/version from the primary .toc in a single top-level
       AddOns folder (used by -Scan, where each folder is examined on its
-      own rather than as a group belonging to one known addon). Prefers a
-      .toc whose basename matches the folder name; falls back to the first
-      .toc found. Never throws; returns hasToc=$false when there is none.
+      own rather than as a group belonging to one known addon). Primary .toc
+      selection is Get-PrimaryTocFile's (Mainline-first, else basename
+      match, else first .toc found). Never throws; returns hasToc=$false
+      when there is none.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$FolderPath
@@ -832,21 +889,7 @@ function Get-FolderTocInfo {
     $result = [PSCustomObject]@{ title = $null; version = $null; hasToc = $false; curseId = $null; wagoId = $null }
 
     $folderLeaf = Split-Path -Path $FolderPath -Leaf
-    $tocFiles = Get-ChildItem -LiteralPath $FolderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
-
-    $chosen = $null
-    foreach ($t in $tocFiles) {
-        if ($t.BaseName -eq $folderLeaf) {
-            $chosen = $t
-            break
-        }
-    }
-    if (-not $chosen) {
-        foreach ($t in $tocFiles) {
-            $chosen = $t
-            break
-        }
-    }
+    $chosen = Get-PrimaryTocFile -FolderPath $FolderPath -FolderName $folderLeaf
     if (-not $chosen) {
         return $result
     }
@@ -891,16 +934,15 @@ function Get-TocCrossSourceIds {
     <#
       E12: reads "## X-Curse-Project-ID:" and "## X-Wago-ID:" from the
       primary .toc of a freshly installed/updated PACKAGE (every folder of
-      it, same "basename matches the folder name, else first .toc found"
-      per-folder rule as Get-TocTitle/Get-FolderTocInfo) - tried folder by
-      folder, keeping the first non-empty value found for each tag, so a
-      package whose main folder omits one tag but a library sub-folder
-      carries it still gets it recorded. Called regardless of the record's
-      own source: a CurseForge-sourced install can reveal it is ALSO on
-      Wago (and vice versa) this way, feeding the UI's "Also on
-      CurseForge/Wago" cross-link. Returns {curseId; wagoId} (both $null
-      when neither tag is present or the folder/.toc is missing/unreadable);
-      never throws.
+      it, same Get-PrimaryTocFile selection rule as Get-TocTitle/
+      Get-FolderTocInfo) - tried folder by folder, keeping the first
+      non-empty value found for each tag, so a package whose main folder
+      omits one tag but a library sub-folder carries it still gets it
+      recorded. Called regardless of the record's own source: a
+      CurseForge-sourced install can reveal it is ALSO on Wago (and vice
+      versa) this way, feeding the UI's "Also on CurseForge/Wago"
+      cross-link. Returns {curseId; wagoId} (both $null when neither tag is
+      present or the folder/.toc is missing/unreadable); never throws.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
@@ -913,10 +955,7 @@ function Get-TocCrossSourceIds {
         if ($curseId -and $wagoId) { break }
         $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
         if (-not (Test-Path -LiteralPath $folderPath)) { continue }
-        $tocFiles = Get-ChildItem -LiteralPath $folderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
-        $chosen = $null
-        foreach ($t in $tocFiles) { if ($t.BaseName -eq $folderName) { $chosen = $t; break } }
-        if (-not $chosen) { foreach ($t in $tocFiles) { $chosen = $t; break } }
+        $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName
         if (-not $chosen) { continue }
         $lines = $null
         try {
@@ -1182,8 +1221,8 @@ function Split-TocDepList {
 
 function Get-TocDependencies {
     <#
-      Reads dependency tags from one installed folder's primary .toc (same
-      "basename matches the folder name, else first .toc found" rule as
+      Reads dependency tags from one installed folder's primary .toc
+      (Get-PrimaryTocFile's Mainline-first selection, same rule as
       Get-FolderTocInfo/Get-TocTitle). "## Dependencies:" and
       "## RequiredDeps:" are treated as synonyms for the required list (both
       are used in the wild for the same purpose); "## OptionalDeps:" feeds
@@ -1206,20 +1245,7 @@ function Get-TocDependencies {
         return $result
     }
 
-    $tocFiles = Get-ChildItem -LiteralPath $folderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
-    $chosen = $null
-    foreach ($t in $tocFiles) {
-        if ($t.BaseName -eq $FolderName) {
-            $chosen = $t
-            break
-        }
-    }
-    if (-not $chosen) {
-        foreach ($t in $tocFiles) {
-            $chosen = $t
-            break
-        }
-    }
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
     if (-not $chosen) {
         return $result
     }
@@ -1342,11 +1368,21 @@ function Get-MissingDeps {
 function Get-TocInterfaceValues {
     <#
       Reads "## Interface:" / "## Interface-Mainline:" tag values from one
-      folder's primary .toc (same "basename matches the folder name, else
-      first .toc found" rule as Get-TocDependencies) into a list of int64s -
-      values are comma/space separated (reuses Split-TocDepList), non-numeric
-      tokens dropped. Never throws; empty list when the folder/.toc is
-      missing, unreadable, or has neither tag.
+      folder's primary .toc (Get-PrimaryTocFile's Mainline-first selection,
+      same rule as Get-TocDependencies) into a list of int64s - values are
+      comma/space separated (reuses Split-TocDepList), non-numeric tokens
+      dropped. Never throws; empty list when the folder/.toc is missing,
+      unreadable, or has neither tag.
+
+      Fix pass: a single base .toc can declare BOTH "## Interface:" (its own
+      native client - e.g. a Cataclysm-Classic build) and "## Interface-
+      Mainline:" (an explicit retail override - WoW's documented
+      multi-toc-in-one-file convention). When the CHOSEN file has any
+      "## Interface-Mainline:" line(s), those win outright and the plain
+      "## Interface:" line(s) in that same file are ignored entirely (they
+      describe a different client, not an additional retail value to union
+      in) - previously both were unioned together indiscriminately, which
+      could report a non-retail Interface number as if it were retail's own.
     #>
     param(
         # Not Mandatory (unlike Get-TocDependencies' identical-shaped param) -
@@ -1369,20 +1405,7 @@ function Get-TocInterfaceValues {
         return
     }
 
-    $tocFiles = Get-ChildItem -LiteralPath $folderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
-    $chosen = $null
-    foreach ($t in $tocFiles) {
-        if ($t.BaseName -eq $FolderName) {
-            $chosen = $t
-            break
-        }
-    }
-    if (-not $chosen) {
-        foreach ($t in $tocFiles) {
-            $chosen = $t
-            break
-        }
-    }
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
     if (-not $chosen) {
         Write-Output -NoEnumerate $result
         return
@@ -1396,15 +1419,29 @@ function Get-TocInterfaceValues {
         return
     }
 
+    $mainlineValues = New-Object 'System.Collections.Generic.List[object]'
+    $plainValues = New-Object 'System.Collections.Generic.List[object]'
     foreach ($line in $lines) {
-        if ($line -match '^\s*##\s*(Interface|Interface-Mainline)\s*:\s*(.*)$') {
-            foreach ($piece in (Split-TocDepList -Value $Matches[2])) {
+        if ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$') {
+            foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
                 $ival = [int64]0
                 if ([int64]::TryParse($piece, [ref]$ival)) {
-                    $result.Add([int64]$ival)
+                    $mainlineValues.Add([int64]$ival)
+                }
+            }
+        } elseif ($line -match '^\s*##\s*Interface\s*:\s*(.*)$') {
+            foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
+                $ival = [int64]0
+                if ([int64]::TryParse($piece, [ref]$ival)) {
+                    $plainValues.Add([int64]$ival)
                 }
             }
         }
+    }
+    if ($mainlineValues.Count -gt 0) {
+        foreach ($v in $mainlineValues) { $result.Add($v) }
+    } else {
+        foreach ($v in $plainValues) { $result.Add($v) }
     }
     Write-Output -NoEnumerate $result
 }
@@ -2063,6 +2100,23 @@ function Sync-SingleAddon {
                 $Record.author = $selected.user.username
                 Write-Log -Level 'INFO' -Message "Backfilled author for project $projectId ($displayLabel): $($Record.author)"
             }
+            # Fix pass: wagoId/curseId metadata backfill, same reasoning as
+            # the author backfill just above - a record synced before
+            # Get-TocCrossSourceIds existed (or before its own last real
+            # install) never got these toc-derived fields captured, even
+            # though the installed folder's .toc is sitting right there on
+            # disk. Reads it directly (no network cost) and only fills
+            # whichever of the two is still missing; never overwrites an
+            # existing value. Same DryRun gate as author/latestGameVersions.
+            if ((-not $DryRun) -and $AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
+                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders
+                if ((-not $Record.curseId) -and $backfillTocIds.curseId) {
+                    $Record.curseId = $backfillTocIds.curseId
+                }
+                if ((-not $Record.wagoId) -and $backfillTocIds.wagoId) {
+                    $Record.wagoId = $backfillTocIds.wagoId
+                }
+            }
             # E13 (compatibility audit): $selected here is the file this run
             # already fetched to determine Up-to-date-ness, so recording its
             # game-version metadata costs no extra network call. Same DryRun
@@ -2300,6 +2354,20 @@ function Sync-SingleWagoAddon {
         }
 
         if (-not $needsInstall) {
+            # Fix pass: wagoId/curseId metadata backfill - the Wago
+            # counterpart of the identical block in Sync-SingleAddon's own
+            # Up-to-date branch (see its comment for the full rationale).
+            # Reads the installed folder's .toc directly, no network cost;
+            # only fills whichever of the two is still missing.
+            if ((-not $DryRun) -and $AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
+                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders
+                if ((-not $Record.curseId) -and $backfillTocIds.curseId) {
+                    $Record.curseId = $backfillTocIds.curseId
+                }
+                if ((-not $Record.wagoId) -and $backfillTocIds.wagoId) {
+                    $Record.wagoId = $backfillTocIds.wagoId
+                }
+            }
             # E13 (compatibility audit): mirrors the CurseForge path's
             # identical DryRun-gated capture just above Sync-SingleAddon's own
             # Up-to-date return - $selected here is the release this run
@@ -2791,6 +2859,39 @@ try {
         # or doesn't exist, keeps that no-path-required contract intact.
         $statusAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath
         $statusPresentFolders = Get-AddonsFolderSet -Path $statusAddonsPath
+
+        # Fix pass: backfill wagoId/curseId toc-derived fields for records
+        # that predate Get-TocCrossSourceIds (or whose last real install/
+        # sync predated it) - read directly from each record's installed
+        # folders on disk, no network needed, so -Status (otherwise fully
+        # offline/read-only) can persist this itself rather than waiting for
+        # the addon's next real sync/update. Only fills whichever of the two
+        # is still missing; never overwrites an existing value. Skipped
+        # entirely when the AddOns path can't be resolved (nothing to read).
+        $statusConfigChanged = $false
+        if ($statusAddonsPath) {
+            foreach ($item in $config) {
+                if ((-not $item.wagoId) -or (-not $item.curseId)) {
+                    $statusTocIds = Get-TocCrossSourceIds -AddonsPath $statusAddonsPath -Folders $item.folders
+                    if ((-not $item.curseId) -and $statusTocIds.curseId) {
+                        $item.curseId = $statusTocIds.curseId
+                        $statusConfigChanged = $true
+                    }
+                    if ((-not $item.wagoId) -and $statusTocIds.wagoId) {
+                        $item.wagoId = $statusTocIds.wagoId
+                        $statusConfigChanged = $true
+                    }
+                }
+            }
+            if ($statusConfigChanged) {
+                try {
+                    Save-Config -Path $script:ConfigPath -Items $config
+                    Write-Log -Level 'INFO' -Message 'Status: persisted wagoId/curseId backfill'
+                } catch {
+                    Write-Log -Level 'ERROR' -Message "Status: failed to persist wagoId/curseId backfill: $($_.Exception.Message)"
+                }
+            }
+        }
 
         $statusAddons = New-Object 'System.Collections.Generic.List[object]'
         foreach ($item in $config) {
