@@ -202,14 +202,36 @@
           </div>
         </div>
 
-        <!-- E16: replaces the old fully-blocking "Browse needs a free
-             CurseForge API key" panel for the CurseForge side of the source
-             switch - a keyless partial search (community mirrors: the
-             offline instawow-data/strongbox catalogue index, supplemented
-             live by addon-radar.com when that index comes up short) now
-             works in #browse-content below instead, so this is a
-             non-blocking notice rather than a wall. Wago Addons never
-             needed a key and is unaffected. -->
+        <!-- Round 9: jumps out to CurseForge's own website search (its full
+             catalogue, official ranking) - shown for the CurseForge side of
+             the source switch in both keyless and keyed mode, since this
+             app's in-app search never covers everything CurseForge's own
+             site does. Opens as a separate window (server-side allowlisted
+             to curseforge.com) rather than a normal browser tab, so it sits
+             beside this app instead of replacing it. -->
+        <div class="cf-web-search" id="cf-web-search">
+          <label class="search-field cf-web-search-field">
+            <svg class="icon search-icon"><use href="#icon-search"></use></svg>
+            <input type="search" id="cf-web-search-input" placeholder="Search CurseForge.com" autocomplete="off">
+          </label>
+          <button type="button" class="btn btn-outline" id="btn-cf-web-search">
+            <svg class="icon"><use href="#icon-external"></use></svg>
+            Search on CurseForge.com
+          </button>
+          <p class="muted-text cf-web-search-hint">Opens CurseForge in a side window; installs still happen here by Project ID for now.</p>
+        </div>
+
+        <!-- E16: replaces the old fully-blocking key-required panel that
+             used to sit here for the CurseForge side of the source switch -
+             a keyless partial search (community mirrors: the offline
+             instawow-data/strongbox catalogue index, supplemented live by
+             addon-radar.com when that index comes up short) now works in
+             #browse-content below instead, so this is a non-blocking notice
+             rather than a wall. Wago Addons never needed a key and is
+             unaffected. E18: no CurseForge path in this app requires a key
+             any more (see SPEC's "Keyless enrichment sources"), so this
+             banner exists purely to explain the difference from an official-
+             API search, never to gate anything. -->
         <div class="banner is-info" id="browse-keyless-banner" hidden>
           <svg class="icon"><use href="#icon-info"></use></svg>
           <span>Showing a keyless index via community mirrors (instawow-data, addon-radar.com), not CurseForge&rsquo;s own search. <button type="button" class="link-btn" id="btn-keyless-settings">Add a free API key in Settings</button> for full official search, sorting and categories.</span>
@@ -341,7 +363,8 @@
           </section>
 
           <section class="settings-group" id="settings-apikey">
-            <h3>CurseForge API key</h3>
+            <h3>Optional: CurseForge API key (adds official CurseForge metadata)</h3>
+            <p class="muted-text">Installing, updating, pinning and rolling back addons already work fully without a key. Adding one unlocks CurseForge&rsquo;s own search/sort/categories, plus descriptions, changelogs and screenshots for CurseForge-sourced addons.</p>
             <div class="apikey-row">
               <div class="password-field">
                 <input type="password" id="input-apikey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
@@ -517,6 +540,24 @@
   <div class="dialog-footer">
     <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
     <button type="button" class="btn btn-danger" id="confirm-ok">Confirm</button>
+  </div>
+</div>
+
+<!-- E18: first-run welcome - shown once when addons.json has 0 records and a
+     scan finds folders with a recognizable CurseForge/Wago id already sitting
+     in AddOns (e.g. right after install.ps1 adoption was skipped, or a fresh
+     AddOns folder the user populated by hand before ever opening the app). -->
+<div class="dialog dialog-welcome" id="dialog-welcome" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-welcome-title">
+  <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found addons in your AddOns folder</h3>
+  <p class="muted-text">Furphy found <strong id="welcome-count">0</strong> addon(s) it can manage. Adopting reinstalls each one from its source (CurseForge or Wago) so Furphy can keep it updated from here on.</p>
+  <ul class="welcome-list" id="welcome-list"></ul>
+  <div class="nokey-inline welcome-nokey-note">
+    <svg class="icon"><use href="#icon-info"></use></svg>
+    <span>No CurseForge API key needed for this, or for anything else here. <button type="button" class="link-btn" id="welcome-browse-link">See Browse</button></span>
+  </div>
+  <div class="dialog-footer">
+    <button type="button" class="btn btn-ghost" id="welcome-skip">Skip</button>
+    <button type="button" class="btn btn-accent" id="welcome-adopt">Adopt all</button>
   </div>
 </div>
 

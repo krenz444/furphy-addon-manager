@@ -47,7 +47,7 @@ if (Test-Path -LiteralPath $Dest) {
 
 # 3. Copy code files (mirror ui\, never state files).
 New-Item -ItemType Directory -Force -Path $Dest, (Join-Path $Dest 'ui'), (Join-Path $Dest 'jobs') | Out-Null
-$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'icon.ico')
+$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico')
 foreach ($f in $codeFiles) {
     $s = Join-Path $Source $f
     if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $Dest $f) -Force; "copied $f" }
@@ -98,7 +98,7 @@ if (-not $SkipServerCheck) {
 
 # 6. Mirror into the git repo and push (keeps github.com/krenz444/furphy-addon-manager current).
 if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
-    foreach ($f in @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'deploy.ps1', 'iterate.workflow.js', 'icon.ico', 'make-icon.ps1')) {
+    foreach ($f in @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'deploy.ps1', 'iterate.workflow.js', 'icon.ico', 'make-icon.ps1', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'package.ps1', 'VERSION', 'Install Furphy.cmd', 'README.md', 'NEXT-FIXES.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath $f) -Force }
     }

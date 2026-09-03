@@ -776,14 +776,32 @@ function Build-CliArgs {
             $argsList.Add('-DryRun')
         }
         'add' {
-            if (-not ($Params -and $Params.projectId)) {
-                throw 'projectId is required for kind add'
-            }
-            $argsList.Add('-Add')
-            $argsList.Add([string]$Params.projectId)
-            if ($Params.fileId) {
-                $argsList.Add('-FileId')
-                $argsList.Add([string]$Params.fileId)
+            # E18: the first-run Welcome dialog's "Adopt all" button (and,
+            # equivalently, install.ps1's own bulk adoption of pre-existing
+            # untracked folders) posts projectIds - an array of ALREADY
+            # fully-formed target tokens (a bare numeric CurseForge id, or a
+            # "wago:<slug-or-id>" string; addon-sync.ps1's own -Add
+            # classifier tells the two apart) - instead of a single
+            # projectId. Same "one comma-joined -Add token" pattern as the
+            # 'remove' case's bulk projectIds above (only a single
+            # comma-joined token survives -File binding intact - see that
+            # case's comment). FileId is meaningless for a multi-target add
+            # (which target would it apply to?), so it is only honoured on
+            # the single-projectId path below.
+            if ($Params -and $Params.projectIds -and @($Params.projectIds).Count -gt 0) {
+                $ids = New-Object 'System.Collections.Generic.List[object]'
+                foreach ($id in @($Params.projectIds)) { $ids.Add([string]$id) }
+                $argsList.Add('-Add')
+                $argsList.Add(($ids -join ','))
+            } elseif ($Params -and $Params.projectId) {
+                $argsList.Add('-Add')
+                $argsList.Add([string]$Params.projectId)
+                if ($Params.fileId) {
+                    $argsList.Add('-FileId')
+                    $argsList.Add([string]$Params.fileId)
+                }
+            } else {
+                throw 'projectId or projectIds is required for kind add'
             }
         }
         'remove' {
@@ -1035,9 +1053,22 @@ function Build-ImportPlan {
       safe to `return` directly, unlike the List[object]s inside it, which
       the caller must never re-wrap in `@()`): @{ Phases = <List[object] of
       CliArgs Lists>; SkipRows = <List[object] of {status,name,version,
-      projectId,fileId} rows> }.
+      projectId,fileId,wagoSlug} rows> }.
 
-      -Add is issued ONCE with every not-yet-present projectId comma-joined
+      E12 fix (Round 9): each entry is identified by a TARGET TOKEN -
+      Get-UpdateAvailableKeyForRecord's own duplex key, reused verbatim
+      since an import entry (post-Handle-Export fix) carries the exact same
+      projectId/source/slug shape a real addon record does: the numeric
+      CurseForge project id as a string, or "wago:<slug>" for a Wago-sourced
+      entry (identifiable only via source/slug - it has no numeric id at
+      all). This token is also exactly what addon-sync.ps1's -Add/-Only/
+      -Ignore target classifier already accepts, CurseForge or Wago alike,
+      so no further translation is needed before it lands in a phase's
+      CliArgs. An entry with neither (foreign/malformed data, or a
+      CurseForge row missing even a projectId) is unidentifiable and
+      skipped outright, same as before.
+
+      -Add is issued ONCE with every not-yet-present target comma-joined
       (SPEC: "one CLI invocation with all ids" - the exact same
       comma-joined-single-token requirement Build-CliArgs's own 'sync' case
       already documents at length, since addon-sync.ps1 is likewise always
@@ -1050,8 +1081,8 @@ function Build-ImportPlan {
       roadmap's own two-step wording rather than trying to fold both into
       one -Add -FileId call (which only ever supports a single id, so it
       cannot cover a multi-addon import). An ignoreUpdates flag needs no
-      per-addon restriction, so every id that wants it - freshly added by
-      this import or already on record - is batched into one trailing
+      per-addon restriction, so every target that wants it - freshly added
+      by this import or already on record - is batched into one trailing
       -Ignore phase. releaseType is captured on export for round-tripping
       but is deliberately NOT applied on import: no CLI flag sets a
       record's per-addon releaseType override directly (SPEC.md's addon-
@@ -1062,9 +1093,10 @@ function Build-ImportPlan {
       An imported addon already present with neither pinnedFileId nor
       ignoreUpdates set needs no CLI call at all - its SkipRow mirrors the
       exact shape addon-sync.ps1's own "-Add: already present" path already
-      produces (Name/Version/FileId straight from the EXISTING record), so
-      the job's results read the same as they would if the underlying add
-      job itself had done the skipping.
+      produces (Name/Version/FileId straight from the EXISTING record, plus
+      wagoSlug for a Wago one - the same additive field every other -Json
+      result row carries per SPEC), so the job's results read the same as
+      they would if the underlying add job itself had done the skipping.
     #>
     param(
         [Parameter(Mandatory = $true)]$ImportAddons,
@@ -1074,27 +1106,22 @@ function Build-ImportPlan {
     $phases = New-Object 'System.Collections.Generic.List[object]'
     $skipRows = New-Object 'System.Collections.Generic.List[object]'
 
-    $seenIds = New-Object 'System.Collections.Generic.HashSet[int64]'
-    $toAddIds = New-Object 'System.Collections.Generic.List[object]'
+    $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $toAddTargets = New-Object 'System.Collections.Generic.List[object]'
     $pinEntries = New-Object 'System.Collections.Generic.List[object]'
-    $ignoreIds = New-Object 'System.Collections.Generic.List[object]'
-    $ignoreSeen = New-Object 'System.Collections.Generic.HashSet[int64]'
+    $ignoreTargets = New-Object 'System.Collections.Generic.List[object]'
+    $ignoreSeen = New-Object 'System.Collections.Generic.HashSet[string]'
 
     foreach ($entry in @($ImportAddons)) {
-        if (-not $entry -or ($null -eq $entry.projectId)) { continue }
-        # NOTE: named $entryPid, not $pid - $pid (case-insensitively) is
-        # PowerShell's own read-only automatic variable holding this
-        # process's id, and assigning to it throws "Cannot overwrite
-        # variable PID because it is read-only or constant." (caught live
-        # during this build's own offline verification).
-        $entryPid = [int64]0
-        try { $entryPid = [int64]$entry.projectId } catch { continue }
-        if (-not $seenIds.Add($entryPid)) { continue }   # dedupe within the import file itself
+        if (-not $entry) { continue }
+        $key = Get-UpdateAvailableKeyForRecord -Record $entry
+        if (-not $key) { continue }   # neither a numeric projectId nor a wago:<slug> pair - unidentifiable
+        if (-not $seenKeys.Add($key)) { continue }   # dedupe within the import file itself
 
         $existingRecord = $null
         $isNew = $true
-        if ($ExistingById.ContainsKey($entryPid)) {
-            $existingRecord = $ExistingById[$entryPid]
+        if ($ExistingById.ContainsKey($key)) {
+            $existingRecord = $ExistingById[$key]
             $isNew = $false
         }
 
@@ -1106,50 +1133,49 @@ function Build-ImportPlan {
         $hasIgnore = [bool]$entry.ignoreUpdates
 
         if ($isNew) {
-            $toAddIds.Add($entryPid)
+            $toAddTargets.Add($key)
         }
         if ($hasPin) {
-            $pinEntries.Add([PSCustomObject]@{ ProjectId = $entryPid; FileId = $fid })
+            $pinEntries.Add([PSCustomObject]@{ Target = $key; FileId = $fid })
         }
-        if ($hasIgnore -and $ignoreSeen.Add($entryPid)) {
-            $ignoreIds.Add($entryPid)
+        if ($hasIgnore -and $ignoreSeen.Add($key)) {
+            $ignoreTargets.Add($key)
         }
 
         if ((-not $isNew) -and (-not $hasPin) -and (-not $hasIgnore)) {
+            $skipWagoSlug = $null
+            if ($existingRecord.source -eq 'wago') { $skipWagoSlug = $existingRecord.slug }
             $skipRows.Add([PSCustomObject]@{
                     status    = 'Skipped'
                     name      = $existingRecord.name
                     version   = $existingRecord.version
                     projectId = $existingRecord.projectId
                     fileId    = $existingRecord.fileId
+                    wagoSlug  = $skipWagoSlug
                 })
         }
     }
 
-    if ($toAddIds.Count -gt 0) {
-        $idStrings = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($id in $toAddIds) { $idStrings.Add([string]$id) }
+    if ($toAddTargets.Count -gt 0) {
         $addArgs = New-Object 'System.Collections.Generic.List[object]'
         $addArgs.Add('-Add')
-        $addArgs.Add(($idStrings -join ','))
+        $addArgs.Add(($toAddTargets -join ','))
         $phases.Add($addArgs)
     }
 
     foreach ($pin in $pinEntries) {
         $pinArgs = New-Object 'System.Collections.Generic.List[object]'
         $pinArgs.Add('-Only')
-        $pinArgs.Add([string]$pin.ProjectId)
+        $pinArgs.Add([string]$pin.Target)
         $pinArgs.Add('-FileId')
         $pinArgs.Add([string]$pin.FileId)
         $phases.Add($pinArgs)
     }
 
-    if ($ignoreIds.Count -gt 0) {
-        $ignoreStrings = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($id in $ignoreIds) { $ignoreStrings.Add([string]$id) }
+    if ($ignoreTargets.Count -gt 0) {
         $ignoreArgs = New-Object 'System.Collections.Generic.List[object]'
         $ignoreArgs.Add('-Ignore')
-        $ignoreArgs.Add(($ignoreStrings -join ','))
+        $ignoreArgs.Add(($ignoreTargets -join ','))
         $phases.Add($ignoreArgs)
     }
 
@@ -1213,11 +1239,16 @@ function Start-ImportJob {
     $importAddons = @()
     if ($Params -and ($null -ne $Params.addons)) { $importAddons = @($Params.addons) }
 
+    # E12 fix (Round 9): keyed the same duplex way Get-UpdateAvailableKeyForRecord
+    # already keys $Script:UpdateAvailable - the numeric projectId (as a
+    # string) for a CurseForge record, or "wago:<slug>" for a Wago-sourced
+    # one (which has no numeric projectId at all and was previously omitted
+    # from this map entirely, making every already-tracked Wago addon look
+    # brand-new to Build-ImportPlan).
     $existingById = @{}
     foreach ($r in (Get-AddonRecords)) {
-        if ($r.projectId) {
-            try { $existingById[[int64]$r.projectId] = $r } catch { }
-        }
+        $key = Get-UpdateAvailableKeyForRecord -Record $r
+        if ($key) { $existingById[$key] = $r }
     }
 
     $plan = Build-ImportPlan -ImportAddons $importAddons -ExistingById $existingById
@@ -2936,21 +2967,29 @@ function ConvertTo-AddonRadarDetail {
     <#
       Normalizes a devalue-decoded addon-radar.com detail payload into
       {id,name,slug,summary,descriptionHtml,authorName,logoUrl,downloadCount,
-      gameVersions,lastUpdated,screenshots}. SPEC's verified facts list the
-      fields present on a real detail page (id/name/slug/summary/
-      description_html/...) but this build could not independently confirm
-      the exact wrapper shape around them against a live payload, so this
-      checks a few plausible roots defensively - the decoded value itself,
-      then .data, then .props, then .result - and returns $null (a total
-      miss, handled by the caller falling through to catalogue-only) rather
-      than guessing wrong. Never throws.
+      gameVersions,lastUpdated,screenshots}. Round 9: a real captured
+      /addon/{slug}/__data.json payload (catalogue-probe\bigwigs-data.json)
+      showed the resolved root is a stats wrapper -
+      {addon:<detail object>, dailyHistory, hourlyHistory, rankHistory,
+      relatedAddons, authorAddons, dataHints} - with every field this
+      function reads (id/name/slug/summary/description_html/screenshots/...)
+      one level down, under .addon; the un-probed root has none of those
+      names, so every real response fell through to the null/"unrecognized
+      payload shape" case (confirmed against the diagnostics disk cache,
+      cache\addon-radar\bigwigs.json, which held a cached $null detail from
+      exactly this miss). .addon is checked first as the now-verified real
+      shape; the decoded value itself, then .data, then .props, then
+      .result remain as defensive fallbacks for a differently-shaped
+      response, still returning $null (a total miss, handled by the caller
+      falling through to catalogue-only) rather than guessing wrong. Never
+      throws.
     #>
     param($Decoded)
 
     if ($null -eq $Decoded) { return $null }
 
     $candidate = $null
-    foreach ($probe in @($Decoded, $Decoded.data, $Decoded.props, $Decoded.result)) {
+    foreach ($probe in @($Decoded.addon, $Decoded, $Decoded.data, $Decoded.props, $Decoded.result)) {
         if (-not $probe) { continue }
         $names = $probe.PSObject.Properties.Name
         if ($names -contains 'slug' -or $names -contains 'id') { $candidate = $probe; break }
@@ -3815,8 +3854,12 @@ function Handle-JobsPost {
     # yet) is posted as {source:'wago', slug} instead of projectId - either
     # is accepted here.
     $hasWagoSourceSlug = [bool]($body.source -and $body.slug)
-    if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug)) {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
+    # E18: bulk adopt (the Welcome dialog's "Adopt all") posts projectIds
+    # (array of already-normalized tokens) instead of a single projectId -
+    # same three-way either/or as 'remove' below.
+    $hasMultiAdd = $body.projectIds -and (@($body.projectIds).Count -gt 0)
+    if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug) -and (-not $hasMultiAdd)) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId or projectIds required' }
         return
     }
     if ($kind -eq 'switch-source') {
@@ -4047,6 +4090,18 @@ function Handle-Export {
                 pinnedFileId  = $r.pinnedFileId
                 ignoreUpdates = [bool]$r.ignoreUpdates
                 releaseType   = $r.releaseType
+                # E12 fix (Round 9): additive identification fields. A
+                # Wago-sourced record's projectId is always $null - without
+                # these, Build-ImportPlan's Get-UpdateAvailableKeyForRecord
+                # keying has nothing to identify it by and the addon is
+                # silently dropped on import. source/slug are what the key
+                # is actually built from; wagoId/curseId round-trip for
+                # completeness (both are toc-derived and re-populated by the
+                # CLI on the next real sync regardless).
+                source        = $r.source
+                slug          = $r.slug
+                wagoId        = $r.wagoId
+                curseId       = $r.curseId
             })
     }
     $body = [PSCustomObject]@{
@@ -4658,7 +4713,20 @@ $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 $Script:BuildInfoPathOverride = $BuildInfoPath
 $Script:AppName = 'Furphy Addon Manager'
+# E18: the shipped version lives in one place - ROOT\VERSION (a bare string,
+# e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
+# report can never drift apart. Falls back to the last-known default when the
+# file is missing (a dev checkout that predates E18) or unreadable.
 $Script:Version = '1.0.0'
+$Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
+if (Test-Path -LiteralPath $Script:VersionPath) {
+    try {
+        $verText = [IO.File]::ReadAllText($Script:VersionPath).Trim()
+        if ($verText.Length -gt 0) { $Script:Version = $verText }
+    } catch {
+        # Keep the fallback above; this must never block startup.
+    }
+}
 $Script:StartTime = Get-Date
 $Script:ShuttingDown = $false
 $Script:LastResponseStatus = $null
