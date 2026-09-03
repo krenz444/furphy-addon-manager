@@ -85,3 +85,7 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 - Rename: title, sidebar brand, About, /api/ping name, vbs, README, SPEC/CHANGELOG headings. Folder/file names unchanged.
 - Vaporwave theme: complete token override (23 tokens + theme-scoped extras), neon glows, gradient brand, CSS perspective grid, neon chips, cyan focus rings; five hard-coded colours routed through tokens so all themes stay consistent; contrast >= 4.79:1 worst case. Browser test 6/6, zero console errors.
 - 20:30 follow-up (commit 3b5f9d3): sidebar brand on one line with a 26 px icon. Live verified: logos load with the valid key, Vaporwave renders, zero console errors.
+- 21:43 (commit 76849d7): Vaporwave is the default theme (Eric: "looks sick"); Dark/Light remain selectable. Keyless-mode research workflow launched (WoWInterface API, WowUp hub, catalogues, Wago-as-metadata, CurseForge edges) -> E16 spec.
+
+### Keyless-mode research (21:45 - 22:05) - 10 agents, 4 probes verified, none refuted
+- addon-radar.com: keyless hourly CurseForge mirror by project id (logo, description, screenshots, categories, game versions, dates, downloads, fuzzy search). instawow-data catalogue: CF id -> name/slug resolution 37/37. Wago-as-metadata: 30/37 via wagoId or confident name match. Dead ends: WowUp hub (own catalog), strongbox CF catalogue (frozen 2022), CF RSS/legacy/edge endpoints. Design appended as ROADMAP E16 (fallback order Wago -> addon-radar -> CF files-only; Browse = Wago + addon-radar search). Risk: addon-radar devalue decoding in PS 5.1.
