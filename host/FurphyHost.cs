@@ -14,6 +14,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -28,15 +29,75 @@ namespace Furphy
         [STAThread]
         private static int Main(string[] args)
         {
+            // Must run before any Form/Control is created - see
+            // DpiAwareness below and ROADMAP.md "E19" DPI fix notes.
+            bool dpiAware = DpiAwareness.TryEnable();
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
             HostOptions options = HostOptions.Parse(args);
-            using (MainForm form = new MainForm(options))
+            using (MainForm form = new MainForm(options, dpiAware))
             {
                 Application.Run(form);
                 return form.ExitCode;
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Per-monitor-v2 DPI awareness. Declared via P/Invoke (the Add-Type/
+    // csc.exe compile path produces no app.manifest) so the process opts
+    // out of Windows' default bitmap-stretch scaling - the cause of the
+    // whole window looking blurry on a >100% scaled display. Tries
+    // newest-to-oldest API in a fallback chain; each call is isolated in
+    // its own try/catch since the newer entry points do not exist on
+    // older Windows and would otherwise throw EntryPointNotFoundException.
+    // ------------------------------------------------------------------
+    internal static class DpiAwareness
+    {
+        private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+        [DllImport("shcore.dll")]
+        private static extern int SetProcessDpiAwareness(int value);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
+        public static bool TryEnable()
+        {
+            try
+            {
+                if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            try
+            {
+                // PROCESS_PER_MONITOR_DPI_AWARE = 2; S_OK = 0.
+                if (SetProcessDpiAwareness(2) == 0)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (SetProcessDPIAware())
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
     }
 
@@ -553,15 +614,37 @@ namespace Furphy
             "localhost"
         };
 
+        // Vaporwave dark chrome palette (matches ui/style.css's dark and
+        // vaporwave themes) - keeps the WinForms shell from clashing with
+        // the dark web UI it hosts. See ROADMAP.md "E19" dark-chrome fix.
+        private static readonly Color ChromeBg = Color.FromArgb(0x12, 0x08, 0x1f);
+        private static readonly Color ChromeBgAlt = Color.FromArgb(0x1a, 0x0b, 0x2e);
+        private static readonly Color ChromeBgActive = Color.FromArgb(0x24, 0x16, 0x40);
+        private static readonly Color ChromeText = Color.FromArgb(0xf3, 0xe9, 0xff);
+        private static readonly Color ChromeMuted = Color.FromArgb(0xb9, 0xa6, 0xd6);
+        private static readonly Color ChromeAccent = Color.FromArgb(0xff, 0x71, 0xce);
+        private static readonly Color ChromeHover = Color.FromArgb(0x2d, 0x1b, 0x4e);
+
+        private enum HostTab
+        {
+            Furphy,
+            CurseForge
+        }
+
         private readonly HostOptions _options;
         private readonly string _settingsPath;
         private readonly string _adFilterListPath;
         private readonly string _hostLogPath;
         private readonly int _port;
+        private readonly bool _dpiAware;
+        private int _effectiveDpi;
 
-        private TabControl _tabs;
-        private TabPage _furphyTab;
-        private TabPage _cfTab;
+        private Panel _navPanel;
+        private Button _btnFurphy;
+        private Button _btnCf;
+        private Panel _contentPanel;
+        private Panel _cfContainer;
+        private HostTab _activeTab;
         private WebView2 _furphyWebView;
         private WebView2 _cfWebView;
         private Panel _cfToolbar;
@@ -584,9 +667,16 @@ namespace Furphy
 
         public int ExitCode;
 
-        public MainForm(HostOptions options)
+        public MainForm(HostOptions options, bool dpiAware)
         {
             _options = options;
+            _dpiAware = dpiAware;
+
+            // Lets WinForms rescale child control fonts/bounds
+            // automatically if the window is later dragged to a monitor
+            // with a different DPI; must be set before any control exists.
+            AutoScaleMode = AutoScaleMode.Dpi;
+
             string exeDir = HostFiles.ExeDir();
             _settingsPath = HostFiles.FindUpward(exeDir, "settings.json", 4);
             _adFilterListPath = HostFiles.FindUpward(exeDir, "adfilter-hosts.txt", 4);
@@ -598,6 +688,7 @@ namespace Furphy
             Text = WindowTitle;
             StartPosition = FormStartPosition.Manual;
             MinimumSize = new Size(900, 600);
+            BackColor = ChromeBg;
 
             string iconPath = HostFiles.FindUpward(exeDir, "icon.ico", 1);
             if (iconPath != null)
@@ -607,7 +698,15 @@ namespace Furphy
 
             ApplyWindowBounds();
 
+            // DeviceDpi reflects the DPI of the monitor the form will be
+            // created on now that per-monitor-v2 awareness is declared
+            // (DpiAwareness.TryEnable, called before this form existed).
+            _effectiveDpi = DeviceDpi;
+
             BuildUi();
+
+            LogHost("dpi=" + _effectiveDpi.ToString(CultureInfo.InvariantCulture) +
+                " dpiAware=" + _dpiAware.ToString());
 
             Load += new EventHandler(MainForm_Load);
             FormClosing += new FormClosingEventHandler(MainForm_FormClosing);
@@ -724,68 +823,188 @@ namespace Furphy
             });
         }
 
+        // ---------------------------------------------------------- DPI
+
+        private float DpiScale()
+        {
+            return _effectiveDpi / 96f;
+        }
+
+        private int Scaled(int baseValue)
+        {
+            return (int)Math.Round(baseValue * DpiScale());
+        }
+
+        // -------------------------------------------------------- layout
+
         private void BuildUi()
         {
-            _tabs = new TabControl();
-            _tabs.Dock = DockStyle.Fill;
-            _tabs.Alignment = TabAlignment.Left;
-            _tabs.SizeMode = TabSizeMode.Fixed;
-            _tabs.ItemSize = new Size(28, 110);
+            BackColor = ChromeBg;
 
-            _furphyTab = new TabPage("Furphy");
-            _cfTab = new TabPage("CurseForge");
+            _navPanel = new Panel();
+            _navPanel.Dock = DockStyle.Left;
+            _navPanel.Width = Scaled(64);
+            _navPanel.BackColor = ChromeBg;
+
+            int navBtnHeight = Scaled(64);
+
+            _btnFurphy = BuildNavButton("Furphy");
+            _btnFurphy.SetBounds(0, 0, _navPanel.Width, navBtnHeight);
+            _btnFurphy.Click += new EventHandler(NavFurphy_Click);
+
+            _btnCf = BuildNavButton("CurseForge");
+            _btnCf.SetBounds(0, navBtnHeight, _navPanel.Width, navBtnHeight);
+            _btnCf.Click += new EventHandler(NavCf_Click);
+
+            _navPanel.Controls.Add(_btnFurphy);
+            _navPanel.Controls.Add(_btnCf);
+
+            _contentPanel = new Panel();
+            _contentPanel.Dock = DockStyle.Fill;
+            _contentPanel.BackColor = ChromeBg;
 
             _furphyWebView = new WebView2();
             _furphyWebView.Dock = DockStyle.Fill;
-            _furphyTab.Controls.Add(_furphyWebView);
+            try { _furphyWebView.DefaultBackgroundColor = ChromeBg; } catch { }
+
+            _cfContainer = new Panel();
+            _cfContainer.Dock = DockStyle.Fill;
+            _cfContainer.BackColor = ChromeBg;
 
             _cfWebView = new WebView2();
             _cfWebView.Dock = DockStyle.Fill;
+            try { _cfWebView.DefaultBackgroundColor = ChromeBg; } catch { }
 
             _cfToolbar = BuildCfToolbar();
-            _cfTab.Controls.Add(_cfWebView);
-            _cfTab.Controls.Add(_cfToolbar);
 
-            _tabs.TabPages.Add(_furphyTab);
-            _tabs.TabPages.Add(_cfTab);
+            _cfContainer.Controls.Add(_cfWebView);
+            _cfContainer.Controls.Add(_cfToolbar);
 
-            Controls.Add(_tabs);
+            _contentPanel.Controls.Add(_furphyWebView);
+            _contentPanel.Controls.Add(_cfContainer);
+
+            // Fill-docked content added first, Left-docked nav strip
+            // added second - WinForms docks in that add order, so the
+            // nav strip correctly claims the left edge and the content
+            // panel fills whatever remains instead of being squeezed out.
+            Controls.Add(_contentPanel);
+            Controls.Add(_navPanel);
+
+            ActivateTab(HostTab.Furphy);
+        }
+
+        private Button BuildNavButton(string text)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = ChromeHover;
+            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
+            b.TabStop = false;
+            b.TextAlign = ContentAlignment.MiddleCenter;
+            // The active-tab accent bar is drawn here rather than via a
+            // child control, since Button does not host children reliably.
+            b.Paint += new PaintEventHandler(NavButton_Paint);
+            return b;
+        }
+
+        private void ApplyNavButtonColors(Button b, bool active)
+        {
+            b.Tag = active;
+            if (active)
+            {
+                b.BackColor = ChromeBgActive;
+                b.ForeColor = ChromeAccent;
+            }
+            else
+            {
+                b.BackColor = ChromeBg;
+                b.ForeColor = ChromeMuted;
+            }
+        }
+
+        private void NavButton_Paint(object sender, PaintEventArgs e)
+        {
+            Button b = (Button)sender;
+            bool active = (b.Tag is bool) && (bool)b.Tag;
+            if (!active) return;
+            int barWidth = Math.Max(Scaled(3), 1);
+            using (SolidBrush brush = new SolidBrush(ChromeAccent))
+            {
+                e.Graphics.FillRectangle(brush, 0, 0, barWidth, b.Height);
+            }
+        }
+
+        private void NavFurphy_Click(object sender, EventArgs e)
+        {
+            ActivateTab(HostTab.Furphy);
+        }
+
+        private void NavCf_Click(object sender, EventArgs e)
+        {
+            ActivateTab(HostTab.CurseForge);
+        }
+
+        private void ActivateTab(HostTab tab)
+        {
+            _activeTab = tab;
+            bool furphyActive = tab == HostTab.Furphy;
+
+            ApplyNavButtonColors(_btnFurphy, furphyActive);
+            ApplyNavButtonColors(_btnCf, !furphyActive);
+            _btnFurphy.Invalidate();
+            _btnCf.Invalidate();
+
+            _furphyWebView.Visible = furphyActive;
+            _cfContainer.Visible = !furphyActive;
+            if (furphyActive)
+            {
+                _furphyWebView.BringToFront();
+            }
+            else
+            {
+                _cfContainer.BringToFront();
+            }
         }
 
         private Panel BuildCfToolbar()
         {
             Panel bar = new Panel();
             bar.Dock = DockStyle.Top;
-            bar.Height = 34;
-            bar.Padding = new Padding(4);
+            bar.Height = Scaled(36);
+            bar.BackColor = ChromeBgAlt;
+            bar.Padding = new Padding(Scaled(4));
 
-            Button back = new Button();
-            back.Text = "<";
-            back.Width = 30;
-            back.Location = new Point(4, 4);
+            int y = Scaled(4);
+            int btnH = Scaled(26);
+
+            Button back = BuildToolbarButton("<", Scaled(30));
+            back.Location = new Point(Scaled(4), y);
+            back.Height = btnH;
             back.Click += new EventHandler(CfBack_Click);
 
-            Button fwd = new Button();
-            fwd.Text = ">";
-            fwd.Width = 30;
-            fwd.Location = new Point(38, 4);
+            Button fwd = BuildToolbarButton(">", Scaled(30));
+            fwd.Location = new Point(Scaled(38), y);
+            fwd.Height = btnH;
             fwd.Click += new EventHandler(CfForward_Click);
 
-            Button home = new Button();
-            home.Text = "Home";
-            home.Width = 50;
-            home.Location = new Point(72, 4);
+            Button home = BuildToolbarButton("Home", Scaled(50));
+            home.Location = new Point(Scaled(72), y);
+            home.Height = btnH;
             home.Click += new EventHandler(CfHome_Click);
 
             _cfSearchBox = new TextBox();
-            _cfSearchBox.Location = new Point(130, 6);
-            _cfSearchBox.Width = 220;
+            _cfSearchBox.Location = new Point(Scaled(130), Scaled(6));
+            _cfSearchBox.Width = Scaled(220);
+            _cfSearchBox.BackColor = ChromeBgActive;
+            _cfSearchBox.ForeColor = ChromeText;
+            _cfSearchBox.BorderStyle = BorderStyle.FixedSingle;
             _cfSearchBox.KeyDown += new KeyEventHandler(CfSearchBox_KeyDown);
 
-            Button go = new Button();
-            go.Text = "Go";
-            go.Width = 40;
-            go.Location = new Point(356, 4);
+            Button go = BuildToolbarButton("Go", Scaled(40));
+            go.Location = new Point(Scaled(356), y);
+            go.Height = btnH;
             go.Click += new EventHandler(CfGo_Click);
 
             bar.Controls.Add(back);
@@ -794,6 +1013,21 @@ namespace Furphy
             bar.Controls.Add(_cfSearchBox);
             bar.Controls.Add(go);
             return bar;
+        }
+
+        private Button BuildToolbarButton(string text, int width)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.Width = width;
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = ChromeHover;
+            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
+            b.BackColor = ChromeBgAlt;
+            b.ForeColor = ChromeText;
+            b.TabStop = false;
+            return b;
         }
 
         // ------------------------------------------------------ toolbar
@@ -1148,12 +1382,12 @@ namespace Furphy
 
         private void SwitchToFurphyTab()
         {
-            if (_tabs.InvokeRequired)
+            if (InvokeRequired)
             {
-                _tabs.BeginInvoke(new MethodInvoker(SwitchToFurphyTab));
+                BeginInvoke(new MethodInvoker(SwitchToFurphyTab));
                 return;
             }
-            _tabs.SelectedTab = _furphyTab;
+            ActivateTab(HostTab.Furphy);
         }
 
         private string BaseUrl()
@@ -1330,10 +1564,61 @@ namespace Furphy
             }
             catch { }
 
+            // Switch to the CurseForge tab so its toolbar is actually
+            // visible/rendered for the pixel sample below. Snapshot the
+            // nav bar and the toolbar via DrawToBitmap called DIRECTLY ON
+            // EACH PANEL (not on the whole Form): a whole-Form snapshot
+            // composites in the CurseForge WebView2, a real child HWND
+            // sitting immediately below the toolbar in the same
+            // container, and its WM_PRINT response can bleed into
+            // neighboring siblings' printed pixels even where the toolbar
+            // itself is logically drawn on top - printing just the
+            // Panel/Button subtree in isolation sidesteps that entirely.
+            // The WebView2 content itself still never renders into this
+            // (expected; it lives in a separate child HWND).
+            string tabBarPixelHex = null;
+            string toolbarPixelHex = null;
+            try
+            {
+                ActivateTab(HostTab.CurseForge);
+                Application.DoEvents();
+
+                if (_navPanel.Width > 0 && _navPanel.Height > 0)
+                {
+                    using (Bitmap navBmp = new Bitmap(_navPanel.Width, _navPanel.Height))
+                    {
+                        _navPanel.DrawToBitmap(navBmp, new Rectangle(0, 0, navBmp.Width, navBmp.Height));
+                        tabBarPixelHex = SamplePixelHex(navBmp, 10, 200);
+                    }
+                }
+
+                if (_cfToolbar.Width > 0 && _cfToolbar.Height > 0)
+                {
+                    using (Bitmap toolbarBmp = new Bitmap(_cfToolbar.Width, _cfToolbar.Height))
+                    {
+                        _cfToolbar.DrawToBitmap(toolbarBmp, new Rectangle(0, 0, toolbarBmp.Width, toolbarBmp.Height));
+                        // The back/forward/home buttons and the search box
+                        // all sit in the top ~30 of the bar's Scaled(36)
+                        // height, so a y just under that (proportionally,
+                        // at any DPI) lands on plain toolbar background
+                        // instead of a control face.
+                        toolbarPixelHex = SamplePixelHex(toolbarBmp, 10, Scaled(33));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHost("selftest DrawToBitmap failed: " + ex.Message);
+            }
+
             Dictionary<string, object> marker = new Dictionary<string, object>();
             marker["init"] = initSucceeded && _furphyReady && _cfReady;
             marker["version"] = _webviewVersion;
             marker["cfTabTitle"] = cfTitle;
+            marker["dpi"] = (long)_effectiveDpi;
+            marker["dpiAware"] = _dpiAware;
+            marker["tabBarPixel"] = tabBarPixelHex;
+            marker["toolbarPixel"] = toolbarPixelHex;
 
             List<string> blockedCopy;
             List<string> allowedCopy;
@@ -1360,6 +1645,14 @@ namespace Furphy
             {
                 LogHost("failed to write selftest marker: " + ex.Message);
             }
+        }
+
+        private static string SamplePixelHex(Bitmap bmp, int x, int y)
+        {
+            if (bmp == null) return null;
+            if (x < 0 || y < 0 || x >= bmp.Width || y >= bmp.Height) return null;
+            Color c = bmp.GetPixel(x, y);
+            return string.Format(CultureInfo.InvariantCulture, "#{0:x2}{1:x2}{2:x2}", c.R, c.G, c.B);
         }
     }
 }
