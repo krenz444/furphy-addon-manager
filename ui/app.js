@@ -26,20 +26,20 @@ const Prefs = (function () {
   // E15: a third theme value, "vaporwave", joins "light" as the only other
   // non-default option - anything else read back (missing key, corrupt
   // value, an older/newer build's value) still falls through to "dark".
-  function isKnownTheme(v) { return v === "light" || v === "vaporwave"; }
+  function isKnownTheme(v) { return v === "light" || v === "vaporwave" || v === "dark"; }
 
   function readTheme() {
-    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "dark"; } catch (e) { return "dark"; }
+    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "vaporwave"; } catch (e) { return "vaporwave"; }
   }
   function readDensity() {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
-  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "dark"; }
+  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "vaporwave"; }
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
-    const v = isKnownTheme(value) ? value : "dark";
+    const v = isKnownTheme(value) ? value : "vaporwave";
     applyTheme(v);
     try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* storage unavailable - theme still applies for this load */ }
   }

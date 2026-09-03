@@ -84,3 +84,4 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 - Icon: three vaporwave concepts rendered via headless Edge; chosen sunset + puzzle piece. make-icon.ps1 renders 16..512 PNGs and packs a 7-size PNG .ico; assets: ui/icon.svg, ui/icons/furphy-*.png, icon.ico, ui/manifest.json. Desktop shortcut renamed "Furphy Addon Manager" with the icon.
 - Rename: title, sidebar brand, About, /api/ping name, vbs, README, SPEC/CHANGELOG headings. Folder/file names unchanged.
 - Vaporwave theme: complete token override (23 tokens + theme-scoped extras), neon glows, gradient brand, CSS perspective grid, neon chips, cyan focus rings; five hard-coded colours routed through tokens so all themes stay consistent; contrast >= 4.79:1 worst case. Browser test 6/6, zero console errors.
+- 20:30 follow-up (commit 3b5f9d3): sidebar brand on one line with a 26 px icon. Live verified: logos load with the valid key, Vaporwave renders, zero console errors.
