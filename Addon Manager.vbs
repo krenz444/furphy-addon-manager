@@ -1,4 +1,4 @@
-' WoW Addon Manager launcher.
+' Furphy Addon Manager launcher.
 ' Starts the local server hidden (if it is not already running) and opens the UI as an Edge app window.
 Option Explicit
 Dim sh, fso, root, port, url, http, running, i, text, re, matches, edge
@@ -31,7 +31,7 @@ If Not running Then
 End If
 
 If Not running Then
-    MsgBox "The Addon Manager server did not start. Check " & root & "\server.log", vbExclamation, "WoW Addon Manager"
+    MsgBox "The Addon Manager server did not start. Check " & root & "\server.log", vbExclamation, "Furphy Addon Manager"
     WScript.Quit 1
 End If
 

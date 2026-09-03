@@ -3,7 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WoW Addon Manager</title>
+<title>Furphy Addon Manager</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/furphy-32.png">
+<link rel="apple-touch-icon" href="icons/furphy-192.png">
+<link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -45,8 +49,8 @@
 
   <aside id="sidebar" class="sidebar">
     <div class="brand">
-      <svg class="brand-icon icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
-      <span class="brand-name">WoW Addon Manager</span>
+      <img class="brand-icon" src="icon.svg" alt="">
+      <span class="brand-name">Furphy Addon Manager</span>
     </div>
 
     <nav class="nav" id="nav" aria-label="Primary">
@@ -218,6 +222,18 @@
           </div>
         </div>
 
+        <!-- Round 6 fix: distinct from #browse-nokey above - shown when a key
+             IS configured but CurseForge is rejecting it (401/403), so the
+             copy points at fixing the saved key rather than adding one. -->
+        <div class="nokey-panel" id="browse-keyrejected" hidden>
+          <div class="nokey-card">
+            <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
+            <h2>Your CurseForge API key was rejected</h2>
+            <p class="muted-text">CurseForge is rejecting the key currently saved in Settings, so Browse, logos, descriptions, and changelogs can&rsquo;t load. Paste a working key to fix this.</p>
+            <button type="button" class="btn btn-accent" id="btn-keyrejected-settings">Go to Settings</button>
+          </div>
+        </div>
+
         <div id="browse-content">
           <header class="topbar">
             <label class="search-field">
@@ -293,7 +309,7 @@
             <div class="settings-row settings-row-col">
               <div class="settings-row-label">Out-of-date addon loading (checkAddonVersion)</div>
               <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
-              <p class="muted-text">This is WoW&rsquo;s own setting, not a WoW Addon Manager setting &mdash; it controls whether the character-select screen blocks addons the client thinks are out of date. &ldquo;0&rdquo; (disabled) lets them load anyway, which pairs well with this manager keeping them updated; &ldquo;1&rdquo; (enabled) is the game&rsquo;s default warning/block. Change it in-game via the AddOns list, not here.</p>
+              <p class="muted-text">This is WoW&rsquo;s own setting, not a Furphy Addon Manager setting &mdash; it controls whether the character-select screen blocks addons the client thinks are out of date. &ldquo;0&rdquo; (disabled) lets them load anyway, which pairs well with this manager keeping them updated; &ldquo;1&rdquo; (enabled) is the game&rsquo;s default warning/block. Change it in-game via the AddOns list, not here.</p>
             </div>
           </section>
 
@@ -329,7 +345,13 @@
               </div>
               <button type="button" class="btn btn-outline" id="btn-test-apikey">Test</button>
               <button type="button" class="btn btn-accent" id="btn-save-apikey">Save</button>
+              <button type="button" class="btn btn-danger-outline" id="btn-clear-apikey">Clear key</button>
             </div>
+            <!-- Round 6 fix: shown only while the masked field is focused for
+                 editing - reminds the user the old key stays saved until they
+                 click Save, since the field is cleared (not pre-filled) the
+                 moment they click into it. -->
+            <p class="form-msg is-info" id="apikey-hint" hidden></p>
             <p class="apikey-status" id="apikey-status">No key configured</p>
             <p class="form-msg" id="apikey-test-result" hidden></p>
           </section>
@@ -348,6 +370,7 @@
               <div class="segmented" id="theme-toggle" role="group" aria-label="Color theme">
                 <button type="button" class="segmented-btn" data-theme-value="dark">Dark</button>
                 <button type="button" class="segmented-btn" data-theme-value="light">Light</button>
+                <button type="button" class="segmented-btn" data-theme-value="vaporwave">Vaporwave</button>
               </div>
             </div>
           </section>

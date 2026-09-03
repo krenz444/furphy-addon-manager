@@ -1,10 +1,10 @@
-WoW Addon Manager (AddonSync)
-=============================
+Furphy Addon Manager (AddonSync)
+=================================
 Keeps your retail addons updated straight from CurseForge, and gives you a CurseForge-style app to manage them.
 
 TWO WAYS IN
   Desktop shortcut "WoW (auto-update addons)"  -> silently updates everything, then launches WoW via Battle.net.
-  Desktop shortcut "WoW Addon Manager"         -> opens the app (installed list, updates, versions, browse, settings).
+  Desktop shortcut "Furphy Addon Manager"      -> opens the app (installed list, updates, versions, browse, settings).
   Both are safe to use any time; the app refuses to run two operations at once.
 
 THE APP

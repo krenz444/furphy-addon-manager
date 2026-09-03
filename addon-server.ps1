@@ -2,7 +2,7 @@
 =====================================================================
  addon-server.ps1
 
- Local HTTP server for the WoW Addon Manager. Serves the ui\ single
+ Local HTTP server for the Furphy Addon Manager. Serves the ui\ single
  page app and a JSON API, runs addon-sync.ps1 as hidden child
  processes for long operations, and proxies the official CurseForge
  Core API when a key is configured in settings.json.
@@ -2810,7 +2810,7 @@ function Handle-Ping {
     param($Context, $RouteMatch)
 
     $uptime = ((Get-Date) - $Script:StartTime).TotalSeconds
-    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; version = $Script:Version; uptime = [math]::Round($uptime, 1) }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1) }
 }
 
 function Handle-State {
@@ -3722,6 +3722,7 @@ $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 $Script:BuildInfoPathOverride = $BuildInfoPath
+$Script:AppName = 'Furphy Addon Manager'
 $Script:Version = '1.0.0'
 $Script:StartTime = Get-Date
 $Script:ShuttingDown = $false

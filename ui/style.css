@@ -1,5 +1,5 @@
 /* ==========================================================================
-   WoW Addon Manager - stylesheet
+   Furphy Addon Manager - stylesheet
    Dark, CurseForge-app-like theme. Tokens live on :root as CSS variables.
    8px spacing grid. 150ms transitions. Custom scrollbars.
    ========================================================================== */
@@ -27,6 +27,26 @@
   --warning: #f5b400;
   --danger: #ef4a4a;
   --info: #4a9eef;
+
+  /* danger button's own hover/text shades, its outline variant's border, and
+     the offline banner's border - factored out of what used to be hardcoded
+     literals baked into their selectors (see Round 7 E15 changelog entry) so
+     a theme with a different danger hue - Vaporwave - can override them;
+     dark and light (which never redefine these four) render byte-identical
+     to before. */
+  --danger-hover: #ff6363;
+  --danger-text: #2a0a0a;
+  --danger-border: rgba(239, 74, 74, 0.35);
+  --danger-outline-border: rgba(239, 74, 74, 0.4);
+
+  /* focus-ring: what :focus-visible outlines actually draw in, everywhere in
+     this file. Indirected through --accent (rather than every selector
+     writing var(--accent) directly) purely so Vaporwave can point focus
+     rings at its cyan secondary instead of its hot-pink accent without
+     touching the ~14 shared :focus-visible rules themselves; dark and light
+     never redefine this token, so it always equals their own --accent and
+     nothing about their focus rings changes. */
+  --focus-ring: var(--accent);
 
   /* derived translucent tints for chips/badges */
   --success-tint: rgba(61, 220, 132, 0.14);
@@ -97,6 +117,65 @@
   --form-error-text: #9c2b2b;
 }
 
+/* ==========================================================================
+   Vaporwave theme - third Appearance option (E15), applied via
+   [data-theme="vaporwave"] the same way Light is applied above. Requested by
+   Eric. Every token the dark theme defines is redefined here (nothing falls
+   through to dark), plus three tokens this theme alone needs:
+     --secondary / --purple - the cyan/purple hues named in the brief,
+       reserved for the signature touches below (brand gradient, focus ring,
+       perspective grid) rather than any of the six semantic roles.
+     --accent-active - the brief's third accent shade (hover/active), used
+       only for .btn-accent:active below; dark/light have no :active rule to
+       drive so they never define it.
+   --focus-ring is the one token above whose *default* (dark's --focus-ring:
+   var(--accent)) this theme overrides outright, pointing every shared
+   :focus-visible rule at the cyan secondary instead of the hot-pink accent.
+   ========================================================================== */
+:root[data-theme="vaporwave"] {
+  color-scheme: dark;
+
+  --bg-0: #12081f;
+  --bg-1: #1a0b2e;
+  --bg-2: #241640;
+  --bg-3: #2d1b4e;
+  --border: #3a2a5c;
+  --border-soft: #241640;
+  --border-hover: #4d3a76;
+
+  --text: #f3e9ff;
+  --text-muted: #b9a6d6;
+  --text-faint: #9a86c0;
+
+  --accent: #ff71ce;
+  --accent-hover: #ff8fd8;
+  --accent-active: #ff4fbf;
+  --accent-text: #1a0e2e;
+  --success: #05ffa1;
+  --warning: #fffb96;
+  --danger: #ff4f79;
+  --info: #01cdfe;
+
+  --secondary: #01cdfe;
+  --purple: #b967ff;
+  --focus-ring: var(--secondary);
+
+  --success-tint: rgba(5, 255, 161, 0.14);
+  --warning-tint: rgba(255, 251, 150, 0.16);
+  --danger-tint: rgba(255, 79, 121, 0.16);
+  --info-tint: rgba(1, 205, 254, 0.14);
+  --accent-tint: rgba(255, 113, 206, 0.16);
+  --muted-tint: rgba(185, 166, 214, 0.12);
+
+  --banner-danger-text: #ffb3c6;
+  --form-error-text: #ff9fb8;
+
+  --danger-hover: #ff7a97;
+  --danger-text: #2a0a14;
+  --danger-border: rgba(255, 79, 121, 0.35);
+  --danger-outline-border: rgba(255, 79, 121, 0.4);
+}
+
 * { box-sizing: border-box; }
 
 /* Several elements below are toggled purely via the `hidden` attribute (in
@@ -126,7 +205,7 @@ p { margin: 0 0 8px; }
 ol, ul { margin: 0; padding-left: 20px; }
 dl { margin: 0; }
 a { color: var(--info); }
-a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+a:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 2px; }
 button { font-family: inherit; }
 
 /* custom scrollbars, applied wherever content overflows */
@@ -167,7 +246,7 @@ button { font-family: inherit; }
   padding: 4px 8px 12px;
   border-bottom: 1px solid var(--border);
 }
-.brand-icon { width: 22px; height: 22px; stroke: var(--accent); }
+.brand-icon { width: 22px; height: 22px; flex: none; display: block; border-radius: 5px; }
 .brand-name { font-weight: 700; font-size: 14px; letter-spacing: 0.2px; }
 
 .nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
@@ -187,7 +266,7 @@ button { font-family: inherit; }
   transition: background var(--fast), color var(--fast);
 }
 .nav-item:hover { background: var(--bg-2); color: var(--text); }
-.nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nav-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .nav-item.is-active { background: var(--accent-tint); color: var(--text); }
 .nav-item.is-active .nav-icon { stroke: var(--accent); }
 .nav-label { flex: 1; }
@@ -230,7 +309,7 @@ button { font-family: inherit; }
   padding: 10px 20px;
   background: var(--danger-tint);
   color: var(--banner-danger-text);
-  border-bottom: 1px solid rgba(239, 74, 74, 0.35);
+  border-bottom: 1px solid var(--danger-border);
   font-size: 13px;
 }
 .banner .icon { stroke: var(--danger); }
@@ -261,10 +340,10 @@ button { font-family: inherit; }
   transition: background var(--fast), border-color var(--fast), color var(--fast), opacity var(--fast);
 }
 .btn .icon { width: 15px; height: 15px; }
-.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .btn:disabled { cursor: not-allowed; opacity: 0.5; }
 
-.btn-accent { background: var(--accent); color: #1a0e08; }
+.btn-accent { background: var(--accent); color: var(--accent-text); }
 .btn-accent:hover:not(:disabled) { background: var(--accent-hover); }
 
 .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
@@ -273,10 +352,10 @@ button { font-family: inherit; }
 .btn-ghost { background: transparent; color: var(--text-muted); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
 
-.btn-danger { background: var(--danger); color: #2a0a0a; }
-.btn-danger:hover:not(:disabled) { background: #ff6363; }
+.btn-danger { background: var(--danger); color: var(--danger-text); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
 
-.btn-danger-outline { background: transparent; color: var(--danger); border-color: rgba(239, 74, 74, 0.4); }
+.btn-danger-outline { background: transparent; color: var(--danger); border-color: var(--danger-outline-border); }
 .btn-danger-outline:hover:not(:disabled) { background: var(--danger-tint); }
 
 .btn-block { width: 100%; }
@@ -296,7 +375,7 @@ button { font-family: inherit; }
   transition: background var(--fast), color var(--fast);
 }
 .icon-btn:hover { background: var(--bg-2); color: var(--text); }
-.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.icon-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
 input[type="text"], input[type="search"], input[type="password"], input[type="number"] {
   background: var(--bg-2);
@@ -312,7 +391,7 @@ input[type="text"], input[type="search"], input[type="password"], input[type="nu
 input::placeholder { color: var(--text-faint); }
 input:focus { border-color: var(--accent); background: var(--bg-3); }
 input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type="password"]:focus-visible, input[type="number"]:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -334,12 +413,16 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   transition: border-color var(--fast);
 }
 .select:focus { border-color: var(--accent); }
-.select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 /* The chevron above is a data-URI SVG with its stroke color baked in (can't
    reference a CSS var from inside one), so the light theme needs its own
    copy - same shape, --text-muted's light-theme value as the stroke. */
 :root[data-theme="light"] .select {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2352545b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6,9 12,15 18,9'/></svg>");
+}
+/* Same reason, Vaporwave's own --text-muted (#b9a6d6). */
+:root[data-theme="vaporwave"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b9a6d6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6,9 12,15 18,9'/></svg>");
 }
 
 .search-field {
@@ -391,7 +474,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   text-underline-offset: 2px;
 }
 .link-btn:hover { color: var(--accent-hover); }
-.link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.link-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 2px; }
 
 /* ==========================================================================
    Status filter chips (My Addons)
@@ -413,7 +496,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   transition: background var(--fast), border-color var(--fast), color var(--fast);
 }
 .filter-chip:hover { background: var(--bg-2); color: var(--text); }
-.filter-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.filter-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .filter-chip.is-active { background: var(--accent-tint); border-color: var(--accent); color: var(--text); }
 .filter-chip-count {
   font-size: 10.5px;
@@ -529,7 +612,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   transition: color var(--fast);
 }
 .th-sort-btn:hover, .th-sort-btn.is-active-sort { color: var(--text); }
-.th-sort-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.th-sort-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
 .sort-indicator { font-size: 9px; line-height: 1; color: var(--accent); min-width: 8px; }
 
 .addon-row {
@@ -557,7 +640,14 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .addon-logo-fallback {
   width: 40px; height: 40px; border-radius: var(--radius-sm); flex: none;
   display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 15px; color: #fff;
+  font-weight: 700; font-size: 15px;
+  /* Fixed white text against a background whose hue is chosen per-addon at
+     random (Utils.colorForName in app.js) - color: #fff only clears WCAG AA
+     (4.5:1) across every hue that generator can produce because that
+     function caps lightness at 30% specifically to keep the worst case
+     (yellow) dark enough. Do not raise that lightness without re-checking
+     contrast here. */
+  color: #fff;
 }
 .addon-names { min-width: 0; }
 .addon-name { font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -654,7 +744,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   cursor: pointer;
 }
 .dropdown-item:hover { background: var(--bg-3); }
-.dropdown-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dropdown-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .dropdown-item.is-danger { color: var(--danger); }
 .dropdown-item:disabled { color: var(--text-faint); cursor: not-allowed; }
 .dropdown-sep { height: 1px; background: var(--border); margin: 4px 2px; }
@@ -791,7 +881,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 /* E11: plain checkbox used by the My Addons header "select all" and each row's
    selection checkbox - same sizing/accent-color language as .radio-option's. */
 .chk { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; margin: 0; }
-.chk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chk:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
@@ -799,7 +889,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-muted); transition: transform var(--fast), background var(--fast); }
 .switch input:checked ~ .switch-track { background: var(--accent-tint); border-color: var(--accent); }
 .switch input:checked ~ .switch-track .switch-thumb { transform: translateX(16px); background: var(--accent); }
-.switch input:focus-visible ~ .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch input:focus-visible ~ .switch-track { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Two-option segmented toggle (Settings > Appearance: density, theme). */
 .segmented { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px; gap: 2px; margin-top: 8px; }
@@ -816,7 +906,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 }
 .segmented-btn:hover { color: var(--text); }
 .segmented-btn.is-active { background: var(--bg-3); color: var(--text); }
-.segmented-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.segmented-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
 .apikey-row { display: flex; gap: 8px; align-items: center; }
 .password-field { position: relative; flex: 1; }
@@ -924,7 +1014,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   transition: color var(--fast), border-color var(--fast);
 }
 .drawer-tab:hover { color: var(--text); }
-.drawer-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.drawer-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .drawer-tab.is-active { color: var(--text); border-bottom-color: var(--accent); }
 
 .drawer-body { padding: 20px 24px 40px; }
@@ -1152,3 +1242,93 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 [data-density="compact"] .dep-row { padding: 6px 10px; }
 [data-density="compact"] .diag-row { padding: 6px 10px; }
 [data-density="compact"] .selection-bar { padding: 5px 10px; margin-bottom: 6px; }
+
+/* ==========================================================================
+   Vaporwave signature touches (E15) - everything above this point is just
+   the token set, which alone re-themes every surface (tables, chips, drawer,
+   dialogs, toasts, job panel, inputs, cards, empty/error states, banners -
+   all already built on var(--bg-*)/var(--text-*)/etc, never a literal
+   color). These few rules layer the theme's own personality on top: neon
+   glow, a gradient brand, a horizon grid, outlined chips. All scoped under
+   [data-theme="vaporwave"] so dark and light never see a byte of this.
+   ========================================================================== */
+
+/* Neon glow on primary buttons - a soft accent-colored bloom instead of a
+   flat fill edge; intensifies on hover, snaps to the brief's third
+   (--accent-active) shade while actually pressed. */
+:root[data-theme="vaporwave"] .btn-accent {
+  box-shadow: 0 0 0 1px rgba(255, 113, 206, 0.4), 0 0 14px rgba(255, 113, 206, 0.35);
+}
+:root[data-theme="vaporwave"] .btn-accent:hover:not(:disabled) {
+  box-shadow: 0 0 0 1px rgba(255, 143, 216, 0.5), 0 0 20px rgba(255, 143, 216, 0.45);
+}
+:root[data-theme="vaporwave"] .btn-accent:active:not(:disabled) {
+  background: var(--accent-active);
+  box-shadow: 0 0 0 1px rgba(255, 79, 191, 0.6), 0 0 10px rgba(255, 79, 191, 0.4);
+}
+
+/* Neon glow on the active nav item - an inset hairline plus outer bloom,
+   layered on top of the existing --accent-tint fill/is-active rules above
+   (untouched, still shared with dark/light). */
+:root[data-theme="vaporwave"] .nav-item.is-active {
+  box-shadow: inset 0 0 0 1px rgba(255, 113, 206, 0.35), 0 0 14px rgba(255, 113, 206, 0.3);
+}
+
+/* Brand: pink -> cyan gradient wordmark, glowing icon. background-clip:text
+   needs an explicit transparent text color or the gradient never shows
+   through the glyphs. */
+:root[data-theme="vaporwave"] .brand-name {
+  background: linear-gradient(90deg, var(--accent), var(--secondary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+:root[data-theme="vaporwave"] .brand-icon {
+  filter: drop-shadow(0 0 6px rgba(255, 113, 206, 0.55));
+}
+
+/* Faint CSS-only perspective grid along the bottom of the sidebar - two
+   repeating-linear-gradients (vertical + horizontal rules) plus a rising
+   accent glow, cropped to the sidebar's own rounded corners via
+   overflow:hidden and faded out toward the top with a mask so it reads as a
+   horizon rather than a hard-edged rectangle. Kept deliberately low-alpha
+   (0.08-0.14) since it sits directly behind the real nav/status content -
+   .sidebar > * gets a stacking context above it (z-index:1) so every button,
+   label and focus ring stays exactly as clickable/legible as before; the
+   grid never intercepts a click either way (pointer-events:none). */
+:root[data-theme="vaporwave"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="vaporwave"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="vaporwave"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 150px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    repeating-linear-gradient(90deg, rgba(1, 205, 254, 0.10) 0, rgba(1, 205, 254, 0.10) 1px, transparent 1px, transparent 26px),
+    repeating-linear-gradient(0deg, rgba(1, 205, 254, 0.08) 0, rgba(1, 205, 254, 0.08) 1px, transparent 1px, transparent 16px),
+    linear-gradient(to top, rgba(255, 113, 206, 0.14), transparent 65%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent);
+}
+
+/* Neon-outlined status chips and the active filter chip - an inset hairline
+   in the chip's own color, so the tint fill reads like it's glowing at the
+   rim instead of a flat pill. inset keeps it from adding to the chip's box
+   size (no reflow versus the dark/light pill it's layered onto). */
+:root[data-theme="vaporwave"] .chip-success { box-shadow: inset 0 0 0 1px rgba(5, 255, 161, 0.55); }
+:root[data-theme="vaporwave"] .chip-warning { box-shadow: inset 0 0 0 1px rgba(255, 251, 150, 0.55); }
+:root[data-theme="vaporwave"] .chip-info { box-shadow: inset 0 0 0 1px rgba(1, 205, 254, 0.55); }
+:root[data-theme="vaporwave"] .chip-muted { box-shadow: inset 0 0 0 1px rgba(185, 166, 214, 0.35); }
+:root[data-theme="vaporwave"] .chip-danger { box-shadow: inset 0 0 0 1px rgba(255, 79, 121, 0.55); }
+:root[data-theme="vaporwave"] .chip-busy { box-shadow: inset 0 0 0 1px rgba(255, 113, 206, 0.55); }
+:root[data-theme="vaporwave"] .filter-chip.is-active { box-shadow: inset 0 0 0 1px rgba(255, 113, 206, 0.4); }
