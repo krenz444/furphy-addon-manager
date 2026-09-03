@@ -1,6 +1,6 @@
 "use strict";
 /* ==========================================================================
-   WoW Addon Manager - frontend
+   Furphy Addon Manager - frontend
    Vanilla JS, no frameworks. Organised as namespaced modules:
      Mock       - dev-only fake backend, active only with ?mock=1
      Utils      - DOM/format helpers
@@ -23,18 +23,23 @@ const Prefs = (function () {
   const THEME_KEY = "addonSync.theme.v1";
   const DENSITY_KEY = "addonSync.density.v1";
 
+  // E15: a third theme value, "vaporwave", joins "light" as the only other
+  // non-default option - anything else read back (missing key, corrupt
+  // value, an older/newer build's value) still falls through to "dark".
+  function isKnownTheme(v) { return v === "light" || v === "vaporwave"; }
+
   function readTheme() {
-    try { return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark"; } catch (e) { return "dark"; }
+    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "dark"; } catch (e) { return "dark"; }
   }
   function readDensity() {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
-  function applyTheme(value) { document.documentElement.dataset.theme = value === "light" ? "light" : "dark"; }
+  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "dark"; }
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
-    const v = value === "light" ? "light" : "dark";
+    const v = isKnownTheme(value) ? value : "dark";
     applyTheme(v);
     try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* storage unavailable - theme still applies for this load */ }
   }
@@ -385,7 +390,7 @@ const Mock = (function () {
         // "stale-minor" BigWigs fixtures seeded above.
         return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, clientBuild: "12.1.0.69587", clientInterface: 120100 };
       }
-      if (p === "/api/ping") return { ok: true, version: "mock-1.0", uptime: 1234 };
+      if (p === "/api/ping") return { ok: true, name: "Furphy Addon Manager", version: "mock-1.0", uptime: 1234 };
       if (p === "/api/jobs" && method === "GET") return jobs.slice(0, 20);
       if (p.indexOf("/api/jobs/") === 0 && method === "GET") {
         const id = p.split("/").pop();
@@ -476,7 +481,15 @@ const Mock = (function () {
         if (key && key.length >= 8) return { ok: true, message: "Key is valid." };
         return { ok: false, message: "Key rejected by CurseForge." };
       }
-      if (p.indexOf("/api/cf/") === 0 && !hasKey) return { __status: 409, error: "no-key" };
+      if (p.indexOf("/api/cf/") === 0) {
+        if (!hasKey) return { __status: 409, error: "no-key" };
+        // Round 6 fix: dev-only way to exercise a configured-but-rejected key
+        // (real CurseForge 401/403) under ?mock=1 - same length-8 threshold
+        // /api/settings/test-key above already uses, so saving a short key
+        // in Settings and then visiting Browse reproduces the reported bug
+        // (repeated /api/cf/* 403s) without any real network access.
+        if (mockSettings.cfApiKey.length < 8) return { __status: 401, error: "unauthorized" };
+      }
       if (p === "/api/cf/categories") return { data: categories };
       if (p === "/api/cf/search") {
         const q2 = (q.get("q") || "").toLowerCase();
@@ -672,11 +685,17 @@ const Utils = (function () {
   }
 
   // Deterministic pastel-ish color from a string, used for logo fallback circles.
+  // .addon-logo-fallback (style.css) paints the initial in a fixed white -
+  // every hue this can produce must stay dark enough for that white text to
+  // hit WCAG AA (4.5:1). At this saturation the worst case is yellow (hue
+  // ~60, where R and G both peak and B is 0 - the highest weighted
+  // luminance the HSL wheel can produce here): 40% lightness only reaches
+  // ~3.3:1 there. 30% keeps every hue, including that one, above 5:1.
   function colorForName(name) {
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
     const hue = hash % 360;
-    return "hsl(" + hue + ", 45%, 40%)";
+    return "hsl(" + hue + ", 45%, 30%)";
   }
 
   function firstLetter(name) {
@@ -902,12 +921,45 @@ const Api = (function () {
     return err;
   }
 
+  // Round 6 fix: every /api/cf/* call (LogoCache's batch logo fetch, Browse's
+  // search/categories, the drawer's mod/description/changelog loaders,
+  // Add-by-URL resolve) funnels through this one function, so a rejected key
+  // is detected and reacted to in exactly one place instead of each call
+  // site needing its own 401/403 handling. Live symptom this fixes: with a
+  // rejected key configured, My Addons re-renders on every 800ms job poll,
+  // each one calling LogoCache.ensure again for the same addons - without a
+  // shared "already known rejected" flag that hammered POST /api/cf/mods
+  // roughly once a second, forever.
+  function isCfPath(path) { return path.indexOf("/api/cf/") === 0; }
+
+  function noteCfResult(path, status) {
+    if (!isCfPath(path)) return;
+    if (status === 401 || status === 403) {
+      if (Store.state.cfKeyRejected) return; // already known - never a second banner/toast for the same rejection
+      Store.state.cfKeyRejected = true;
+      Components.Toast.show("Your CurseForge API key was rejected. Fix it in Settings.", "error");
+    } else if (status < 400 && Store.state.cfKeyRejected) {
+      // Cleared by a later call succeeding (e.g. the key was fixed in another
+      // tab/session) - Actions.saveSettings also clears this on any settings
+      // save made from this tab, so both paths documented in the fix note apply.
+      Store.state.cfKeyRejected = false;
+    }
+  }
+
   async function request(method, path, body) {
+    if (isCfPath(path) && Store.state.cfKeyRejected) {
+      // A rejected key fails every /api/cf/* call the exact same way - stop
+      // making the call at all (no fetch, no Mock round-trip) rather than
+      // rediscovering the same 401/403 over and over.
+      throw ApiError(403, { error: "key-rejected" });
+    }
+
     if (Mock.enabled) {
       const result = await Mock.handle(method, path, body);
       const status = (result && result.__status) || 200;
       const data = result ? Object.assign({}, result) : {};
       delete data.__status;
+      noteCfResult(path, status);
       if (status >= 400) throw ApiError(status, data);
       return data;
     }
@@ -928,6 +980,7 @@ const Api = (function () {
     let data = null;
     const text = await res.text();
     if (text) { try { data = JSON.parse(text); } catch (e) { data = { raw: text }; } }
+    noteCfResult(path, res.status);
 
     if (!res.ok) throw ApiError(res.status, data || {});
     return data;
@@ -1019,6 +1072,13 @@ const Store = (function () {
 
     addons: [],
     settings: null,
+    // Round 6 fix: sticky "the saved CurseForge key is being rejected"
+    // signal - set by Api.request the moment any /api/cf/* call comes back
+    // 401/403, read by LogoCache (stop fetching logos) and Views.browse
+    // (show a dedicated panel instead of the search UI). Cleared by
+    // Actions.saveSettings on any settings save, or by a later /api/cf/*
+    // call that succeeds.
+    cfKeyRejected: false,
     lastRun: null,
     job: null,
     jobLabel: null,        // client-chosen human title for the job panel, set by Actions.startJob
@@ -1218,8 +1278,14 @@ const Store = (function () {
 const LogoCache = (function () {
   const KEY = "addonSync.logoCache.v1";
   const TTL_MS = 24 * 3600 * 1000;
+  // Round 6 fix: "never re-request the same failed logo batch more than once
+  // per 10 minutes" - independent of (and in addition to) the cfKeyRejected
+  // short-circuit below, so a transient network/500 failure also backs off
+  // instead of retrying on every My Addons/Browse render.
+  const FAILURE_BACKOFF_MS = 10 * 60 * 1000;
   let cache = null;
   const inFlight = new Set();
+  const failedAt = new Map(); // projectId -> ms timestamp of its last failed fetch attempt (in-memory only, resets on reload)
 
   function load() {
     if (cache) return cache;
@@ -1240,13 +1306,21 @@ const LogoCache = (function () {
   // onUpdated() once. No-ops entirely when no API key is configured.
   async function ensure(projectIds, onUpdated) {
     if (!Store.state.settings || !Store.state.settings.hasApiKey) return;
+    // Round 6 fix: a rejected key fails every /api/cf/* call the same way -
+    // return immediately (no batch built, no Api call) instead of rediscovering
+    // that on every render while a job is polling (previously this repeated
+    // roughly once a second - see Api.request's own note on the same fix).
+    if (Store.state.cfKeyRejected) return;
     const c = load();
+    const now = Date.now();
     const need = [];
     (projectIds || []).forEach(function (raw) {
       const id = Number(raw);
       if (!id || inFlight.has(id)) return;
       const rec = c[id];
-      if (rec && Date.now() - rec.ts <= TTL_MS) return;
+      if (rec && now - rec.ts <= TTL_MS) return;
+      const failTs = failedAt.get(id);
+      if (failTs && now - failTs < FAILURE_BACKOFF_MS) return;
       need.push(id);
     });
     if (!need.length) return;
@@ -1259,6 +1333,7 @@ const LogoCache = (function () {
         Store.cacheMods(data);
         data.forEach(function (mod) {
           c[mod.id] = { url: (mod.logo && (mod.logo.thumbnailUrl || mod.logo.url)) || "", ts: Date.now() };
+          failedAt.delete(mod.id);
         });
         // Also remember ids that didn't come back, so a missing mod isn't refetched every render.
         chunk.forEach(function (id) { if (!c[id]) c[id] = { url: "", ts: Date.now() }; });
@@ -1266,7 +1341,11 @@ const LogoCache = (function () {
       persist();
       if (onUpdated) onUpdated();
     } catch (e) {
-      /* network/key issue - fallback letter avatars remain, silently */
+      // network/key issue - fallback letter avatars remain, silently. Mark
+      // this whole batch as just-failed so the `need` filtering above skips
+      // it for the next 10 minutes rather than retrying on the next render.
+      const ts = Date.now();
+      need.forEach(function (id) { failedAt.set(id, ts); });
     } finally {
       need.forEach(function (id) { inFlight.delete(id); });
     }
@@ -2680,15 +2759,23 @@ const Actions = (function () {
   // successive successful saves into a single toast, fired a moment after
   // the last one settles rather than after every individual call.
   let saveToastTimer = null;
-  async function saveSettings(patch) {
+  // Round 6 fix: optional `toastMessage` overrides the generic "Settings
+  // saved." for callers with something more specific to say (the API key
+  // save button reports "API key saved (…last4)" instead) - existing callers
+  // that pass nothing are unaffected.
+  async function saveSettings(patch, toastMessage) {
     try {
       const res = await Api.putSettings(patch);
       Store.state.settings = res;
+      // Round 6 fix: any settings save clears a stale "key was rejected"
+      // signal - the user may just have fixed it, and even if not, the next
+      // /api/cf/* call will re-detect the rejection and set it right back.
+      Store.state.cfKeyRejected = false;
       App.renderChrome();
       if (Store.state.view === "settings") Views.settings.render();
       if (Store.state.view === "browse") Views.browse.render();
       clearTimeout(saveToastTimer);
-      saveToastTimer = setTimeout(function () { Components.Toast.show("Settings saved.", "success"); }, 300);
+      saveToastTimer = setTimeout(function () { Components.Toast.show(toastMessage || "Settings saved.", "success"); }, 300);
       return res;
     } catch (err) {
       Components.Toast.show("Couldn't save settings: " + describeError(err), "error");
@@ -3296,6 +3383,7 @@ Views.browse = (function () {
     Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
     if (b.source === "wago") {
       Utils.qs("#browse-nokey").hidden = true;
+      Utils.qs("#browse-keyrejected").hidden = true;
       Utils.qs("#browse-content").hidden = false;
       if (!b.categories.length && !b.categoriesLoading) loadWagoCategories();
       if (!b.loaded && !b.loading) searchWago(true);
@@ -3304,9 +3392,15 @@ Views.browse = (function () {
     }
 
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
+    // Round 6 fix: a configured-but-rejected key is a third state, distinct
+    // from "no key at all" - shows its own panel (with its own fix-it copy)
+    // instead of either the no-key panel or a search UI that would just keep
+    // failing every request.
+    const rejected = hasKey && Store.state.cfKeyRejected;
     Utils.qs("#browse-nokey").hidden = hasKey;
-    Utils.qs("#browse-content").hidden = !hasKey;
-    if (!hasKey) return;
+    Utils.qs("#browse-keyrejected").hidden = !rejected;
+    Utils.qs("#browse-content").hidden = !hasKey || rejected;
+    if (!hasKey || rejected) return;
 
     if (!Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCfCategories();
     if (!Store.state.browse.loaded && !Store.state.browse.loading) searchCf(true);
@@ -3522,6 +3616,8 @@ Views.browse = (function () {
       search(false);
     });
     Utils.qs("#btn-nokey-settings").addEventListener("click", function () { App.switchView("settings"); });
+    // Round 6 fix: the key-rejected panel's own "Go to Settings" button.
+    Utils.qs("#btn-keyrejected-settings").addEventListener("click", function () { App.switchView("settings"); });
 
     Utils.qs("#install-by-id-form").addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -3585,6 +3681,49 @@ Views.settings = (function () {
   let diagError = null;
   let diagChecks = null;
 
+  // Round 6 fix: the masked placeholder this app itself writes into
+  // #input-apikey when a key is configured - eight bullet dots plus the
+  // last-4-chars hint, e.g. "••••••••edf0". Centralised so render(), the
+  // focus/blur handlers, and extractTypedKey() all agree on exactly what
+  // "still showing the mask, unedited" looks like.
+  function apikeyMask(hint) { return "••••••••" + (hint || ""); }
+
+  // Round 6 fix: what the user actually typed/pasted, with the masked
+  // placeholder stripped back off if it's still leading the value (defends
+  // against a paste landing inside the mask instead of replacing it, which
+  // is the live defect this whole helper exists to fix) and whitespace
+  // trimmed. Returns "" for "nothing real here" - an empty field, the mask
+  // alone, or the mask followed by only whitespace - which every caller
+  // below treats as "no change".
+  function extractTypedApiKey(raw) {
+    if (!raw) return "";
+    let v = raw;
+    const s = Store.state.settings;
+    if (s && s.hasApiKey) {
+      const mask = apikeyMask(s.apiKeyHint);
+      if (v.indexOf(mask) === 0) {
+        v = v.slice(mask.length);
+      } else {
+        // Defensive fallback: the hint may be stale (e.g. changed elsewhere
+        // this session) - still strip a leading run of the mask character.
+        const m = v.match(/^•+/);
+        if (m) v = v.slice(m[0].length);
+      }
+    }
+    return v.trim();
+  }
+
+  function showApikeyHint(text) {
+    const hint = Utils.qs("#apikey-hint");
+    hint.textContent = text;
+    hint.hidden = false;
+  }
+  function hideApikeyHint() {
+    const hint = Utils.qs("#apikey-hint");
+    hint.hidden = true;
+    hint.textContent = "";
+  }
+
   function render() {
     const s = Store.state.settings;
     if (!s) return;
@@ -3599,8 +3738,9 @@ Views.settings = (function () {
     Utils.qs("#toggle-autoupdate").checked = !!s.autoUpdateOnLaunch;
 
     const apikeyInput = Utils.qs("#input-apikey");
-    if (document.activeElement !== apikeyInput) apikeyInput.value = s.hasApiKey ? ("••••••••" + s.apiKeyHint) : "";
+    if (document.activeElement !== apikeyInput) apikeyInput.value = s.hasApiKey ? (apikeyMask(s.apiKeyHint)) : "";
     Utils.qs("#apikey-status").textContent = s.hasApiKey ? ("Key configured (…" + s.apiKeyHint + ")") : "No key configured";
+    Utils.qs("#btn-clear-apikey").disabled = !s.hasApiKey;
 
     Utils.qs("#about-version").textContent = App.getServerVersion() || "—";
     const uptime = App.getServerUptime();
@@ -3772,7 +3912,7 @@ Views.settings = (function () {
   // so it pastes cleanly into a bug report or a chat message.
   function diagnosticsReportText() {
     if (!diagChecks) return "";
-    const lines = ["WoW Addon Manager diagnostics - " + new Date().toLocaleString()];
+    const lines = ["Furphy Addon Manager diagnostics - " + new Date().toLocaleString()];
     diagChecks.forEach(function (c) { lines.push((c.ok ? "[OK]   " : "[FAIL] ") + c.name + ": " + (c.detail || "")); });
     return lines.join("\n");
   }
@@ -3813,12 +3953,59 @@ Views.settings = (function () {
       Utils.qs("#btn-toggle-apikey-visibility svg use").setAttribute("href", apikeyVisible ? "#icon-eye-off" : "#icon-eye");
     });
 
+    // Round 6 fix: clicking into the masked field used to leave the mask
+    // sitting there - a paste with no prior select-all landed the new key
+    // in the middle of the dots/hint instead of replacing them. Clearing on
+    // focus means a paste (or fresh typing) always replaces the whole value;
+    // the hint line explains the old key is untouched until Save.
+    Utils.qs("#input-apikey").addEventListener("focus", function () {
+      const input = Utils.qs("#input-apikey");
+      const s = Store.state.settings;
+      if (s && s.hasApiKey && input.value === apikeyMask(s.apiKeyHint)) {
+        input.value = "";
+        showApikeyHint("Paste your new key — the current key ends in …" + (s.apiKeyHint || "") + " and stays until you Save.");
+      }
+    });
+    // Blurring a field the user cleared-by-focusing but never actually typed
+    // into restores the masked display (render() only repaints #input-apikey
+    // while it isn't focused). Only when the field is genuinely EMPTY though:
+    // clicking Save/Test blurs this field first (blur fires before the
+    // button's own click handler), so unconditionally calling render() here
+    // would wipe out real just-typed/pasted content before Save/Test ever
+    // gets to read it.
+    Utils.qs("#input-apikey").addEventListener("blur", function () {
+      hideApikeyHint();
+      const input = Utils.qs("#input-apikey");
+      if (!input.value) render();
+    });
+
     Utils.qs("#btn-save-apikey").addEventListener("click", function () {
       const input = Utils.qs("#input-apikey");
       const raw = input.value;
-      // The masked placeholder (dots + hint) means "unchanged" - never save it verbatim.
-      if (Store.state.settings && Store.state.settings.hasApiKey && /^•+/.test(raw)) return;
-      Actions.saveSettings({ cfApiKey: raw }).then(function () { input.value = ""; apikeyVisible = false; input.type = "password"; }).catch(function () { /* error already toasted by saveSettings; keep the typed key in the field so the user can retry */ });
+      const typed = extractTypedApiKey(raw);
+      if (!typed) {
+        // Round 6 fix: both of these used to silently do nothing at all - no
+        // toast, no saved change, no indication the click was even seen.
+        Components.Toast.show(raw ? "No change." : "No key entered — current key kept.", "info");
+        return;
+      }
+      Actions.saveSettings({ cfApiKey: typed }, "API key saved (…" + typed.slice(-4) + ").")
+        .then(function () { input.value = ""; apikeyVisible = false; input.type = "password"; hideApikeyHint(); })
+        .catch(function () { /* error already toasted by saveSettings; keep the typed key in the field so the user can retry */ });
+    });
+
+    Utils.qs("#btn-clear-apikey").addEventListener("click", async function () {
+      const ok = await Components.Dialogs.confirm({
+        title: "Clear CurseForge API key?",
+        message: "Browse, logos, descriptions, and changelogs from CurseForge will stop working until a new key is saved.",
+        confirmLabel: "Clear key"
+      });
+      if (!ok) return;
+      try {
+        await Actions.saveSettings({ cfApiKey: "" }, "API key cleared.");
+        Utils.qs("#input-apikey").value = "";
+        hideApikeyHint();
+      } catch (e) { /* error already toasted by saveSettings */ }
     });
 
     // Round 4 fix: a Test result describing the previously-typed key must not
@@ -3834,12 +4021,22 @@ Views.settings = (function () {
     Utils.qs("#btn-test-apikey").addEventListener("click", async function () {
       const input = Utils.qs("#input-apikey");
       const raw = input.value;
-      const usingSaved = !raw || /^•+/.test(raw);
+      // Round 6 fix: unambiguous about WHICH key is being tested - a pasted
+      // value that still starts with the mask (defensive - focus already
+      // clears it in the normal flow) is now correctly recognised as "real
+      // content", instead of being treated as "using the saved key" and
+      // testing the wrong one while blaming the freshly-pasted key.
+      const typed = extractTypedApiKey(raw);
+      const usingSaved = !typed;
+      const s = Store.state.settings;
+      const label = usingSaved
+        ? (s && s.hasApiKey ? ("Saved key (…" + s.apiKeyHint + ")") : "No saved key")
+        : "Pasted key";
       const msg = Utils.qs("#apikey-test-result");
-      msg.hidden = false; msg.className = "form-msg is-info"; msg.textContent = "Testing…";
-      const res = await Actions.testKey(usingSaved ? undefined : raw);
+      msg.hidden = false; msg.className = "form-msg is-info"; msg.textContent = "Testing — " + label + "…";
+      const res = await Actions.testKey(usingSaved ? undefined : typed);
       msg.className = "form-msg " + (res.ok ? "is-success" : "is-error");
-      msg.textContent = res.message || (res.ok ? "Key is valid." : "Key test failed.");
+      msg.textContent = label + ": " + (res.ok ? "valid" : (res.message || "rejected"));
     });
 
     Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("folder"); });
@@ -3898,7 +4095,7 @@ Views.settings = (function () {
         return;
       }
       if (!data || data.format !== "wow-addon-manager/1" || !Array.isArray(data.addons)) {
-        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a WoW Addon Manager export.";
+        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a Furphy Addon Manager export.";
         return;
       }
       const existingIds = new Set(Store.state.addons.map(function (a) { return a.projectId; }));

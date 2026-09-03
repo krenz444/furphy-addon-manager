@@ -1,4 +1,4 @@
-# WoW Addon Manager - specification (authoritative)
+# Furphy Addon Manager - specification (authoritative)
 
 Working directory for this build: `C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\`
 (called ROOT below). Production deployment target (do NOT touch during the build): `C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync\`.
@@ -108,7 +108,7 @@ API (all JSON):
 ## 3. Frontend (ui\) - mirror the CurseForge app for WoW
 
 Look and feel: CurseForge-app-like. Dark theme (backgrounds around #141518 / #1c1d21 / #26282d, text #e7e7ea, muted #9a9ca3, accent orange #f16436 with hover #ff7a4d, success #3ddc84, warning #f5b400, danger #ef4a4a), system font stack (Segoe UI, sans-serif), 8px spacing grid, rounded 8px cards, subtle borders (#2f3136), smooth 150 ms transitions, custom scrollbars. Minimum layout width 1000px; the Edge app window is 1320x900. Page must never scroll horizontally. Every state (loading, empty, error, no-key) has a designed placeholder, not a blank.
-Layout: left sidebar 232px (brand "WoW Addon Manager" with an inline SVG icon; nav: My Addons [count badge + orange "n updates" badge when known], Browse, Settings; bottom: big orange "Update & Play" button and a secondary "Launch WoW" button; tiny status line: server ok / last check time). Main area with a top bar per view.
+Layout: left sidebar 232px (brand "Furphy Addon Manager" with an inline SVG icon; nav: My Addons [count badge + orange "n updates" badge when known], Browse, Settings; bottom: big orange "Update & Play" button and a secondary "Launch WoW" button; tiny status line: server ok / last check time). Main area with a top bar per view.
 
 View: My Addons
 - Top bar: search box (filters rows by name/author/folder instantly), buttons: "Check for updates" (check job), "Update all" (sync job; label shows count when known; disabled when 0 known and not checked - still allowed: with no check data it runs a full sync), "Add addon" (opens Add dialog: Project ID or CurseForge URL; URL needs key; validates; runs add job). Sort control (Name, Status, Updated).
@@ -135,7 +135,7 @@ Global
 - No inline event handlers; code organised as modules within app.js (api, state, views, components); comments where logic is non-obvious. Sanitize all upstream HTML before insertion; escape all text.
 
 ## 4. Launcher pieces (produced by the deploy step, not by the builders)
-`ROOT\Addon Manager.vbs` starts the server hidden if `/api/ping` fails, then opens the Edge app window. Desktop shortcut "WoW Addon Manager". The existing game launcher `.cmd` calls the CLI with `-Launcher -Quiet`.
+`ROOT\Addon Manager.vbs` starts the server hidden if `/api/ping` fails, then opens the Edge app window. Desktop shortcut "Furphy Addon Manager". The existing game launcher `.cmd` calls the CLI with `-Launcher -Quiet`.
 
 ## Expansion E1
 
