@@ -226,6 +226,15 @@ function Get-DefaultSettings {
         autoUpdateOnLaunch = $true
         cfApiKey           = ''
         port               = 47831
+        # E19: adFilter is the native host's (host\FurphyHost.exe) CurseForge-
+        # tab ad/tracker filter toggle - OFF by default per Eric's explicit
+        # decision (SPEC E19). hostWindow is the host's last saved window
+        # bounds ({x,y,w,h}), written by FurphyHost.cs itself via a direct
+        # read-modify-write of settings.json (HostFiles.UpdateJsonObject) -
+        # this server only needs to round-trip it through GET/PUT so a
+        # Settings PUT from the web UI (releaseType, etc.) never clobbers it.
+        adFilter           = $false
+        hostWindow         = $null
     }
 }
 
@@ -265,6 +274,11 @@ function Get-Settings {
         if ($null -ne $obj.autoUpdateOnLaunch) { $result.autoUpdateOnLaunch = [bool]$obj.autoUpdateOnLaunch }
         if ($null -ne $obj.cfApiKey) { $result.cfApiKey = [string]$obj.cfApiKey }
         if ($null -ne $obj.port) { $result.port = [int]$obj.port }
+        # E19: adFilter/hostWindow - see Get-DefaultSettings. hostWindow is
+        # copied through as whatever object shape is on disk (the host owns
+        # its contents); this server never inspects x/y/w/h itself.
+        if ($null -ne $obj.adFilter) { $result.adFilter = [bool]$obj.adFilter }
+        if ($null -ne $obj.hostWindow) { $result.hostWindow = $obj.hostWindow }
         return $result
     } catch {
         Write-ServerLog "Failed to read settings.json, using defaults: $($_.Exception.Message)"
@@ -294,6 +308,10 @@ function Get-SettingsView {
         # checkAddonVersion cvar from WTF\Config.wtf. PUT /api/settings never
         # accepts this key; it exists only for Settings > Game to display.
         checkAddonVersion = (Get-CheckAddonVersionSetting)
+        # E19: pass through unmasked (neither is a secret) - see
+        # Get-DefaultSettings.
+        adFilter          = $Settings.adFilter
+        hostWindow        = $Settings.hostWindow
     }
 }
 
@@ -964,6 +982,54 @@ function Start-Job {
     # Start-SwitchSourceJob/Complete-SwitchSourcePhase.
     if ($Kind -eq 'switch-source') {
         return (Start-SwitchSourceJob -JobId $jobId -StartedAt $startedAt -Params $Params)
+    }
+
+    # E19: add-by-slug {slug, fileId?} - the native host's CurseForge-tab
+    # install-link interception knows only the URL slug, never the numeric
+    # projectId, so resolve it here (an in-memory dictionary/linear-scan
+    # lookup against the same keyless catalogue index /api/cf/browse and
+    # /api/cf/enrich already use - no network call, so this stays
+    # synchronous unlike every CLI-backed job kind) and fall through to the
+    # ordinary single-projectId 'add' path below. Unlike a bad-request
+    # (caught earlier, in Handle-JobsPost, as a 400 before Start-Job is ever
+    # called), an unresolvable slug is a valid request that simply has
+    # nothing to install - per SPEC that is reported as a "404-style failed
+    # job" (a real job, in state 'failed', with a synthetic 404 exitCode)
+    # rather than an HTTP-level error, so the host's blind
+    # POST-then-switch-tabs flow always gets a jobId whose progress panel
+    # then shows the failure normally, same as any other Failed CLI result.
+    if ($Kind -eq 'add-by-slug') {
+        $slug = $null
+        if ($Params -and $Params.slug) { $slug = [string]$Params.slug }
+        if (-not $slug) {
+            return @{ Busy = $false; Error = 'slug is required for kind add-by-slug' }
+        }
+        $entry = Get-CfCatalogueEntryBySlug -Slug $slug
+        if (-not $entry) {
+            $finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $job = [PSCustomObject]@{
+                id            = $jobId
+                kind          = 'add-by-slug'
+                params        = $Params
+                state         = 'failed'
+                startedAt     = $startedAt
+                finishedAt    = $finishedAt
+                exitCode      = 404
+                log           = New-Object 'System.Collections.Generic.List[object]'
+                results       = New-Object 'System.Collections.Generic.List[object]'
+                error         = "No CurseForge addon found for slug '$slug' (404)"
+                Process       = $null
+                OutFile       = $null
+                ErrFile       = $null
+                SyncLogOffset = 0
+                LaunchAfter   = $false
+            }
+            Add-JobToHistory -Job $job
+            Save-CheckState
+            return @{ Busy = $false; Job = $job }
+        }
+        $Kind = 'add'
+        $Params = Add-Member -InputObject $Params -NotePropertyName 'projectId' -NotePropertyValue $entry.id -Force -PassThru
     }
 
     $cliKind = $Kind
@@ -2113,6 +2179,89 @@ function Invoke-Cli {
 }
 
 # =====================================================================
+# Invoke-ProtocolScript: synchronous register-protocol.ps1 call (E19)
+# =====================================================================
+
+function Invoke-ProtocolScript {
+    <#
+      Runs E17's existing, unchanged register-protocol.ps1 (the curseforge://
+      handler registration script - see SPEC "register-protocol.ps1") with
+      -Json and one of -Status/-Register/-Unregister, waits (up to
+      TimeoutSec), and returns the parsed JSON status object. Same
+      hidden-child-process / redirected-output / parsed-JSON / quoted-path
+      shape as Invoke-Cli above (the space-containing ROOT path is quoted the
+      same way); throws on failure or timeout - callers
+      (Handle-ProtocolStatus/Register/Unregister) catch and turn that into a
+      500, matching every other route handler's contract.
+    #>
+    param(
+        [string]$Switch,
+        [int]$TimeoutSec = 30
+    )
+
+    if (-not (Test-Path -LiteralPath $Script:JobsDir)) {
+        New-Item -ItemType Directory -Path $Script:JobsDir -Force | Out-Null
+    }
+
+    $token = [System.Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $outFile = Join-Path -Path $Script:JobsDir -ChildPath "protocol-$token.out"
+    $errFile = Join-Path -Path $Script:JobsDir -ChildPath "protocol-$token.err"
+
+    $psArgs = New-Object 'System.Collections.Generic.List[object]'
+    $psArgs.Add('-NoProfile')
+    $psArgs.Add('-ExecutionPolicy')
+    $psArgs.Add('Bypass')
+    # Start-Process joins -ArgumentList elements with spaces and does NOT
+    # quote them, so paths with spaces (C:\Program Files (x86)\... /
+    # $Script:Root itself) must be quoted here - same reasoning as
+    # New-CliProcessArgs above.
+    $psArgs.Add('-File')
+    $psArgs.Add('"' + $Script:RegisterProtocolPath + '"')
+    $psArgs.Add('-' + $Switch)
+    $psArgs.Add('-Json')
+
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # See Invoke-Cli/Start-Job: force the SafeProcessHandle to
+        # materialize now so that reading .ExitCode later is reliable.
+        $proc.Handle | Out-Null
+        $exited = $proc.WaitForExit($TimeoutSec * 1000)
+        if (-not $exited) {
+            try { $proc.Kill() } catch { }
+            throw "register-protocol.ps1 -$Switch timed out after $TimeoutSec seconds"
+        }
+
+        $exitCode = $proc.ExitCode
+        $stdout = ''
+        if (Test-Path -LiteralPath $outFile) {
+            try { $stdout = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8) } catch { $stdout = '' }
+        }
+        $stderr = ''
+        if (Test-Path -LiteralPath $errFile) {
+            try { $stderr = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::UTF8) } catch { $stderr = '' }
+        }
+
+        if ($exitCode -ne 0) {
+            $msg = $stderr
+            if (-not $msg) { $msg = "register-protocol.ps1 -$Switch exited with code $exitCode" }
+            throw $msg
+        }
+        if (-not $stdout -or $stdout.Trim().Length -eq 0) {
+            throw 'register-protocol.ps1 produced no output'
+        }
+
+        try {
+            return ($stdout | ConvertFrom-Json -ErrorAction Stop)
+        } catch {
+            throw "Could not parse register-protocol.ps1 output as JSON: $($_.Exception.Message)"
+        }
+    } finally {
+        try { if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue } } catch { }
+        try { if (Test-Path -LiteralPath $errFile) { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+}
+
+# =====================================================================
 # Invoke-CfApi: CurseForge Core API proxy (key-gated, cached, timed out)
 # =====================================================================
 
@@ -2848,6 +2997,28 @@ function Get-CfCatalogueEntry {
     if (-not $ProjectId) { return $null }
     $key = [string]$ProjectId
     if ($Script:CfCatalogueById.ContainsKey($key)) { return $Script:CfCatalogueById[$key] }
+    return $null
+}
+
+function Get-CfCatalogueEntryBySlug {
+    <#
+      E19: exact, case-insensitive slug match against the same keyless
+      catalogue index /api/cf/browse and Get-CfCatalogueEntry already use -
+      the job kind 'add-by-slug' (the native host's CurseForge-tab install-
+      link interception, host\FurphyHost.cs HandleSlugInstall) resolves a
+      curseforge.com URL slug to a projectId through this before behaving
+      like a normal 'add'. Linear scan (a few thousand entries, called at
+      most once per add-by-slug job - never per-request, so no separate
+      slug index is worth maintaining). $null when not found, the index is
+      empty, or Slug is blank.
+    #>
+    param([string]$Slug)
+    if ([string]::IsNullOrWhiteSpace($Slug)) { return $null }
+    foreach ($e in $Script:CfCatalogueIndex) {
+        if ($e.slug -and ([string]$e.slug).Equals($Slug, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $e
+        }
+    }
     return $null
 }
 
@@ -3767,7 +3938,11 @@ function Handle-Ping {
     param($Context, $RouteMatch)
 
     $uptime = ((Get-Date) - $Script:StartTime).TotalSeconds
-    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1) }
+    # E19: $Script:HostKind starts 'edge-app' and flips (stickily - see
+    # Invoke-Route's static-file branch) to 'webview2' the moment a GET / or
+    # GET /index.html arrives with ?host=webview2, which only
+    # host\FurphyHost.cs's Furphy-tab navigation ever sends.
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1); host = $Script:HostKind }
 }
 
 function Handle-State {
@@ -3845,9 +4020,18 @@ function Handle-JobsPost {
     }
 
     $kind = [string]$body.kind
-    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source')
+    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source', 'add-by-slug')
     if (-not ($validKinds -contains $kind)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: unknown kind '$kind'" }
+        return
+    }
+    # E19: the native host's CurseForge-tab install-link interception
+    # (host\FurphyHost.cs HandleSlugInstall, for /wow/addons/<slug>/install/
+    # <fileId> links, which carry a slug but no numeric projectId) - see
+    # Start-Job for slug -> projectId resolution against the same catalogue
+    # /api/cf/browse uses.
+    if ($kind -eq 'add-by-slug' -and (-not $body.slug)) {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: slug required' }
         return
     }
     # E12: a NEW Wago add (no existing record, so no projectId-equivalent key
@@ -4193,6 +4377,19 @@ function Handle-SettingsPut {
     if ($null -ne $body.port) {
         $settings.port = [int]$body.port
     }
+    # E19: adFilter (the CurseForge-tab ad/tracker filter toggle) and
+    # hostWindow (the native host's window bounds) - see Get-DefaultSettings.
+    # Settings > Browsing's toggle is the normal caller for adFilter;
+    # hostWindow is set almost exclusively by FurphyHost.exe writing
+    # settings.json directly (HostFiles.UpdateJsonObject, bypassing this
+    # endpoint entirely), but is still accepted here for completeness/so a
+    # round-trip through the API never loses it.
+    if ($null -ne $body.adFilter) {
+        $settings.adFilter = [bool]$body.adFilter
+    }
+    if ($null -ne $body.hostWindow) {
+        $settings.hostWindow = $body.hostWindow
+    }
 
     try {
         Save-Settings -Settings $settings
@@ -4226,6 +4423,46 @@ function Handle-SettingsTestKey {
     # relays the result unchanged (always 200, ok/message in the body, exactly
     # as before this refactor).
     Send-Json -Context $Context -StatusCode 200 -Body (Test-CfApiKey -Key $key)
+}
+
+# =====================================================================
+# curseforge:// protocol handler status (E19; script itself is E17's)
+# =====================================================================
+
+function Handle-ProtocolStatus {
+    <# GET /api/protocol/status -> register-protocol.ps1 -Status -Json, unchanged. #>
+    param($Context, $RouteMatch)
+
+    try {
+        $status = Invoke-ProtocolScript -Switch 'Status'
+        Send-Json -Context $Context -StatusCode 200 -Body $status
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-ProtocolRegister {
+    <# POST /api/protocol/register -> register-protocol.ps1 -Register -Json, then its resulting status. #>
+    param($Context, $RouteMatch)
+
+    try {
+        $status = Invoke-ProtocolScript -Switch 'Register'
+        Send-Json -Context $Context -StatusCode 200 -Body $status
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-ProtocolUnregister {
+    <# POST /api/protocol/unregister -> register-protocol.ps1 -Unregister -Json, then its resulting status. #>
+    param($Context, $RouteMatch)
+
+    try {
+        $status = Invoke-ProtocolScript -Switch 'Unregister'
+        Send-Json -Context $Context -StatusCode 200 -Body $status
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
 }
 
 function Handle-Diagnostics {
@@ -4606,6 +4843,10 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsGet' }
     @{ Method = 'PUT'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsPut' }
     @{ Method = 'POST'; Pattern = '^/api/settings/test-key$'; Handler = 'Handle-SettingsTestKey' }
+    # E19 (script itself is E17's, unchanged)
+    @{ Method = 'GET'; Pattern = '^/api/protocol/status$'; Handler = 'Handle-ProtocolStatus' }
+    @{ Method = 'POST'; Pattern = '^/api/protocol/register$'; Handler = 'Handle-ProtocolRegister' }
+    @{ Method = 'POST'; Pattern = '^/api/protocol/unregister$'; Handler = 'Handle-ProtocolUnregister' }
     @{ Method = 'GET'; Pattern = '^/api/diagnostics$'; Handler = 'Handle-Diagnostics' }
     @{ Method = 'GET'; Pattern = '^/api/cf/search$'; Handler = 'Handle-CfSearch' }
     @{ Method = 'GET'; Pattern = '^/api/cf/categories$'; Handler = 'Handle-CfCategories' }
@@ -4658,6 +4899,16 @@ function Invoke-Route {
         if ($matchedHandler) {
             & $matchedHandler $Context $routeMatch
         } elseif ($method -eq 'GET' -and (-not $path.StartsWith('/api/'))) {
+            # E19: the native host (host\FurphyHost.cs) navigates its Furphy
+            # tab to "http://localhost:<port>/?host=webview2" on first load;
+            # the Edge --app window (Addon Manager.vbs's fallback) never adds
+            # that query param. Sticky by design - once set, $Script:HostKind
+            # stays 'webview2' for the life of the process (a later plain GET
+            # / with no query, e.g. a manual reload, must not revert it) -
+            # /api/ping (Handle-Ping) reports whichever value this settled on.
+            if (($path -eq '/' -or $path -eq '/index.html') -and $request.QueryString['host'] -eq 'webview2') {
+                $Script:HostKind = 'webview2'
+            }
             $filePath = Get-StaticFilePath -UrlPath $path
             if (-not $filePath) {
                 Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'not found' }
@@ -4700,6 +4951,8 @@ $Script:AddonsJsonPath = Join-Path -Path $Script:Root -ChildPath 'addons.json'
 $Script:ServerLogPath = Join-Path -Path $Script:Root -ChildPath 'server.log'
 $Script:SyncLogPath = Join-Path -Path $Script:Root -ChildPath 'sync.log'
 $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
+# E19 (script itself is E17's, unchanged) - Invoke-ProtocolScript's target.
+$Script:RegisterProtocolPath = Join-Path -Path $Script:Root -ChildPath 'register-protocol.ps1'
 # E16: on-disk caches for the keyless CurseForge enrichment sources - the
 # catalogue index (refreshed at most once/24h) and per-slug addon-radar.com
 # detail pages (cached 24h each). Both directories are created lazily by
@@ -4739,6 +4992,9 @@ $Script:UpdateAvailable = @{}
 $Script:LastRun = $null
 $Script:UpdatesCheckedAt = $null
 $Script:LastRequestTime = Get-Date
+# E19: see Invoke-Route's static-file branch / Handle-Ping - flips to
+# 'webview2' the first time the native host's Furphy tab loads.
+$Script:HostKind = 'edge-app'
 # E12: Wago Addons proxy state - WagoCache mirrors CfCache (5-minute
 # response cache, same size-gated cleanup pattern); WagoInertiaVersion
 # caches the site's Inertia asset version for the life of the process (and

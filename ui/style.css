@@ -468,6 +468,25 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 }
 .cf-web-search-field { min-width: 220px; flex: 1 1 220px; }
 .cf-web-search-hint { flex-basis: 100%; margin: 0; }
+/* E19 (script/registration itself is E17's, unchanged): the curseforge://
+   handler status pill + toggle, painted by Components.ProtocolControl into
+   this row - a hairline divider separates it from the search controls
+   above since it is a different kind of setting (not a search action). */
+.cf-web-search-protocol {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.cf-web-search-protocol .muted-text { margin: 0; }
+
+/* E19: shared by both places Components.ProtocolControl.render() paints
+   into (Settings > Game's row, the CurseForge Browse pane above) - the
+   status chip and the toggle switch side by side. */
+.protocol-control-row { display: flex; align-items: center; gap: 10px; }
 
 /* ==========================================================================
    Top bars / list summaries
@@ -1217,6 +1236,11 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .toast-info .icon { stroke: var(--info); }
 .toast-body { flex: 1; }
 .toast-close { flex: none; }
+/* E19: optional inline action (e.g. "Undo" on the curseforge:// handler
+   toggle) - flex:none like .toast-close, sits between the message and the
+   dismiss button; nudged down 1px to align with the body text's baseline
+   rather than the icon's. */
+.toast-action { flex: none; margin-top: 1px; white-space: nowrap; }
 
 @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes toast-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(16px); } }

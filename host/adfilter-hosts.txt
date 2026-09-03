@@ -1,0 +1,182 @@
+# Furphy Addon Manager - ad/tracker host list for the optional CurseForge
+# ad filter (Settings > Browsing > "Filter ads and trackers in the
+# CurseForge tab"). OFF by default.
+#
+# One host per line. '#' starts a comment (whole-line or trailing after
+# whitespace is NOT stripped - keep comments on their own line). A listed
+# host blocks itself and any subdomain of it (e.g. "doubleclick.net" also
+# blocks "ad.doubleclick.net"). This file is user-editable; FurphyHost.exe
+# reads it fresh each time the CurseForge tab's ad filter is (re)armed.
+#
+# NEVER add curseforge.com, forgecdn.net, overwolf.com, cloudflare.com or
+# cloudflareinsights.com here - those are hard-allow-listed in code and
+# would be ignored anyway, but keep this file honest.
+
+# --- Google / DoubleClick ad stack ---
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+googletagservices.com
+google-analytics.com
+googletagmanager.com
+adservice.google.com
+pagead2.googlesyndication.com
+partner.googleadservices.com
+2mdn.net
+admob.com
+
+# --- Programmatic / RTB exchanges ---
+adnxs.com
+adsrvr.org
+rubiconproject.com
+pubmatic.com
+openx.net
+casalemedia.com
+contextweb.com
+districtm.io
+gumgum.com
+sovrn.com
+sharethrough.com
+triplelift.com
+smartadserver.com
+adform.net
+adroll.com
+bidswitch.net
+lijit.com
+indexexchange.com
+33across.com
+onetag-sys.com
+criteo.com
+criteo.net
+appnexus.com
+yieldmo.com
+loopme.com
+teads.tv
+media.net
+mathtag.com
+360yield.com
+spotxchange.com
+spotx.tv
+improvedigital.com
+smaato.net
+inmobi.com
+unrulymedia.com
+yieldlab.net
+adyoulike.com
+nativeads.com
+undertone.com
+sonobi.com
+c1exchange.com
+emxdgt.com
+gothamads.com
+adkernel.com
+adsymptotic.com
+rhythmone.com
+tremorhub.com
+telaria.com
+freewheel.tv
+fwmrm.net
+
+# --- Amazon ad stack ---
+amazon-adsystem.com
+assoc-amazon.com
+
+# --- Content-recommendation / native ---
+taboola.com
+outbrain.com
+zemanta.com
+revcontent.com
+mgid.com
+content.ad
+adblade.com
+
+# --- Analytics / measurement / heatmaps ---
+scorecardresearch.com
+quantserve.com
+quantcount.com
+moatads.com
+comscore.com
+chartbeat.com
+chartbeat.net
+newrelic.com
+nr-data.net
+hotjar.com
+mouseflow.com
+crazyegg.com
+mixpanel.com
+segment.com
+segment.io
+amplitude.com
+fullstory.com
+clicktale.net
+optimizely.com
+adobedtm.com
+demdex.net
+omtrdc.net
+krxd.net
+bluekai.com
+exelator.com
+eyeota.net
+tapad.com
+liveramp.com
+agkn.com
+rlcdn.com
+mathads.com
+
+# --- Social widget / retargeting trackers ---
+facebook.net
+fbcdn.net
+connect.facebook.net
+ads-twitter.com
+static.ads-twitter.com
+analytics.twitter.com
+ct.pinterest.com
+px.ads.linkedin.com
+bat.bing.com
+snap.licdn.com
+analytics.tiktok.com
+
+# --- Push notification / popunder ad networks ---
+propellerads.com
+propellerclick.com
+popads.net
+popcash.net
+adcash.com
+exoclick.com
+juicyads.com
+trafficjunky.net
+mgcash.com
+adsterra.com
+clickadu.com
+hilltopads.net
+richads.com
+push.house
+onclickmax.com
+adnium.com
+zeropark.com
+adprovider.io
+
+# --- Misc ad servers / networks ---
+advertising.com
+aolcdn.com
+serving-sys.com
+turn.com
+adtechus.com
+yieldpartners.com
+bidvertiser.com
+infolinks.com
+kontera.com
+vibrantmedia.com
+skimresources.com
+viglink.com
+sharesale.com
+impactradius.com
+cj.com
+linksynergy.com
+flexlinkspro.com
+avantlink.com
+pardot.com
+marketo.net
+hubspot.net
+hs-analytics.net
+hsleadflows.net

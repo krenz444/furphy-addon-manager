@@ -1,7 +1,9 @@
 ' Furphy Addon Manager launcher.
-' Starts the local server hidden (if it is not already running) and opens the UI as an Edge app window.
+' Starts the local server hidden (if it is not already running), then opens
+' the native WebView2 host window (host\bin\FurphyHost.exe) when it has been
+' built, falling back to an Edge app window otherwise.
 Option Explicit
-Dim sh, fso, root, port, url, http, running, i, text, re, matches, edge
+Dim sh, fso, root, port, url, http, running, i, text, re, matches, edge, hostExe
 
 Set sh = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -35,11 +37,20 @@ If Not running Then
     WScript.Quit 1
 End If
 
-edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-If fso.FileExists(edge) Then
-    sh.Run """" & edge & """ --app=" & url & " --window-size=1320,900", 1, False
+' E19: prefer the native WebView2 host (Furphy + CurseForge tabs in one
+' window) when it has been built; fall back to the plain Edge app window
+' otherwise (host missing, or FurphyHost.exe itself exits 3 when the
+' WebView2 runtime is not installed - see SPEC E19).
+hostExe = root & "\host\bin\FurphyHost.exe"
+If fso.FileExists(hostExe) Then
+    sh.Run """" & hostExe & """ --port " & port, 1, False
 Else
-    sh.Run url, 1, False
+    edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    If fso.FileExists(edge) Then
+        sh.Run """" & edge & """ --app=" & url & " --window-size=1320,900", 1, False
+    Else
+        sh.Run url, 1, False
+    End If
 End If
 
 Function Ping(target)
