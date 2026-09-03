@@ -176,6 +176,80 @@
   --danger-outline-border: rgba(255, 79, 121, 0.4);
 }
 
+/* ==========================================================================
+   Lofi Night theme (E15b) - fourth Appearance option, and now the DEFAULT
+   theme (Eric's decision, round 11 - replaces Vaporwave-default; Dark/Light/
+   Vaporwave all remain selectable and unchanged). Applied via
+   [data-theme="lofi"] the same way Light/Vaporwave are applied above. "Pixel
+   night cityscape, lofi cats" was the brief. Every color token the dark
+   theme defines is redefined here (nothing falls through), plus:
+     --secondary - dusky purple, used for the chip-outline signature touch
+       and as a window-light color in the cityscape art below.
+     --teal      - the theme's cyan-teal; also backs --focus-ring (the brief
+       gives the focus ring the same hex as the teal anchor).
+     --accent-active - the amber button's pressed shade, same role as
+       Vaporwave's own --accent-active.
+   Geometry (--radius-sm/--radius/--radius-lg) is ALSO overridden here,
+   unlike Vaporwave which left it at the shared default - "slightly larger
+   radii" is one of this theme's own requested signature touches, so its
+   corners are deliberately the roundest of any theme.
+   ========================================================================== */
+:root[data-theme="lofi"] {
+  color-scheme: dark;
+
+  --bg-0: #0f1226;
+  --bg-1: #161b34;
+  --bg-2: #1e2445;
+  --bg-3: #262d55;
+  --border: #343b66;
+  --border-soft: #1e2445;
+  --border-hover: #4a5390;
+
+  --text: #f2eee6;
+  --text-muted: #b3b1c9;
+  /* Lightened from the brief's literal muted-purple midpoint (#7d7b9c, which
+     only clears 4.18:1 on --bg-1 and less on --bg-2/--bg-3 - real surfaces
+     this token sits on, e.g. .addon-author/.browse-card-author on a bg-1
+     row/card, .source-pill's own bg-3 fill) up to a value that clears
+     4.5:1 against every surface it actually appears on (5.2-6.4:1 measured
+     against bg-0 through bg-3) while staying visibly dimmer than
+     --text-muted (8.1:1 on the same bg-1), preserving the faint < muted
+     ordering every other theme keeps. */
+  --text-faint: #9795b0;
+
+  --accent: #ffb86b;
+  --accent-hover: #ffc98a;
+  --accent-active: #ff9f3d;
+  --accent-text: #1a1230;
+  --success: #6fe3b4;
+  --warning: #ffd166;
+  --danger: #ff6b8b;
+  --info: #7cc4ff;
+
+  --secondary: #a980ff;
+  --teal: #39d3c3;
+  --focus-ring: var(--teal);
+
+  --success-tint: rgba(111, 227, 180, 0.14);
+  --warning-tint: rgba(255, 209, 102, 0.14);
+  --danger-tint: rgba(255, 107, 139, 0.14);
+  --info-tint: rgba(124, 196, 255, 0.14);
+  --accent-tint: rgba(255, 184, 107, 0.16);
+  --muted-tint: rgba(179, 177, 201, 0.12);
+
+  --banner-danger-text: #ffc2d1;
+  --form-error-text: #ff9fb5;
+
+  --danger-hover: #ff8fa8;
+  --danger-text: #2a0e1a;
+  --danger-border: rgba(255, 107, 139, 0.35);
+  --danger-outline-border: rgba(255, 107, 139, 0.4);
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+}
+
 * { box-sizing: border-box; }
 
 /* Several elements below are toggled purely via the `hidden` attribute (in
@@ -429,6 +503,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 /* Same reason, Vaporwave's own --text-muted (#b9a6d6). */
 :root[data-theme="vaporwave"] .select {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b9a6d6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6,9 12,15 18,9'/></svg>");
+}
+/* Same reason, Lofi Night's own --text-muted (#b3b1c9). */
+:root[data-theme="lofi"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b3b1c9' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6,9 12,15 18,9'/></svg>");
 }
 
 .search-field {
@@ -1424,3 +1502,130 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 :root[data-theme="vaporwave"] .chip-danger { box-shadow: inset 0 0 0 1px rgba(255, 79, 121, 0.55); }
 :root[data-theme="vaporwave"] .chip-busy { box-shadow: inset 0 0 0 1px rgba(255, 113, 206, 0.55); }
 :root[data-theme="vaporwave"] .filter-chip.is-active { box-shadow: inset 0 0 0 1px rgba(255, 113, 206, 0.4); }
+
+/* ==========================================================================
+   Lofi Night signature touches (E15b) - everything above (the token block
+   plus the geometry/select-chevron overrides near the top of the file) is
+   what re-themes every ordinary surface; these rules layer the theme's own
+   personality on top, scoped under [data-theme="lofi"] exactly like
+   Vaporwave's own block above never sees a byte of this: warm amber glow on
+   primary buttons/active nav, chip outlines in muted purple, gentle drop
+   shadows plus a pixel-dither top edge on cards, and the pixel night
+   cityscape + two lofi cats along the bottom of the sidebar (markup in
+   index.html - .lofi-cityscape / .lofi-brand-cat, real <svg> elements
+   rather than a CSS background, since they need individually animated
+   children: twinkling stars, a swaying cat tail).
+   ========================================================================== */
+
+/* Warm amber glow on primary buttons - same bloom-on-hover-and-press
+   language as Vaporwave's neon glow, just amber instead of pink. */
+:root[data-theme="lofi"] .btn-accent {
+  box-shadow: 0 0 0 1px rgba(255, 184, 107, 0.4), 0 3px 14px rgba(255, 184, 107, 0.25);
+}
+:root[data-theme="lofi"] .btn-accent:hover:not(:disabled) {
+  box-shadow: 0 0 0 1px rgba(255, 201, 138, 0.5), 0 4px 20px rgba(255, 201, 138, 0.35);
+}
+:root[data-theme="lofi"] .btn-accent:active:not(:disabled) {
+  background: var(--accent-active);
+  box-shadow: 0 0 0 1px rgba(255, 159, 61, 0.6), 0 2px 10px rgba(255, 159, 61, 0.3);
+}
+
+/* Warm amber glow on the active nav item - inset hairline plus outer bloom,
+   layered on top of the shared --accent-tint fill/is-active rule. */
+:root[data-theme="lofi"] .nav-item.is-active {
+  box-shadow: inset 0 0 0 1px rgba(255, 184, 107, 0.3), 0 0 12px rgba(255, 184, 107, 0.22);
+}
+
+/* Chip outlines in muted purple - a single inset hairline shared by every
+   chip variant (unlike Vaporwave's per-color neon outlines above), reading
+   as a soft "sticker" edge consistent with the theme's cozy/rounded feel. */
+:root[data-theme="lofi"] .chip { box-shadow: inset 0 0 0 1px rgba(169, 128, 255, 0.32); }
+:root[data-theme="lofi"] .filter-chip.is-active { box-shadow: inset 0 0 0 1px rgba(169, 128, 255, 0.4); }
+
+/* Gentle drop shadows + a faint 1px pixel-dither top edge on cards - the
+   "soft rounded lofi feel" signature touch, on top of the larger --radius*
+   tokens the theme block above already set. Applied to the app's two card
+   containers (Settings groups, Browse cards); overflow:hidden clips the
+   dither strip cleanly to the (now larger) rounded top corners. */
+:root[data-theme="lofi"] .settings-group,
+:root[data-theme="lofi"] .browse-card {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 3px 12px rgba(10, 13, 30, 0.4);
+}
+:root[data-theme="lofi"] .settings-group::before,
+:root[data-theme="lofi"] .browse-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background-image: repeating-linear-gradient(90deg, var(--secondary) 0, var(--secondary) 1px, transparent 1px, transparent 3px);
+  opacity: 0.4;
+}
+:root[data-theme="lofi"] .addon-row { box-shadow: 0 2px 8px rgba(10, 13, 30, 0.28); }
+
+/* Tiny curled cat next to the brand wordmark - hidden on every other theme
+   (default display:none below); sized to sit comfortably beside the 26px
+   brand icon without pushing the sidebar's own layout around. */
+.lofi-brand-cat { display: none; }
+:root[data-theme="lofi"] .lofi-brand-cat {
+  display: block;
+  width: 18px;
+  height: 14px;
+  flex: none;
+}
+
+/* Pixel night cityscape along the bottom of the sidebar - positioned and
+   layered exactly like Vaporwave's ::after grid (behind the real nav/status
+   content, cropped to the sidebar's own edges, never intercepts a click),
+   but as a real <svg> element so its stars/cat-tail can be animated by the
+   rules below. Hidden on every other theme by the bare .lofi-cityscape rule. */
+.lofi-cityscape { display: none; }
+:root[data-theme="lofi"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="lofi"] .sidebar > *:not(.lofi-cityscape) {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="lofi"] .lofi-cityscape {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 140px;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* Twinkling stars: four staggered timings so the sky never blinks in unison. */
+@keyframes lofi-twinkle {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 1; }
+}
+.lofi-star-1 { animation: lofi-twinkle 3.6s ease-in-out infinite; }
+.lofi-star-2 { animation: lofi-twinkle 4.2s ease-in-out infinite 0.7s; }
+.lofi-star-3 { animation: lofi-twinkle 3.9s ease-in-out infinite 1.4s; }
+.lofi-star-4 { animation: lofi-twinkle 4.6s ease-in-out infinite 2.1s; }
+
+/* Swaying cat tail (the sitting cat only - the curled cat's tail is tucked
+   in and stays still). transform-origin is set inline in the SVG markup at
+   the tail's own base coordinate so it pivots from where it meets the body,
+   not the shape's bounding-box center. */
+@keyframes lofi-tail-sway {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+}
+.lofi-cat-tail { animation: lofi-tail-sway 3.6s ease-in-out infinite; }
+
+/* Motion-sensitive users get a static skyline: no twinkle, no tail sway. */
+@media (prefers-reduced-motion: reduce) {
+  .lofi-star-1, .lofi-star-2, .lofi-star-3, .lofi-star-4, .lofi-cat-tail {
+    animation: none;
+  }
+}

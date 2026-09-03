@@ -23,23 +23,25 @@ const Prefs = (function () {
   const THEME_KEY = "addonSync.theme.v1";
   const DENSITY_KEY = "addonSync.density.v1";
 
-  // E15: a third theme value, "vaporwave", joins "light" as the only other
-  // non-default option - anything else read back (missing key, corrupt
-  // value, an older/newer build's value) still falls through to "dark".
-  function isKnownTheme(v) { return v === "light" || v === "vaporwave" || v === "dark"; }
+  // E15/E15b: four theme values total - "light", "vaporwave" and "dark" (E15),
+  // joined by "lofi" (E15b, round 11) which is now the DEFAULT (replacing
+  // Vaporwave-default; see SPEC.md section 3). Anything else read back
+  // (missing key, corrupt value, an older/newer build's value) falls
+  // through to "lofi".
+  function isKnownTheme(v) { return v === "light" || v === "vaporwave" || v === "dark" || v === "lofi"; }
 
   function readTheme() {
-    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "vaporwave"; } catch (e) { return "vaporwave"; }
+    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "lofi"; } catch (e) { return "lofi"; }
   }
   function readDensity() {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
-  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "vaporwave"; }
+  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "lofi"; }
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
-    const v = isKnownTheme(value) ? value : "vaporwave";
+    const v = isKnownTheme(value) ? value : "lofi";
     applyTheme(v);
     try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* storage unavailable - theme still applies for this load */ }
   }
