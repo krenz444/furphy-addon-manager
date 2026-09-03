@@ -71,8 +71,23 @@ New-Item -ItemType Directory -Force -Path $uiDst | Out-Null
 Copy-Item -Path (Join-Path -Path $uiSrc -ChildPath '*') -Destination $uiDst -Recurse -Force
 $uiCount = (Get-ChildItem -LiteralPath $uiDst -File -Recurse | Measure-Object).Count
 
+# Native host (E19): sources + SDK assemblies + the prebuilt exe. install.ps1 rebuilds the exe when csc.exe
+# exists, so the sources matter as much as bin\. Never the WebView2 runtime cache (bin\*.WebView2) or pkg\.
+$hostSrc = Join-Path -Path $Source -ChildPath 'host'
+$hostCount = 0
+if (Test-Path -LiteralPath $hostSrc -PathType Container) {
+    $hostDst = Join-Path -Path $stageRoot -ChildPath 'host'
+    New-Item -ItemType Directory -Force -Path $hostDst, (Join-Path $hostDst 'lib'), (Join-Path $hostDst 'bin') | Out-Null
+    foreach ($f in @('FurphyHost.cs', 'build-host.ps1', 'adfilter-hosts.txt', 'selftest.html')) {
+        $s = Join-Path -Path $hostSrc -ChildPath $f
+        if (Test-Path -LiteralPath $s -PathType Leaf) { Copy-Item -LiteralPath $s -Destination (Join-Path $hostDst $f) -Force }
+    }
+    Get-ChildItem -LiteralPath (Join-Path $hostSrc 'lib') -File -Filter '*.dll' -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $hostDst 'lib') -Force
+    Get-ChildItem -LiteralPath (Join-Path $hostSrc 'bin') -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe', '.dll', '.ico' } | Copy-Item -Destination (Join-Path $hostDst 'bin') -Force
+    $hostCount = (Get-ChildItem -LiteralPath $hostDst -File -Recurse | Measure-Object).Count
+}
 foreach ($f in $missing) { Write-Host "WARNING: expected file missing, not packaged: $f" -ForegroundColor Yellow }
-Write-Host "Staged $($copied.Count) root files and ui\ ($uiCount files) into $stageRoot"
+Write-Host "Staged $($copied.Count) root files, ui\ ($uiCount files) and host\ ($hostCount files) into $stageRoot"
 
 $zipName = "FurphyAddonManager-$version.zip"
 $zipPath = Join-Path -Path $DistDir -ChildPath $zipName
