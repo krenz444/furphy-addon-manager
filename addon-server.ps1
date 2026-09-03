@@ -235,6 +235,16 @@ function Get-DefaultSettings {
         # Settings PUT from the web UI (releaseType, etc.) never clobbers it.
         adFilter           = $false
         hostWindow         = $null
+        # Round 12 (E19b): the native host's LAST SAVED chrome/title-bar
+        # palette - {name, colors:{bg0,bg1,...}} - same round-trip pattern as
+        # hostWindow just above (the host writes it directly via
+        # HostFiles.UpdateJsonObject, bypassing PUT /api/settings entirely;
+        # this server only needs to not lose it on an unrelated settings
+        # save). Unlike hostWindow, a PUT through this endpoint DOES validate
+        # it - see Test-HostTheme - since unlike hostWindow's host-owned
+        # opaque blob, this shape can also be reached by a client sending
+        # arbitrary JSON to the API directly.
+        hostTheme          = $null
     }
 }
 
@@ -279,6 +289,13 @@ function Get-Settings {
         # its contents); this server never inspects x/y/w/h itself.
         if ($null -ne $obj.adFilter) { $result.adFilter = [bool]$obj.adFilter }
         if ($null -ne $obj.hostWindow) { $result.hostWindow = $obj.hostWindow }
+        # Round 12 (E19b): hostTheme is copied through unvalidated on READ,
+        # same as hostWindow just above - whatever shape is already on disk
+        # (written either by the host directly, or by a prior validated PUT
+        # through this server) round-trips as-is. Validation only happens on
+        # the WRITE path (Handle-SettingsPut/Test-HostTheme) where it can
+        # actually stop a bad value from being saved in the first place.
+        if ($null -ne $obj.hostTheme) { $result.hostTheme = $obj.hostTheme }
         return $result
     } catch {
         Write-ServerLog "Failed to read settings.json, using defaults: $($_.Exception.Message)"
@@ -312,7 +329,56 @@ function Get-SettingsView {
         # Get-DefaultSettings.
         adFilter          = $Settings.adFilter
         hostWindow        = $Settings.hostWindow
+        # Round 12 (E19b): pass through unmasked, same as hostWindow - not a
+        # secret, and the UI never displays it (only the native host reads
+        # it, at startup, to paint the right chrome before the page loads).
+        hostTheme         = $Settings.hostTheme
     }
+}
+
+function Test-HostTheme {
+    <#
+      Validates a hostTheme object per SPEC.md's E19b section: { name,
+      colors }. name must be a 1-32 char lowercase-alnum-hyphen string;
+      colors must be an object with at most 12 keys, every value a
+      "#rrggbb" hex string. Returns $true/$false - used only by
+      Handle-SettingsPut's write path (Get-Settings's read path above passes
+      hostTheme through unvalidated, same as hostWindow, since by the time
+      something is sitting in settings.json it already went through this
+      check once, either here or - for the native host's own direct writes -
+      was produced by the host's own getComputedStyle read of real CSS
+      custom properties, not arbitrary input).
+    #>
+    param($Theme)
+
+    if ($null -eq $Theme) { return $false }
+
+    if ($null -eq $Theme.name) { return $false }
+    $name = [string]$Theme.name
+    if ($name.Length -lt 1 -or $name.Length -gt 32) { return $false }
+    # -cnotmatch (case-SENSITIVE), not the bare -notmatch every other regex
+    # check in this file uses - PowerShell's -match/-notmatch are
+    # case-INSENSITIVE by default (confirmed live during this round's own
+    # verification: "LofiNight" passed a plain -notmatch '^[a-z0-9-]+$'
+    # check and got saved to settings.json), which would silently accept
+    # any-case names despite the lowercase-only contract documented above
+    # and in SPEC.md's E19b section.
+    if ($name -cnotmatch '^[a-z0-9-]+$') { return $false }
+
+    if ($null -eq $Theme.colors) { return $false }
+    # Counted by hand (not @($Theme.colors.PSObject.Properties).Count) per
+    # this file's standing @()-around-an-enumerable caution (see SPEC.md's
+    # hard-constraints line) - a plain foreach never hits that class of
+    # quirk regardless of the collection's runtime type.
+    $colorCount = 0
+    foreach ($p in $Theme.colors.PSObject.Properties) {
+        $colorCount = $colorCount + 1
+        if ($colorCount -gt 12) { return $false }
+        $val = [string]$p.Value
+        if ($val -notmatch '^#[0-9a-fA-F]{6}$') { return $false }
+    }
+
+    return $true
 }
 
 # =====================================================================
@@ -3930,6 +3996,56 @@ function Open-InBrowser {
     }
 }
 
+function Open-CfSideWindow {
+    <#
+      Round 12 (E19b): the 'cf-window' /api/open target's Edge-app fallback
+      path - opens $Url in a chromeless Edge window beside this app, rather
+      than a normal browser tab (Open-InBrowser above) or the native host's
+      embedded CurseForge tab (which, when present, ui\app.js's
+      Host.openCurseForge intercepts before this endpoint is ever reached -
+      see SPEC.md's E19b). Same msedge.exe path + Test-Path/Start-Process
+      fallback as Open-InBrowser and the $OpenBrowser startup block further
+      down this file - there is no registry/App Paths lookup anywhere in
+      this codebase (grepped addon-server.ps1, Addon Manager.vbs and
+      curseforge-handler.vbs; all three hardcode this same default-install
+      path) to reuse instead.
+    #>
+    param([string]$Url)
+
+    # Adversarial-review fix (round 2): the first fix here only rejected
+    # '"'/CR/LF, but Windows PowerShell 5.1's Start-Process -ArgumentList
+    # does NOT quote each array element - it joins them with a plain SPACE
+    # before CreateProcess sees them, so a literal space in $Url (e.g.
+    # "https://www.curseforge.com/x --app=http://evil.example/phish") also
+    # splits into extra msedge.exe argv tokens and defeats the
+    # curseforge.com-only allowlist, exactly like the quote/CRLF case.
+    # Blocklisting characters is fragile (whatever's missed next is the
+    # next bypass), so validate structurally instead: parse $Url as an
+    # absolute URI and require scheme https + host www.curseforge.com
+    # (case-insensitive), then rebuild the msedge.exe argument from the
+    # PARSED $parsedUri.AbsoluteUri, never from the raw client string -
+    # AbsoluteUri is guaranteed free of spaces/quotes/control characters
+    # (Uri encodes them), so it cannot inject additional argv tokens
+    # regardless of what the caller sent.
+    $parsedUri = $null
+    $isValid = [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$parsedUri)
+    if (-not $isValid -or
+        $parsedUri.Scheme -ne 'https' -or
+        -not $parsedUri.Host.Equals('www.curseforge.com', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-ServerLog "Open-CfSideWindow: rejected url that failed structural validation"
+        return $false
+    }
+    $safeUrl = $parsedUri.AbsoluteUri
+
+    $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    if (Test-Path -LiteralPath $edgePath) {
+        Start-Process -FilePath $edgePath -ArgumentList @("--app=$safeUrl", '--window-size=1100,900')
+    } else {
+        Start-Process $safeUrl
+    }
+    return $true
+}
+
 # =====================================================================
 # Route handlers
 # =====================================================================
@@ -4390,6 +4506,21 @@ function Handle-SettingsPut {
     if ($null -ne $body.hostWindow) {
         $settings.hostWindow = $body.hostWindow
     }
+    # Round 12 (E19b): hostTheme (the native host's chrome/title-bar palette,
+    # relayed from the page via a postMessage the host then PUTs here the
+    # same way it round-trips hostWindow) - VALIDATED unlike hostWindow's
+    # total pass-through above, since this shape can also be reached by a
+    # client sending arbitrary JSON straight to the API. Rejects (400) and
+    # saves nothing else from this request either, rather than silently
+    # dropping just the bad field - consistent with releaseType's own
+    # out-of-range 400 just above.
+    if ($null -ne $body.hostTheme) {
+        if (-not (Test-HostTheme -Theme $body.hostTheme)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'hostTheme invalid: name must be 1-32 chars matching ^[a-z0-9-]+$, colors must be an object of <=12 "#rrggbb" values' }
+            return
+        }
+        $settings.hostTheme = $body.hostTheme
+    }
 
     try {
         Save-Settings -Settings $settings
@@ -4795,6 +4926,36 @@ function Handle-Open {
                     return
                 }
                 Open-InBrowser -Url $url
+            }
+            'cf-window' {
+                # Round 12 (E19b): the UI has posted this 'what' since round
+                # 9 (Browse's "Search on CurseForge.com" box,
+                # Actions.searchCurseForgeWebsite) but this server had no
+                # case for it at all until now - every call landed on the
+                # 'default: unknown what' branch below and toasted "Couldn't
+                # open that: unknown what: cf-window". This is the
+                # Edge-app-fallback path only: when running inside the
+                # native host, ui\app.js's Host.openCurseForge intercepts
+                # before this endpoint is ever called and routes into the
+                # host's own embedded CurseForge tab instead (see the
+                # 'open-curseforge' postMessage in SPEC.md's E19b section).
+                # Narrower allowlist than 'url' above: curseforge.com ONLY,
+                # not also wago.io - opening a side window for Wago never
+                # made sense (Wago has no in-app tab to feed either).
+                $url = $null
+                if ($body.url) { $url = [string]$body.url }
+                if (-not $url) {
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url required' }
+                    return
+                }
+                if (-not $url.StartsWith('https://www.curseforge.com/', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url must start with https://www.curseforge.com/' }
+                    return
+                }
+                if (-not (Open-CfSideWindow -Url $url)) {
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url contains invalid characters' }
+                    return
+                }
             }
             default {
                 Send-Json -Context $Context -StatusCode 400 -Body @{ error = "unknown what: $what" }
