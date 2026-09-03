@@ -78,3 +78,9 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 
 ### 18:50 - MinimapButtonBag-Reborn removed (Eric's decision)
 - Uninstalled via the CLI (folder MBB deleted, record dropped); 36 addons remain, all current. Enable Enhance QoL's Minimap Button Sink or EllesmereUI's minimap flyout in-game to collect minimap buttons.
+
+### Round 7 (19:40 - 20:28, deployed + pushed 20:28, commit f460387) - Furphy Addon Manager branding, icon, Vaporwave theme, API-key field fix
+- CurseForge key: Eric's first token was a UUID (author upload token, not a Core API key) and the second paste was swallowed by the masked field; the console key ($2a$10$...) is now saved and valid (test ok, 71 categories via proxy). Fixed the field UX (clears on focus, explicit Saved/No-change toasts, Test names which key it tested, Clear-key button) and the 401/403 logo-batch retry storm (sticky rejected flag + backoff + Browse panel).
+- Icon: three vaporwave concepts rendered via headless Edge; chosen sunset + puzzle piece. make-icon.ps1 renders 16..512 PNGs and packs a 7-size PNG .ico; assets: ui/icon.svg, ui/icons/furphy-*.png, icon.ico, ui/manifest.json. Desktop shortcut renamed "Furphy Addon Manager" with the icon.
+- Rename: title, sidebar brand, About, /api/ping name, vbs, README, SPEC/CHANGELOG headings. Folder/file names unchanged.
+- Vaporwave theme: complete token override (23 tokens + theme-scoped extras), neon glows, gradient brand, CSS perspective grid, neon chips, cyan focus rings; five hard-coded colours routed through tokens so all themes stay consistent; contrast >= 4.79:1 worst case. Browser test 6/6, zero console errors.
