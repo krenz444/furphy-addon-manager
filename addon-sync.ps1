@@ -2235,11 +2235,10 @@ function Sync-SingleAddon {
         $folderSummary = $newFolders -join ', '
         Write-Log -Level 'INFO' -Message "Installed project $projectId ($finalName) fileId $selectedFileId folders: $folderSummary"
 
-        $statusText = 'Updated'
-        if ($usingPin -and (-not $isNewInstall)) {
-            $statusText = 'Updated'
-        } elseif ($isNewInstall) {
+        if ($isNewInstall) {
             $statusText = 'Installed'
+        } else {
+            $statusText = 'Updated'
         }
 
         return [PSCustomObject]@{ Status = $statusText; Name = $finalName; Version = $versionText }
@@ -2457,11 +2456,10 @@ function Sync-SingleWagoAddon {
         $folderSummary = $newFolders -join ', '
         Write-Log -Level 'INFO' -Message "Installed wago:$slug ($finalName) release $selectedFileId folders: $folderSummary"
 
-        $statusText = 'Updated'
-        if ($usingPin -and (-not $isNewInstall)) {
-            $statusText = 'Updated'
-        } elseif ($isNewInstall) {
+        if ($isNewInstall) {
             $statusText = 'Installed'
+        } else {
+            $statusText = 'Updated'
         }
 
         return [PSCustomObject]@{ Status = $statusText; Name = $finalName; Version = $versionText }
@@ -2787,7 +2785,9 @@ try {
     } catch {
         $msg = "addons.json could not be parsed: $($_.Exception.Message)"
         Write-Log -Level 'ERROR' -Message $msg
-        if ((-not $Quiet) -and (-not $Json)) {
+        if ($Json) {
+            Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+        } elseif (-not $Quiet) {
             Write-Host "ERROR: $msg"
         }
         exit 2
@@ -2953,7 +2953,9 @@ try {
         } catch {
             $msg = $_.Exception.Message
             Write-Log -Level 'ERROR' -Message $msg
-            if ((-not $Quiet) -and (-not $Json)) {
+            if ($Json) {
+                Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+            } elseif (-not $Quiet) {
                 Write-Host "ERROR: $msg"
             }
             exit 2
@@ -3114,7 +3116,9 @@ try {
     if (-not $effectiveAddonsPath) {
         $msg = 'AddonsPath was not specified and could not be inferred from the script location (expected <X>\_retail_\AddonSync). Pass -AddonsPath "<X>\_retail_\Interface\AddOns".'
         Write-Log -Level 'ERROR' -Message $msg
-        if ((-not $Quiet) -and (-not $Json)) {
+        if ($Json) {
+            Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+        } elseif (-not $Quiet) {
             Write-Host "ERROR: $msg"
         }
         exit 2
@@ -3122,7 +3126,9 @@ try {
     if (-not (Test-Path -LiteralPath $effectiveAddonsPath -PathType Container)) {
         $msg = "AddOns path does not exist: $effectiveAddonsPath"
         Write-Log -Level 'ERROR' -Message $msg
-        if ((-not $Quiet) -and (-not $Json)) {
+        if ($Json) {
+            Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+        } elseif (-not $Quiet) {
             Write-Host "ERROR: $msg"
         }
         exit 2
@@ -3221,7 +3227,9 @@ try {
     } catch {
         $msg = "Invalid command-line value: $($_.Exception.Message)"
         Write-Log -Level 'ERROR' -Message $msg
-        if ((-not $Quiet) -and (-not $Json)) {
+        if ($Json) {
+            Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+        } elseif (-not $Quiet) {
             Write-Host "ERROR: $msg"
         }
         exit 2
@@ -3260,7 +3268,9 @@ try {
         } else {
             $msg = '-FileId requires exactly one project id via -Only or -Add.'
             Write-Log -Level 'ERROR' -Message $msg
-            if ((-not $Quiet) -and (-not $Json)) {
+            if ($Json) {
+                Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+            } elseif (-not $Quiet) {
                 Write-Host "ERROR: $msg"
             }
             exit 2

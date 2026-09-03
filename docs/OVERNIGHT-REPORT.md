@@ -89,3 +89,6 @@ Started 00:28 Central. Cutoff for starting new rounds: 07:00. Each round = audit
 
 ### Keyless-mode research (21:45 - 22:05) - 10 agents, 4 probes verified, none refuted
 - addon-radar.com: keyless hourly CurseForge mirror by project id (logo, description, screenshots, categories, game versions, dates, downloads, fuzzy search). instawow-data catalogue: CF id -> name/slug resolution 37/37. Wago-as-metadata: 30/37 via wagoId or confident name match. Dead ends: WowUp hub (own catalog), strongbox CF catalogue (frozen 2022), CF RSS/legacy/edge endpoints. Design appended as ROADMAP E16 (fallback order Wago -> addon-radar -> CF files-only; Browse = Wago + addon-radar search). Risk: addon-radar devalue decoding in PS 5.1.
+
+### Round 8 (started 22:40) - E16 keyless CurseForge search/metadata (addon-radar + instawow catalogue + Wago match), E17 curseforge:// install links + "Search on CurseForge", auto-check panel fix
+- Eric's goal restated: anyone can install and use Furphy without an API key. CORS probe from the app origin in headless Edge: CurseForge search -> "Failed to fetch" (no Access-Control-Allow-Origin); direct in-page search ruled out. E18 (installer, adoption, package, external README) queued for round 9.

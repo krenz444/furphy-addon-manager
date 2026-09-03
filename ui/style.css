@@ -313,6 +313,12 @@ button { font-family: inherit; }
   font-size: 13px;
 }
 .banner .icon { stroke: var(--danger); }
+/* E16: a non-blocking, neutral-toned variant of .banner - Browse's keyless-
+   mode notice, unlike the danger-toned "server not reachable" banner this
+   class was originally built for. Same --info/--info-tint pairing
+   .form-msg.is-info already uses across all three themes. */
+.banner.is-info { background: var(--info-tint); color: var(--info); border-bottom: 1px solid var(--border); }
+.banner.is-info .icon { stroke: var(--info); }
 
 .main { flex: 1; min-width: 0; padding: 20px 24px 96px; overflow-y: auto; }
 
@@ -666,6 +672,18 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .source-badge.is-cf { background: var(--accent-tint); color: var(--accent-hover); }
 .source-badge.is-wago { background: var(--info-tint); color: var(--info); }
 
+/* E16: a small neutral secondary pill marking WHERE keyless-mode content
+   came from - "Indexed"/"Live match" on a Browse card, "via addon-radar"/
+   "via catalogue" in the drawer header - distinct from .source-badge's
+   per-source identity colors (this is about provenance, not identity, so
+   it stays muted regardless of which source it names). */
+.source-pill {
+  flex: none; display: inline-flex; align-items: center; padding: 1px 6px;
+  border-radius: 999px; font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+  background: var(--bg-3); color: var(--text-faint); border: 1px solid var(--border-soft);
+}
+.source-note { margin-top: 8px; }
+
 /* E12: "Also on Wago/CurseForge" cross-link in the drawer header, when the
    tracked record's own toc revealed the other source's id. */
 .drawer-crosssource { margin-top: -4px; }
@@ -833,6 +851,11 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   min-width: 320px;
 }
 .nokey-icon { width: 28px; height: 28px; stroke: var(--accent); margin-bottom: 8px; }
+/* E16: the "Install by Project ID" card now lives inside #browse-content
+   (keyless CurseForge mode only) rather than inside .nokey-panel's flex
+   row, so it needs its own top margin to separate it from the results
+   grid/empty-state above it. */
+#browse-installbyid { margin-top: 20px; }
 .nokey-steps { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 16px; color: var(--text-muted); font-size: 13px; }
 .nokey-steps li { padding-left: 4px; }
 .muted-text { color: var(--text-faint); font-size: 12.5px; }

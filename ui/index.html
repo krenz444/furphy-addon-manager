@@ -32,6 +32,7 @@
   <symbol id="icon-warning" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
   <symbol id="icon-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="8,12.5 11,15.5 16,9"/></symbol>
   <symbol id="icon-alert-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="7.5" x2="12" y2="13"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
+  <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
   <symbol id="icon-inbox" viewBox="0 0 24 24"><path d="M3 12h4.5l1.5 3h6l1.5-3H21"/><path d="M5 12L4 5h16l-1 7"/><path d="M4 12v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></symbol>
   <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z"/></symbol>
   <symbol id="icon-trash" viewBox="0 0 24 24"><polyline points="4,7 20,7"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></symbol>
@@ -191,8 +192,9 @@
       <section id="view-browse" class="view" data-view-root="browse" hidden>
 
         <!-- E12 (Wago second source): visible regardless of key status, since
-             Wago never needs one - switching to it must work even while the
-             CurseForge no-key panel below is showing. -->
+             Wago never needs one - switching to it must work even while a
+             CurseForge-side panel below (keyless banner / key-rejected) is
+             showing. -->
         <div class="browse-source-row">
           <div class="segmented" id="browse-source-switch" role="group" aria-label="Addon source">
             <button type="button" class="segmented-btn is-active" data-source-value="curseforge">CurseForge</button>
@@ -200,29 +202,20 @@
           </div>
         </div>
 
-        <div class="nokey-panel" id="browse-nokey" hidden>
-          <div class="nokey-card">
-            <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
-            <h2>Browse needs a free CurseForge API key</h2>
-            <ol class="nokey-steps">
-              <li>Sign in or create an account at <a href="https://console.curseforge.com" target="_blank" rel="noopener noreferrer">console.curseforge.com</a></li>
-              <li>Open <a href="https://console.curseforge.com/#/api-keys" target="_blank" rel="noopener noreferrer">API Keys</a> and generate one</li>
-              <li>Paste it in Settings</li>
-            </ol>
-            <button type="button" class="btn btn-accent" id="btn-nokey-settings">Go to Settings</button>
-          </div>
-          <div class="nokey-card">
-            <h3>Install by Project ID</h3>
-            <p class="muted-text">Works without a key. Find the Project ID in the right-hand &ldquo;About Project&rdquo; box on any CurseForge addon page.</p>
-            <form id="install-by-id-form" class="inline-form">
-              <input type="text" id="install-by-id-input" placeholder="e.g. 1521253" inputmode="numeric" autocomplete="off">
-              <button type="submit" class="btn btn-accent" id="install-by-id-submit">Install</button>
-            </form>
-            <p class="form-msg" id="install-by-id-msg" hidden></p>
-          </div>
+        <!-- E16: replaces the old fully-blocking "Browse needs a free
+             CurseForge API key" panel for the CurseForge side of the source
+             switch - a keyless partial search (community mirrors: the
+             offline instawow-data/strongbox catalogue index, supplemented
+             live by addon-radar.com when that index comes up short) now
+             works in #browse-content below instead, so this is a
+             non-blocking notice rather than a wall. Wago Addons never
+             needed a key and is unaffected. -->
+        <div class="banner is-info" id="browse-keyless-banner" hidden>
+          <svg class="icon"><use href="#icon-info"></use></svg>
+          <span>Showing a keyless index via community mirrors (instawow-data, addon-radar.com), not CurseForge&rsquo;s own search. <button type="button" class="link-btn" id="btn-keyless-settings">Add a free API key in Settings</button> for full official search, sorting and categories.</span>
         </div>
 
-        <!-- Round 6 fix: distinct from #browse-nokey above - shown when a key
+        <!-- Round 6 fix: shown when a key
              IS configured but CurseForge is rejecting it (401/403), so the
              copy points at fixing the saved key rather than adding one. -->
         <div class="nokey-panel" id="browse-keyrejected" hidden>
@@ -278,6 +271,19 @@
 
           <div class="loadmore-wrap" id="browse-loadmore-wrap" hidden>
             <button type="button" class="btn btn-outline" id="btn-load-more">Load more</button>
+          </div>
+
+          <!-- E16: "Install by Project ID" - works without a key, shown only
+               in keyless CurseForge mode (previously part of the old
+               fully-blocking no-key panel this replaces). -->
+          <div class="nokey-card" id="browse-installbyid" hidden>
+            <h3>Install by Project ID</h3>
+            <p class="muted-text">Works without a key. Find the Project ID in the right-hand &ldquo;About Project&rdquo; box on any CurseForge addon page.</p>
+            <form id="install-by-id-form" class="inline-form">
+              <input type="text" id="install-by-id-input" placeholder="e.g. 1521253" inputmode="numeric" autocomplete="off">
+              <button type="submit" class="btn btn-accent" id="install-by-id-submit">Install</button>
+            </form>
+            <p class="form-msg" id="install-by-id-msg" hidden></p>
           </div>
         </div>
       </section>
@@ -404,6 +410,14 @@
               <button type="button" class="btn btn-outline" id="btn-open-serverlog">Open server log</button>
               <button type="button" class="btn btn-outline" id="btn-open-backups">Open backups folder</button>
             </div>
+            <!-- E16: forces a fresh fetch+merge of the offline CurseForge
+                 catalogue index (instawow-data + strongbox-catalogue) that
+                 Browse/the detail drawer fall back to with no API key -
+                 otherwise refreshed automatically at most once/24h. -->
+            <div class="btn-row">
+              <button type="button" class="btn btn-outline" id="btn-refresh-cf-catalogue">Refresh CurseForge catalogue now</button>
+            </div>
+            <p class="muted-text" id="cf-catalogue-status"></p>
             <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
           </section>
 
@@ -486,9 +500,9 @@
 
 <div class="dialog" id="dialog-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-add-title">
   <h3 id="dialog-add-title">Add addon</h3>
-  <p class="muted-text">Enter a numeric Project ID, or a CurseForge addon URL (requires an API key).</p>
+  <p class="muted-text">Enter a numeric CurseForge Project ID, a CurseForge addon URL (needs an API key), or a Wago addon URL / wago:&lt;slug&gt; (no key needed).</p>
   <form id="add-addon-form">
-    <input type="text" id="add-addon-input" placeholder="1521253 or https://www.curseforge.com/wow/addons/..." autocomplete="off">
+    <input type="text" id="add-addon-input" placeholder="1521253, a curseforge.com URL, or a wago.io URL" autocomplete="off">
     <p class="form-msg" id="add-addon-error" hidden></p>
     <div class="dialog-footer">
       <button type="button" class="btn btn-ghost" id="add-addon-cancel">Cancel</button>
