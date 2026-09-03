@@ -770,7 +770,14 @@ const Utils = (function () {
 
   function firstLetter(name) {
     const t = (name || "?").trim();
-    return t ? t[0].toUpperCase() : "?";
+    // Round 9 fix: a name that starts with punctuation (CurseForge's common
+    // "<Camera> Max Distance" color-code-bracket naming style) used to fall
+    // back to a bare "<" instead of a letter, in both the My Addons row logo
+    // and the drawer header logo (both go through Components.Logo.build ->
+    // here). Skip past any leading non-alphanumeric characters and take the
+    // first real letter/digit instead; "?" only when there is none at all.
+    const m = t.match(/[A-Za-z0-9]/);
+    return m ? m[0].toUpperCase() : "?";
   }
 
   // E12 (Wago second source): an addon's "id" is a number (its CurseForge
@@ -832,7 +839,12 @@ const Utils = (function () {
       : "Toc Interface: none declared");
     if (latestVersions.length) {
       let s = "Newest known file supports: " + latestVersions.join(", ");
-      if (addon.latestFileDate) s += " (checked " + fullDate(addon.latestFileDate) + ")";
+      // Round 9 fix: this is the FILE's own upload date (latestFileDate ==
+      // the selected file's dateCreated, captured at sync time - see SPEC's
+      // Sync-SingleAddon/Sync-SingleWagoAddon notes), not a timestamp of when
+      // this app last polled CurseForge/Wago - "checked" implied the latter
+      // and could read as claiming fresher data than it actually has.
+      if (addon.latestFileDate) s += " (released " + fullDate(addon.latestFileDate) + ")";
       detailBits.push(s);
     }
     return { label: label, cls: cls, title: detailBits.join(" · ") };
@@ -1239,7 +1251,8 @@ const Store = (function () {
       wagoReleasesLoading: false,
       wagoReleasesError: null,
       wagoGallery: null,
-      wagoGalleryLoading: false
+      wagoGalleryLoading: false,
+      wagoGalleryError: null
     },
 
     installingAdd: null        // {kind:'add'|'install', projectId} optimistic marker while a dialog-triggered job is being posted
@@ -1358,9 +1371,34 @@ const Store = (function () {
     if (pruned.length !== state.myaddonsSelection.length) state.myaddonsSelection = pruned;
   }
 
+  // Round 9 fix: the fast-op endpoints (POST .../ignore, .../unpin) return
+  // the CLI's raw addons.json records (SPEC: "addons: full records" from
+  // addon-sync.ps1 -Json), not the enriched /api/state shape - updateAvailable,
+  // compat, tocInterfaces, missingDeps, latestGameVersions etc. only exist
+  // because Handle-State computes them server-side on top of those same raw
+  // records. Swapping state.addons for one of those bare responses wholesale
+  // (`Store.state.addons = res.addons`) silently dropped every enriched field
+  // for every row until the next /api/state poll caught it back up - which
+  // is what made an immediate post-toggle render look like it "waited for the
+  // poll" even though the assignment and re-render both ran synchronously.
+  // Object.assign onto the SAME existing addon object only overwrites the
+  // keys the incoming record actually carries (ignoreUpdates, pinnedFileId,
+  // fileId, version, etc.), so anything the raw record doesn't know about -
+  // and the object identity anything else in the UI may have cached - both
+  // survive untouched, while the field that DID change is live for the very
+  // next render.
+  function mergeAddons(list) {
+    (list || []).forEach(function (record) {
+      const key = addonKey(record);
+      const existing = state.addons.filter(function (a) { return addonKey(a) === key; })[0];
+      if (existing) Object.assign(existing, record);
+      else state.addons.push(record);
+    });
+  }
+
   return {
     state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
-    isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection
+    isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons
   };
 })();
 
@@ -1481,7 +1519,7 @@ Components.Toast = (function () {
 
 /* ---------- Generic dialog plumbing (shared backdrop, Add + Confirm) ---------- */
 Components.Dialogs = (function () {
-  let openName = null;      // 'add' | 'confirm' | null
+  let openName = null;      // 'add' | 'confirm' | 'welcome' | null
   let confirmResolve = null;
 
   function show(name) {
@@ -1514,6 +1552,11 @@ Components.Dialogs = (function () {
   }
   function closeAdd() { hide("add"); }
 
+  // E18: first-run welcome (Components.Welcome builds its content; this just
+  // owns the shared show/hide/backdrop/Esc plumbing, same as add/confirm).
+  function openWelcome() { show("welcome"); }
+  function closeWelcome() { hide("welcome"); }
+
   function confirm(opts) {
     opts = opts || {};
     Utils.qs("#confirm-title").textContent = opts.title || "Are you sure?";
@@ -1532,15 +1575,58 @@ Components.Dialogs = (function () {
   function backdropClicked() {
     if (openName === "confirm") resolveConfirm(false);
     else if (openName === "add") closeAdd();
+    else if (openName === "welcome") closeWelcome();
   }
   function escPressed() {
     if (openName === "confirm") { resolveConfirm(false); return true; }
     if (openName === "add") { closeAdd(); return true; }
+    if (openName === "welcome") { closeWelcome(); return true; }
     return false;
   }
   function isOpen() { return openName !== null; }
 
-  return { openAdd: openAdd, closeAdd: closeAdd, confirm: confirm, resolveConfirm: resolveConfirm, backdropClicked: backdropClicked, escPressed: escPressed, isOpen: isOpen };
+  return {
+    openAdd: openAdd, closeAdd: closeAdd, confirm: confirm, resolveConfirm: resolveConfirm,
+    openWelcome: openWelcome, closeWelcome: closeWelcome,
+    backdropClicked: backdropClicked, escPressed: escPressed, isOpen: isOpen
+  };
+})();
+
+/* ---------- E18: first-run welcome dialog content -----------------------
+   Lists the untracked-but-recognizable (curseId/wagoId) folders App found
+   on load when addons.json had 0 records - the same signal Settings'
+   "Untracked folders" scan (E7) surfaces later, just surfaced once, up
+   front, so a fresh install (or a hand-populated AddOns folder) doesn't
+   look empty when it actually has addons Furphy could already manage. */
+Components.Welcome = (function () {
+  // A bare numeric CurseForge id, or "wago:<id>" - exactly the token shape
+  // addon-sync.ps1's -Add classifier (and this app's own Store.addonKey)
+  // already expects, so no further translation happens server-side either.
+  function targetFor(u) { return u.curseId ? String(u.curseId) : ("wago:" + u.wagoId); }
+
+  function itemRow(u) {
+    const isWago = !u.curseId && !!u.wagoId;
+    const badge = Utils.el("span", { class: "source-badge " + (isWago ? "is-wago" : "is-cf"), title: isWago ? "Wago Addons" : "CurseForge" }, [isWago ? "Wago" : "CF"]);
+    const label = u.title || u.folder;
+    return Utils.el("li", { class: "welcome-item" }, [
+      badge,
+      Utils.el("span", { class: "welcome-item-name", title: label }, [label]),
+      Utils.el("span", { class: "welcome-item-folder muted-text" }, [u.folder])
+    ]);
+  }
+
+  function open(items) {
+    const list = Utils.qs("#welcome-list");
+    list.innerHTML = "";
+    items.forEach(function (u) { list.appendChild(itemRow(u)); });
+    Utils.qs("#welcome-count").textContent = items.length;
+    const adoptBtn = Utils.qs("#welcome-adopt");
+    adoptBtn.textContent = "Adopt all (" + items.length + ")";
+    adoptBtn.onclick = function () { Actions.adoptAll(items.map(targetFor)); };
+    Components.Dialogs.openWelcome();
+  }
+
+  return { open: open };
 })();
 
 /* ---------- Kebab dropdown menu (single instance, portalled to <body>) ----------
@@ -1739,7 +1825,7 @@ Components.Drawer = (function () {
         screenshotsLoaded: false,
         wagoAddon: null, wagoAddonLoading: false, wagoAddonError: null,
         wagoReleases: null, wagoReleasesLoading: false, wagoReleasesError: null,
-        wagoGallery: null, wagoGalleryLoading: false,
+        wagoGallery: null, wagoGalleryLoading: false, wagoGalleryError: null,
         // E16: keyless CurseForge enrichment (source:'cf-keyless' only -
         // null/unused for 'curseforge'/'wago').
         enrich: null, enrichLoading: false, enrichError: null
@@ -1959,14 +2045,21 @@ Components.Drawer = (function () {
     const wagoSlug = d.enrich && d.enrich.wagoSlug;
     if (!wagoSlug || d.wagoGallery || d.wagoGalleryLoading) return;
     d.wagoGalleryLoading = true;
+    d.wagoGalleryError = null;
     Api.wagoGallery(wagoSlug).then(function (res) {
       if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
       d.wagoGallery = res.gallery || res;
       d.wagoGalleryLoading = false;
       if (d.tab === "screenshots") renderScreenshots();
-    }).catch(function () {
+    }).catch(function (err) {
       if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
-      d.wagoGallery = {};
+      // Round 9 fix: keep wagoGallery null on failure (was set to {}, which
+      // wagoGalleryImages() and a genuinely-empty gallery both render as
+      // "No screenshots provided." - indistinguishable from a real network/
+      // API failure) - wagoGalleryError carries the failure instead, same
+      // {loading, loaded-empty, error} contract as wagoAddonError/
+      // wagoReleasesError already use for their own sibling fields.
+      d.wagoGalleryError = err;
       d.wagoGalleryLoading = false;
       if (d.tab === "screenshots") renderScreenshots();
     });
@@ -2593,20 +2686,26 @@ Components.Drawer = (function () {
     panel.textContent = "";
     if (!d.wagoGallery && !d.wagoGalleryLoading) {
       d.wagoGalleryLoading = true;
+      d.wagoGalleryError = null;
       const slug = d.slug;
       Api.wagoGallery(slug).then(function (res) {
         if (Store.state.drawer.slug !== slug) return;
         d.wagoGallery = res.gallery || res;
         d.wagoGalleryLoading = false;
         if (d.tab === "screenshots") renderScreenshots();
-      }).catch(function () {
+      }).catch(function (err) {
         if (Store.state.drawer.slug !== slug) return;
-        d.wagoGallery = {};
+        // Round 9 fix: see loadCfKeylessWagoGallery's identical fix above -
+        // wagoGallery stays null on failure so wagoGalleryError (checked
+        // below) can render a distinct "couldn't load" state instead of the
+        // same "No screenshots provided." a genuinely empty gallery shows.
+        d.wagoGalleryError = err;
         d.wagoGalleryLoading = false;
         if (d.tab === "screenshots") renderScreenshots();
       });
     }
     if (d.wagoGalleryLoading && !d.wagoGallery) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Loading…"])); return; }
+    if (d.wagoGalleryError && !d.wagoGallery) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Couldn't load screenshots (" + describeError(d.wagoGalleryError) + ")."])); return; }
     const images = wagoGalleryImages(d.wagoGallery);
     if (!images.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No screenshots provided."])); return; }
     panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, images.map(function (s) {
@@ -2930,7 +3029,7 @@ const Actions = (function () {
     for (let i = 0; i < selected.length; i++) {
       try {
         const res = await Api.setIgnore(Store.addonKey(selected[i]), ignore);
-        Store.state.addons = res.addons;
+        Store.mergeAddons(res.addons);
       } catch (err) {
         failCount++;
       }
@@ -2982,6 +3081,17 @@ const Actions = (function () {
   function installLatestWago(slug, name) { return startJob("add", { source: "wago", slug: slug }, "Installing " + (name || "addon")); }
   function addWagoWithVersion(slug, releaseId) { return startJob("add", { source: "wago", slug: slug, fileId: releaseId }, "Installing addon"); }
   function addByWagoSlug(slug) { return startJob("add", { source: "wago", slug: slug }, "Adding addon"); }
+
+  // E18: the first-run Welcome dialog's "Adopt all" - one job installing
+  // every already-fully-formed target token (a bare numeric CurseForge id,
+  // or "wago:<id>") at once, mirroring what install.ps1 itself does via the
+  // CLI directly. See Build-CliArgs's 'add' case (addon-server.ps1) for the
+  // server-side projectIds handling this relies on.
+  function adoptAll(targets) {
+    Components.Dialogs.closeWelcome();
+    const label = "Adopting " + targets.length + " addon" + (targets.length === 1 ? "" : "s");
+    return startJob("add", { projectIds: targets }, label);
+  }
 
   function openOnWago(slug) { return openWhat("url", { url: "https://addons.wago.io/addons/" + encodeURIComponent(slug) }); }
 
@@ -3044,7 +3154,7 @@ const Actions = (function () {
   async function toggleIgnore(projectId, ignore) {
     try {
       const res = await Api.setIgnore(projectId, ignore);
-      Store.state.addons = res.addons;
+      Store.mergeAddons(res.addons);
       App.renderCurrentView();
       Components.Toast.show(ignore ? "Updates ignored for this addon." : "Updates re-enabled for this addon.", "success");
     } catch (err) {
@@ -3055,7 +3165,7 @@ const Actions = (function () {
   async function unpin(projectId) {
     try {
       const res = await Api.unpin(projectId);
-      Store.state.addons = res.addons;
+      Store.mergeAddons(res.addons);
       App.renderCurrentView();
       Components.Toast.show("Unpinned — it will follow the newest allowed release again.", "success");
     } catch (err) {
@@ -3127,6 +3237,20 @@ const Actions = (function () {
   }
 
   function openOnCurseForge(projectId, slug) { return openWhat("curseforge", { projectId: Utils.normalizeId(projectId), slug: slug || undefined }); }
+
+  // Round 9: Browse's "Search on CurseForge.com" box (CurseForge pane, both
+  // keyless and keyed) - unlike searchDependency below, this always opens
+  // CurseForge's own website search rather than ever redirecting into this
+  // app's in-app search, since the whole point is reaching CurseForge's full
+  // catalogue/official ranking. Uses the 'cf-window' open target (a
+  // chromeless side window beside this app) rather than 'url' (the default
+  // browser tab every other external link here uses) - server-side
+  // allowlisted to curseforge.com, same as every other open target.
+  function searchCurseForgeWebsite(term) {
+    const q = (term || "").trim();
+    if (!q) return;
+    return openWhat("cf-window", { url: "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons" });
+  }
 
   // E3: "Search CurseForge" on a missing dependency, from the drawer's
   // Overview tab. With a key, Browse can search directly, so switch there
@@ -3230,12 +3354,14 @@ const Actions = (function () {
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings, testKey: testKey,
-    openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, submitAddInput: submitAddInput,
+    openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
     whatChanged: whatChanged, showLastRunDetails: showLastRunDetails, importAddons: importAddons,
     updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
     // E12 (Wago second source)
     installLatestWago: installLatestWago, addWagoWithVersion: addWagoWithVersion, addByWagoSlug: addByWagoSlug,
-    openOnWago: openOnWago, switchSource: switchSource, switchSourceButton: switchSourceButton
+    openOnWago: openOnWago, switchSource: switchSource, switchSourceButton: switchSourceButton,
+    // E18 (first-run welcome)
+    adoptAll: adoptAll
   };
 })();
 
@@ -3721,6 +3847,10 @@ Views.browse = (function () {
   function render() {
     renderSourceSwitch();
     const b = Store.state.browse;
+    // Round 9: "Search on CurseForge.com" - shown for the CurseForge side of
+    // the source switch in both keyless and keyed mode (Wago never needed a
+    // separate website search box - Wago's own search IS the in-app one).
+    Utils.qs("#cf-web-search").hidden = b.source === "wago";
     Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
     if (b.source === "wago") {
       Utils.qs("#browse-keyless-banner").hidden = true;
@@ -4048,6 +4178,17 @@ Views.browse = (function () {
         if (ok) { msg.className = "form-msg is-success"; msg.textContent = "Install started — watch the progress panel below."; input.value = ""; }
         else { msg.hidden = true; }
       });
+    });
+
+    // Round 9: "Search on CurseForge.com" - Enter in its input or the button
+    // both trigger the same external-window search; the input keeps
+    // whatever term was typed rather than clearing, since re-opening the
+    // same search (e.g. after closing the side window) is a common follow-up.
+    Utils.qs("#btn-cf-web-search").addEventListener("click", function () {
+      Actions.searchCurseForgeWebsite(Utils.qs("#cf-web-search-input").value);
+    });
+    Utils.qs("#cf-web-search-input").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); Actions.searchCurseForgeWebsite(ev.target.value); }
     });
   }
 
@@ -4613,6 +4754,10 @@ const App = (function () {
   const AUTO_CHECK_STALE_MS = 10 * 60 * 1000;
   const AUTO_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
+  // E18: first-run welcome dialog - shown at most once per browser after
+  // the user dismisses it (see wireGlobal's #welcome-skip handler below).
+  const WELCOME_SKIPPED_KEY = "addonSync.welcomeSkipped.v1";
+
   function switchView(view) {
     if (Store.state.view === view) return;
     Store.state.view = view;
@@ -4688,6 +4833,41 @@ const App = (function () {
     pollJob(jobId);
   }
 
+  // Round 9: a completed check job that found updates gets a real desktop
+  // notification, not just the in-app toast/badge below - CurseForge's own
+  // app keeps a Windows notification up even after its check panel closes,
+  // which matters most for the unattended background check (autoCheckForUpdates,
+  // every 30 min - see Actions.autoCheckForUpdates) where nobody is
+  // necessarily looking at the app at all. Purely client-side (the standard
+  // Notification API) - no new /api surface, no PowerShell module dependency;
+  // degrades silently wherever Notification is unavailable, blocked, or the
+  // user never grants permission.
+  function notifyIfUpdatesFound(job) {
+    if (!job || job.kind !== "check" || job.state !== "done") return;
+    if (typeof Notification === "undefined") return;
+    const rows = (job.results || []).filter(function (r) { return r.status === "Would-update"; });
+    if (!rows.length) return;
+    function fire() {
+      const names = rows.map(function (r) { return r.name; });
+      const body = names.length <= 4 ? names.join(", ") : (names.slice(0, 4).join(", ") + ", and " + (names.length - 4) + " more");
+      try {
+        // requireInteraction keeps it on screen until the user dismisses it
+        // (Chromium/Edge honor this; browsers that don't just auto-dismiss,
+        // which is no worse than not having a notification at all) - the
+        // "persist until dismissed or an update is started" behavior a
+        // check-and-forget in-app toast can't offer.
+        const n = new Notification(rows.length + " addon update" + (rows.length === 1 ? "" : "s") + " available", {
+          body: body, requireInteraction: true, tag: "furphy-addon-updates"
+        });
+        n.onclick = function () { window.focus(); switchView("myaddons"); n.close(); };
+      } catch (err) { /* best-effort only - never let a notification failure affect the job flow */ }
+    }
+    if (Notification.permission === "granted") fire();
+    else if (Notification.permission === "default") {
+      Notification.requestPermission().then(function (perm) { if (perm === "granted") fire(); });
+    }
+  }
+
   function pollJob(jobId) {
     clearTimeout(jobPollTimer);
     jobPollTimer = setTimeout(async function () {
@@ -4701,6 +4881,7 @@ const App = (function () {
         await reloadState(true);
         const summary = job.state === "failed" ? ("Failed: " + (job.error || "unknown error")) : Components.JobPanel.summarize(job.results);
         Components.Toast.show(summary, job.state === "failed" ? "error" : "success");
+        notifyIfUpdatesFound(job);
       } catch (err) {
         markOnline(err);
         reloadState(true);
@@ -4882,6 +5063,20 @@ const App = (function () {
     Utils.qs("#confirm-cancel").addEventListener("click", function () { Components.Dialogs.resolveConfirm(false); });
     Utils.qs("#confirm-ok").addEventListener("click", function () { Components.Dialogs.resolveConfirm(true); });
 
+    // E18: Skip remembers itself per-browser (localStorage) so a plain
+    // reload doesn't re-show the dialog every time - it's a one-time nudge,
+    // not a persistent nag. Adopting anything, or the untracked folders
+    // simply going away, both naturally stop it recurring too (the load-time
+    // check re-scans and re-filters every time - see App.maybeShowWelcome).
+    Utils.qs("#welcome-skip").addEventListener("click", function () {
+      try { localStorage.setItem(WELCOME_SKIPPED_KEY, "1"); } catch (err) { /* best-effort only */ }
+      Components.Dialogs.closeWelcome();
+    });
+    Utils.qs("#welcome-browse-link").addEventListener("click", function () {
+      Components.Dialogs.closeWelcome();
+      switchView("browse");
+    });
+
     Utils.qs("#lightbox-close").addEventListener("click", function () { Components.Lightbox.close(); });
     Utils.qs("#lightbox").addEventListener("click", function (ev) { if (ev.target.id === "lightbox") Components.Lightbox.close(); });
 
@@ -4922,6 +5117,25 @@ const App = (function () {
     // trigger is wired here at all.
   }
 
+  // E18: when addons.json has 0 records, a scan may still find folders the
+  // user already had in AddOns before ever opening the app (or where
+  // install.ps1's own adoption was skipped) - offer to adopt them once,
+  // rather than leaving the app looking empty when it doesn't have to.
+  // Silently gives up on any failure (offline server, malformed scan JSON,
+  // etc.) - this is a nicety, never allowed to block or error out the rest
+  // of startup.
+  async function maybeShowWelcome() {
+    if (Store.state.addons.length !== 0) return;
+    try {
+      if (localStorage.getItem(WELCOME_SKIPPED_KEY) === "1") return;
+    } catch (err) { /* storage unavailable - proceed as if never skipped */ }
+    try {
+      const scan = await Api.scan();
+      const adoptable = (scan.untracked || []).filter(function (u) { return u.curseId || u.wagoId; });
+      if (adoptable.length > 0) Components.Welcome.open(adoptable);
+    } catch (err) { /* best-effort only */ }
+  }
+
   async function init() {
     wireGlobal();
     Views.myAddons.bindOnce();
@@ -4930,6 +5144,7 @@ const App = (function () {
 
     await fetchPingInfo();
     await reloadState(false);
+    await maybeShowWelcome();
     startIdlePolling();
     scheduleAutoCheck();
     startUptimeTicker();

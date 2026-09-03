@@ -451,6 +451,24 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .inline-form { display: flex; gap: 8px; }
 .inline-form input { flex: 1; }
 
+/* Round 9: Browse's "Search on CurseForge.com" row - jumps to CurseForge's
+   own website search (a separate window, not this app's in-app search) -
+   its own compact card rather than living in .topbar, so it never crowds
+   the main search/category/sort controls and reads as clearly distinct. */
+.cf-web-search {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.cf-web-search-field { min-width: 220px; flex: 1 1 220px; }
+.cf-web-search-hint { flex-basis: 100%; margin: 0; }
+
 /* ==========================================================================
    Top bars / list summaries
    ========================================================================== */
@@ -587,6 +605,19 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
    leaves a ~28px buffer under the 720px floor, verified against a live
    render of this file at window widths 1000-1100px (not just arithmetic on
    paper, which is what produced the previous, still-too-wide 810px). */
+/* Round 4 fix: fallback copy of the Updated cell's relative time, folded into
+   the status cell - hidden here, shown only inside the max-width:1100px
+   media query below where the real Updated column is dropped, so the
+   information doesn't just disappear with no affordance at narrow widths.
+   Round 9 fix: this base rule must come BEFORE the media query - a later,
+   equal-specificity `.updated-fallback{display:none}` used to sit after the
+   media query in source order and always won regardless of viewport width
+   (confirmed live: at 1000px, matchMedia('(max-width:1100px)').matches was
+   true and the fallback span existed in the DOM with the right text, but
+   getComputedStyle still showed display:none) - moving the base declaration
+   here lets the media query's override actually apply. */
+.updated-fallback { display: none; font-size: 11px; color: var(--text-faint); cursor: default; }
+
 @media (max-width: 1100px) {
   .addon-table { min-width: 692px; }
   .addon-table .col-addon { width: 190px; }
@@ -724,12 +755,6 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .status-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 
 .updated-cell { color: var(--text-muted); font-size: 12.5px; cursor: default; }
-
-/* Round 4 fix: fallback copy of the Updated cell's relative time, folded into
-   the status cell - hidden here, shown only inside the max-width:1100px
-   media query below where the real Updated column is dropped, so the
-   information doesn't just disappear with no affordance at narrow widths. */
-.updated-fallback { display: none; font-size: 11px; color: var(--text-faint); cursor: default; }
 
 .menu-wrap { display: flex; justify-content: flex-end; }
 /* Portalled to <body> with fixed positioning (see Components.Dropdown) so it is
@@ -1224,6 +1249,26 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .dialog form { display: flex; flex-direction: column; }
 .dialog input[type="text"] { width: 100%; }
 .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* E18: first-run "adopt what's already in AddOns" welcome dialog - wider
+   than the default 420px so a folder name + title don't wrap awkwardly, and
+   its item list scrolls internally rather than growing the dialog past the
+   viewport on a folder with many untracked addons. */
+.dialog-welcome { width: 520px; }
+.dialog-welcome h3 { display: flex; align-items: center; gap: 8px; }
+.welcome-list {
+  list-style: none; margin: 14px 0 0; padding: 0;
+  max-height: 260px; overflow-y: auto;
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
+}
+.welcome-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.welcome-item:last-child { border-bottom: none; }
+.welcome-item-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.welcome-item-folder { flex: none; }
+.welcome-nokey-note { margin-top: 14px; }
 
 /* ==========================================================================
    Lightbox

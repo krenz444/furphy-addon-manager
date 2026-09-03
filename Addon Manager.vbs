@@ -14,7 +14,7 @@ If fso.FileExists(root & "\settings.json") Then
     Set re = New RegExp
     re.Pattern = """port""\s*:\s*(\d+)"
     Set matches = re.Execute(text)
-    If matches.Count > 0 Then port = CInt(matches(0).SubMatches(0))
+    If matches.Count > 0 Then port = CLng(matches(0).SubMatches(0))
 End If
 url = "http://localhost:" & port & "/"
 

@@ -14,3 +14,8 @@ backups/
 .idea/
 Thumbs.db
 desktop.ini
+
+# WebView2 SDK package (downloaded by host/build-host.ps1; only the extracted DLLs are needed at runtime)
+*.nupkg
+host/Smoke.exe
+host/smoke-result.txt
