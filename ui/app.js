@@ -9,6 +9,7 @@
      Store      - central app state + derived getters
      Components - reusable UI pieces (toast, dialog, drawer, job panel, chips)
      Views      - per-screen render/bind logic (myAddons, browse, settings)
+     Host       - postMessage bridge to the native WebView2 host (round 12)
      App        - bootstrap, routing, polling, global event wiring
    ========================================================================== */
 
@@ -37,7 +38,19 @@ const Prefs = (function () {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
-  function applyTheme(value) { document.documentElement.dataset.theme = isKnownTheme(value) ? value : "lofi"; }
+  function applyTheme(value) {
+    document.documentElement.dataset.theme = isKnownTheme(value) ? value : "lofi";
+    // Round 12 (E19b): relay the just-applied theme to the native host (the
+    // Host module, defined later in this file, near App) so it can recolor
+    // its own chrome/title bar to match - see SPEC.md's E19b. Guarded: this
+    // function's very first call happens at module-load time on the line
+    // right below this one (before Host or App exist yet), which would
+    // otherwise throw a ReferenceError; that first call is a harmless
+    // no-op, and App.init() calls Host.reportTheme() again once
+    // App.getServerHost() actually has an answer, so the host still gets a
+    // real report once startup finishes. See Host's own module comment.
+    try { Host.reportTheme(); } catch (e) { /* Host/App not initialized yet, or not running in the native host */ }
+  }
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
@@ -3347,20 +3360,38 @@ const Actions = (function () {
     catch (err) { Components.Toast.show("Couldn't open that: " + describeError(err), "error"); }
   }
 
-  function openOnCurseForge(projectId, slug) { return openWhat("curseforge", { projectId: Utils.normalizeId(projectId), slug: slug || undefined }); }
+  // E12/round 9's project-page URL shape, built client-side (as well as
+  // being what the server's own 'curseforge' /api/open target builds from
+  // {projectId, slug}) so round 12's Host.openCurseForge - which needs a
+  // concrete curseforge.com URL to hand the native host - can try it BEFORE
+  // ever reaching the server. Native host: goes to the embedded CurseForge
+  // tab. Everywhere else: unchanged, falls through to the existing
+  // 'curseforge' /api/open target (default browser).
+  function openOnCurseForge(projectId, slug) {
+    const id = Utils.normalizeId(projectId);
+    const url = slug
+      ? "https://www.curseforge.com/wow/addons/" + encodeURIComponent(slug)
+      : "https://www.curseforge.com/projects/" + encodeURIComponent(String(id));
+    if (Host.openCurseForge(url)) return;
+    return openWhat("curseforge", { projectId: id, slug: slug || undefined });
+  }
 
   // Round 9: Browse's "Search on CurseForge.com" box (CurseForge pane, both
   // keyless and keyed) - unlike searchDependency below, this always opens
   // CurseForge's own website search rather than ever redirecting into this
   // app's in-app search, since the whole point is reaching CurseForge's full
-  // catalogue/official ranking. Uses the 'cf-window' open target (a
-  // chromeless side window beside this app) rather than 'url' (the default
-  // browser tab every other external link here uses) - server-side
-  // allowlisted to curseforge.com, same as every other open target.
+  // catalogue/official ranking. Round 12: in the native host, goes straight
+  // to the embedded CurseForge tab (Host.openCurseForge); everywhere else,
+  // unchanged - the 'cf-window' open target (a chromeless side window
+  // beside this app) rather than 'url' (the default browser tab every
+  // other external link here uses) - server-side allowlisted to
+  // curseforge.com, same as every other open target.
   function searchCurseForgeWebsite(term) {
     const q = (term || "").trim();
     if (!q) return;
-    return openWhat("cf-window", { url: "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons" });
+    const url = "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons";
+    if (Host.openCurseForge(url)) return;
+    return openWhat("cf-window", { url: url });
   }
 
   // E3: "Search CurseForge" on a missing dependency, from the drawer's
@@ -3387,7 +3418,13 @@ const Actions = (function () {
       if (alreadyLoaded) Views.browse.search(true);
       return;
     }
-    return openWhat("url", { url: "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(name) });
+    // Round 12: same Host.openCurseForge-first treatment as
+    // searchCurseForgeWebsite/openOnCurseForge above - in the native host
+    // this also goes to the embedded CurseForge tab instead of the default
+    // browser's 'url' target.
+    const depUrl = "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(name);
+    if (Host.openCurseForge(depUrl)) return;
+    return openWhat("url", { url: depUrl });
   }
 
   // Validates+resolves the Add-addon dialog's free-text input, then starts the add job.
@@ -4016,6 +4053,16 @@ Views.browse = (function () {
     // the source switch in both keyless and keyed mode (Wago never needed a
     // separate website search box - Wago's own search IS the in-app one).
     Utils.qs("#cf-web-search").hidden = b.source === "wago";
+    // Round 12 (E19b): the explainer copy depends on where a CurseForge.com
+    // open actually lands - the native host's embedded tab, or (everywhere
+    // else) a separate chromeless side window. Host may not exist yet on
+    // this module's very first render (see Host's own module comment) -
+    // guarded the same way Prefs.applyTheme guards its own early call.
+    let isNativeHost = false;
+    try { isNativeHost = Host.isNative(); } catch (e) { /* Host not initialized yet */ }
+    Utils.qs("#cf-web-search-hint").textContent = isNativeHost
+      ? "Opens in the CurseForge tab; installs still happen here by Project ID for now."
+      : "Opens CurseForge in a side window; installs still happen here by Project ID for now.";
     // E19 (script/registration itself is E17's, unchanged): painted every
     // render regardless of source - it's a no-op cost, and #cf-web-search's
     // own hidden flag just above already keeps it out of sight on the Wago
@@ -4923,6 +4970,82 @@ Views.settings = (function () {
 })();
 
 /* ==========================================================================
+   Host - round 12 (E19b): postMessage bridge to the native WebView2 host
+   (host\FurphyHost.cs), used ONLY while this page is actually running
+   inside it. Everywhere else (a plain browser tab, ?mock=1, or the Edge
+   --app fallback window) isNative() is false and every caller below falls
+   back to the existing HTTP /api/open flow, unchanged.
+
+   Placed here (right before App, whose getServerHost() this module reads)
+   for that reason, NOT because every caller runs this late - Prefs.applyTheme
+   calls reportTheme() as literally the first thing this whole script does
+   (module-load time, before Host OR App exist yet as far down the file as
+   they do), which is exactly why isNative()/reportTheme() are written to
+   swallow a reference to either not existing yet rather than assume it: that
+   very first call is a harmless no-op, and App.init() calls reportTheme()
+   again once App.getServerHost() actually has an answer, so the host still
+   gets a real report once startup finishes. Every later call (a user
+   switching themes in Settings, well after the whole script has loaded) hits
+   no such gap.
+   ========================================================================== */
+const Host = (function () {
+  function isNative() {
+    try {
+      return !!(window.chrome && window.chrome.webview && App.getServerHost() === "webview2");
+    } catch (e) {
+      // App (or, in principle, this very module) not initialized yet - see
+      // the module comment above. Not native as far as this call can tell.
+      return false;
+    }
+  }
+
+  function post(obj) {
+    if (!isNative()) return false;
+    try {
+      window.chrome.webview.postMessage(obj);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Routes a curseforge.com URL to the host's embedded CurseForge tab
+  // instead of a browser/side-window. Returns true when handled (the caller
+  // should stop there and do nothing else); false when this isn't the
+  // native host, or the url isn't a curseforge.com one - the caller's
+  // existing server-backed fallback ('cf-window'/'curseforge'/'url') should
+  // run in that case, unchanged.
+  function openCurseForge(url) {
+    if (!url || typeof url !== "string") return false;
+    if (!/^https:\/\/www\.curseforge\.com\//i.test(url)) return false;
+    return post({ type: "open-curseforge", url: url });
+  }
+
+  // Relays the theme CSS custom properties actually in effect right now to
+  // the host, so it can recolor its own chrome/title bar to match. Reads
+  // document.documentElement.dataset.theme directly (not Prefs.getTheme(),
+  // which reads localStorage - stale at the exact moment Prefs.setTheme
+  // calls applyTheme(v) BEFORE writing v to localStorage) and every color
+  // via getComputedStyle, which is synchronous and always reflects whatever
+  // data-theme attribute is on the element right now. No-op (false) outside
+  // the native host.
+  function reportTheme() {
+    if (!isNative()) return false;
+    const name = document.documentElement.dataset.theme || "lofi";
+    const cs = getComputedStyle(document.documentElement);
+    const propByKey = { bg0: "--bg-0", bg1: "--bg-1", bg2: "--bg-2", bg3: "--bg-3", border: "--border", text: "--text", muted: "--text-muted", accent: "--accent" };
+    const colors = {};
+    Object.keys(propByKey).forEach(function (key) {
+      const v = (cs.getPropertyValue(propByKey[key]) || "").trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(v)) colors[key] = v;
+    });
+    return post({ type: "theme", name: name, colors: colors });
+  }
+
+  return { isNative: isNative, post: post, openCurseForge: openCurseForge, reportTheme: reportTheme };
+})();
+
+/* ==========================================================================
    App - bootstrap, view routing, polling loops, and one-time global wiring
    (nav, drawer/dialog/lightbox dismissal, sidebar buttons, shutdown beacon).
    ========================================================================== */
@@ -5337,6 +5460,11 @@ const App = (function () {
     Views.settings.bindOnce();
 
     await fetchPingInfo();
+    // Round 12 (E19b): now that serverHost is known (Host.isNative() reads
+    // App.getServerHost()), fire the real initial theme report - Prefs's own
+    // module-load-time applyTheme() call ran before that was possible and
+    // no-opped (see Host's module comment and Prefs.applyTheme above).
+    Host.reportTheme();
     // E19: fire-and-forget, like maybeShowWelcome below - loadProtocolStatus
     // catches its own errors (leaves Store.state.protocol null, rendered as
     // "Checking..."/"Unknown" by Components.ProtocolControl) and is a

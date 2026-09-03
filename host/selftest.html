@@ -5,8 +5,24 @@
 <h1>Furphy host selftest page</h1>
 <img src="https://pagead2.googlesyndication.com/pixel.png" width="1" height="1" alt="">
 <script>
+function postToHost(msg) {
+    try {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(msg);
+        }
+    } catch (e) { }
+}
 setTimeout(function () {
+    postToHost({
+        type: "theme",
+        name: "selftest",
+        colors: {
+            bg0: "#102030", bg1: "#203040", bg2: "#304050", bg3: "#405060",
+            border: "#506070", text: "#f0f0f0", muted: "#c0c0c0", accent: "#ff8800"
+        }
+    });
     location.href = "curseforge://install?addonId=1521253&fileId=8720783";
+    postToHost({ type: "open-curseforge", url: "https://www.curseforge.com/wow/addons/bigwigs" });
 }, 1000);
 </script>
 </body>

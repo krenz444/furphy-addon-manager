@@ -614,16 +614,40 @@ namespace Furphy
             "localhost"
         };
 
-        // Vaporwave dark chrome palette (matches ui/style.css's dark and
-        // vaporwave themes) - keeps the WinForms shell from clashing with
-        // the dark web UI it hosts. See ROADMAP.md "E19" dark-chrome fix.
-        private static readonly Color ChromeBg = Color.FromArgb(0x12, 0x08, 0x1f);
-        private static readonly Color ChromeBgAlt = Color.FromArgb(0x1a, 0x0b, 0x2e);
-        private static readonly Color ChromeBgActive = Color.FromArgb(0x24, 0x16, 0x40);
-        private static readonly Color ChromeText = Color.FromArgb(0xf3, 0xe9, 0xff);
-        private static readonly Color ChromeMuted = Color.FromArgb(0xb9, 0xa6, 0xd6);
-        private static readonly Color ChromeAccent = Color.FromArgb(0xff, 0x71, 0xce);
-        private static readonly Color ChromeHover = Color.FromArgb(0x2d, 0x1b, 0x4e);
+        // Chrome colors track the app's CURRENT theme (Lofi Night, Dark,
+        // Light or Vaporwave) instead of a hard-coded palette - see
+        // ROADMAP.md "E19"/"theme sync". Instance (not static readonly)
+        // fields so ApplyTheme(name, colors) can repaint them live from a
+        // "theme" WebMessage posted by the page; InitializeDefaultTheme
+        // seeds them with Lofi Night (the app's current default theme)
+        // before LoadPersistedTheme overlays any settings.json hostTheme.
+        // bg0/bg1/bg2/bg3/border/text/muted/accent below are the exact
+        // names used in the WebMessage/settings.json "colors" object.
+        private Color ChromeBg;       // bg0
+        private Color ChromeBgAlt;    // bg1
+        private Color ChromeBgActive; // bg2
+        private Color ChromeHover;    // bg3
+        private Color _chromeBorder;  // border (DWM title bar border only)
+        private Color ChromeText;     // text
+        private Color ChromeMuted;    // muted
+        private Color ChromeAccent;   // accent
+
+        private string _themeName;
+        private string _lastSavedThemeName;
+        private Dictionary<string, object> _lastSavedThemeColors;
+
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int pvAttribute, int cbAttribute);
+
+        private int _lastDarkModeHresult;
+        private int _lastCaptionHresult;
+        private int _lastTextHresult;
+        private int _lastBorderHresult;
 
         private enum HostTab
         {
@@ -649,6 +673,10 @@ namespace Furphy
         private WebView2 _cfWebView;
         private Panel _cfToolbar;
         private TextBox _cfSearchBox;
+        private Button _cfBtnBack;
+        private Button _cfBtnForward;
+        private Button _cfBtnHome;
+        private Button _cfBtnGo;
 
         private bool _furphyReady;
         private bool _cfReady;
@@ -664,6 +692,9 @@ namespace Furphy
         private readonly List<string> _selftestIntercepted = new List<string>();
         private int? _selftestJobPostStatus;
         private string _webviewVersion;
+        private int _selftestThemeMessageCount;
+        private string _selftestOpenCurseforgeUrl;
+        private bool _selftestCfTabActiveAfterMessage;
 
         public int ExitCode;
 
@@ -684,6 +715,16 @@ namespace Furphy
             _hostLogPath = Path.Combine(logDir, "host.log");
 
             _port = ResolvePort();
+
+            // Seed the chrome palette with Lofi Night, then overlay any
+            // persisted settings.json hostTheme - BEFORE BuildUi() below so
+            // every control is constructed with the right colors from the
+            // start instead of flashing default then repainting. A live
+            // "theme" WebMessage later calls ApplyTheme to update both the
+            // WinForms chrome and the DWM title-bar attributes (see
+            // OnHandleCreated and HandleThemeMessage).
+            InitializeDefaultTheme();
+            LoadPersistedTheme();
 
             Text = WindowTitle;
             StartPosition = FormStartPosition.Manual;
@@ -710,6 +751,17 @@ namespace Furphy
 
             Load += new EventHandler(MainForm_Load);
             FormClosing += new FormClosingEventHandler(MainForm_FormClosing);
+        }
+
+        // Windows creates the native window handle before Load fires (per
+        // the standard HandleCreated -> Load -> Shown order), so this is
+        // the first point the DWMWA_* title-bar attributes can actually be
+        // set - see ApplyTitleBarColors. Also re-applied on every live
+        // "theme" WebMessage (HandleThemeMessage -> ApplyTheme).
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyTitleBarColors();
         }
 
         // -------------------------------------------------------- setup
@@ -821,6 +873,415 @@ namespace Furphy
                 win["h"] = (long)b.Height;
                 dict["hostWindow"] = win;
             });
+        }
+
+        // ------------------------------------------------------- theming
+
+        // Lofi Night - the app's current default theme (ui/style.css
+        // data-theme="lofi": --bg-0.. --bg-3, --border, --text,
+        // --text-muted, --accent). Overwritten by LoadPersistedTheme
+        // (settings.json hostTheme) and, live, by ApplyTheme whenever a
+        // "theme" WebMessage arrives (HandleThemeMessage).
+        private void InitializeDefaultTheme()
+        {
+            ChromeBg = Color.FromArgb(0x0f, 0x12, 0x26);       // --bg-0
+            ChromeBgAlt = Color.FromArgb(0x16, 0x1b, 0x34);    // --bg-1
+            ChromeBgActive = Color.FromArgb(0x1e, 0x24, 0x45); // --bg-2
+            ChromeHover = Color.FromArgb(0x26, 0x2d, 0x55);    // --bg-3
+            _chromeBorder = Color.FromArgb(0x34, 0x3b, 0x66);  // --border
+            ChromeText = Color.FromArgb(0xf2, 0xee, 0xe6);     // --text
+            ChromeMuted = Color.FromArgb(0xb3, 0xb1, 0xc9);    // --text-muted
+            ChromeAccent = Color.FromArgb(0xff, 0xb8, 0x6b);   // --accent
+            _themeName = "lofi";
+        }
+
+        // Reads settings.json's optional hostTheme = {name, colors} and, if
+        // present, overlays it onto the InitializeDefaultTheme() values.
+        // Called once from the constructor, before BuildUi(), so the
+        // window opens already painted in the last theme the page reported
+        // - mirrors how ApplyWindowBounds reads hostWindow up front.
+        private void LoadPersistedTheme()
+        {
+            Dictionary<string, object> settings = HostFiles.LoadJsonObject(_settingsPath);
+            object hostThemeObj;
+            if (!settings.TryGetValue("hostTheme", out hostThemeObj)) return;
+            Dictionary<string, object> hostTheme = hostThemeObj as Dictionary<string, object>;
+            if (hostTheme == null) return;
+
+            object nameObj;
+            string name = hostTheme.TryGetValue("name", out nameObj) ? nameObj as string : null;
+            object colorsObj;
+            Dictionary<string, object> colors = null;
+            if (hostTheme.TryGetValue("colors", out colorsObj))
+            {
+                colors = colorsObj as Dictionary<string, object>;
+            }
+
+            SetThemeColorFields(colors);
+            if (IsValidThemeName(name)) _themeName = name;
+
+            // Record what is already on disk as "last saved" so the first
+            // live "theme" message that happens to match it does not
+            // trigger a redundant re-save (PersistThemeIfChanged below),
+            // while a message that actually differs still gets saved.
+            if (colors != null)
+            {
+                _lastSavedThemeName = _themeName;
+                _lastSavedThemeColors = CurrentThemeColorsDict();
+            }
+        }
+
+        // Applies a theme (from a live WebMessage - see HandleThemeMessage)
+        // to the in-memory palette, the already-built WinForms chrome, and
+        // the DWM title-bar attributes; optionally persists it to
+        // settings.json when it actually changed. colors may be null or
+        // missing keys - each key present and matching #rrggbb overwrites
+        // the corresponding field, everything else keeps its current
+        // value (tolerates a partial/malformed message).
+        private void ApplyTheme(string name, Dictionary<string, object> colors, bool persistIfChanged)
+        {
+            SetThemeColorFields(colors);
+            if (IsValidThemeName(name)) _themeName = name;
+
+            RecolorChrome();
+            ApplyTitleBarColors();
+
+            if (persistIfChanged)
+            {
+                PersistThemeIfChanged();
+            }
+        }
+
+        // Adversarial-review fix: PersistThemeIfChanged writes _themeName
+        // straight to settings.json's hostTheme.name via the direct
+        // HostFiles.UpdateJsonObject path (see its own comment above),
+        // which - unlike a PUT /api/settings call - never passes through
+        // addon-server.ps1's Test-HostTheme validation
+        // (^[a-z0-9-]+$, 1-32 chars). Enforcing the identical rule here
+        // keeps that invariant true regardless of which path wrote the
+        // file, and also stops an untrusted postMessage (see
+        // CfWebView_InitCompleted's comment) from landing an arbitrary
+        // string in _themeName/settings.json even where the message-source
+        // gap above is ever reopened.
+        private static readonly Regex ThemeNameRegex = new Regex("^[a-z0-9-]{1,32}$", RegexOptions.None);
+
+        private static bool IsValidThemeName(string name)
+        {
+            return !string.IsNullOrEmpty(name) && ThemeNameRegex.IsMatch(name);
+        }
+
+        private void SetThemeColorFields(Dictionary<string, object> colors)
+        {
+            ChromeBg = ColorFromDict(colors, "bg0", ChromeBg);
+            ChromeBgAlt = ColorFromDict(colors, "bg1", ChromeBgAlt);
+            ChromeBgActive = ColorFromDict(colors, "bg2", ChromeBgActive);
+            ChromeHover = ColorFromDict(colors, "bg3", ChromeHover);
+            _chromeBorder = ColorFromDict(colors, "border", _chromeBorder);
+            ChromeText = ColorFromDict(colors, "text", ChromeText);
+            ChromeMuted = ColorFromDict(colors, "muted", ChromeMuted);
+            ChromeAccent = ColorFromDict(colors, "accent", ChromeAccent);
+        }
+
+        // Repaints every already-built chrome control from the current
+        // Chrome* fields. Safe to call before BuildUi has run (no-op) -
+        // ApplyTheme is only expected to reach live controls after the
+        // window is up; the initial palette is picked up by BuildUi
+        // constructing controls directly from the fields instead.
+        private void RecolorChrome()
+        {
+            if (_navPanel == null) return;
+
+            BackColor = ChromeBg;
+            _navPanel.BackColor = ChromeBg;
+            _contentPanel.BackColor = ChromeBg;
+            _cfContainer.BackColor = ChromeBg;
+            _cfToolbar.BackColor = ChromeBgAlt;
+
+            try { _furphyWebView.DefaultBackgroundColor = ChromeBg; } catch { }
+            try { _cfWebView.DefaultBackgroundColor = ChromeBg; } catch { }
+
+            ApplyNavButtonColors(_btnFurphy, _activeTab == HostTab.Furphy);
+            ApplyNavButtonColors(_btnCf, _activeTab == HostTab.CurseForge);
+            _btnFurphy.Invalidate();
+            _btnCf.Invalidate();
+
+            RecolorToolbarButton(_cfBtnBack);
+            RecolorToolbarButton(_cfBtnForward);
+            RecolorToolbarButton(_cfBtnHome);
+            RecolorToolbarButton(_cfBtnGo);
+
+            _cfSearchBox.BackColor = ChromeBgActive;
+            _cfSearchBox.ForeColor = ChromeText;
+        }
+
+        private void RecolorToolbarButton(Button b)
+        {
+            if (b == null) return;
+            b.BackColor = ChromeBgAlt;
+            b.ForeColor = ChromeText;
+            b.FlatAppearance.MouseOverBackColor = ChromeHover;
+            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
+        }
+
+        // Windows title bar (DWM). Attribute 20 (dark mode) is applied
+        // before/alongside the explicit colours per spec; every call is
+        // independently try/caught (older Windows returns E_INVALIDARG for
+        // 34/35/36, and dwmapi.dll's entry points could in principle be
+        // absent) and the raw HRESULTs are kept for the --selftest marker.
+        private void ApplyTitleBarColors()
+        {
+            if (!IsHandleCreated) return;
+            IntPtr hwnd = Handle;
+
+            int darkMode = RelativeLuminance(ChromeBg) < 0.5 ? 1 : 0;
+            _lastDarkModeHresult = TrySetDwmAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, darkMode);
+            _lastCaptionHresult = TrySetDwmAttribute(hwnd, DWMWA_CAPTION_COLOR, ColorToColorRef(ChromeBg));
+            _lastTextHresult = TrySetDwmAttribute(hwnd, DWMWA_TEXT_COLOR, ColorToColorRef(ChromeText));
+            _lastBorderHresult = TrySetDwmAttribute(hwnd, DWMWA_BORDER_COLOR, ColorToColorRef(_chromeBorder));
+
+            LogHost("title bar theme applied: dark=" + darkMode.ToString(CultureInfo.InvariantCulture) +
+                " darkHr=" + _lastDarkModeHresult.ToString(CultureInfo.InvariantCulture) +
+                " captionHr=" + _lastCaptionHresult.ToString(CultureInfo.InvariantCulture) +
+                " textHr=" + _lastTextHresult.ToString(CultureInfo.InvariantCulture) +
+                " borderHr=" + _lastBorderHresult.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private static int TrySetDwmAttribute(IntPtr hwnd, int attribute, int value)
+        {
+            try
+            {
+                int v = value;
+                return DwmSetWindowAttribute(hwnd, attribute, ref v, sizeof(int));
+            }
+            catch
+            {
+                // dwmapi.dll or the specific entry point is unavailable -
+                // treat like any other unsupported-attribute HRESULT.
+                return unchecked((int)0x80004005); // E_FAIL
+            }
+        }
+
+        // COLORREF is 0x00BBGGRR - blue in the high byte.
+        private static int ColorToColorRef(Color c)
+        {
+            return (c.B << 16) | (c.G << 8) | c.R;
+        }
+
+        // WCAG relative luminance (0..1); < 0.5 is treated as "dark".
+        private static double RelativeLuminance(Color c)
+        {
+            double r = ChannelToLinear(c.R);
+            double g = ChannelToLinear(c.G);
+            double b = ChannelToLinear(c.B);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+
+        private static double ChannelToLinear(int channel8)
+        {
+            double c = channel8 / 255.0;
+            if (c <= 0.03928) return c / 12.92;
+            return Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        // Persistence: mirrors SaveWindowBounds exactly - hostWindow is
+        // written by FurphyHost.exe directly to settings.json via
+        // HostFiles.UpdateJsonObject (see addon-server.ps1's
+        // Handle-SettingsPut comment: "hostWindow is set almost
+        // exclusively by FurphyHost.exe writing settings.json directly,
+        // bypassing this endpoint entirely"), NOT through PUT /api/settings
+        // - so hostTheme goes through the exact same direct, atomic
+        // read-modify-write-merge instead of an HTTP call.
+        private void PersistThemeIfChanged()
+        {
+            Dictionary<string, object> current = CurrentThemeColorsDict();
+            bool changed = _lastSavedThemeColors == null
+                || !string.Equals(_lastSavedThemeName, _themeName, StringComparison.Ordinal)
+                || !ThemeDictEquals(current, _lastSavedThemeColors);
+            if (!changed) return;
+
+            string nameToSave = _themeName;
+            HostFiles.UpdateJsonObject(_settingsPath, delegate(Dictionary<string, object> dict)
+            {
+                Dictionary<string, object> theme = new Dictionary<string, object>();
+                theme["name"] = nameToSave;
+                theme["colors"] = current;
+                dict["hostTheme"] = theme;
+            });
+            _lastSavedThemeName = nameToSave;
+            _lastSavedThemeColors = current;
+            LogHost("hostTheme saved: " + (nameToSave == null ? "(null)" : nameToSave));
+        }
+
+        private Dictionary<string, object> CurrentThemeColorsDict()
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["bg0"] = ColorToHex(ChromeBg);
+            d["bg1"] = ColorToHex(ChromeBgAlt);
+            d["bg2"] = ColorToHex(ChromeBgActive);
+            d["bg3"] = ColorToHex(ChromeHover);
+            d["border"] = ColorToHex(_chromeBorder);
+            d["text"] = ColorToHex(ChromeText);
+            d["muted"] = ColorToHex(ChromeMuted);
+            d["accent"] = ColorToHex(ChromeAccent);
+            return d;
+        }
+
+        private static bool ThemeDictEquals(Dictionary<string, object> a, Dictionary<string, object> b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Count != b.Count) return false;
+            foreach (KeyValuePair<string, object> kv in a)
+            {
+                object other;
+                if (!b.TryGetValue(kv.Key, out other)) return false;
+                string sa = kv.Value as string;
+                string sb = other as string;
+                if (!string.Equals(sa, sb, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            return true;
+        }
+
+        private static Color ColorFromDict(Dictionary<string, object> colors, string key, Color fallback)
+        {
+            if (colors == null) return fallback;
+            object v;
+            if (!colors.TryGetValue(key, out v)) return fallback;
+            string s = v as string;
+            Color parsed;
+            if (s != null && TryParseHexColor(s, out parsed)) return parsed;
+            return fallback;
+        }
+
+        private static bool TryParseHexColor(string hex, out Color color)
+        {
+            color = Color.Empty;
+            if (string.IsNullOrEmpty(hex)) return false;
+            string h = hex.Trim();
+            if (h.Length != 7 || h[0] != '#') return false;
+            int r, g, b;
+            if (!int.TryParse(h.Substring(1, 2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out r)) return false;
+            if (!int.TryParse(h.Substring(3, 2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out g)) return false;
+            if (!int.TryParse(h.Substring(5, 2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out b)) return false;
+            color = Color.FromArgb(r, g, b);
+            return true;
+        }
+
+        private static string ColorToHex(Color c)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "#{0:x2}{1:x2}{2:x2}", c.R, c.G, c.B);
+        }
+
+        // ---------------------------------------------- page -> host messages
+
+        // Attached to _furphyWebView always (FurphyWebView_InitCompleted -
+        // the trusted app SPA, gated page-side by
+        // App.getServerHost() === "webview2") and to _cfWebView ONLY during
+        // --selftest (CfWebView_InitCompleted): --selftest's
+        // host\selftest.html is the CurseForge tab's *test page*
+        // (_cfWebView.Source, per MainForm_Load - it exercises the
+        // curseforge:// deep-link interception that only _cfWebView's
+        // NavigationStarting handles), so it needs this same listener there
+        // to post the theme/open-curseforge test messages contract F asks
+        // for. In production _cfWebView loads live, untrusted
+        // curseforge.com content and is deliberately left unwired - see
+        // CfWebView_InitCompleted's comment (adversarial-review fix: an
+        // untrusted CF-tab page must not be able to drive host chrome/theme
+        // or force CurseForge-tab navigation via postMessage).
+        private void HostWebView_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            try
+            {
+                string json = e.WebMessageAsJson;
+                Dictionary<string, object> msg = MiniJson.Parse(json) as Dictionary<string, object>;
+                if (msg == null) return;
+
+                object typeObj;
+                string type = msg.TryGetValue("type", out typeObj) ? typeObj as string : null;
+                if (string.IsNullOrEmpty(type)) return;
+
+                if (type == "open-curseforge")
+                {
+                    object urlObj;
+                    string url = msg.TryGetValue("url", out urlObj) ? urlObj as string : null;
+                    HandleOpenCurseforgeMessage(url);
+                }
+                else if (type == "theme")
+                {
+                    object nameObj;
+                    string name = msg.TryGetValue("name", out nameObj) ? nameObj as string : null;
+                    object colorsObj;
+                    Dictionary<string, object> colors = null;
+                    if (msg.TryGetValue("colors", out colorsObj))
+                    {
+                        colors = colorsObj as Dictionary<string, object>;
+                    }
+                    _selftestThemeMessageCount++;
+
+                    // Adversarial-review fix (finding: --selftest permanently
+                    // corrupts the user's real persisted hostTheme):
+                    // persistIfChanged must never be true during --selftest,
+                    // or selftest.html's synthetic test palette gets written
+                    // straight into settings.json via PersistThemeIfChanged
+                    // -> HostFiles.UpdateJsonObject, the same file a real,
+                    // non-selftest launch reads on startup.
+                    bool persist = !_options.SelftestActive;
+
+                    // Adversarial-review fix (finding: selftest theme-message
+                    // ordering is a live race): during --selftest, both
+                    // _furphyWebView (the real SPA's own startup
+                    // Host.reportTheme(), per contract E - it is genuinely
+                    // running there and its report isn't the thing under
+                    // test) and _cfWebView (selftest.html's synthetic test
+                    // palette, gated on SelftestActive - see
+                    // CfWebView_InitCompleted) are wired to this handler, so
+                    // a --selftest run always receives at least two theme
+                    // messages with no ordering guarantee between them. Make
+                    // the race moot instead of relying on selftest.html's
+                    // 1s head start beating the SPA's startup report: while
+                    // SelftestActive, only apply theme messages that did NOT
+                    // arrive via _furphyWebView, so the marker's
+                    // themeBg0/tabBarPixel/toolbarPixel can only ever reflect
+                    // selftest.html's message, deterministically. The message
+                    // is still counted above either way.
+                    bool fromProductionAppDuringSelftest =
+                        _options.SelftestActive &&
+                        _furphyWebView.CoreWebView2 != null &&
+                        sender == (object)_furphyWebView.CoreWebView2;
+
+                    if (fromProductionAppDuringSelftest)
+                    {
+                        LogHost("theme message from _furphyWebView ignored during --selftest (production SPA report, not under test)");
+                    }
+                    else
+                    {
+                        ApplyTheme(name, colors, persist);
+                    }
+                }
+                else
+                {
+                    LogHost("unknown webmessage type: " + type);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHost("WebMessageReceived failed: " + ex.Message);
+            }
+        }
+
+        private void HandleOpenCurseforgeMessage(string url)
+        {
+            if (string.IsNullOrEmpty(url) ||
+                !url.StartsWith("https://www.curseforge.com/", StringComparison.OrdinalIgnoreCase))
+            {
+                LogHost("open-curseforge ignored, bad url: " + (url == null ? "(null)" : url));
+                return;
+            }
+
+            ActivateTab(HostTab.CurseForge);
+            NavigateCf(url);
+
+            _selftestOpenCurseforgeUrl = url;
+            _selftestCfTabActiveAfterMessage = (_activeTab == HostTab.CurseForge);
         }
 
         // ---------------------------------------------------------- DPI
@@ -979,20 +1440,20 @@ namespace Furphy
             int y = Scaled(4);
             int btnH = Scaled(26);
 
-            Button back = BuildToolbarButton("<", Scaled(30));
-            back.Location = new Point(Scaled(4), y);
-            back.Height = btnH;
-            back.Click += new EventHandler(CfBack_Click);
+            _cfBtnBack = BuildToolbarButton("<", Scaled(30));
+            _cfBtnBack.Location = new Point(Scaled(4), y);
+            _cfBtnBack.Height = btnH;
+            _cfBtnBack.Click += new EventHandler(CfBack_Click);
 
-            Button fwd = BuildToolbarButton(">", Scaled(30));
-            fwd.Location = new Point(Scaled(38), y);
-            fwd.Height = btnH;
-            fwd.Click += new EventHandler(CfForward_Click);
+            _cfBtnForward = BuildToolbarButton(">", Scaled(30));
+            _cfBtnForward.Location = new Point(Scaled(38), y);
+            _cfBtnForward.Height = btnH;
+            _cfBtnForward.Click += new EventHandler(CfForward_Click);
 
-            Button home = BuildToolbarButton("Home", Scaled(50));
-            home.Location = new Point(Scaled(72), y);
-            home.Height = btnH;
-            home.Click += new EventHandler(CfHome_Click);
+            _cfBtnHome = BuildToolbarButton("Home", Scaled(50));
+            _cfBtnHome.Location = new Point(Scaled(72), y);
+            _cfBtnHome.Height = btnH;
+            _cfBtnHome.Click += new EventHandler(CfHome_Click);
 
             _cfSearchBox = new TextBox();
             _cfSearchBox.Location = new Point(Scaled(130), Scaled(6));
@@ -1002,16 +1463,16 @@ namespace Furphy
             _cfSearchBox.BorderStyle = BorderStyle.FixedSingle;
             _cfSearchBox.KeyDown += new KeyEventHandler(CfSearchBox_KeyDown);
 
-            Button go = BuildToolbarButton("Go", Scaled(40));
-            go.Location = new Point(Scaled(356), y);
-            go.Height = btnH;
-            go.Click += new EventHandler(CfGo_Click);
+            _cfBtnGo = BuildToolbarButton("Go", Scaled(40));
+            _cfBtnGo.Location = new Point(Scaled(356), y);
+            _cfBtnGo.Height = btnH;
+            _cfBtnGo.Click += new EventHandler(CfGo_Click);
 
-            bar.Controls.Add(back);
-            bar.Controls.Add(fwd);
-            bar.Controls.Add(home);
+            bar.Controls.Add(_cfBtnBack);
+            bar.Controls.Add(_cfBtnForward);
+            bar.Controls.Add(_cfBtnHome);
             bar.Controls.Add(_cfSearchBox);
-            bar.Controls.Add(go);
+            bar.Controls.Add(_cfBtnGo);
             return bar;
         }
 
@@ -1139,6 +1600,12 @@ namespace Furphy
             }
             _furphyReady = true;
             CaptureVersionIfNeeded();
+
+            // Contract A/B: the app SPA (always loaded here) posts
+            // "open-curseforge"/"theme" messages via
+            // window.chrome.webview.postMessage; see HostWebView_WebMessageReceived.
+            _furphyWebView.CoreWebView2.WebMessageReceived +=
+                new EventHandler<CoreWebView2WebMessageReceivedEventArgs>(HostWebView_WebMessageReceived);
         }
 
         private void CfWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -1160,6 +1627,26 @@ namespace Furphy
                 new EventHandler<CoreWebView2NewWindowRequestedEventArgs>(CfWebView_NewWindowRequested);
             _cfWebView.CoreWebView2.WebResourceRequested +=
                 new EventHandler<CoreWebView2WebResourceRequestedEventArgs>(CfWebView_WebResourceRequested);
+            // Adversarial-review fix: _cfWebView loads live curseforge.com
+            // pages in production and, via CfWebView_NewWindowRequested's
+            // catch-all (NavigateCf(uri) for anything that is not a
+            // curseforge:// link or an install link), can be navigated to
+            // essentially any URL a page on curseforge.com links to.
+            // WebMessageReceived was previously wired here unconditionally,
+            // which let ANY such untrusted page post {type:"theme", ...} or
+            // {type:"open-curseforge", ...} and have it processed exactly
+            // like a message from the trusted SPA - defeating contract A's
+            // App.getServerHost()==='webview2' gate for this tab. Only
+            // --selftest's host\selftest.html (see MainForm_Load - it loads
+            // as _cfWebView.Source during --selftest, to exercise the same
+            // curseforge:// deep-link interception the real CF tab uses)
+            // has any legitimate reason to post these here, so gate the
+            // listener on that mode instead of attaching it unconditionally.
+            if (_options.SelftestActive)
+            {
+                _cfWebView.CoreWebView2.WebMessageReceived +=
+                    new EventHandler<CoreWebView2WebMessageReceivedEventArgs>(HostWebView_WebMessageReceived);
+            }
 
             EnsureAdFilterInfra();
         }
@@ -1619,6 +2106,13 @@ namespace Furphy
             marker["dpiAware"] = _dpiAware;
             marker["tabBarPixel"] = tabBarPixelHex;
             marker["toolbarPixel"] = toolbarPixelHex;
+
+            marker["themeMessages"] = (long)_selftestThemeMessageCount;
+            marker["themeBg0"] = ColorToHex(ChromeBg);
+            marker["captionHresult"] = (long)_lastCaptionHresult;
+            marker["darkModeHresult"] = (long)_lastDarkModeHresult;
+            marker["openCurseforgeUrl"] = _selftestOpenCurseforgeUrl;
+            marker["cfTabActiveAfterMessage"] = _selftestCfTabActiveAfterMessage;
 
             List<string> blockedCopy;
             List<string> allowedCopy;
