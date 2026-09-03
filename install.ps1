@@ -257,6 +257,77 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
 New-Item -ItemType Directory -Force -Path (Join-Path -Path $appDest -ChildPath 'jobs') | Out-Null
 
 # =====================================================================
+# 3b. host\ - the E19 native WebView2 host (Furphy + CurseForge tabs in
+#     one window). Copies the source files (and a prebuilt host\bin\, as
+#     a fallback for a machine with no compiler at all), then rebuilds
+#     FurphyHost.exe fresh at the destination when a C# compiler is
+#     present - skipped silently when it is not (every normal Windows
+#     box has one; see SPEC E19), in which case the copied prebuilt
+#     host\bin\ (if any) or the plain Edge app window (Addon
+#     Manager.vbs's existing fallback, unchanged) is what actually runs.
+# =====================================================================
+
+$hostSrc = Join-Path -Path $SourceRoot -ChildPath 'host'
+if (Test-Path -LiteralPath $hostSrc -PathType Container) {
+    Write-Step 'Copying the native host (host\)'
+    $hostDst = Join-Path -Path $appDest -ChildPath 'host'
+    New-Item -ItemType Directory -Force -Path $hostDst | Out-Null
+
+    foreach ($f in 'adfilter-hosts.txt', 'build-host.ps1', 'FurphyHost.cs') {
+        $s = Join-Path -Path $hostSrc -ChildPath $f
+        if (Test-Path -LiteralPath $s) {
+            Copy-Item -LiteralPath $s -Destination (Join-Path -Path $hostDst -ChildPath $f) -Force
+        } else {
+            Write-Warn2 "host\$f missing, skipped."
+        }
+    }
+
+    $libSrc = Join-Path -Path $hostSrc -ChildPath 'lib'
+    if (Test-Path -LiteralPath $libSrc -PathType Container) {
+        $libDst = Join-Path -Path $hostDst -ChildPath 'lib'
+        New-Item -ItemType Directory -Force -Path $libDst | Out-Null
+        Copy-Item -Path (Join-Path -Path $libSrc -ChildPath '*') -Destination $libDst -Recurse -Force
+    } else {
+        Write-Warn2 'host\lib (the WebView2 SDK) is missing - the host cannot be built here.'
+    }
+
+    # Prebuilt binaries only (icon.ico, the exe, the three SDK dlls) - never
+    # the WebView2Loader-created runtime cache folder a previous run may
+    # have left next to them (host\bin\FurphyHost.exe.WebView2\...), which
+    # is per-machine junk, not part of the app.
+    $binSrc = Join-Path -Path $hostSrc -ChildPath 'bin'
+    if (Test-Path -LiteralPath $binSrc -PathType Container) {
+        $binDst = Join-Path -Path $hostDst -ChildPath 'bin'
+        New-Item -ItemType Directory -Force -Path $binDst | Out-Null
+        Get-ChildItem -LiteralPath $binSrc -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path -Path $binDst -ChildPath $_.Name) -Force
+        }
+    }
+
+    $cscPath = Join-Path -Path $env:WINDIR -ChildPath 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path -LiteralPath $cscPath)) {
+        $cscPath = Join-Path -Path $env:WINDIR -ChildPath 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    }
+    if (Test-Path -LiteralPath $cscPath) {
+        Write-Info 'C# compiler found - building the native host (host\build-host.ps1)...'
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path -Path $hostDst -ChildPath 'build-host.ps1') | Out-Null
+            $exeOut = Join-Path -Path $hostDst -ChildPath 'bin\FurphyHost.exe'
+            if (Test-Path -LiteralPath $exeOut) {
+                Write-Info 'Built host\bin\FurphyHost.exe - Furphy Addon Manager will open with an embedded CurseForge tab.'
+            } else {
+                Write-Warn2 'build-host.ps1 completed but FurphyHost.exe was not produced - falling back to the Edge app window.'
+            }
+        } catch {
+            Write-Warn2 "Could not build the native host, falling back to the Edge app window: $($_.Exception.Message)"
+        }
+    }
+    # else: no C# compiler found - skip the build silently (see comment
+    # above the host\ section; this is expected to be effectively
+    # unreachable on a normal Windows install).
+}
+
+# =====================================================================
 # 4. Parse check on the deployed copy
 # =====================================================================
 

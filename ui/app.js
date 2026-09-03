@@ -65,8 +65,16 @@ const Mock = (function () {
   const enabled = new URLSearchParams(location.search).get("mock") === "1";
   if (!enabled) return { enabled: false };
 
-  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, cfApiKey: "", port: 47831 };
+  // E19: adFilter/hostWindow join the mock settings shape too, so Settings'
+  // Browsing card and the protocol row are exercisable under ?mock=1.
+  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, cfApiKey: "", port: 47831, adFilter: false, hostWindow: null };
   let hasKey = false;
+  // E19: mock curseforge:// handler state - toggled entirely in-memory by
+  // the /api/protocol/register|unregister handling below, no real registry
+  // access. ?mock=1&host=webview2 also flips /api/ping's host field, so the
+  // ad-filter toggle's "native host only" branch is previewable with no
+  // real FurphyHost.exe running.
+  let protocolRegistered = false;
   let nextJobId = 1;
   let currentJob = null;
   const jobs = [];
@@ -432,7 +440,12 @@ const Mock = (function () {
         // "stale-minor" BigWigs fixtures seeded above.
         return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, clientBuild: "12.1.0.69587", clientInterface: 120100 };
       }
-      if (p === "/api/ping") return { ok: true, name: "Furphy Addon Manager", version: "mock-1.0", uptime: 1234 };
+      // E19: ?mock=1&host=webview2 previews the native-host-only ad-filter
+      // toggle branch without a real FurphyHost.exe - mirrors the real
+      // server's own "sticky on the first GET / with that query" contract
+      // closely enough for dev purposes (the mock has no separate
+      // static-file route to hook, so this just reads the page's own URL).
+      if (p === "/api/ping") return { ok: true, name: "Furphy Addon Manager", version: "mock-1.0", uptime: 1234, host: new URLSearchParams(location.search).get("host") === "webview2" ? "webview2" : "edge-app" };
       if (p === "/api/jobs" && method === "GET") return jobs.slice(0, 20);
       if (p.indexOf("/api/jobs/") === 0 && method === "GET") {
         const id = p.split("/").pop();
@@ -519,7 +532,22 @@ const Mock = (function () {
         if (typeof body.autoUpdateOnLaunch === "boolean") mockSettings.autoUpdateOnLaunch = body.autoUpdateOnLaunch;
         if (typeof body.cfApiKey === "string") { hasKey = body.cfApiKey.length > 0; mockSettings.cfApiKey = body.cfApiKey; }
         if (typeof body.port === "number") mockSettings.port = body.port;
+        if (typeof body.adFilter === "boolean") mockSettings.adFilter = body.adFilter;
+        if (body.hostWindow !== undefined && body.hostWindow !== null) mockSettings.hostWindow = body.hostWindow;
         return currentSettings();
+      }
+      // E19 (script itself is E17's, unchanged) - mock curseforge:// handler
+      // toggle, in-memory only.
+      if (p === "/api/protocol/status" && method === "GET") {
+        return { registered: protocolRegistered, currentHandler: protocolRegistered ? "wscript.exe \"...\\curseforge-handler.vbs\" \"%1\"" : "", handlerPath: "...\\curseforge-handler.vbs", handlerExists: true };
+      }
+      if (p === "/api/protocol/register" && method === "POST") {
+        protocolRegistered = true;
+        return { registered: true, currentHandler: "wscript.exe \"...\\curseforge-handler.vbs\" \"%1\"", handlerPath: "...\\curseforge-handler.vbs", handlerExists: true };
+      }
+      if (p === "/api/protocol/unregister" && method === "POST") {
+        protocolRegistered = false;
+        return { registered: false, currentHandler: "", handlerPath: "...\\curseforge-handler.vbs", handlerExists: true };
       }
       if (p === "/api/settings/test-key" && method === "POST") {
         const key = (body && body.cfApiKey) || mockSettings.cfApiKey;
@@ -651,7 +679,7 @@ const Mock = (function () {
   function currentSettings() {
     // E13: checkAddonVersion is fixed mock data (read-only info, WTF\Config.wtf
     // - never set via PUT /api/settings, real or mock).
-    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, hasApiKey: hasKey, apiKeyHint: hasKey ? mockSettings.cfApiKey.slice(-4) : "", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0" };
+    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, hasApiKey: hasKey, apiKeyHint: hasKey ? mockSettings.cfApiKey.slice(-4) : "", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0", adFilter: mockSettings.adFilter, hostWindow: mockSettings.hostWindow };
   }
 })();
 
@@ -1122,6 +1150,12 @@ const Api = (function () {
     testKey: function (cfApiKey) { return request("POST", "/api/settings/test-key", cfApiKey === undefined ? {} : { cfApiKey: cfApiKey }); },
     getDiagnostics: function () { return request("GET", "/api/diagnostics"); },
 
+    // E19 (script itself is E17's, unchanged) - the curseforge:// install-
+    // link handler toggle in Settings > Game and the Browse > CurseForge pane.
+    protocolStatus: function () { return request("GET", "/api/protocol/status"); },
+    protocolRegister: function () { return request("POST", "/api/protocol/register", {}); },
+    protocolUnregister: function () { return request("POST", "/api/protocol/unregister", {}); },
+
     cfSearch: function (params) { return request("GET", "/api/cf/search" + qs(params)); },
     cfCategories: function () { return request("GET", "/api/cf/categories"); },
     cfMod: function (id) { return request("GET", "/api/cf/mods/" + id); },
@@ -1255,7 +1289,17 @@ const Store = (function () {
       wagoGalleryError: null
     },
 
-    installingAdd: null        // {kind:'add'|'install', projectId} optimistic marker while a dialog-triggered job is being posted
+    installingAdd: null,       // {kind:'add'|'install', projectId} optimistic marker while a dialog-triggered job is being posted
+
+    // E19 (script itself is E17's, unchanged): the curseforge:// install-link
+    // handler status - {registered, currentHandler, handlerPath,
+    // handlerExists} from GET /api/protocol/status, or null before the first
+    // load/on a failed load. Read by both the Settings > Game row and the
+    // Browse > CurseForge pane's status pill (Actions.loadProtocolStatus
+    // keeps both in sync from one shared fetch).
+    protocol: null,
+    protocolLoading: false,
+    protocolBusy: false        // true while a register/unregister call is in flight (disables the toggle)
   };
 
   function set(patch) { Object.assign(state, patch); }
@@ -1499,11 +1543,21 @@ Components.Toast = (function () {
     const container = Utils.qs("#toast-container");
     const iconName = type === "success" ? "check-circle" : type === "error" ? "alert-circle" : type === "warning" ? "warning" : "check-circle";
     let removed = false;
-    const node = Utils.el("div", { class: "toast toast-" + type, role: "status" }, [
+    const children = [
       Utils.icon(iconName),
-      Utils.el("div", { class: "toast-body" }, [String(message)]),
-      Utils.el("button", { type: "button", class: "icon-btn toast-close", "aria-label": "Dismiss", title: "Dismiss", onclick: function () { remove(); } }, [Utils.icon("close")])
-    ]);
+      Utils.el("div", { class: "toast-body" }, [String(message)])
+    ];
+    // E19: an optional inline action (e.g. "Undo" on the curseforge://
+    // handler register/unregister toggle) - opt-in, every existing caller
+    // that passes no opts.actionLabel is unaffected.
+    if (opts.actionLabel && typeof opts.onAction === "function") {
+      children.push(Utils.el("button", {
+        type: "button", class: "link-btn toast-action",
+        onclick: function () { opts.onAction(); remove(); }
+      }, [opts.actionLabel]));
+    }
+    children.push(Utils.el("button", { type: "button", class: "icon-btn toast-close", "aria-label": "Dismiss", title: "Dismiss", onclick: function () { remove(); } }, [Utils.icon("close")]));
+    const node = Utils.el("div", { class: "toast toast-" + type, role: "status" }, children);
     function remove() {
       if (removed) return;
       removed = true;
@@ -2876,6 +2930,61 @@ Components.JobPanel = (function () {
   return { show: show, update: update, toggleCollapse: toggleCollapse, collapseIfOpen: collapseIfOpen, hide: hide, summarize: summarize };
 })();
 
+/* ---------- E19 (script itself is E17's, unchanged): curseforge:// handler
+   status pill + toggle. Painted twice from the same Store.state.protocol -
+   once into Settings > Game's row, once into the Browse > CurseForge pane -
+   by two calls to the one render(containerId) function below, so the two
+   places can never drift out of sync with each other. ---------- */
+Components.ProtocolControl = (function () {
+  function render(containerId) {
+    const box = Utils.qs("#" + containerId);
+    if (!box) return;
+    box.textContent = "";
+
+    const p = Store.state.protocol;
+    const busy = Store.state.protocolBusy;
+    let pillLabel, pillCls, note, registered;
+    if (Store.state.protocolLoading && !p) {
+      pillLabel = "Checking…"; pillCls = "chip-muted";
+      note = "Looking up whether Furphy handles CurseForge install links.";
+      registered = false;
+    } else if (!p) {
+      pillLabel = "Unknown"; pillCls = "chip-muted";
+      note = "Couldn't check the install-link handler.";
+      registered = false;
+    } else if (p.registered) {
+      pillLabel = "Handled by Furphy"; pillCls = "chip-success";
+      note = "Clicking Install on a curseforge.com addon page installs it here.";
+      registered = true;
+    } else if (p.currentHandler) {
+      pillLabel = "Handled by another program"; pillCls = "chip-warning";
+      note = "Another program currently opens curseforge:// links. Turning this on switches them to Furphy.";
+      registered = false;
+    } else {
+      pillLabel = "Not registered"; pillCls = "chip-muted";
+      note = "CurseForge.com's own Install buttons open its own picker instead of Furphy.";
+      registered = false;
+    }
+
+    const toggle = Utils.el("input", { type: "checkbox", disabled: busy || (Store.state.protocolLoading && !p) });
+    toggle.checked = registered;
+    toggle.addEventListener("change", function () {
+      Actions.setProtocolRegistered(toggle.checked);
+    });
+
+    box.appendChild(Utils.el("div", { class: "protocol-control-row" }, [
+      Components.Chip.build(pillLabel, pillCls),
+      Utils.el("label", { class: "switch", title: registered ? "Stop handling curseforge:// links" : "Handle curseforge:// links with Furphy" }, [
+        toggle,
+        Utils.el("span", { class: "switch-track" }, [Utils.el("span", { class: "switch-thumb" })])
+      ])
+    ]));
+    box.appendChild(Utils.el("p", { class: "muted-text" }, [note]));
+  }
+
+  return { render: render };
+})();
+
 /* ==========================================================================
    describeError - turns an Api error into a short, user-facing message.
    Declared as a plain top-level function (not inside a module) since it is
@@ -3348,6 +3457,58 @@ const Actions = (function () {
     }
   }
 
+  // E19 (script itself is E17's, unchanged): shared by Settings > Game's row
+  // and the Browse > CurseForge pane's status pill - fetches
+  // GET /api/protocol/status once and repaints whichever of those two views
+  // is currently on screen (a no-op render call on the other is harmless -
+  // both Views.settings.render/Views.browse.render just repaint whatever
+  // DOM is present, matching the pattern App.renderChrome already uses
+  // elsewhere in this file). A failed fetch leaves Store.state.protocol
+  // null - both call sites render that as "Checking..." rather than an
+  // error, since this is a nicety, never something worth an error toast for
+  // on its own.
+  async function loadProtocolStatus() {
+    Store.state.protocolLoading = true;
+    if (Store.state.view === "settings") Views.settings.render();
+    if (Store.state.view === "browse") Views.browse.render();
+    try {
+      Store.state.protocol = await Api.protocolStatus();
+    } catch (err) {
+      Store.state.protocol = null;
+    } finally {
+      Store.state.protocolLoading = false;
+      if (Store.state.view === "settings") Views.settings.render();
+      if (Store.state.view === "browse") Views.browse.render();
+    }
+  }
+
+  // Flips the curseforge:// handler toggle. `isUndo` suppresses the
+  // "Undo" toast on the undo action itself (so clicking Undo can't chain
+  // into another Undo offer) - every normal caller omits it.
+  async function setProtocolRegistered(wantRegistered, isUndo) {
+    if (Store.state.protocolBusy) return;
+    Store.state.protocolBusy = true;
+    if (Store.state.view === "settings") Views.settings.render();
+    if (Store.state.view === "browse") Views.browse.render();
+    try {
+      const status = wantRegistered ? await Api.protocolRegister() : await Api.protocolUnregister();
+      Store.state.protocol = status;
+      if (!isUndo) {
+        Components.Toast.show(
+          wantRegistered ? "CurseForge install links are now handled by Furphy." : "Furphy no longer handles CurseForge install links.",
+          "success",
+          { actionLabel: "Undo", onAction: function () { setProtocolRegistered(!wantRegistered, true); } }
+        );
+      }
+    } catch (err) {
+      Components.Toast.show("Couldn't change the install-link handler: " + describeError(err), "error");
+    } finally {
+      Store.state.protocolBusy = false;
+      if (Store.state.view === "settings") Views.settings.render();
+      if (Store.state.view === "browse") Views.browse.render();
+    }
+  }
+
   return {
     startJob: startJob, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
@@ -3361,7 +3522,9 @@ const Actions = (function () {
     installLatestWago: installLatestWago, addWagoWithVersion: addWagoWithVersion, addByWagoSlug: addByWagoSlug,
     openOnWago: openOnWago, switchSource: switchSource, switchSourceButton: switchSourceButton,
     // E18 (first-run welcome)
-    adoptAll: adoptAll
+    adoptAll: adoptAll,
+    // E19 (curseforge:// handler toggle; ad filter goes through saveSettings above)
+    loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered
   };
 })();
 
@@ -3851,6 +4014,11 @@ Views.browse = (function () {
     // the source switch in both keyless and keyed mode (Wago never needed a
     // separate website search box - Wago's own search IS the in-app one).
     Utils.qs("#cf-web-search").hidden = b.source === "wago";
+    // E19 (script/registration itself is E17's, unchanged): painted every
+    // render regardless of source - it's a no-op cost, and #cf-web-search's
+    // own hidden flag just above already keeps it out of sight on the Wago
+    // side, same as the search box/hint it lives alongside.
+    Components.ProtocolControl.render("browse-protocol-control");
     Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
     if (b.source === "wago") {
       Utils.qs("#browse-keyless-banner").hidden = true;
@@ -4306,6 +4474,8 @@ Views.settings = (function () {
     Utils.qs("#about-uptime").textContent = uptime !== null ? formatUptime(uptime) : "—";
     Utils.qs("#about-port").textContent = s.port || "—";
 
+    renderBrowsing(s);
+    Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
     renderUntracked();
     renderDiagnostics();
@@ -4346,6 +4516,18 @@ Views.settings = (function () {
     if (!el) return;
     const uptime = App.getServerUptime();
     el.textContent = uptime !== null ? formatUptime(uptime) : "—";
+  }
+
+  // E19: the ad filter only does anything inside the native host's
+  // (host\FurphyHost.exe) embedded CurseForge tab - the plain Edge app
+  // window (App.getServerHost() === "edge-app") has no such tab to filter,
+  // so the toggle is swapped for a muted explainer there instead of
+  // offering a control that would silently do nothing when flipped.
+  function renderBrowsing(s) {
+    const isHost = App.getServerHost() === "webview2";
+    Utils.qs("#browsing-adfilter-row").hidden = !isHost;
+    Utils.qs("#browsing-adfilter-unavailable").hidden = isHost;
+    if (isHost) Utils.qs("#toggle-adfilter").checked = !!s.adFilter;
   }
 
   // E7: reflects the persisted density/theme choice (Prefs, already applied
@@ -4494,6 +4676,9 @@ Views.settings = (function () {
       Utils.qs("#radio-release-" + v).addEventListener("change", function () { Actions.saveSettings({ releaseType: Number(v) }); });
     });
     Utils.qs("#toggle-autoupdate").addEventListener("change", function (ev) { Actions.saveSettings({ autoUpdateOnLaunch: ev.target.checked }); });
+    // E19: only visible/enabled while renderBrowsing() has shown the row
+    // (the native host is running) - see that function's comment.
+    Utils.qs("#toggle-adfilter").addEventListener("change", function (ev) { Actions.saveSettings({ adFilter: ev.target.checked }); });
 
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setDensity(btn.dataset.densityValue); renderAppearance(); });
@@ -4747,6 +4932,12 @@ const App = (function () {
   let serverVersion = null;
   let serverUptimeAtFetch = null;
   let serverUptimeFetchedAt = null;
+  // E19: 'webview2' | 'edge-app' | null (unknown until the first successful
+  // ping) - see the server's Handle-Ping/Invoke-Route (sticky once set to
+  // 'webview2': the native host's Furphy tab is the only caller that ever
+  // sends ?host=webview2 on GET /). Read by Views.settings.renderBrowsing
+  // to decide whether the ad-filter toggle can do anything.
+  let serverHost = null;
 
   // E2: automatic update checks. A missing/stale updatesCheckedAt starts a
   // background check shortly after load; then it repeats every 30 minutes
@@ -5002,6 +5193,7 @@ const App = (function () {
       serverVersion = res.version;
       serverUptimeAtFetch = res.uptime;
       serverUptimeFetchedAt = Date.now();
+      if (res.host) serverHost = res.host;
       markOnline(null);
     } catch (err) {
       markOnline(err);
@@ -5143,6 +5335,11 @@ const App = (function () {
     Views.settings.bindOnce();
 
     await fetchPingInfo();
+    // E19: fire-and-forget, like maybeShowWelcome below - loadProtocolStatus
+    // catches its own errors (leaves Store.state.protocol null, rendered as
+    // "Checking..."/"Unknown" by Components.ProtocolControl) and is a
+    // nicety, never worth delaying the rest of startup for.
+    Actions.loadProtocolStatus();
     await reloadState(false);
     await maybeShowWelcome();
     startIdlePolling();
@@ -5153,7 +5350,8 @@ const App = (function () {
   return {
     switchView: switchView, renderCurrentView: renderCurrentView, renderChrome: renderChrome,
     onJobStarted: onJobStarted, reloadState: reloadState, init: init,
-    getServerVersion: function () { return serverVersion; }, getServerUptime: currentUptime
+    getServerVersion: function () { return serverVersion; }, getServerUptime: currentUptime,
+    getServerHost: function () { return serverHost; }
   };
 })();
 

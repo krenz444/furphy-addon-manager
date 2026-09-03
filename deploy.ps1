@@ -58,6 +58,16 @@ Get-ChildItem -LiteralPath $uiDst -File -Recurse | Remove-Item -Force
 Copy-Item -Path (Join-Path $uiSrc '*') -Destination $uiDst -Recurse -Force
 "copied ui\ ($((Get-ChildItem -LiteralPath $uiDst -File -Recurse | Measure-Object).Count) files)"
 
+# 3b. Native host (E19): mirror host\ sources, SDK assemblies and the built exe (never the WebView2 runtime cache).
+$hostSrc = Join-Path $Source 'host'
+if (Test-Path -LiteralPath $hostSrc) {
+    $hostDst = Join-Path $Dest 'host'
+    New-Item -ItemType Directory -Force -Path $hostDst, (Join-Path $hostDst 'lib'), (Join-Path $hostDst 'bin') | Out-Null
+    foreach ($f in @('FurphyHost.cs', 'build-host.ps1', 'adfilter-hosts.txt', 'selftest.html')) { $s = Join-Path $hostSrc $f; if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $hostDst $f) -Force } }
+    Get-ChildItem -LiteralPath (Join-Path $hostSrc 'lib') -File | Copy-Item -Destination (Join-Path $hostDst 'lib') -Force
+    Get-ChildItem -LiteralPath (Join-Path $hostSrc 'bin') -File -Include '*.exe', '*.dll', '*.ico' -Recurse -Depth 0 -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -eq (Join-Path $hostSrc 'bin') } | Copy-Item -Destination (Join-Path $hostDst 'bin') -Force
+    "copied host\ ($((Get-ChildItem -LiteralPath $hostDst -File -Recurse | Measure-Object).Count) files)"
+}
 # 4. Ensure settings.json exists (never overwrite an existing one).
 $settings = Join-Path $Dest 'settings.json'
 if (-not (Test-Path -LiteralPath $settings)) {
@@ -113,6 +123,11 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         $s = Join-Path $retail $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "launcher\$f") -Force }
     }
+    # host\ sources + SDK assemblies for the repo (bin is a build output, pkg is the ignored nupkg)
+    $rh = Join-Path $RepoPath 'host'
+    New-Item -ItemType Directory -Force -Path $rh, (Join-Path $rh 'lib') | Out-Null
+    foreach ($f in @('FurphyHost.cs', 'build-host.ps1', 'adfilter-hosts.txt', 'selftest.html')) { $s = Join-Path $Source "host\$f"; if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $rh $f) -Force } }
+    Get-ChildItem -LiteralPath (Join-Path $Source 'host\lib') -File -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $rh 'lib') -Force
     Push-Location $RepoPath
     # git writes progress to stderr; under $ErrorActionPreference = 'Stop' PowerShell 5.1 would turn
     # that into a terminating error, so relax it for this block and rely on exit codes instead.

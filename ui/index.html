@@ -219,6 +219,11 @@
             Search on CurseForge.com
           </button>
           <p class="muted-text cf-web-search-hint">Opens CurseForge in a side window; installs still happen here by Project ID for now.</p>
+          <!-- E19 (script/registration itself is E17's, unchanged): the
+               status pill from E17, now backed by the same
+               Components.ProtocolControl the Settings > Game row above
+               uses - a shared toggle, not two buttons. -->
+          <div id="browse-protocol-control" class="cf-web-search-protocol"></div>
         </div>
 
         <!-- E16: replaces the old fully-blocking key-required panel that
@@ -339,6 +344,14 @@
               <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
               <p class="muted-text">This is WoW&rsquo;s own setting, not a Furphy Addon Manager setting &mdash; it controls whether the character-select screen blocks addons the client thinks are out of date. &ldquo;0&rdquo; (disabled) lets them load anyway, which pairs well with this manager keeping them updated; &ldquo;1&rdquo; (enabled) is the game&rsquo;s default warning/block. Change it in-game via the AddOns list, not here.</p>
             </div>
+            <!-- E19 (script/registration itself is E17's, unchanged): the
+                 curseforge:// install-link handler toggle. Painted by
+                 Components.ProtocolControl.render() - the same component
+                 also renders into the Browse > CurseForge pane below. -->
+            <div class="settings-row settings-row-col">
+              <div class="settings-row-label">CurseForge install links (curseforge://)</div>
+              <div id="settings-protocol-control"></div>
+            </div>
           </section>
 
           <section class="settings-group" id="settings-updates">
@@ -383,6 +396,26 @@
             <p class="form-msg is-info" id="apikey-hint" hidden></p>
             <p class="apikey-status" id="apikey-status">No key configured</p>
             <p class="form-msg" id="apikey-test-result" hidden></p>
+          </section>
+
+          <!-- E19: OFF by default (Eric's explicit decision) - only
+               meaningful in the native FurphyHost.exe window (host\), which
+               has a real embedded CurseForge tab; the plain Edge app window
+               has no such tab to filter, so this shows a muted explainer
+               there instead of a toggle that would do nothing. -->
+          <section class="settings-group" id="settings-browsing">
+            <h3>Browsing</h3>
+            <div class="settings-row" id="browsing-adfilter-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
+                <p class="muted-text">Off by default. CurseForge is ad-funded and pays addon authors from that revenue; enabling this is your choice.</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-adfilter">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+            <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.</p>
           </section>
 
           <section class="settings-group" id="settings-appearance">
