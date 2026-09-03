@@ -174,6 +174,48 @@ const Mock = (function () {
     browsePool.push(fakeMod(90000 + i, "Sample Addon " + i, "A tidy little addon that does something useful for raiders and casuals alike."));
   }
 
+  // E16 (keyless CurseForge enrichment): a small offline-catalogue-shaped
+  // fixture pool, distinct from browsePool above (which represents the
+  // OFFICIAL /api/cf/search results a keyed session sees) - exercises
+  // /api/cf/browse and the "addon-radar"/"catalogue-only" drawer branches
+  // under ?mock=1 with no key configured. 1521253 deliberately matches
+  // BonusRollConfirm's real tracked projectId (see the addons fixture
+  // above) so opening ITS row with no key exercises the enrichment path
+  // for an already-tracked addon, not just a Browse card.
+  const cfCatalogueMock = [
+    { id: 1521253, name: "BonusRollConfirm", slug: "bonusrollconfirm", downloadCount: 12000, lastUpdated: new Date(Date.now() - 5 * 24 * 3600e3).toISOString(), logoUrl: "" },
+    { id: 25301, name: "Details! Damage Meter", slug: "details-damage-meter", downloadCount: 45000000, lastUpdated: new Date().toISOString(), logoUrl: "" }
+  ];
+  let cfCatalogueMockFetchedAt = new Date(Date.now() - 3 * 3600e3).toISOString();
+
+  // GET /api/cf/enrich/{id} fixture - id 654321 (matching Simple Damage
+  // Meter's own curseId in the addons fixture above, the same E12 cross-
+  // source pairing) demonstrates the "wago-match" branch; a
+  // cfCatalogueMock hit demonstrates "addon-radar"; anything else falls to
+  // "catalogue-only", mirroring the real server's own fallback order.
+  function mockCfEnrich(id) {
+    if (id === 654321) {
+      return {
+        source: "wago-match", name: "Simple Damage Meter", slug: "simple-damage-meter",
+        summary: "A lightweight combat meter, mirrored from its Wago Addons listing.",
+        descriptionMarkdown: "## Simple Damage Meter\nA **lightweight** combat meter.\n- Fast\n- Configurable\n- [Wago page](https://addons.wago.io/addons/simple-damage-meter)",
+        logoUrl: "", screenshots: [], downloadCount: 30000, lastUpdated: new Date().toISOString(), gameVersions: [],
+        wagoSlug: "simple-damage-meter"
+      };
+    }
+    const entry = cfCatalogueMock.find(function (e) { return e.id === id; });
+    if (entry) {
+      return {
+        source: "addon-radar", name: entry.name, slug: entry.slug,
+        summary: entry.name + " helps you do useful things in World of Warcraft.",
+        descriptionHtml: "<p>" + entry.name + " helps you do useful things in World of Warcraft.</p><ul><li>Reliable</li><li>Actively maintained</li></ul>",
+        logoUrl: entry.logoUrl, screenshots: [{ id: 1, title: "Screenshot", description: "", thumbnail: "", url: "" }],
+        downloadCount: entry.downloadCount, lastUpdated: entry.lastUpdated, gameVersions: ["12.1.0"]
+      };
+    }
+    return { source: "catalogue-only", name: "Project " + id, slug: null, summary: null, downloadCount: null, lastUpdated: null, gameVersions: [] };
+  }
+
   function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
 
   function jobLines(kind) {
@@ -464,7 +506,10 @@ const Mock = (function () {
             { name: "Server uptime", ok: true, detail: "12m" },
             { name: "Last sync", ok: true, detail: lastRun ? lastRun.timestamp : "never" },
             // E13: mirrors the real server's Test-DiagClientBuild row.
-            { name: "WoW client build", ok: true, detail: "12.1.0.69587" }
+            { name: "WoW client build", ok: true, detail: "12.1.0.69587" },
+            // E16: mirrors the real server's Test-DiagCfCatalogue/Test-DiagAddonRadar rows.
+            { name: "CurseForge catalogue cache", ok: true, detail: cfCatalogueMock.length + " entries, 0.1h old (instawow-data+strongbox)" },
+            { name: "addon-radar reachability", ok: true, detail: "Reachable" }
           ]
         };
       }
@@ -481,7 +526,13 @@ const Mock = (function () {
         if (key && key.length >= 8) return { ok: true, message: "Key is valid." };
         return { ok: false, message: "Key rejected by CurseForge." };
       }
-      if (p.indexOf("/api/cf/") === 0) {
+      // E16: /api/cf/enrich/*, /api/cf/browse and /api/cf/catalogue/refresh
+      // are always keyless-capable (no 409 no-key gate) - exempted from the
+      // blanket no-key 409 below, matching the real server (Handle-CfEnrich/
+      // Handle-CfBrowse/Handle-CfCatalogueRefresh never check for a key at
+      // all) and the client's own isKeylessCfPath exemption.
+      const isKeylessCfMockPath = p.indexOf("/api/cf/enrich/") === 0 || p === "/api/cf/browse" || p === "/api/cf/catalogue/refresh";
+      if (p.indexOf("/api/cf/") === 0 && !isKeylessCfMockPath) {
         if (!hasKey) return { __status: 409, error: "no-key" };
         // Round 6 fix: dev-only way to exercise a configured-but-rejected key
         // (real CurseForge 401/403) under ?mock=1 - same length-8 threshold
@@ -489,6 +540,25 @@ const Mock = (function () {
         // in Settings and then visiting Browse reproduces the reported bug
         // (repeated /api/cf/* 403s) without any real network access.
         if (mockSettings.cfApiKey.length < 8) return { __status: 401, error: "unauthorized" };
+      }
+      // E16: keyless CurseForge enrichment - mirrors the real server's
+      // /api/cf/enrich, /api/cf/browse and /api/cf/catalogue/refresh shapes
+      // closely enough to exercise Browse's keyless-mode UI and the
+      // drawer's cf-keyless branches (incl. a wago-match demo, id 654321)
+      // without a real server. Reachable in mock mode regardless of
+      // mockSettings.cfApiKey - see isKeylessCfMockPath above.
+      const enrichMatch = p.match(/^\/api\/cf\/enrich\/(\d+)$/);
+      if (enrichMatch) return mockCfEnrich(Number(enrichMatch[1]));
+      if (p === "/api/cf/browse") {
+        const bq = (q.get("q") || "").toLowerCase();
+        const items = cfCatalogueMock.filter(function (e) { return !bq || e.name.toLowerCase().indexOf(bq) !== -1; }).map(function (e) {
+          return { id: e.id, name: e.name, slug: e.slug, downloadCount: e.downloadCount, lastUpdated: e.lastUpdated, source: "catalogue", logoUrl: e.logoUrl };
+        });
+        return { items: items, catalogueAge: cfCatalogueMockFetchedAt, total: items.length };
+      }
+      if (p === "/api/cf/catalogue/refresh" && method === "POST") {
+        cfCatalogueMockFetchedAt = new Date().toISOString();
+        return { ok: true, fetchedAt: cfCatalogueMockFetchedAt, count: cfCatalogueMock.length, source: "instawow-data+strongbox" };
       }
       if (p === "/api/cf/categories") return { data: categories };
       if (p === "/api/cf/search") {
@@ -896,8 +966,16 @@ const Markdown = (function () {
         out.push("<li>" + inline(item[1]) + "</li>");
       } else if (line.length === 0) {
         flushPara(); closeList();
+      } else if (listOpen) {
+        // Round 8 fix: a bullet item's text that wraps onto an indented
+        // continuation line (no marker of its own - standard CommonMark
+        // "lazy continuation") used to unconditionally close the list here
+        // and start a new paragraph, shredding a normal multi-line bullet
+        // into a run of disconnected, bullet-less fragments. Append the
+        // continuation text onto the still-open last <li> instead.
+        const last = out.length - 1;
+        out[last] = out[last].replace(/<\/li>$/, " " + inline(line) + "</li>");
       } else {
-        closeList();
         para.push(inline(line));
       }
     });
@@ -932,8 +1010,17 @@ const Api = (function () {
   // roughly once a second, forever.
   function isCfPath(path) { return path.indexOf("/api/cf/") === 0; }
 
+  // E16: these three /api/cf/* routes are always keyless-capable - no 409
+  // no-key gate, unlike every other /api/cf/* call above them - so a
+  // rejected key must never short-circuit or flag them the way it does the
+  // key-gated ones (isCfPath alone can't tell the two apart, since they
+  // share the same URL prefix).
+  function isKeylessCfPath(path) {
+    return path.indexOf("/api/cf/enrich/") === 0 || path.indexOf("/api/cf/browse") === 0 || path.indexOf("/api/cf/catalogue/") === 0;
+  }
+
   function noteCfResult(path, status) {
-    if (!isCfPath(path)) return;
+    if (!isCfPath(path) || isKeylessCfPath(path)) return;
     if (status === 401 || status === 403) {
       if (Store.state.cfKeyRejected) return; // already known - never a second banner/toast for the same rejection
       Store.state.cfKeyRejected = true;
@@ -947,7 +1034,7 @@ const Api = (function () {
   }
 
   async function request(method, path, body) {
-    if (isCfPath(path) && Store.state.cfKeyRejected) {
+    if (isCfPath(path) && !isKeylessCfPath(path) && Store.state.cfKeyRejected) {
       // A rejected key fails every /api/cf/* call the exact same way - stop
       // making the call at all (no fetch, no Mock round-trip) rather than
       // rediscovering the same 401/403 over and over.
@@ -1031,6 +1118,13 @@ const Api = (function () {
     cfFiles: function (id, params) { return request("GET", "/api/cf/mods/" + id + "/files" + qs(params)); },
     cfChangelog: function (id, fileId) { return request("GET", "/api/cf/mods/" + id + "/files/" + fileId + "/changelog"); },
     cfResolve: function (url) { return request("GET", "/api/cf/resolve" + qs({ url: url })); },
+
+    // E16: always keyless-capable (no 409 no-key gate) - the drawer/Browse
+    // call these directly instead of the key-gated cfMod/cfSearch calls
+    // above when no key is configured; see isKeylessCfPath just above.
+    cfEnrich: function (id) { return request("GET", "/api/cf/enrich/" + id); },
+    cfBrowse: function (params) { return request("GET", "/api/cf/browse" + qs(params)); },
+    cfCatalogueRefresh: function () { return request("POST", "/api/cf/catalogue/refresh", {}); },
 
     // E12 (Wago second source): keyless, no NoKey/409 handling needed -
     // Wago never requires an API key.
@@ -1625,9 +1719,15 @@ Components.Drawer = (function () {
     const isWago = opts.source === "wago" || (typeof key === "string" && key.toLowerCase().indexOf("wago:") === 0);
     const addon = Store.addonByProjectId(key);
     const slug = opts.slug || (addon ? addon.slug : null) || (isWago && typeof key === "string" ? key.slice(5) : null);
+    // E16: a CurseForge-sourced drawer opened with no API key configured
+    // gets its own 'cf-keyless' source, distinct from the keyed
+    // 'curseforge' one - every render function below reads Store.state.drawer.enrich
+    // instead of .mod for that state, via /api/cf/enrich (see loadEnrich).
+    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
+    const source = isWago ? "wago" : (hasKey ? "curseforge" : "cf-keyless");
     Store.set({
       drawer: {
-        open: true, projectId: key, source: isWago ? "wago" : "curseforge", slug: slug, tracked: !!addon,
+        open: true, projectId: key, source: source, slug: slug, tracked: !!addon,
         tab: opts.tab || "overview",
         lastKnownFileId: addon ? addon.fileId : null,
         mod: isWago ? null : Store.getCachedMod(key), modLoading: false, modError: null,
@@ -1639,7 +1739,10 @@ Components.Drawer = (function () {
         screenshotsLoaded: false,
         wagoAddon: null, wagoAddonLoading: false, wagoAddonError: null,
         wagoReleases: null, wagoReleasesLoading: false, wagoReleasesError: null,
-        wagoGallery: null, wagoGalleryLoading: false
+        wagoGallery: null, wagoGalleryLoading: false,
+        // E16: keyless CurseForge enrichment (source:'cf-keyless' only -
+        // null/unused for 'curseforge'/'wago').
+        enrich: null, enrichLoading: false, enrichError: null
       }
     });
     Utils.qs("#drawer-backdrop").hidden = false;
@@ -1652,7 +1755,8 @@ Components.Drawer = (function () {
     renderHeader();
     selectTab(Store.state.drawer.tab);
     if (isWago) { loadWagoAddon(); }
-    else if (Store.state.settings && Store.state.settings.hasApiKey && !Store.state.drawer.mod) { loadMod(); }
+    else if (source === "cf-keyless") { loadEnrich(); }
+    else if (hasKey && !Store.state.drawer.mod) { loadMod(); }
   }
 
   function close() {
@@ -1776,16 +1880,113 @@ Components.Drawer = (function () {
     }
   }
 
+  // E16: fetches /api/cf/enrich/{id} for a 'cf-keyless' drawer (a
+  // CurseForge-sourced addon opened with no API key configured) - the
+  // keyless fallback counterpart to loadMod above. The response's `source`
+  // field ("wago-match"/"addon-radar"/"catalogue-only") drives which
+  // Overview/Changelog/Screenshots branch renders; see renderKeylessOverview
+  // etc. below.
+  async function loadEnrich() {
+    const d = Store.state.drawer;
+    const pid = projectId();
+    d.enrichLoading = true;
+    d.enrichError = null;
+    try {
+      const res = await Api.cfEnrich(pid);
+      if (projectId() !== pid) return;
+      d.enrich = res;
+      if (!d.slug && res.slug) d.slug = res.slug; // cosmetic: a better "Open on CurseForge" link once resolved
+      renderHeader();
+      if (d.tab === "overview") renderOverview();
+      if (d.tab === "changelog") renderChangelog();
+      if (d.tab === "screenshots") renderScreenshots();
+    } catch (err) {
+      if (projectId() === pid) { d.enrichError = err; renderHeader(); if (d.tab === "overview") renderOverview(); }
+    } finally {
+      if (projectId() === pid) d.enrichLoading = false;
+    }
+  }
+
+  // E16: the three functions below fetch a "wago-match" enrichment's data
+  // straight into d.wagoAddon/d.wagoReleases/d.wagoGallery - the SAME
+  // fields loadWagoAddon/loadWagoReleases/renderWagoScreenshots's own loader
+  // already populate - keyed by d.enrich.wagoSlug rather than d.slug (which
+  // stays the addon's own CurseForge identity in cf-keyless mode). Once
+  // populated, renderWagoOverview/renderWagoChangelog/renderWagoScreenshots
+  // (E12, unmodified) render them directly - none of those three read
+  // d.slug themselves, only their OWN loaders do, and those loaders are
+  // skipped here since the target field is already set (or already loading).
+  async function loadCfKeylessWagoAddon() {
+    const d = Store.state.drawer;
+    const wagoSlug = d.enrich && d.enrich.wagoSlug;
+    if (!wagoSlug || d.wagoAddon || d.wagoAddonLoading) return;
+    d.wagoAddonLoading = true;
+    d.wagoAddonError = null;
+    try {
+      const res = await Api.wagoAddon(wagoSlug);
+      if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
+      d.wagoAddon = res;
+      renderHeader();
+      if (d.tab === "overview") renderOverview();
+    } catch (err) {
+      if (Store.state.drawer.enrich && Store.state.drawer.enrich.wagoSlug === wagoSlug) { d.wagoAddonError = err; renderHeader(); if (d.tab === "overview") renderOverview(); }
+    } finally {
+      if (Store.state.drawer.enrich && Store.state.drawer.enrich.wagoSlug === wagoSlug) d.wagoAddonLoading = false;
+    }
+  }
+
+  function loadCfKeylessWagoReleases() {
+    const d = Store.state.drawer;
+    const wagoSlug = d.enrich && d.enrich.wagoSlug;
+    if (!wagoSlug || d.wagoReleases || d.wagoReleasesLoading) return;
+    d.wagoReleasesLoading = true;
+    Api.wagoReleases(wagoSlug, { page: 1 }).then(function (res) {
+      if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
+      const paginator = res.data || {};
+      d.wagoReleases = paginator.data || [];
+      d.wagoReleasesLoading = false;
+      if (d.tab === "versions") renderVersions();
+      if (d.tab === "changelog") renderChangelog();
+    }).catch(function (err) {
+      if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
+      d.wagoReleasesError = err; d.wagoReleasesLoading = false;
+      if (d.tab === "changelog") renderChangelog();
+    });
+  }
+
+  function loadCfKeylessWagoGallery() {
+    const d = Store.state.drawer;
+    const wagoSlug = d.enrich && d.enrich.wagoSlug;
+    if (!wagoSlug || d.wagoGallery || d.wagoGalleryLoading) return;
+    d.wagoGalleryLoading = true;
+    Api.wagoGallery(wagoSlug).then(function (res) {
+      if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
+      d.wagoGallery = res.gallery || res;
+      d.wagoGalleryLoading = false;
+      if (d.tab === "screenshots") renderScreenshots();
+    }).catch(function () {
+      if (!Store.state.drawer.enrich || Store.state.drawer.enrich.wagoSlug !== wagoSlug) return;
+      d.wagoGallery = {};
+      d.wagoGalleryLoading = false;
+      if (d.tab === "screenshots") renderScreenshots();
+    });
+  }
+
   function renderHeader() {
     const d = Store.state.drawer;
     if (d.source === "wago") { renderWagoHeader(); return; }
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
     const mod = d.mod;
-    const name = mod ? mod.name : (addon ? addon.name : ("Project " + d.projectId));
+    // E16: 'cf-keyless' has no mod (never fetched without a key) - falls
+    // back to the /api/cf/enrich response's own name/logo/downloads/date
+    // instead. Never set for a keyed 'curseforge' drawer (d.enrich stays
+    // null there), so this changes nothing about the pre-E16 keyed path.
+    const enrich = d.enrich;
+    const name = mod ? mod.name : ((enrich && enrich.name) ? enrich.name : (addon ? addon.name : ("Project " + d.projectId)));
     // Round 4 fix: list every author CurseForge returns ("by A, B"), not just
     // the first - mod.authors is commonly more than one name.
     const author = (mod && mod.authors && mod.authors.length ? mod.authors.map(function (a) { return a.name; }).join(", ") : null) || (addon ? addon.author : null);
-    const logoUrl = mod && mod.logo ? (mod.logo.thumbnailUrl || mod.logo.url) : null;
+    const logoUrl = mod && mod.logo ? (mod.logo.thumbnailUrl || mod.logo.url) : (enrich ? enrich.logoUrl : null);
 
     const children = [
       Utils.el("div", { class: "drawer-header-top" }, [
@@ -1811,6 +2012,20 @@ Components.Drawer = (function () {
       if (mod.categories && mod.categories.length) {
         children.push(Utils.el("div", { class: "drawer-cats" }, mod.categories.map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.name]); })));
       }
+    } else if (enrich) {
+      const meta = [];
+      if (enrich.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(enrich.downloadCount) + " downloads"]));
+      if (enrich.lastUpdated) meta.push(Utils.el("span", { title: Utils.fullDate(enrich.lastUpdated) }, ["updated " + Utils.relativeTime(enrich.lastUpdated)]));
+      if (meta.length) children.push(Utils.el("div", { class: "drawer-meta" }, meta));
+      // E16: a small provenance pill so it's always visually clear whether
+      // this is CurseForge's own data (official-api - no pill needed) or a
+      // third party's best-effort mirror.
+      const pillText = enrich.source === "addon-radar" ? "via addon-radar" : (enrich.source === "wago-match" ? "via Wago Addons" : (enrich.source === "catalogue-only" ? "via catalogue" : null));
+      if (pillText) children.push(Utils.el("span", { class: "source-pill" }, [pillText]));
+    } else if (d.enrichLoading) {
+      children.push(Utils.el("div", { class: "muted-text" }, ["Loading…"]));
+    } else if (d.enrichError) {
+      children.push(Utils.el("div", { class: "muted-text" }, ["Couldn't load addon details (" + describeError(d.enrichError) + ")."]));
     }
 
     const links = [];
@@ -1931,6 +2146,7 @@ Components.Drawer = (function () {
   async function renderOverview() {
     const panel = Utils.qs("#drawer-panel-overview");
     if (Store.state.drawer.source === "wago") { renderWagoOverview(); return; }
+    if (Store.state.drawer.source === "cf-keyless") { renderKeylessOverview(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
@@ -1959,6 +2175,63 @@ Components.Drawer = (function () {
       renderCompat(panel);
       renderDependencies(panel);
     }
+  }
+
+  // E16: Overview for a 'cf-keyless' drawer (a CurseForge-sourced addon,
+  // opened with no API key configured) - renders per d.enrich.source.
+  // wago-match reuses E12's Wago overview render VERBATIM (it reads only
+  // d.wagoAddon/d.wagoAddonLoading/d.wagoAddonError, never d.slug) plus a
+  // small attribution note; addon-radar renders its own HTML description
+  // (through the same Sanitize.render pipeline the official CurseForge
+  // description already uses - description_html is real HTML, not
+  // markdown, so it does NOT go through the Markdown module); catalogue-only
+  // (or no match at all) shows the existing no-key placeholder plus a
+  // "View on CurseForge.com" link, since that page is not itself
+  // Cloudflare-blocked the way this app's own scripted requests are.
+  function renderKeylessOverview() {
+    const panel = Utils.qs("#drawer-panel-overview");
+    const d = Store.state.drawer;
+
+    if (d.enrichLoading && !d.enrich) {
+      panel.textContent = "";
+      panel.appendChild(Utils.el("div", { class: "rich-content" }, ["Loading description…"]));
+      return;
+    }
+    if (!d.enrich) {
+      panel.textContent = "";
+      panel.appendChild(Utils.el("p", { class: "rich-content" }, [d.enrichError ? ("Couldn't load addon details (" + describeError(d.enrichError) + ").") : "Loading description…"]));
+      renderCompat(panel);
+      renderDependencies(panel);
+      return;
+    }
+
+    if (d.enrich.source === "wago-match") {
+      if (!d.wagoAddon && !d.wagoAddonLoading) loadCfKeylessWagoAddon();
+      renderWagoOverview();
+      const panel2 = Utils.qs("#drawer-panel-overview");
+      panel2.appendChild(Utils.el("p", { class: "muted-text source-note" }, ["(metadata from Wago Addons — this addon is also listed there)"]));
+      return;
+    }
+
+    panel.textContent = "";
+    if (d.enrich.source === "addon-radar") {
+      const holder = Utils.el("div", { class: "rich-content" });
+      panel.appendChild(holder);
+      if (d.enrich.descriptionHtml) {
+        Sanitize.render(holder, d.enrich.descriptionHtml);
+      } else if (d.enrich.summary) {
+        holder.appendChild(Utils.el("p", {}, [d.enrich.summary]));
+      } else {
+        holder.appendChild(Utils.el("p", { class: "muted-text" }, ["No description provided."]));
+      }
+      panel.appendChild(Utils.el("p", { class: "muted-text source-note" }, ["(via addon-radar.com, an independent WoW addon index)"]));
+    } else {
+      if (d.enrich.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [d.enrich.summary]));
+      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see descriptions, changelogs and screenshots."])]));
+      panel.appendChild(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, d.enrich.slug || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"]));
+    }
+    renderCompat(panel);
+    renderDependencies(panel);
   }
 
   // E3: Required/Optional dependency lists, sourced entirely from the local
@@ -2222,6 +2495,7 @@ Components.Drawer = (function () {
   function renderChangelog() {
     const panel = Utils.qs("#drawer-panel-changelog");
     if (Store.state.drawer.source === "wago") { renderWagoChangelog(); return; }
+    if (Store.state.drawer.source === "cf-keyless") { renderKeylessChangelog(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
@@ -2264,6 +2538,36 @@ Components.Drawer = (function () {
       const target = Utils.qs("#changelog-body");
       if (target) target.textContent = "Couldn't load the changelog (" + describeError(err) + ").";
     }
+  }
+
+  // E16: Changelog for a 'cf-keyless' drawer. wago-match reuses E12's
+  // existing Wago changelog tab exactly (per-release markdown changelog) -
+  // renderWagoChangelog only reads d.wagoReleases/d.changelogFileId, never
+  // d.slug, so pre-populating d.wagoReleases via loadCfKeylessWagoReleases
+  // (keyed by d.enrich.wagoSlug) and then calling it directly is enough.
+  // Every other case (addon-radar, catalogue-only, no match at all) shows a
+  // dedicated empty state - SPEC's own investigation found no keyless
+  // source anywhere that exposes CurseForge changelog text, so this is a
+  // permanent gap, never a blank tab or a stuck spinner.
+  function renderKeylessChangelog() {
+    const panel = Utils.qs("#drawer-panel-changelog");
+    const d = Store.state.drawer;
+
+    if (d.enrich && d.enrich.source === "wago-match") {
+      if (!d.wagoReleases && !d.wagoReleasesLoading) loadCfKeylessWagoReleases();
+      renderWagoChangelog();
+      return;
+    }
+
+    panel.textContent = "";
+    panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [
+      Utils.icon("warning"),
+      Utils.el("span", {}, ["Changelogs for CurseForge addons need a free API key (or a matching Wago Addons listing, which this one doesn't have)."])
+    ]));
+    panel.appendChild(Utils.el("div", { class: "btn-row" }, [
+      Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { App.switchView("settings"); } }, ["Go to Settings"]),
+      Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, (d.enrich && d.enrich.slug) || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"])
+    ]));
   }
 
   // E12: Wago's gallery shape is documented in SPEC as "inspect and
@@ -2310,9 +2614,38 @@ Components.Drawer = (function () {
     })));
   }
 
+  // E16: Screenshots for a 'cf-keyless' drawer. wago-match reuses E12's
+  // existing Wago gallery renderer exactly (same reasoning as
+  // renderKeylessChangelog above - renderWagoScreenshots only reads
+  // d.wagoGallery, never d.slug, once pre-populated by
+  // loadCfKeylessWagoGallery). addon-radar feeds its own screenshots[]
+  // into the SAME lightbox grid component E12 built for Wago's gallery,
+  // just a different data source; every other case shows the existing
+  // empty state.
+  function renderKeylessScreenshots() {
+    const panel = Utils.qs("#drawer-panel-screenshots");
+    const d = Store.state.drawer;
+
+    if (d.enrich && d.enrich.source === "wago-match") {
+      if (!d.wagoGallery && !d.wagoGalleryLoading) loadCfKeylessWagoGallery();
+      renderWagoScreenshots();
+      return;
+    }
+
+    panel.textContent = "";
+    const shots = (d.enrich && d.enrich.source === "addon-radar") ? (d.enrich.screenshots || []) : [];
+    if (!shots.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No screenshots provided."])); return; }
+    panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, shots.map(function (s) {
+      const full = s.url || s.thumbnail;
+      const thumb = s.thumbnail || s.url;
+      return Utils.el("img", { class: "screenshot-thumb", src: thumb, alt: s.title || "", loading: "lazy", onclick: function () { Components.Lightbox.open(full); } });
+    })));
+  }
+
   function renderScreenshots() {
     const panel = Utils.qs("#drawer-panel-screenshots");
     if (Store.state.drawer.source === "wago") { renderWagoScreenshots(); return; }
+    if (Store.state.drawer.source === "cf-keyless") { renderKeylessScreenshots(); return; }
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
@@ -3377,13 +3710,24 @@ Views.browse = (function () {
     });
   }
 
+  // E16: whether Browse's CurseForge side is in keyless partial-search mode
+  // right now - true only for the source:"curseforge" panel with no API
+  // key configured (a rejected key is its own separate blocking state,
+  // unaffected by this expansion; Wago never reaches this function at all).
+  function isKeylessCf() {
+    return Store.state.browse.source !== "wago" && !(Store.state.settings && Store.state.settings.hasApiKey);
+  }
+
   function render() {
     renderSourceSwitch();
     const b = Store.state.browse;
     Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
     if (b.source === "wago") {
-      Utils.qs("#browse-nokey").hidden = true;
+      Utils.qs("#browse-keyless-banner").hidden = true;
       Utils.qs("#browse-keyrejected").hidden = true;
+      Utils.qs("#browse-installbyid").hidden = true;
+      Utils.qs("#browse-category").hidden = false;
+      Utils.qs("#browse-sort").hidden = false;
       Utils.qs("#browse-content").hidden = false;
       if (!b.categories.length && !b.categoriesLoading) loadWagoCategories();
       if (!b.loaded && !b.loading) searchWago(true);
@@ -3394,15 +3738,28 @@ Views.browse = (function () {
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     // Round 6 fix: a configured-but-rejected key is a third state, distinct
     // from "no key at all" - shows its own panel (with its own fix-it copy)
-    // instead of either the no-key panel or a search UI that would just keep
-    // failing every request.
+    // instead of either the no-key/keyless copy or a search UI that would
+    // just keep failing every request.
     const rejected = hasKey && Store.state.cfKeyRejected;
-    Utils.qs("#browse-nokey").hidden = hasKey;
     Utils.qs("#browse-keyrejected").hidden = !rejected;
-    Utils.qs("#browse-content").hidden = !hasKey || rejected;
-    if (!hasKey || rejected) return;
+    Utils.qs("#browse-content").hidden = rejected;
+    if (rejected) {
+      Utils.qs("#browse-keyless-banner").hidden = true;
+      Utils.qs("#browse-installbyid").hidden = true;
+      return;
+    }
 
-    if (!Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCfCategories();
+    // E16: no key -> a keyless partial search takes over #browse-content
+    // instead of the old fully-blocking panel - the banner/Install-by-ID
+    // card show, category/CurseForge-specific sort stay hidden (neither
+    // keyless source carries CurseForge's category taxonomy).
+    const keyless = !hasKey;
+    Utils.qs("#browse-keyless-banner").hidden = !keyless;
+    Utils.qs("#browse-installbyid").hidden = !keyless;
+    Utils.qs("#browse-category").hidden = keyless;
+    Utils.qs("#browse-sort").hidden = keyless;
+
+    if (!keyless && !Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCfCategories();
     if (!Store.state.browse.loaded && !Store.state.browse.loading) searchCf(true);
 
     renderResults();
@@ -3441,6 +3798,7 @@ Views.browse = (function () {
   }
 
   async function searchCf(reset) {
+    if (isKeylessCf()) { return searchCfKeyless(reset); }
     const b = Store.state.browse;
     if (reset) { b.index = 0; b.results = []; }
     b.loading = true;
@@ -3454,6 +3812,31 @@ Views.browse = (function () {
       b.loaded = true;
       b.loading = false;
       LogoCache.ensure((res.data || []).map(function (m) { return m.id; }), renderResults);
+    } catch (err) {
+      b.loading = false;
+      b.error = err;
+    }
+    renderResults();
+  }
+
+  // E16: the no-key CurseForge search - GET /api/cf/browse, always keyless-
+  // capable. No index/pageSize pagination on this endpoint (unlike the
+  // official search above), so there is no "Load more" here - see
+  // renderResults' loadMoreWrap.hidden logic.
+  async function searchCfKeyless(reset) {
+    const b = Store.state.browse;
+    if (reset) { b.results = []; }
+    b.loading = true;
+    b.error = null;
+    renderResults();
+    try {
+      const res = await Api.cfBrowse({ q: b.query, limit: 30 });
+      const items = res.items || [];
+      b.results = reset ? items : b.results.concat(items);
+      b.totalCount = res.total != null ? res.total : b.results.length;
+      b.catalogueAge = res.catalogueAge || null;
+      b.loaded = true;
+      b.loading = false;
     } catch (err) {
       b.loading = false;
       b.error = err;
@@ -3492,6 +3875,7 @@ Views.browse = (function () {
   function renderResults() {
     const b = Store.state.browse;
     const isWago = b.source === "wago";
+    const keylessCf = !isWago && isKeylessCf();
     const grid = Utils.qs("#browse-grid");
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
@@ -3524,10 +3908,44 @@ Views.browse = (function () {
 
     grid.hidden = false;
     grid.textContent = "";
-    b.results.forEach(function (m) { grid.appendChild(isWago ? wagoCard(m) : card(m)); });
+    b.results.forEach(function (m) { grid.appendChild(isWago ? wagoCard(m) : (keylessCf ? catalogueCard(m) : card(m))); });
 
     summary.textContent = b.results.length + " of " + Utils.formatNumber(b.totalCount) + " results";
-    loadMoreWrap.hidden = b.loading || (isWago ? b.page >= b.lastPage : b.results.length >= b.totalCount);
+    // E16: /api/cf/browse has no index/pageSize pagination of its own (it
+    // returns up to `limit` items in one shot) - "Load more" never applies
+    // in keyless CurseForge mode.
+    loadMoreWrap.hidden = b.loading || keylessCf || (isWago ? b.page >= b.lastPage : b.results.length >= b.totalCount);
+  }
+
+  // E16: a keyless-CurseForge-browse card - sparser than the official
+  // card() below (only id/name/slug/downloadCount/lastUpdated/logoUrl/source
+  // are ever known - see /api/cf/browse's documented item shape), with a
+  // small "Indexed"/"Live match" provenance pill instead of category chips
+  // (neither keyless source carries CurseForge's category taxonomy).
+  function catalogueCard(item) {
+    const tracked = !!Store.addonByProjectId(item.id);
+    const busy = Store.jobActingOn(item.id);
+    const btn = tracked
+      ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
+      : Utils.el("button", { type: "button", class: "btn btn-accent", disabled: busy, onclick: function (ev) { ev.stopPropagation(); Actions.installLatest(item.id, item.name); } }, [busy ? "Installing…" : "Install"]);
+
+    const meta = [];
+    if (item.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(item.downloadCount) + " downloads"]));
+    if (item.lastUpdated) meta.push(Utils.el("span", { title: Utils.fullDate(item.lastUpdated) }, ["updated " + Utils.relativeTime(item.lastUpdated)]));
+
+    const node = Utils.el("div", { class: "browse-card" }, [
+      Utils.el("div", { class: "browse-card-top" }, [
+        Components.Logo.build({ projectId: item.id, name: item.name, thumbnailUrl: item.logoUrl }, 44),
+        Utils.el("div", {}, [
+          Utils.el("div", { class: "browse-card-title" }, [item.name || ("Project " + item.id)]),
+          Utils.el("span", { class: "source-pill" }, [item.source === "addon-radar" ? "Live match" : "Indexed"])
+        ])
+      ]),
+      meta.length ? Utils.el("div", { class: "browse-card-meta" }, meta) : null,
+      Utils.el("div", { class: "browse-card-footer" }, [btn])
+    ]);
+    node.addEventListener("click", function () { Components.Drawer.open(item.id, { tab: "overview", slug: item.slug }); });
+    return node;
   }
 
   function card(m) {
@@ -3615,7 +4033,7 @@ Views.browse = (function () {
       if (b.source === "wago") b.page += 1; else b.index += b.pageSize;
       search(false);
     });
-    Utils.qs("#btn-nokey-settings").addEventListener("click", function () { App.switchView("settings"); });
+    Utils.qs("#btn-keyless-settings").addEventListener("click", function () { App.switchView("settings"); });
     // Round 6 fix: the key-rejected panel's own "Go to Settings" button.
     Utils.qs("#btn-keyrejected-settings").addEventListener("click", function () { App.switchView("settings"); });
 
@@ -4050,6 +4468,28 @@ Views.settings = (function () {
     Utils.qs("#btn-open-serverlog").addEventListener("click", function () { Actions.openWhat("log"); });
     Utils.qs("#btn-open-backups").addEventListener("click", function () { Actions.openWhat("backups"); });
 
+    // E16: forces a fresh fetch+merge of the offline CurseForge catalogue
+    // index (Search-CfCatalogue/Get-CfCatalogueEntry's backing store) -
+    // a plain fetch, not a job (mirrors Diagnostics' own "Run" button,
+    // which is likewise never busy-gated - see the comment on Diagnostics'
+    // Run binding above).
+    Utils.qs("#btn-refresh-cf-catalogue").addEventListener("click", async function () {
+      const btn = Utils.qs("#btn-refresh-cf-catalogue");
+      const status = Utils.qs("#cf-catalogue-status");
+      btn.disabled = true;
+      status.textContent = "Refreshing…";
+      try {
+        const res = await Api.cfCatalogueRefresh();
+        status.textContent = res.count + " addon(s) indexed, just now (" + res.source + ").";
+        Components.Toast.show("CurseForge catalogue refreshed (" + res.count + " addons).", "success");
+      } catch (err) {
+        status.textContent = "Refresh failed: " + describeError(err);
+        Components.Toast.show("Couldn't refresh the CurseForge catalogue: " + describeError(err), "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     // E4: Export downloads a Blob built from the parsed /api/export response
     // (rather than a plain `<a href="/api/export" download>`) so it works
     // identically under ?mock=1, where there's no real URL to link to at
@@ -4408,10 +4848,13 @@ const App = (function () {
   // (its search box is hidden behind the no-key panel).
   function focusCurrentSearch() {
     if (Store.state.view === "myaddons") { Utils.qs("#myaddons-search").focus(); return; }
-    // E12: Wago's search box is always usable (no key needed), regardless of
-    // whether a CurseForge key is configured - only gate on the key when
-    // Browse is actually showing the CurseForge source.
-    const canFocusBrowseSearch = Store.state.browse.source === "wago" || !!(Store.state.settings && Store.state.settings.hasApiKey);
+    // E12: Wago's search box is always usable (no key needed). E16: so is
+    // CurseForge's now, keyed or not (a keyless session searches the
+    // offline catalogue/addon-radar instead of the official API) - the
+    // only state that still blocks it is a REJECTED key, which replaces
+    // #browse-content (and its search box) with a dedicated blocking panel.
+    const rejected = !!(Store.state.settings && Store.state.settings.hasApiKey) && Store.state.cfKeyRejected;
+    const canFocusBrowseSearch = Store.state.browse.source === "wago" || !rejected;
     if (Store.state.view === "browse" && canFocusBrowseSearch) { Utils.qs("#browse-search").focus(); }
   }
 

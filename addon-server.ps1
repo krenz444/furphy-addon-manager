@@ -2606,6 +2606,851 @@ function Handle-WagoResolve {
 }
 
 # =====================================================================
+# Keyless CurseForge enrichment (E16) - three new, independently-verified,
+# purely additive metadata sources for a CurseForge-sourced record when no
+# API key is configured: an offline catalogue index (instawow-data, with
+# strongbox-catalogue as coverage insurance), a live addon-radar.com mirror
+# (paced/cached like the CurseForge-website and Wago proxies above), and
+# E12's own Wago Addons integration (a toc-derived cross-id first, then a
+# conservative name+author auto-match). None of this can install anything -
+# read-only enrichment only, consulted ONLY when no key is configured; the
+# key-gated /api/cf/* proxy above is completely untouched, including its
+# 409 {error:"no-key"} contract. Verified facts live in SPEC.md's "Keyless
+# enrichment sources" section.
+# =====================================================================
+
+function Load-CfCatalogueIndexFromDisk {
+    <# Loads ROOT\cache\cf-catalogue.json into $Script:CfCatalogueIndex/$Script:CfCatalogueById/$Script:CfCatalogueFetchedAt/$Script:CfCatalogueSource. Returns $true on success, $false if the file is missing/empty/corrupt (never throws). #>
+    if (-not (Test-Path -LiteralPath $Script:CfCatalogueCachePath)) { return $false }
+    try {
+        $raw = Get-Content -LiteralPath $Script:CfCatalogueCachePath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $false }
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $entries = New-Object 'System.Collections.Generic.List[object]'
+        $byId = @{}
+        foreach ($e in @($obj.entries)) {
+            $id = [string]$e.id
+            if (-not $id) { continue }
+            $entries.Add($e)
+            $byId[$id] = $e
+        }
+        $Script:CfCatalogueIndex = $entries.ToArray()
+        $Script:CfCatalogueById = $byId
+        $Script:CfCatalogueFetchedAt = [string]$obj.fetchedAt
+        $Script:CfCatalogueSource = [string]$obj.source
+        return $true
+    } catch {
+        Write-ServerLog "Failed to read cf-catalogue.json cache, ignoring: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Save-CfCatalogueIndex {
+    <#
+      Forces a fresh fetch+merge+write of the CurseForge catalogue index:
+      instawow-data's base-catalogue-v8.compact.json (100% coverage, the
+      primary source - filtered to source:"curse" entries), then - paced
+      >=1s after it, per SPEC's verified facts - strongbox-catalogue's
+      curseforge-catalogue.json (54% coverage, frozen since 2022-01-22,
+      consulted only as insurance for an id instawow-data might miss;
+      instawow-data wins on any id collision). Updates the in-memory index
+      and writes ROOT\cache\cf-catalogue.json (temp file + Move-Item,
+      matching Save-CheckState's atomic-write pattern). Returns
+      @{ ok; fetchedAt; count; source; error }. A strongbox failure is not
+      fatal (instawow-data alone already has near-total coverage); an
+      instawow-data failure IS fatal to this refresh and leaves whatever
+      index was already loaded (possibly empty) untouched.
+    #>
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+    $byId = @{}
+    $source = 'instawow-data'
+
+    try {
+        $resp1 = Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/layday/instawow-data/data/base-catalogue-v8.compact.json' -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $data1 = $resp1.Content | ConvertFrom-Json -ErrorAction Stop
+        foreach ($entry in @($data1.entries)) {
+            if ([string]$entry.source -ne 'curse') { continue }
+            $id = [string]$entry.id
+            if (-not $id) { continue }
+            $downloads = 0
+            if ($entry.download_count) { $downloads = [int64]$entry.download_count }
+            $byId[$id] = [PSCustomObject]@{
+                id            = $id
+                name          = [string]$entry.name
+                slug          = [string]$entry.slug
+                url           = [string]$entry.url
+                downloadCount = $downloads
+                lastUpdated   = [string]$entry.last_updated
+            }
+        }
+    } catch {
+        Write-ServerLog "CurseForge catalogue refresh: instawow-data fetch failed: $($_.Exception.Message)"
+        return @{ ok = $false; fetchedAt = $Script:CfCatalogueFetchedAt; count = $Script:CfCatalogueIndex.Count; source = $Script:CfCatalogueSource; error = $_.Exception.Message }
+    }
+
+    Start-Sleep -Milliseconds 1000
+
+    try {
+        $resp2 = Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/ogri-la/strongbox-catalogue/master/curseforge-catalogue.json' -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $data2 = $resp2.Content | ConvertFrom-Json -ErrorAction Stop
+        $list2 = $data2.'addon-summary-list'
+        foreach ($entry in @($list2)) {
+            if ([string]$entry.source -ne 'curseforge') { continue }
+            $id = [string]$entry.'source-id'
+            if (-not $id) { continue }
+            if ($byId.ContainsKey($id)) { continue }   # instawow-data wins on collision
+            $slug = $null
+            $url = [string]$entry.url
+            if ($url -match '/wow/addons/([^/?#]+)') { $slug = $Matches[1] }
+            $name = [string]$entry.name
+            if (-not $name) { $name = [string]$entry.label }
+            $downloads = 0
+            if ($entry.'download-count') { $downloads = [int64]$entry.'download-count' }
+            $byId[$id] = [PSCustomObject]@{
+                id            = $id
+                name          = $name
+                slug          = $slug
+                url           = $url
+                downloadCount = $downloads
+                lastUpdated   = [string]$entry.'updated-date'
+            }
+        }
+        $source = 'instawow-data+strongbox'
+    } catch {
+        Write-ServerLog "CurseForge catalogue refresh: strongbox-catalogue fetch failed (continuing with instawow-data only): $($_.Exception.Message)"
+    }
+
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($k in $byId.Keys) { $entries.Add($byId[$k]) }
+
+    $fetchedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $cacheBody = [PSCustomObject]@{ fetchedAt = $fetchedAt; source = $source; entries = $entries.ToArray() }
+    try {
+        if (-not (Test-Path -LiteralPath $Script:CacheDir)) {
+            New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null
+        }
+        $json = ConvertTo-Json -InputObject $cacheBody -Depth 6
+        $tmpPath = "$Script:CfCatalogueCachePath.tmp"
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $Script:CfCatalogueCachePath -Force
+    } catch {
+        Write-ServerLog "Failed to write cf-catalogue.json cache: $($_.Exception.Message)"
+    }
+
+    $Script:CfCatalogueIndex = $entries.ToArray()
+    $Script:CfCatalogueById = $byId
+    $Script:CfCatalogueFetchedAt = $fetchedAt
+    $Script:CfCatalogueSource = $source
+
+    Write-ServerLog "CurseForge catalogue refreshed: $($entries.Count) entries from $source"
+    return @{ ok = $true; fetchedAt = $fetchedAt; count = $entries.Count; source = $source; error = $null }
+}
+
+function Initialize-CfCatalogueIndex {
+    <#
+      Called once at server startup. Loads ROOT\cache\cf-catalogue.json when
+      present and fresh (<24h); fetches a new one when missing or stale.
+      Best-effort: a fetch failure at startup leaves the index empty (or
+      whatever stale copy is already on disk, loaded first as a fallback)
+      rather than blocking the server from starting - Search-CfCatalogue/
+      Get-CfCatalogueEntry both tolerate an empty index (no matches), which
+      just means /api/cf/browse and /api/cf/enrich fall straight through to
+      their next fallback (addon-radar / catalogue-only) until a refresh
+      succeeds (automatically past the 24h mark, or via Settings >
+      Maintenance > "Refresh CurseForge catalogue now").
+    #>
+    $loaded = Load-CfCatalogueIndexFromDisk
+    $stale = $true
+    if ($loaded -and $Script:CfCatalogueFetchedAt) {
+        try {
+            $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+            $fetched = [DateTime]::ParseExact($Script:CfCatalogueFetchedAt, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+            $ageHours = ((Get-Date).ToUniversalTime() - $fetched).TotalHours
+            $stale = ($ageHours -ge 24)
+        } catch {
+            $stale = $true
+        }
+    }
+    if ($stale) {
+        $result = Save-CfCatalogueIndex
+        if (-not $result.ok) {
+            Write-ServerLog "CurseForge catalogue index unavailable at startup (will retry on next restart or manual refresh): $($result.error)"
+        }
+    } else {
+        Write-ServerLog "CurseForge catalogue loaded from disk cache: $($Script:CfCatalogueIndex.Count) entries, fetched $($Script:CfCatalogueFetchedAt)"
+    }
+}
+
+function Search-CfCatalogue {
+    <# Case-insensitive match against name: exact, then starts-with, then contains - each tier ordered by downloadCount descending. Returns at most $Limit entries. Never throws; empty on no index/no query/no match. #>
+    param([string]$Query, [int]$Limit = 30)
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    if ([string]::IsNullOrWhiteSpace($Query) -or -not $Script:CfCatalogueIndex -or $Script:CfCatalogueIndex.Count -eq 0) {
+        return Write-Output -NoEnumerate $out.ToArray()
+    }
+    $needle = $Query.Trim().ToLowerInvariant()
+    $scored = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($e in $Script:CfCatalogueIndex) {
+        if (-not $e.name) { continue }
+        $n = ([string]$e.name).ToLowerInvariant()
+        $tier = -1
+        if ($n -eq $needle) { $tier = 0 }
+        elseif ($n.StartsWith($needle)) { $tier = 1 }
+        elseif ($n.Contains($needle)) { $tier = 2 }
+        if ($tier -ge 0) {
+            $scored.Add([PSCustomObject]@{ Tier = $tier; Entry = $e; Downloads = [double]$e.downloadCount })
+        }
+    }
+    $sorted = $scored | Sort-Object -Property Tier, @{ Expression = 'Downloads'; Descending = $true }
+    foreach ($s in $sorted) {
+        if ($out.Count -ge $Limit) { break }
+        $out.Add($s.Entry)
+    }
+    return Write-Output -NoEnumerate $out.ToArray()
+}
+
+function Get-CfCatalogueEntry {
+    <# O(1) lookup by CurseForge project id (string or number, compared as a string). $null when not indexed. #>
+    param($ProjectId)
+    if (-not $ProjectId) { return $null }
+    $key = [string]$ProjectId
+    if ($Script:CfCatalogueById.ContainsKey($key)) { return $Script:CfCatalogueById[$key] }
+    return $null
+}
+
+function ConvertFrom-DevalueJson {
+    <#
+      addon-radar.com's __data.json responses are SvelteKit's "devalue" wire
+      format, not plain JSON: a flat array where a value's fields can be
+      integers that are themselves indices back into that SAME array (so a
+      repeated/nested value only appears once in the payload). This is a
+      purpose-built index-walking decoder.
+
+      VERIFIED LIVE (this build) against both
+      https://addon-radar.com/addon/{slug}/__data.json and
+      https://addon-radar.com/search/__data.json: the JSON root is NOT the
+      flat devalue array itself - it is a SvelteKit envelope object,
+      {"type":"data","nodes":[null,{"type":"data","data":[<flat array>]}]}.
+      "nodes" holds one entry per matched route segment (an earlier segment
+      with no load function contributes $null); the real flat devalue array
+      to index into is the "data" array carried by the last node that has
+      one (the deepest/most specific route segment - the page itself). This
+      function unwraps to that array before resolving any index. If the
+      root does not look like that envelope (no PSCustomObject/'nodes', or
+      no node carries a 'data' array) it falls back to treating the parsed
+      root itself as the flat array, for resilience against a differently-
+      shaped payload.
+
+      Beyond the envelope unwrap, the exact field names inside the
+      resolved objects were only spot-checked (id/name/slug/etc.) so
+      callers (ConvertTo-AddonRadarDetail, Get-AddonRadarSearchRows) still
+      treat the result defensively rather than assuming every field is
+      present. Given the resolved flat array, this resolves every integer
+      field/array-element that IS a valid in-range index into the node it
+      points to, recursively, with cycle protection. A field that is
+      genuinely just small integer DATA (not a reference) cannot be told
+      apart from a real index by shape alone, so a value out of range (or
+      inside the wrong array) is always left as literal data rather than
+      guessed at.
+      Never throws - returns $null on any parse failure or empty input.
+    #>
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    try {
+        $parsed = $Text | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if ($null -eq $parsed) { return $null }
+
+    # Unwrap the SvelteKit {type,nodes:[...]} envelope to the real flat
+    # devalue array (the 'data' array of the last node that carries one)
+    # before any index resolution - see the function comment above.
+    $arr = $null
+    if (($parsed -is [System.Management.Automation.PSCustomObject]) -and ($parsed.PSObject.Properties.Name -contains 'nodes') -and $parsed.nodes) {
+        foreach ($node in @($parsed.nodes)) {
+            if ($node -and ($node.PSObject.Properties.Name -contains 'data') -and ($node.data -is [System.Array])) {
+                $arr = @($node.data)
+            }
+        }
+    }
+    if (-not $arr) { $arr = @($parsed) }
+    if ($arr.Count -eq 0) { return $null }
+
+    $cache = @{}
+    $resolving = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    function Resolve-DevalueValue {
+        param($Node)
+        if ($null -eq $Node) { return $null }
+        if ($Node -is [System.Management.Automation.PSCustomObject]) {
+            $result = [PSCustomObject]@{}
+            foreach ($p in $Node.PSObject.Properties) {
+                Add-Member -InputObject $result -NotePropertyName $p.Name -NotePropertyValue (Resolve-DevalueField -Value $p.Value)
+            }
+            return $result
+        }
+        if ($Node -is [System.Array]) {
+            $out = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($item in $Node) { $out.Add((Resolve-DevalueField -Value $item)) }
+            return Write-Output -NoEnumerate $out.ToArray()
+        }
+        return $Node
+    }
+
+    function Resolve-DevalueField {
+        param($Value)
+        # ConvertFrom-Json on Windows PowerShell 5.1 (.NET Framework, not
+        # .NET 7+) deserializes a JSON integer as Int32/Int64 and only falls
+        # back to Double for a value that overflows Int64 or carries a
+        # fractional/exponent part - neither of which is a plausible devalue
+        # array index - so only the integer types are ever treated as a
+        # reference here; a genuine Double is always literal data.
+        if ($Value -is [int] -or $Value -is [long]) {
+            $i = [int]$Value
+            if ($i -ge 0 -and $i -lt $arr.Count) { return (Resolve-DevalueIndex -Idx $i) }
+            return $Value
+        }
+        return (Resolve-DevalueValue -Node $Value)
+    }
+
+    function Resolve-DevalueIndex {
+        param([int]$Idx)
+        if ($cache.ContainsKey($Idx)) { return $cache[$Idx] }
+        if ($Idx -lt 0 -or $Idx -ge $arr.Count) { return $null }
+        if ($resolving.Contains($Idx)) { return $null }   # cycle guard
+        [void]$resolving.Add($Idx)
+        $value = Resolve-DevalueValue -Node $arr[$Idx]
+        [void]$resolving.Remove($Idx)
+        $cache[$Idx] = $value
+        return $value
+    }
+
+    return (Resolve-DevalueIndex -Idx 0)
+}
+
+function ConvertTo-AddonRadarDetail {
+    <#
+      Normalizes a devalue-decoded addon-radar.com detail payload into
+      {id,name,slug,summary,descriptionHtml,authorName,logoUrl,downloadCount,
+      gameVersions,lastUpdated,screenshots}. SPEC's verified facts list the
+      fields present on a real detail page (id/name/slug/summary/
+      description_html/...) but this build could not independently confirm
+      the exact wrapper shape around them against a live payload, so this
+      checks a few plausible roots defensively - the decoded value itself,
+      then .data, then .props, then .result - and returns $null (a total
+      miss, handled by the caller falling through to catalogue-only) rather
+      than guessing wrong. Never throws.
+    #>
+    param($Decoded)
+
+    if ($null -eq $Decoded) { return $null }
+
+    $candidate = $null
+    foreach ($probe in @($Decoded, $Decoded.data, $Decoded.props, $Decoded.result)) {
+        if (-not $probe) { continue }
+        $names = $probe.PSObject.Properties.Name
+        if ($names -contains 'slug' -or $names -contains 'id') { $candidate = $probe; break }
+    }
+    if (-not $candidate) { return $null }
+
+    $shots = New-Object 'System.Collections.Generic.List[object]'
+    if ($candidate.screenshots) {
+        foreach ($s in @($candidate.screenshots)) {
+            $thumb = $s.thumbnail_url
+            if (-not $thumb) { $thumb = $s.thumbnailUrl }
+            $full = $s.url
+            if (-not $full) { $full = $s.image }
+            $shots.Add([PSCustomObject]@{ id = $s.id; title = $s.title; description = $s.description; thumbnail = $thumb; url = $full })
+        }
+    }
+    $gameVersions = New-Object 'System.Collections.Generic.List[object]'
+    if ($candidate.game_versions) { foreach ($v in @($candidate.game_versions)) { $gameVersions.Add([string]$v) } }
+
+    return [PSCustomObject]@{
+        id              = $candidate.id
+        name            = $candidate.name
+        slug            = $candidate.slug
+        summary         = $candidate.summary
+        descriptionHtml = $candidate.description_html
+        authorName      = $candidate.author_name
+        logoUrl         = $candidate.logo_url
+        downloadCount   = $candidate.download_count
+        gameVersions    = $gameVersions.ToArray()
+        lastUpdated     = $candidate.last_updated_at
+        screenshots     = $shots.ToArray()
+    }
+}
+
+function Get-AddonRadarSearchRows {
+    <#
+      Defensively finds the results array within a devalue-decoded search
+      payload - SPEC describes the shape as reachable via the decoded
+      root's own .results.data path; a couple of other plausible roots are
+      also tried since this build could not verify a live payload (see
+      ConvertFrom-DevalueJson's own note). Never throws - empty array on
+      any shape it doesn't recognize.
+    #>
+    param($Decoded)
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    if ($null -eq $Decoded) { return Write-Output -NoEnumerate $out.ToArray() }
+
+    foreach ($c in @($Decoded.results, $Decoded.data, $Decoded)) {
+        if (-not $c) { continue }
+        $arr = $null
+        if ($c.data) { $arr = $c.data }
+        elseif ($c -is [System.Array]) { $arr = $c }
+        if ($arr) {
+            foreach ($row in @($arr)) {
+                if ($row -and ($row.PSObject.Properties.Name -contains 'slug')) { $out.Add($row) }
+            }
+            if ($out.Count -gt 0) { break }
+        }
+    }
+    return Write-Output -NoEnumerate $out.ToArray()
+}
+
+function Invoke-AddonRadarRequest {
+    <# Paced (>=600ms between live requests) + retry-once-on-429/503 GET, mirroring Invoke-WagoHttpRequest's shape - same generic Get-WagoExceptionStatusCode helper (despite its Wago-specific name) reused here since both proxies live in this same process/file. #>
+    param([Parameter(Mandatory = $true)][string]$Uri)
+
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+    $elapsed = ((Get-Date) - $Script:LastAddonRadarRequestTime).TotalMilliseconds
+    if ($elapsed -lt 600) {
+        Start-Sleep -Milliseconds ([int](600 - $elapsed))
+    }
+
+    $maxAttempts = 2
+    $attempt = 0
+    $lastError = $null
+    $result = $null
+    while ($attempt -lt $maxAttempts) {
+        $attempt++
+        $shouldRetry = $false
+        $lastError = $null
+        try {
+            $result = Invoke-WebRequest -Uri $Uri -Headers @{ 'Accept' = 'application/json' } -UserAgent $userAgent -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        } catch {
+            $lastError = $_
+            $statusCode = Get-WagoExceptionStatusCode -ErrorRecord $_
+            if (($statusCode -eq 429 -or $statusCode -eq 503) -and ($attempt -lt $maxAttempts)) {
+                Write-ServerLog "HTTP $statusCode from $Uri (addon-radar) - waiting 5 seconds and retrying"
+                $shouldRetry = $true
+            }
+        }
+        $Script:LastAddonRadarRequestTime = Get-Date
+        if (-not $lastError) { return $result }
+        if (-not $shouldRetry) { throw $lastError }
+        Start-Sleep -Seconds 5
+    }
+    if ($lastError) { throw $lastError }
+    return $result
+}
+
+function Get-AddonRadarDetail {
+    <#
+      addon-radar.com's per-addon detail (capability source #3, behind
+      Wago, for descriptions/logos/screenshots). Cached both in-memory
+      ($Script:AddonRadarCache) and on disk (ROOT\cache\addon-radar\
+      <slug>.json) for 24h - checked before any live request, which is what
+      keeps live addon-radar traffic bounded to first-time-viewed addons
+      rather than growing with catalogue size or repeat views. Returns a
+      normalized PSCustomObject (see ConvertTo-AddonRadarDetail) or $null
+      (missing/unreachable/undecodable, INCLUDING a definitive miss - which
+      is cached too, so a Wago-less/unmatched addon is not re-fetched on
+      every drawer open). Never throws.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Slug)
+
+    $slugKey = $Slug.ToLowerInvariant()
+    if ($Script:AddonRadarCache.ContainsKey($slugKey)) {
+        $entry = $Script:AddonRadarCache[$slugKey]
+        if (((Get-Date) - $entry.Time).TotalHours -lt 24) { return $entry.Detail }
+    }
+
+    $diskPath = Join-Path -Path $Script:AddonRadarCacheDir -ChildPath ($slugKey + '.json')
+    if (Test-Path -LiteralPath $diskPath) {
+        try {
+            $raw = Get-Content -LiteralPath $diskPath -Raw -Encoding UTF8 -ErrorAction Stop
+            $cached = $raw | ConvertFrom-Json -ErrorAction Stop
+            if ($cached.fetchedAt) {
+                $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+                $fetched = [DateTime]::ParseExact([string]$cached.fetchedAt, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+                if (((Get-Date).ToUniversalTime() - $fetched).TotalHours -lt 24) {
+                    $detail = $cached.detail
+                    $Script:AddonRadarCache[$slugKey] = @{ Time = (Get-Date); Detail = $detail }
+                    return $detail
+                }
+            }
+        } catch {
+            # Corrupt/unreadable disk cache entry - fall through to a live fetch.
+        }
+    }
+
+    $detail = $null
+    try {
+        $uri = 'https://addon-radar.com/addon/' + [System.Uri]::EscapeDataString($Slug) + '/__data.json'
+        $resp = Invoke-AddonRadarRequest -Uri $uri
+        $decoded = ConvertFrom-DevalueJson -Text $resp.Content
+        $detail = ConvertTo-AddonRadarDetail -Decoded $decoded
+    } catch {
+        Write-ServerLog "addon-radar detail fetch failed for slug '$Slug': $($_.Exception.Message)"
+        $detail = $null
+    }
+
+    $Script:AddonRadarCache[$slugKey] = @{ Time = (Get-Date); Detail = $detail }
+    try {
+        if (-not (Test-Path -LiteralPath $Script:AddonRadarCacheDir)) {
+            New-Item -ItemType Directory -Path $Script:AddonRadarCacheDir -Force | Out-Null
+        }
+        $cacheBody = [PSCustomObject]@{ fetchedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); detail = $detail }
+        $json = ConvertTo-Json -InputObject $cacheBody -Depth 8
+        $tmpPath = "$diskPath.tmp"
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $diskPath -Force
+    } catch {
+        Write-ServerLog "Failed to write addon-radar disk cache for slug '$Slug': $($_.Exception.Message)"
+    }
+
+    return $detail
+}
+
+function Search-AddonRadar {
+    <#
+      Free-text addon-radar.com search - supplemental to the offline
+      catalogue when it returns few/no hits for a query (Handle-CfBrowse's
+      own threshold). NOT an id lookup - SPEC's own verified facts warn
+      against ever treating result #1 as authoritative for a specific known
+      id; this is for free-text discovery only. Cached 24h per lowercased
+      query, in-memory only. Never throws - empty array on any failure.
+    #>
+    param([string]$Query, [int]$Limit = 30)
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    if ([string]::IsNullOrWhiteSpace($Query)) { return Write-Output -NoEnumerate $out.ToArray() }
+
+    $cacheKey = $Query.Trim().ToLowerInvariant()
+    if ($Script:AddonRadarSearchCache.ContainsKey($cacheKey)) {
+        $entry = $Script:AddonRadarSearchCache[$cacheKey]
+        if (((Get-Date) - $entry.Time).TotalHours -lt 24) {
+            foreach ($it in @($entry.Items)) {
+                if ($out.Count -ge $Limit) { break }
+                $out.Add($it)
+            }
+            return Write-Output -NoEnumerate $out.ToArray()
+        }
+    }
+
+    $normalizedItems = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $uri = 'https://addon-radar.com/search/__data.json?q=' + [System.Uri]::EscapeDataString($Query)
+        $resp = Invoke-AddonRadarRequest -Uri $uri
+        $decoded = ConvertFrom-DevalueJson -Text $resp.Content
+        $rows = Get-AddonRadarSearchRows -Decoded $decoded
+        foreach ($row in $rows) {
+            $normalizedItems.Add([PSCustomObject]@{
+                id            = $row.id
+                name          = $row.name
+                slug          = $row.slug
+                downloadCount = $row.download_count
+                lastUpdated   = $row.last_updated_at
+                logoUrl       = $row.logo_url
+            })
+        }
+    } catch {
+        Write-ServerLog "addon-radar search failed for '$Query': $($_.Exception.Message)"
+    }
+
+    $Script:AddonRadarSearchCache[$cacheKey] = @{ Time = (Get-Date); Items = $normalizedItems.ToArray() }
+
+    foreach ($it in $normalizedItems) {
+        if ($out.Count -ge $Limit) { break }
+        $out.Add($it)
+    }
+    return Write-Output -NoEnumerate $out.ToArray()
+}
+
+function Get-WagoAutoMatchNormalizedName {
+    <# Lowercased, trimmed, with a trailing parenthetical/subtitle stripped (e.g. "BigWigs (Boss Timers & Tools)" -> "bigwigs") so a Wago listing's own subtitle style doesn't defeat an otherwise-exact name match. #>
+    param([string]$Value)
+    if (-not $Value) { return '' }
+    $v = [regex]::Replace($Value, '\s*\([^)]*\)\s*$', '')
+    return $v.Trim().ToLowerInvariant()
+}
+
+function Get-WagoAutoMatch {
+    <#
+      A conservative "is this CurseForge-tracked addon also on Wago"
+      probe, used only when the record's own toc has no X-Wago-ID tag at
+      all (Get-CfEnrichmentNoKey's caller-side guard). Reuses E12's own
+      Wago search/detail machinery (Get-WagoCached) rather than duplicating
+      it. A candidate is accepted ONLY when its search-card name equals the
+      queried name case-insensitively (trailing parenthetical stripped on
+      both sides) AND at least one of its detail page's developer names
+      equals (or is a substring, either direction, of) the queried author
+      case-insensitively - never on name similarity alone, never assuming
+      result #1 is the match, per SPEC's verified matching rule. Result
+      (including a definitive miss) cached 24h per (name,author) pair.
+      Returns @{ slug } or $null. Never throws.
+    #>
+    param([string]$Name, [string]$Author)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    $cacheKey = $Name.Trim().ToLowerInvariant() + '|' + (([string]$Author).Trim().ToLowerInvariant())
+    if ($Script:WagoAutoMatchCache.ContainsKey($cacheKey)) {
+        $entry = $Script:WagoAutoMatchCache[$cacheKey]
+        if (((Get-Date) - $entry.Time).TotalHours -lt 24) { return $entry.Match }
+    }
+
+    $match = $null
+    try {
+        $uri = 'https://addons.wago.io/?game_version=retail&search=' + [System.Uri]::EscapeDataString($Name)
+        $props = Get-WagoCached -PageUri $uri
+        $normName = Get-WagoAutoMatchNormalizedName -Value $Name
+        if ($props -and $props.addons -and $props.addons.data) {
+            foreach ($cardHtml in @($props.addons.data)) {
+                $card = ConvertFrom-WagoSearchCardHtml -Html ([string]$cardHtml)
+                if (-not $card -or -not $card.name) { continue }
+                if ((Get-WagoAutoMatchNormalizedName -Value $card.name) -ne $normName) { continue }
+                try {
+                    $detailProps = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($card.slug))
+                    $authorOk = [string]::IsNullOrWhiteSpace($Author)
+                    if (-not $authorOk -and $detailProps -and $detailProps.metadata -and $detailProps.metadata.developers) {
+                        $authorLower = $Author.ToLowerInvariant()
+                        foreach ($dev in @($detailProps.metadata.developers)) {
+                            if (-not $dev.name) { continue }
+                            $devLower = ([string]$dev.name).ToLowerInvariant()
+                            if ($devLower.Contains($authorLower) -or $authorLower.Contains($devLower)) { $authorOk = $true; break }
+                        }
+                    }
+                    if ($authorOk) { $match = [PSCustomObject]@{ slug = $card.slug }; break }
+                } catch {
+                    # Could not confirm this one candidate's author - try the next, if any.
+                }
+            }
+        }
+    } catch {
+        Write-ServerLog "Wago auto-match search failed for '$Name': $($_.Exception.Message)"
+    }
+
+    $Script:WagoAutoMatchCache[$cacheKey] = @{ Time = (Get-Date); Match = $match }
+    return $match
+}
+
+function Get-CfEnrichmentNoKey {
+    <#
+      The keyless fallback chain behind GET /api/cf/enrich/{projectId} when
+      no CurseForge API key is configured: (1) a Wago match - the tracked
+      record's own toc-derived wagoId first, else (only when there is none
+      at all) a conservative Get-WagoAutoMatch probe; (2) addon-radar.com,
+      via the catalogue-resolved slug; (3) catalogue-only (or nothing at
+      all, for an id neither catalogue has and no Wago match). Never
+      throws - every branch already degrades to the next on its own
+      failure, and this function's own try/catch around the Wago path
+      guards against a live network hiccup there specifically.
+    #>
+    param([string]$ProjectId)
+
+    $records = Get-AddonRecords
+    $rec = $null
+    foreach ($r in $records) {
+        if ($r.projectId -and ([string]$r.projectId -eq $ProjectId)) { $rec = $r; break }
+    }
+
+    $catalogueEntry = Get-CfCatalogueEntry -ProjectId $ProjectId
+
+    # 1) Wago match.
+    $wagoRef = $null
+    if ($rec -and $rec.wagoId) {
+        $wagoRef = [string]$rec.wagoId
+    } elseif ($rec -and $rec.name) {
+        $auto = Get-WagoAutoMatch -Name $rec.name -Author $rec.author
+        if ($auto) { $wagoRef = $auto.slug }
+    }
+    if ($wagoRef) {
+        try {
+            $props = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($wagoRef))
+            if ($props -and $props.addon) {
+                $downloadCount = $null
+                $lastUpdated = $null
+                if ($props.metadata) { $downloadCount = $props.metadata.download_count; $lastUpdated = $props.metadata.last_update }
+                return [PSCustomObject]@{
+                    source          = 'wago-match'
+                    name            = $props.addon.display_name
+                    slug            = $props.addon.slug
+                    summary         = $props.addon.summary
+                    descriptionMarkdown = $props.description
+                    logoUrl         = $props.addon.thumbnail_image
+                    screenshots     = @()
+                    downloadCount   = $downloadCount
+                    lastUpdated     = $lastUpdated
+                    gameVersions    = @()
+                    wagoSlug        = $props.addon.slug
+                }
+            }
+        } catch {
+            Write-ServerLog "Wago-match lookup failed for project $ProjectId (ref '$wagoRef'): $($_.Exception.Message)"
+        }
+    }
+
+    # 2) addon-radar.com, via the catalogue-resolved slug.
+    if ($catalogueEntry -and $catalogueEntry.slug) {
+        $detail = Get-AddonRadarDetail -Slug ([string]$catalogueEntry.slug)
+        if ($detail) {
+            return [PSCustomObject]@{
+                source          = 'addon-radar'
+                name            = $detail.name
+                slug            = $detail.slug
+                summary         = $detail.summary
+                descriptionHtml = $detail.descriptionHtml
+                logoUrl         = $detail.logoUrl
+                screenshots     = $detail.screenshots
+                downloadCount   = $detail.downloadCount
+                lastUpdated     = $detail.lastUpdated
+                gameVersions    = $detail.gameVersions
+            }
+        }
+    }
+
+    # 3) catalogue-only, or nothing at all.
+    $name = $null
+    if ($rec -and $rec.name) { $name = $rec.name } elseif ($catalogueEntry -and $catalogueEntry.name) { $name = $catalogueEntry.name }
+    $downloadCount = $null
+    $lastUpdated = $null
+    $slug = $null
+    if ($catalogueEntry) { $downloadCount = $catalogueEntry.downloadCount; $lastUpdated = $catalogueEntry.lastUpdated; $slug = $catalogueEntry.slug }
+    return [PSCustomObject]@{
+        source        = 'catalogue-only'
+        name          = $name
+        slug          = $slug
+        summary       = $null
+        downloadCount = $downloadCount
+        lastUpdated   = $lastUpdated
+        gameVersions  = @()
+    }
+}
+
+function Handle-CfEnrich {
+    <#
+      GET /api/cf/enrich/{projectId} - always keyless-capable, no 409
+      no-key gate. With a key configured, simply proxies the existing
+      key-gated mod/description calls (source:'official-api') and touches
+      none of the new sources at all - the key path is unchanged and
+      always wins. Without one, walks Get-CfEnrichmentNoKey's fallback
+      chain. Response shape: {source,name,slug,summary,descriptionHtml?,
+      descriptionMarkdown?,logoUrl?,screenshots?[],downloadCount?,
+      lastUpdated?,gameVersions?[],wagoSlug?}.
+    #>
+    param($Context, $RouteMatch)
+
+    $id = $RouteMatch['id']
+    $settings = Get-Settings
+
+    if ($settings.cfApiKey -and $settings.cfApiKey.Trim().Length -gt 0) {
+        $modResult = Invoke-CfApi -Path "/v1/mods/$id" -Query $null -Method 'GET'
+        if ($modResult.NoKey) {
+            Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
+            return
+        }
+        if ($modResult.StatusCode -lt 200 -or $modResult.StatusCode -ge 300) {
+            Send-Json -Context $Context -StatusCode $modResult.StatusCode -Body @{ error = "CurseForge returned status $($modResult.StatusCode)" }
+            return
+        }
+        $mod = $null
+        try {
+            $mod = ($modResult.Body | ConvertFrom-Json -ErrorAction Stop).data
+        } catch {
+            Send-Json -Context $Context -StatusCode 502 -Body @{ error = 'Invalid JSON from CurseForge' }
+            return
+        }
+        $descHtml = $null
+        $descResult = Invoke-CfApi -Path "/v1/mods/$id/description" -Query $null -Method 'GET'
+        if (-not $descResult.NoKey -and $descResult.StatusCode -ge 200 -and $descResult.StatusCode -lt 300) {
+            try { $descHtml = ($descResult.Body | ConvertFrom-Json -ErrorAction Stop).data } catch { $descHtml = $null }
+        }
+        $logoUrl = $null
+        if ($mod.logo) { $logoUrl = $mod.logo.thumbnailUrl; if (-not $logoUrl) { $logoUrl = $mod.logo.url } }
+        $body = [PSCustomObject]@{
+            source          = 'official-api'
+            name            = $mod.name
+            slug            = $mod.slug
+            summary         = $mod.summary
+            descriptionHtml = $descHtml
+            logoUrl         = $logoUrl
+            screenshots     = $(if ($mod.screenshots) { $mod.screenshots } else { @() })
+            downloadCount   = $mod.downloadCount
+            lastUpdated     = $mod.dateModified
+            gameVersions    = @()
+        }
+        Send-Json -Context $Context -StatusCode 200 -Body $body
+        return
+    }
+
+    $body = Get-CfEnrichmentNoKey -ProjectId $id
+    Send-Json -Context $Context -StatusCode 200 -Body $body
+}
+
+function Handle-CfBrowse {
+    <#
+      GET /api/cf/browse?q=&limit= - always keyless-capable. The UI only
+      ever calls this when no key is configured (a keyed session keeps
+      using the official /api/cf/search entirely unchanged); Search-CfCatalogue
+      runs first, and Search-AddonRadar is additionally consulted only when
+      that returns fewer than 5 hits, merging in anything not already
+      present by id (SPEC's own documented threshold).
+    #>
+    param($Context, $RouteMatch)
+
+    $q = $Context.Request.QueryString
+    $query = [string]$q['q']
+    $limit = 30
+    $limitRaw = Get-QueryOrDefault -QueryString $q -Name 'limit' -Default '30'
+    $parsedLimit = 0
+    if ([int]::TryParse($limitRaw, [ref]$parsedLimit) -and $parsedLimit -gt 0) { $limit = $parsedLimit }
+
+    $items = New-Object 'System.Collections.Generic.List[object]'
+    $seenIds = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    foreach ($e in (Search-CfCatalogue -Query $query -Limit $limit)) {
+        $items.Add([PSCustomObject]@{ id = $e.id; name = $e.name; slug = $e.slug; downloadCount = $e.downloadCount; lastUpdated = $e.lastUpdated; source = 'catalogue'; logoUrl = $null })
+        [void]$seenIds.Add([string]$e.id)
+    }
+
+    if ($items.Count -lt 5 -and -not [string]::IsNullOrWhiteSpace($query)) {
+        foreach ($r in (Search-AddonRadar -Query $query -Limit $limit)) {
+            $ridStr = [string]$r.id
+            if ($seenIds.Contains($ridStr)) { continue }
+            $items.Add([PSCustomObject]@{ id = $r.id; name = $r.name; slug = $r.slug; downloadCount = $r.downloadCount; lastUpdated = $r.lastUpdated; source = 'addon-radar'; logoUrl = $r.logoUrl })
+            [void]$seenIds.Add($ridStr)
+        }
+    }
+
+    $body = [PSCustomObject]@{
+        items        = $items.ToArray()
+        catalogueAge = $Script:CfCatalogueFetchedAt
+        total        = $items.Count
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body $body
+}
+
+function Handle-CfCatalogueRefresh {
+    <# POST /api/cf/catalogue/refresh - Settings > Maintenance > "Refresh CurseForge catalogue now". A fast op (no job queue involved), same shape Save-CfCatalogueIndex already returns. #>
+    param($Context, $RouteMatch)
+
+    $result = Save-CfCatalogueIndex
+    if ($result.ok) {
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; fetchedAt = $result.fetchedAt; count = $result.count; source = $result.source }
+    } else {
+        Send-Json -Context $Context -StatusCode 502 -Body @{ ok = $false; error = $result.error }
+    }
+}
+
+# =====================================================================
 # Diagnostics (E10) - GET /api/diagnostics: a fixed battery of quick health
 # checks, each returning @{ ok; detail }. Every Test-Diag* function below is
 # self-contained (its own try/catch, never throws), so Handle-Diagnostics
@@ -2744,6 +3589,33 @@ function Test-DiagServerUptime {
     return @{ ok = $true; detail = $detail }
 }
 
+function Format-DiagTimestamp {
+    <#
+      Renders one of this script's own ISO-8601 UTC timestamps
+      ("yyyy-MM-ddTHH:mm:ssZ", the format every $Script:LastRun.timestamp/
+      startedAt/finishedAt already uses) as local-time human text, matching
+      the convention every OTHER Test-Diag* check's detail already follows
+      within this same endpoint - Server uptime's "2h 3m", CurseForge
+      reachability's "Reachable (HTTP 200)" - finished display text, never
+      raw data left for the client to reformat. Confirmed against ui\app.js:
+      diagRow() renders c.detail verbatim with no date parsing of its own,
+      unlike the addons table's Updated column (Utils.relativeTime), so an
+      un-formatted ISO string here was the one diagnostics row showing raw
+      machine-readable text next to eight rows of finished prose. Falls back
+      to the raw input string on any parse failure - never throws, matching
+      every Test-Diag* function's own no-throw contract.
+    #>
+    param([string]$Iso)
+
+    try {
+        $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        $dt = [DateTime]::ParseExact($Iso, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        return $dt.ToLocalTime().ToString('MMM d, yyyy, hh:mm tt')
+    } catch {
+        return $Iso
+    }
+}
+
 function Test-DiagLastSync {
     <#
       Timestamp of the most recent completed sync, read from last-run.txt's
@@ -2758,13 +3630,13 @@ function Test-DiagLastSync {
     if (Test-Path -LiteralPath $lastRunPath) {
         try {
             $mtime = (Get-Item -LiteralPath $lastRunPath).LastWriteTimeUtc
-            return @{ ok = $true; detail = $mtime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+            return @{ ok = $true; detail = $mtime.ToLocalTime().ToString('MMM d, yyyy, hh:mm tt') }
         } catch {
             return @{ ok = $false; detail = $_.Exception.Message }
         }
     }
     if ($Script:LastRun -and $Script:LastRun.timestamp) {
-        return @{ ok = $true; detail = [string]$Script:LastRun.timestamp }
+        return @{ ok = $true; detail = (Format-DiagTimestamp -Iso ([string]$Script:LastRun.timestamp)) }
     }
     return @{ ok = $true; detail = 'never' }
 }
@@ -2781,6 +3653,52 @@ function Test-DiagClientBuild {
         return @{ ok = $true; detail = $Script:ClientBuildInfo.clientBuild }
     }
     return @{ ok = $false; detail = 'Could not read .build.info (missing, unreadable, or no "wow" row found)' }
+}
+
+function Test-DiagCfCatalogue {
+    <#
+      E16: the offline CurseForge catalogue index (instawow-data +
+      strongbox-catalogue) that /api/cf/browse and /api/cf/enrich fall back
+      to when no key is configured. ok:false when never fetched at all
+      (fresh install, or every fetch attempt has failed so far) or when the
+      on-disk copy is over 48h stale (double the normal 24h refresh window -
+      a generous allowance before flagging red, since a single missed daily
+      refresh is not itself a problem).
+    #>
+    if (-not $Script:CfCatalogueFetchedAt) {
+        return @{ ok = $false; detail = 'No catalogue cache yet (fetched on first use, or via Settings > Maintenance > "Refresh CurseForge catalogue now")' }
+    }
+    $ageHours = $null
+    try {
+        $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        $fetched = [DateTime]::ParseExact($Script:CfCatalogueFetchedAt, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        $ageHours = ((Get-Date).ToUniversalTime() - $fetched).TotalHours
+    } catch {
+        return @{ ok = $false; detail = "Cache timestamp unreadable ($Script:CfCatalogueFetchedAt)" }
+    }
+    $count = 0
+    if ($Script:CfCatalogueIndex) { $count = $Script:CfCatalogueIndex.Count }
+    $detail = "$count entries, $([math]::Round($ageHours, 1))h old ($Script:CfCatalogueSource)"
+    return @{ ok = ($ageHours -lt 48); detail = $detail }
+}
+
+function Test-DiagAddonRadar {
+    <#
+      E16: one cheap, cached-if-possible addon-radar.com request - the same
+      allowance E10 already gives CurseForge's own reachability check.
+      "bigwigs" is a real, small, always-present addon-radar slug (SPEC's
+      own verified facts were gathered against it) so a cache hit from an
+      earlier drawer/browse view is common; a cold cache pays one live
+      request, paced/retried exactly like every other Get-AddonRadarDetail
+      call.
+    #>
+    try {
+        $detail = Get-AddonRadarDetail -Slug 'bigwigs'
+        if ($detail) { return @{ ok = $true; detail = 'Reachable' } }
+        return @{ ok = $false; detail = 'No response or unrecognized payload shape' }
+    } catch {
+        return @{ ok = $false; detail = $_.Exception.Message }
+    }
 }
 
 function Get-QueryOrDefault {
@@ -3288,6 +4206,9 @@ function Handle-Diagnostics {
     # E13: the client build $Script:ClientBuildInfo already resolved once at
     # startup (roadmap: "/api/diagnostics includes the client build").
     $checks.Add((New-DiagCheckRow -Name 'WoW client build' -Result (Test-DiagClientBuild)))
+    # E16: the two keyless-enrichment checks its own roadmap item calls for.
+    $checks.Add((New-DiagCheckRow -Name 'CurseForge catalogue cache' -Result (Test-DiagCfCatalogue)))
+    $checks.Add((New-DiagCheckRow -Name 'addon-radar reachability' -Result (Test-DiagAddonRadar)))
 
     Send-Json -Context $Context -StatusCode 200 -Body @{ checks = $checks.ToArray() }
 }
@@ -3639,6 +4560,11 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)/files$'; Handler = 'Handle-CfModFiles' }
     @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)$'; Handler = 'Handle-CfModGet' }
     @{ Method = 'GET'; Pattern = '^/api/cf/resolve$'; Handler = 'Handle-CfResolve' }
+    # E16: always keyless-capable - no 409 no-key gate, unlike every /api/cf/*
+    # route above this one.
+    @{ Method = 'GET'; Pattern = '^/api/cf/browse$'; Handler = 'Handle-CfBrowse' }
+    @{ Method = 'GET'; Pattern = '^/api/cf/enrich/(?<id>[^/]+)$'; Handler = 'Handle-CfEnrich' }
+    @{ Method = 'POST'; Pattern = '^/api/cf/catalogue/refresh$'; Handler = 'Handle-CfCatalogueRefresh' }
     @{ Method = 'GET'; Pattern = '^/api/wago/search$'; Handler = 'Handle-WagoSearch' }
     @{ Method = 'GET'; Pattern = '^/api/wago/categories$'; Handler = 'Handle-WagoCategories' }
     @{ Method = 'GET'; Pattern = '^/api/wago/resolve$'; Handler = 'Handle-WagoResolve' }
@@ -3719,6 +4645,15 @@ $Script:AddonsJsonPath = Join-Path -Path $Script:Root -ChildPath 'addons.json'
 $Script:ServerLogPath = Join-Path -Path $Script:Root -ChildPath 'server.log'
 $Script:SyncLogPath = Join-Path -Path $Script:Root -ChildPath 'sync.log'
 $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
+# E16: on-disk caches for the keyless CurseForge enrichment sources - the
+# catalogue index (refreshed at most once/24h) and per-slug addon-radar.com
+# detail pages (cached 24h each). Both directories are created lazily by
+# their own writers (Save-CfCatalogueIndex / Get-AddonRadarDetail), the same
+# "app owns this folder, create on first use" pattern already used for
+# backups\ (E7's Handle-Open 'backups' case).
+$Script:CacheDir = Join-Path -Path $Script:Root -ChildPath 'cache'
+$Script:CfCatalogueCachePath = Join-Path -Path $Script:CacheDir -ChildPath 'cf-catalogue.json'
+$Script:AddonRadarCacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'addon-radar'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 $Script:BuildInfoPathOverride = $BuildInfoPath
@@ -3746,6 +4681,23 @@ $Script:LastRequestTime = Get-Date
 $Script:WagoCache = @{}
 $Script:WagoInertiaVersion = $null
 
+# E16: keyless CurseForge enrichment state. CfCatalogueIndex/CfCatalogueById/
+# CfCatalogueFetchedAt/CfCatalogueSource are populated by Initialize-
+# CfCatalogueIndex below (disk cache load, or a fresh fetch when missing/
+# stale); AddonRadarCache/AddonRadarSearchCache/WagoAutoMatchCache are
+# in-memory 24h caches (the first also backed by an on-disk per-slug cache -
+# see Get-AddonRadarDetail); LastAddonRadarRequestTime paces live
+# addon-radar.com requests the same way LastRequestTime-style throttles are
+# already used for Wago/CurseForge above.
+$Script:CfCatalogueIndex = @()
+$Script:CfCatalogueById = @{}
+$Script:CfCatalogueFetchedAt = $null
+$Script:CfCatalogueSource = $null
+$Script:AddonRadarCache = @{}
+$Script:AddonRadarSearchCache = @{}
+$Script:WagoAutoMatchCache = @{}
+$Script:LastAddonRadarRequestTime = [DateTime]::MinValue
+
 # E13 (compatibility audit): resolved once at server startup, not re-read
 # from disk on every /api/state or /api/diagnostics call - -BuildInfoPath
 # overrides everything (never touches the real WoW folder when given, per
@@ -3764,6 +4716,12 @@ $Script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $(
 # and the rollback tooltip / job list all survive a server restart instead
 # of going blank until the next check/job.
 Load-CheckState
+
+# E16: loads (or, when missing/stale, fetches) the offline CurseForge
+# catalogue index that /api/cf/browse and /api/cf/enrich fall back to when
+# no key is configured. Best-effort - see the function's own doc comment;
+# a failure here never blocks the server from starting.
+Initialize-CfCatalogueIndex
 
 if (-not (Test-Path -LiteralPath $Script:Root)) {
     throw "Root path does not exist: $Script:Root"
