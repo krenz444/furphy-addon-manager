@@ -339,7 +339,10 @@ function Get-Settings {
 function Get-SettingsView {
     <# settings.json, as returned by the settings API - no cfApiKey field
        exists any more (Round 16, E22: the CurseForge key feature was
-       removed 2026-09-04 at Eric's explicit request). #>
+       removed 2026-09-04 at Eric's explicit request). Round 17 removed
+       checkAddonVersion the same way (Eric: "WoW's out-of-date warning...
+       get rid of this it doesn't do anything") - see Get-DefaultSettings's
+       own note and CHANGELOG.md's Round 17 section. #>
     param($Settings)
 
     return [PSCustomObject]@{
@@ -348,10 +351,6 @@ function Get-SettingsView {
         port               = $Script:Port
         addonsPath         = (Resolve-EffectiveAddonsPath)
         wowRoot            = (Get-WowRootPath)
-        # E13: read-only info, not a manager setting - WoW's own
-        # checkAddonVersion cvar from WTF\Config.wtf. PUT /api/settings never
-        # accepts this key; it exists only for Settings > Game to display.
-        checkAddonVersion = (Get-CheckAddonVersionSetting)
         # E19: pass through unmasked (neither is a secret) - see
         # Get-DefaultSettings.
         adFilter          = $Settings.adFilter
@@ -517,30 +516,6 @@ function Get-DefaultBuildInfoPath {
     } catch {
         return $null
     }
-}
-
-# E13: WoW's own checkAddonVersion cvar (WTF\Config.wtf, alongside the game
-# root Get-WowRootPath already resolves - "SET checkAddonVersion "0"" means
-# out-of-date addons load anyway) - read-only display info for Settings >
-# Game, per roadmap E13. Returns the string value ("0"/"1"/whatever WoW
-# wrote) or $null when Config.wtf/the setting isn't there yet (a fresh
-# install that has never had the option toggled). Never throws.
-function Get-CheckAddonVersionSetting {
-    $wowRoot = Get-WowRootPath
-    if (-not $wowRoot) { return $null }
-    $configPath = Join-Path -Path (Join-Path -Path $wowRoot -ChildPath 'WTF') -ChildPath 'Config.wtf'
-    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return $null }
-    try {
-        $lines = Get-Content -LiteralPath $configPath -Encoding UTF8 -ErrorAction Stop
-    } catch {
-        return $null
-    }
-    foreach ($line in $lines) {
-        if ($line -match '^\s*SET\s+checkAddonVersion\s+"([^"]*)"') {
-            return $Matches[1]
-        }
-    }
-    return $null
 }
 
 # =====================================================================
@@ -3669,17 +3644,12 @@ function Handle-CfBrowse {
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
 
-function Handle-CfCatalogueRefresh {
-    <# POST /api/cf/catalogue/refresh - Settings > Maintenance > "Refresh CurseForge catalogue now". A fast op (no job queue involved), same shape Save-CfCatalogueIndex already returns. #>
-    param($Context, $RouteMatch)
-
-    $result = Save-CfCatalogueIndex
-    if ($result.ok) {
-        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; fetchedAt = $result.fetchedAt; count = $result.count; source = $result.source }
-    } else {
-        Send-Json -Context $Context -StatusCode 502 -Body @{ ok = $false; error = $result.error }
-    }
-}
+# Round 17 - removed: Handle-CfCatalogueRefresh (POST
+# /api/cf/catalogue/refresh) and the "Refresh the addon list from
+# CurseForge" button that was its only caller (Settings > Troubleshooting).
+# Save-CfCatalogueIndex itself is unchanged and still called automatically
+# at startup/once-per-24h by Initialize-CfCatalogueIndex - only the manual,
+# on-demand trigger is gone.
 
 # =====================================================================
 # Diagnostics (E10) - GET /api/diagnostics: a fixed battery of quick health
@@ -3897,7 +3867,7 @@ function Test-DiagCfCatalogue {
       refresh is not itself a problem).
     #>
     if (-not $Script:CfCatalogueFetchedAt) {
-        return @{ ok = $false; detail = 'No catalogue cache yet (fetched on first use, or via Settings > Maintenance > "Refresh CurseForge catalogue now")' }
+        return @{ ok = $false; detail = 'No catalogue cache yet (fetched automatically on first use)' }
     }
     $ageHours = $null
     try {
@@ -4802,10 +4772,12 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/diagnostics$'; Handler = 'Handle-Diagnostics' }
     # Round 16 (E22): the only CurseForge routes left, both keyless - every
     # key-gated /api/cf/* route (search/categories/mods/description/files/
-    # changelog/resolve) was removed with the key feature itself.
+    # changelog/resolve) was removed with the key feature itself. Round 17
+    # removed the third, POST /api/cf/catalogue/refresh, with the manual
+    # "Refresh the addon list from CurseForge" button that was its only
+    # caller - the catalogue still refreshes itself automatically.
     @{ Method = 'GET'; Pattern = '^/api/cf/browse$'; Handler = 'Handle-CfBrowse' }
     @{ Method = 'GET'; Pattern = '^/api/cf/enrich/(?<id>[^/]+)$'; Handler = 'Handle-CfEnrich' }
-    @{ Method = 'POST'; Pattern = '^/api/cf/catalogue/refresh$'; Handler = 'Handle-CfCatalogueRefresh' }
     @{ Method = 'GET'; Pattern = '^/api/wago/search$'; Handler = 'Handle-WagoSearch' }
     @{ Method = 'GET'; Pattern = '^/api/wago/categories$'; Handler = 'Handle-WagoCategories' }
     @{ Method = 'GET'; Pattern = '^/api/wago/resolve$'; Handler = 'Handle-WagoResolve' }
@@ -4915,7 +4887,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.3.0'
+$Script:Version = '1.4.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

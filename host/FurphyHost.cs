@@ -21,6 +21,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Microsoft.Win32;
 
 namespace Furphy
 {
@@ -37,6 +38,17 @@ namespace Furphy
             Application.SetCompatibleTextRenderingDefault(false);
 
             HostOptions options = HostOptions.Parse(args);
+
+            // Auto-updater tray mode (E24): --tray runs silently with no
+            // main window, just a NotifyIcon; --tray-selftest runs one
+            // cycle and writes a marker like the existing --selftest does
+            // for the main window. Routed here, before MainForm is ever
+            // touched, so the normal window path below is unaffected.
+            if (options.Tray || options.TraySelftestActive)
+            {
+                return TrayProgram.Run(options, dpiAware);
+            }
+
             using (MainForm form = new MainForm(options, dpiAware))
             {
                 Application.Run(form);
@@ -117,6 +129,17 @@ namespace Furphy
         public string View;
         public string Tab;
 
+        // Auto-updater tray mode (E24). --tray: run headless with just a
+        // NotifyIcon (TrayProgram.Run), never MainForm. --tray-selftest
+        // <markerPath>: like --selftest but for the tray - runs one cycle
+        // then writes a JSON marker and exits. --wow-fake <processName>
+        // lets --tray-selftest prove the WoW-running skip without the
+        // real game by treating a process of that name as WoW.
+        public bool Tray;
+        public bool TraySelftestActive;
+        public string TraySelftestMarkerPath;
+        public string WowFakeProcessName;
+
         public static HostOptions Parse(string[] args)
         {
             HostOptions o = new HostOptions();
@@ -140,6 +163,21 @@ namespace Furphy
                     o.SelftestTestPageUrl = args[i + 2];
                     i += 2;
                 }
+                else if (string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase))
+                {
+                    o.Tray = true;
+                }
+                else if (string.Equals(a, "--tray-selftest", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    o.TraySelftestActive = true;
+                    o.TraySelftestMarkerPath = args[i + 1];
+                    i++;
+                }
+                else if (string.Equals(a, "--wow-fake", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    o.WowFakeProcessName = args[i + 1];
+                    i++;
+                }
                 else if (string.Equals(a, "--view", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
                     o.View = args[i + 1];
@@ -152,6 +190,113 @@ namespace Furphy
                 }
             }
             return o;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // App-wide constants shared between MainForm and the tray classes
+    // below (E24) - kept in one place so the window title the tray looks
+    // for via FindWindow can never drift from the one MainForm sets.
+    // ------------------------------------------------------------------
+    internal static class AppConstants
+    {
+        public const string WindowTitle = "Furphy Addon Manager";
+    }
+
+    // ------------------------------------------------------------------
+    // Small JSON-value coercion helpers, shared by MainForm (whose own
+    // ToInt/ToBool/ToDouble/DictGet below delegate here - see those
+    // methods) and the tray classes (E24), which read the same
+    // settings.json via HostFiles.LoadJsonObject but live outside
+    // MainForm.
+    // ------------------------------------------------------------------
+    internal static class JsonUtil
+    {
+        public static int ToInt(object o, int fallback)
+        {
+            if (o is long) return (int)(long)o;
+            if (o is int) return (int)o;
+            if (o is double) return (int)(double)o;
+            int parsed;
+            if (o is string && int.TryParse((string)o, out parsed)) return parsed;
+            return fallback;
+        }
+
+        public static bool ToBool(object o, bool fallback)
+        {
+            if (o is bool) return (bool)o;
+            if (o is string)
+            {
+                string s = ((string)o).Trim().ToLowerInvariant();
+                if (s == "true") return true;
+                if (s == "false") return false;
+            }
+            return fallback;
+        }
+
+        public static double ToDouble(object o, double fallback)
+        {
+            if (o is double) return (double)o;
+            if (o is long) return (long)o;
+            if (o is int) return (int)o;
+            double parsed;
+            if (o is string && double.TryParse((string)o, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)) return parsed;
+            return fallback;
+        }
+
+        public static object DictGet(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return (d != null && d.TryGetValue(key, out v)) ? v : null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // host.log appender. MainForm.LogHost (instance method, tied to
+    // _hostLogPath) delegates here; the tray classes (E24) - which run
+    // with no MainForm at all in --tray/--tray-selftest - call this
+    // directly with their own resolved log path so every "[tray] ..."
+    // line lands in the same host.log a user would already look at.
+    // ------------------------------------------------------------------
+    internal static class LogWriter
+    {
+        private static readonly object _lock = new object();
+
+        public static void Append(string path, string message)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                lock (_lock)
+                {
+                    string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
+                        "  " + message + Environment.NewLine;
+                    File.AppendAllText(path, line, new UTF8Encoding(false));
+                }
+            }
+            catch { }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Port resolution: command-line --port wins, else settings.json's
+    // "port", else the default. MainForm.ResolvePort (instance method)
+    // delegates here; the tray classes (E24) call it directly since they
+    // have no MainForm.
+    // ------------------------------------------------------------------
+    internal static class PortResolver
+    {
+        public static int Resolve(HostOptions options, string settingsPath)
+        {
+            if (options.Port > 0) return options.Port;
+            Dictionary<string, object> settings = HostFiles.LoadJsonObject(settingsPath);
+            object portObj;
+            if (settings.TryGetValue("port", out portObj) && portObj != null)
+            {
+                int p = JsonUtil.ToInt(portObj, 0);
+                if (p > 0) return p;
+            }
+            return 47831;
         }
     }
 
@@ -617,7 +762,7 @@ namespace Furphy
     // ------------------------------------------------------------------
     internal class MainForm : Form
     {
-        private const string WindowTitle = "Furphy Addon Manager";
+        private const string WindowTitle = AppConstants.WindowTitle;
         // Hard allow-list: never blocked by the ad filter regardless of
         // what adfilter-hosts.txt contains.
         private static readonly string[] HardAllowHosts = new string[]
@@ -820,15 +965,7 @@ namespace Furphy
 
         private int ResolvePort()
         {
-            if (_options.Port > 0) return _options.Port;
-            Dictionary<string, object> settings = HostFiles.LoadJsonObject(_settingsPath);
-            object portObj;
-            if (settings.TryGetValue("port", out portObj) && portObj != null)
-            {
-                int p = ToInt(portObj, 0);
-                if (p > 0) return p;
-            }
-            return 47831;
+            return PortResolver.Resolve(_options, _settingsPath);
         }
 
         // host-ready's "version" field (contract F) is the app's own
@@ -855,24 +992,12 @@ namespace Furphy
 
         private static int ToInt(object o, int fallback)
         {
-            if (o is long) return (int)(long)o;
-            if (o is int) return (int)o;
-            if (o is double) return (int)(double)o;
-            int parsed;
-            if (o is string && int.TryParse((string)o, out parsed)) return parsed;
-            return fallback;
+            return JsonUtil.ToInt(o, fallback);
         }
 
         private static bool ToBool(object o, bool fallback)
         {
-            if (o is bool) return (bool)o;
-            if (o is string)
-            {
-                string s = ((string)o).Trim().ToLowerInvariant();
-                if (s == "true") return true;
-                if (s == "false") return false;
-            }
-            return fallback;
+            return JsonUtil.ToBool(o, fallback);
         }
 
         // Used for cf-show/cf-rect's rect{x,y,w,h}/dpr fields, which the
@@ -880,18 +1005,12 @@ namespace Furphy
         // long depending on whether a decimal point was present).
         private static double ToDouble(object o, double fallback)
         {
-            if (o is double) return (double)o;
-            if (o is long) return (long)o;
-            if (o is int) return (int)o;
-            double parsed;
-            if (o is string && double.TryParse((string)o, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)) return parsed;
-            return fallback;
+            return JsonUtil.ToDouble(o, fallback);
         }
 
         private static object DictGet(Dictionary<string, object> d, string key)
         {
-            object v;
-            return (d != null && d.TryGetValue(key, out v)) ? v : null;
+            return JsonUtil.DictGet(d, key);
         }
 
         private bool ReadAdFilterSetting()
@@ -2736,21 +2855,9 @@ boot();
 
         // -------------------------------------------------------- logging
 
-        private readonly object _logLock = new object();
-
         private void LogHost(string message)
         {
-            if (string.IsNullOrEmpty(_hostLogPath)) return;
-            try
-            {
-                lock (_logLock)
-                {
-                    string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
-                        "  " + message + Environment.NewLine;
-                    File.AppendAllText(_hostLogPath, line, new UTF8Encoding(false));
-                }
-            }
-            catch { }
+            LogWriter.Append(_hostLogPath, message);
         }
 
         // -------------------------------------------------------- selftest
@@ -2900,6 +3007,1290 @@ boot();
             catch (Exception ex)
             {
                 LogHost("failed to write selftest marker: " + ex.Message);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E24 - auto-updater tray mode. Everything below runs when Program.Main
+    // sees --tray or --tray-selftest and never touches MainForm at all.
+    // ------------------------------------------------------------------
+
+    // Win32 window activation - used by the tray's click handler to bring
+    // an already-open main window to the foreground instead of starting a
+    // second one, keyed on MainForm's exact window title (AppConstants.
+    // WindowTitle) since that is the one thing every FurphyHost.exe window
+    // (normal launch, deep link, whatever --view/--tab it was given) has
+    // in common and the tray process itself never creates.
+    internal static class WindowActivation
+    {
+        private const int SW_RESTORE = 9;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        public static bool WindowExists(string title)
+        {
+            try { return FindWindow(null, title) != IntPtr.Zero; }
+            catch { return false; }
+        }
+
+        // Finds a top-level window with the given exact title and, if one
+        // exists, restores it (if minimized) and brings it to the
+        // foreground. Returns true iff a window was found (regardless of
+        // whether SetForegroundWindow itself succeeded - Windows can
+        // refuse focus-stealing from a background process in ways that
+        // are not this tray's problem to solve).
+        public static bool ActivateWindowByTitle(string title)
+        {
+            IntPtr hwnd;
+            try { hwnd = FindWindow(null, title); }
+            catch { return false; }
+            if (hwnd == IntPtr.Zero) return false;
+            try
+            {
+                if (IsIconic(hwnd)) { ShowWindow(hwnd, SW_RESTORE); }
+                SetForegroundWindow(hwnd);
+            }
+            catch { }
+            return true;
+        }
+    }
+
+    // HKCU\...\Run "FurphyAddonManager" = "<quoted exe path>" --tray - the
+    // literal value text is part of the stage A/B contract (stage B's own
+    // server endpoint writes the identical string), so BuildRunValue is
+    // the one place that format lives.
+    internal static class StartupRegistry
+    {
+        private const string RunKeyPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        private const string ValueName = "FurphyAddonManager";
+
+        public static string BuildRunValue(string exePath)
+        {
+            return "\"" + exePath + "\" --tray";
+        }
+
+        public static bool Exists()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
+                {
+                    if (key == null) return false;
+                    return key.GetValue(ValueName) != null;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static string ReadValue()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
+                {
+                    if (key == null) return null;
+                    object v = key.GetValue(ValueName);
+                    return v as string;
+                }
+            }
+            catch { return null; }
+        }
+
+        public static bool Enable(string exePath)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath))
+                {
+                    key.SetValue(ValueName, BuildRunValue(exePath), RegistryValueKind.String);
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool Disable()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    if (key != null && key.GetValue(ValueName) != null)
+                    {
+                        key.DeleteValue(ValueName, false);
+                    }
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+    }
+
+    // "any process named 'Wow' is running" (contract step 5a). --wow-fake
+    // lets --tray-selftest substitute a harmless process name so the skip
+    // path can be proven without launching the real game.
+    internal static class WowDetector
+    {
+        // Process.GetProcessesByName does an exact, whole-name match (no
+        // substring/wildcard), so retail-only "Wow" misses Classic/PTR/Beta
+        // clients, which ship under their own exe names. Check every known
+        // client name so the "never touch addon files while the game is
+        // running" guarantee holds regardless of which client is open.
+        private static readonly string[] KnownWowNames = new string[]
+        {
+            "Wow",
+            "Wow-64",
+            "WowClassic",
+            "WowClassicT",
+            "WowClassicB",
+            "WowT",
+            "WowB"
+        };
+
+        public static bool IsRunning(string fakeProcessName)
+        {
+            string[] names = string.IsNullOrEmpty(fakeProcessName) ? KnownWowNames : new string[] { fakeProcessName };
+            for (int n = 0; n < names.Length; n++)
+            {
+                Process[] procs = null;
+                try
+                {
+                    procs = Process.GetProcessesByName(names[n]);
+                    if (procs.Length > 0)
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // ignore and check the next known name
+                }
+                finally
+                {
+                    if (procs != null)
+                    {
+                        for (int i = 0; i < procs.Length; i++)
+                        {
+                            try { procs[i].Dispose(); } catch { }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    // settings.json's background-updater keys, with the contract's
+    // defaults and interval clamp applied once here so every reader (the
+    // scheduling loop, --tray-selftest, the once-a-minute disabled check)
+    // sees the same values.
+    internal class TrayBackgroundSettings
+    {
+        public bool BackgroundUpdates;
+        public int IntervalMinutes;
+        public bool RunAtStartup;
+    }
+
+    internal static class TraySettingsReader
+    {
+        public const int DefaultIntervalMinutes = 120;
+        public const int MinIntervalMinutes = 30;
+        public const int MaxIntervalMinutes = 1440;
+
+        public static TrayBackgroundSettings Read(string settingsPath)
+        {
+            Dictionary<string, object> settings = HostFiles.LoadJsonObject(settingsPath);
+            TrayBackgroundSettings result = new TrayBackgroundSettings();
+
+            object v;
+            result.BackgroundUpdates = (settings.TryGetValue("backgroundUpdates", out v) && v != null)
+                ? JsonUtil.ToBool(v, false)
+                : false;
+
+            int interval = DefaultIntervalMinutes;
+            if (settings.TryGetValue("backgroundIntervalMinutes", out v) && v != null)
+            {
+                interval = JsonUtil.ToInt(v, DefaultIntervalMinutes);
+            }
+            if (interval < MinIntervalMinutes) interval = MinIntervalMinutes;
+            if (interval > MaxIntervalMinutes) interval = MaxIntervalMinutes;
+            result.IntervalMinutes = interval;
+
+            result.RunAtStartup = (settings.TryGetValue("runAtStartup", out v) && v != null)
+                ? JsonUtil.ToBool(v, false)
+                : false;
+
+            return result;
+        }
+    }
+
+    // Process-level entry point for tray mode: owns the single-instance
+    // mutex (contract: a second --tray exits immediately with code 0
+    // after logging) and hands off to TrayForm, which does the real work
+    // under a normal Application.Run message loop (needed for the
+    // NotifyIcon, its context menu, and System.Windows.Forms.Timer/
+    // Control.Invoke marshaling from the background cycle thread).
+    internal static class TrayProgram
+    {
+        public const string MutexName = "FurphyAddonManager.Tray";
+        public const string StopEventName = "FurphyAddonManager.TrayStop";
+
+        public static int Run(HostOptions options, bool dpiAware)
+        {
+            bool createdNew = false;
+            Mutex mutex = null;
+            try
+            {
+                mutex = new Mutex(true, MutexName, out createdNew);
+            }
+            catch
+            {
+                mutex = null;
+                createdNew = false;
+            }
+
+            if (mutex == null || !createdNew)
+            {
+                string exeDir = HostFiles.ExeDir();
+                string settingsPath = HostFiles.FindUpward(exeDir, "settings.json", 4);
+                string logDir = settingsPath != null ? Path.GetDirectoryName(settingsPath) : exeDir;
+                LogWriter.Append(Path.Combine(logDir, "host.log"),
+                    "[tray] another tray instance already holds the mutex - exiting");
+                if (options.TraySelftestActive)
+                {
+                    WriteMutexBusyMarker(options);
+                }
+                if (mutex != null) { try { mutex.Close(); } catch { } }
+                return 0;
+            }
+
+            try
+            {
+                using (TrayForm form = new TrayForm(options, dpiAware))
+                {
+                    Application.Run(form);
+                    return form.ExitCode;
+                }
+            }
+            finally
+            {
+                try { mutex.ReleaseMutex(); } catch { }
+                try { mutex.Close(); } catch { }
+            }
+        }
+
+        // Best-effort marker for the (untested-by-design, but must not
+        // hang whoever is waiting on the marker file) case where
+        // --tray-selftest is run while a real --tray already owns the
+        // mutex. Every field the real marker writes is present, just
+        // reflecting "did nothing" (mutexHeld=false is the tell).
+        private static void WriteMutexBusyMarker(HostOptions options)
+        {
+            if (string.IsNullOrEmpty(options.TraySelftestMarkerPath)) return;
+            Dictionary<string, object> marker = new Dictionary<string, object>();
+            marker["iconShown"] = false;
+            marker["tooltip"] = null;
+            marker["lastResult"] = null;
+            marker["updatedNames"] = new List<string>();
+            marker["failedNames"] = new List<string>();
+            marker["jobId"] = null;
+            marker["jobPostStatus"] = null;
+            marker["serverStarted"] = false;
+            marker["clickAction"] = null;
+            marker["runValueWritten"] = null;
+            marker["runValueRemoved"] = false;
+            marker["stateFileWritten"] = false;
+            marker["mutexHeld"] = false;
+            marker["exitCode"] = (long)0;
+            try
+            {
+                string json = MiniJson.Write(marker);
+                string tmpPath = options.TraySelftestMarkerPath + ".tmp";
+                File.WriteAllText(tmpPath, json, new UTF8Encoding(false));
+                if (File.Exists(options.TraySelftestMarkerPath))
+                {
+                    try { File.Delete(options.TraySelftestMarkerPath); } catch { }
+                }
+                File.Move(tmpPath, options.TraySelftestMarkerPath);
+            }
+            catch { }
+        }
+    }
+
+    // Outcome of one sync cycle, surfaced on the --tray-selftest marker
+    // (jobId/jobPostStatus/serverStarted) in addition to updating the
+    // TrayForm instance fields that feed tray-state.json and the tooltip.
+    internal class TrayCycleOutcome
+    {
+        public string JobId;
+        public int? JobPostStatus;
+        public bool ServerStarted;
+    }
+
+    // The tray itself: a Form that is never shown (SetVisibleCore/
+    // CreateParams below) so Application.Run(form) still gives the
+    // NotifyIcon, its ContextMenuStrip, and Control.Invoke marshaling a
+    // real message loop, exactly like MainForm gets for the main window,
+    // without ever creating a visible window of its own.
+    internal class TrayForm : Form
+    {
+        private readonly HostOptions _options;
+        private readonly bool _dpiAware;
+        private readonly int _pid;
+        private readonly string _exePath;
+        private readonly string _exeDir;
+        private readonly string _settingsPath;
+        private readonly string _hostLogPath;
+        private readonly string _trayStatePath;
+        private readonly string _addonServerScriptPath;
+        private readonly int _port;
+
+        private NotifyIcon _icon;
+        private ContextMenuStrip _menu;
+        private ToolStripMenuItem _startupMenuItem;
+
+        private EventWaitHandle _stopEvent;
+        private readonly AutoResetEvent _manualTrigger = new AutoResetEvent(false);
+        private Thread _workerThread;
+
+        private readonly object _launchLock = new object();
+        private DateTime _lastLaunchAttemptUtc = DateTime.MinValue;
+
+        private readonly object _stateLock = new object();
+        private string _tooltipCurrent;
+        private string _lastResult;
+        private List<string> _updatedNames = new List<string>();
+        private List<string> _failedNames = new List<string>();
+        private string _message;
+        private DateTime? _lastRunAtUtc;
+        private DateTime? _nextRunAtUtc;
+        private bool _stateFileWritten;
+
+        public int ExitCode;
+
+        public TrayForm(HostOptions options, bool dpiAware)
+        {
+            _options = options;
+            _dpiAware = dpiAware;
+
+            // Never actually shown - see SetVisibleCore/CreateParams -
+            // but give it sane bounds anyway in case some future code
+            // path forgets and calls Show().
+            ShowInTaskbar = false;
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-32000, -32000);
+            Size = new Size(1, 1);
+
+            _pid = Process.GetCurrentProcess().Id;
+            _exePath = Application.ExecutablePath;
+            _exeDir = HostFiles.ExeDir();
+            _settingsPath = HostFiles.FindUpward(_exeDir, "settings.json", 4);
+            string logDir = _settingsPath != null ? Path.GetDirectoryName(_settingsPath) : _exeDir;
+            _hostLogPath = Path.Combine(logDir, "host.log");
+            _trayStatePath = Path.Combine(logDir, "tray-state.json");
+            _addonServerScriptPath = HostFiles.FindUpward(_exeDir, "addon-server.ps1", 4);
+            _port = PortResolver.Resolve(_options, _settingsPath);
+
+            bool createdNewEvent;
+            try
+            {
+                _stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, TrayProgram.StopEventName, out createdNewEvent);
+            }
+            catch
+            {
+                // Falls back to an unnamed handle so the tray still runs
+                // (just not externally stoppable by name) rather than
+                // crashing outright on some locked-down environment.
+                _stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset);
+            }
+
+            BuildTrayIcon();
+            BuildContextMenu();
+            _icon.ContextMenuStrip = _menu;
+
+            LogHost("[tray] starting pid=" + _pid.ToString(CultureInfo.InvariantCulture) +
+                " port=" + _port.ToString(CultureInfo.InvariantCulture) +
+                " selftest=" + _options.TraySelftestActive.ToString());
+
+            WriteStateFile(true);
+
+            FormClosing += new FormClosingEventHandler(TrayForm_FormClosing);
+
+            // Force the native window handle to exist right now instead
+            // of relying on the Show()/Load choreography Application.Run
+            // normally drives - SetVisibleCore below always substitutes
+            // false for the real OS-level show, so waiting on Load here
+            // would be one more thing depending on WinForms internals
+            // this file has no control over. BeginInvoke/Control.Invoke
+            // marshaling and the background work started right after just
+            // need IsHandleCreated to already be true, which referencing
+            // Handle guarantees for a standalone top-level form like this.
+            IntPtr forceHandle = Handle;
+            StartBackgroundWork();
+        }
+
+        private void StartBackgroundWork()
+        {
+            if (_options.TraySelftestActive)
+            {
+                ThreadPool.QueueUserWorkItem(delegate(object state) { RunSelftestSequenceSafe(); });
+            }
+            else
+            {
+                _workerThread = new Thread(new ThreadStart(WorkerLoop));
+                _workerThread.IsBackground = true;
+                _workerThread.Name = "FurphyTrayWorker";
+                _workerThread.Start();
+            }
+        }
+
+        // Keeps the form permanently invisible regardless of who calls
+        // Show()/Visible=true (Application.Run(form) calls Show() itself)
+        // - the standard "tray-only, no window" WinForms idiom.
+        protected override void SetVisibleCore(bool value)
+        {
+            base.SetVisibleCore(false);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80; // WS_EX_TOOLWINDOW - keeps it out of the taskbar/alt-tab
+                return cp;
+            }
+        }
+
+        private void TrayForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            try { if (_icon != null) { _icon.Visible = false; } } catch { }
+            try { if (_icon != null) { _icon.Dispose(); } } catch { }
+            try { if (_stopEvent != null) { _stopEvent.Close(); } } catch { }
+        }
+
+        // -------------------------------------------------- tray icon/menu
+
+        private void BuildTrayIcon()
+        {
+            _icon = new NotifyIcon();
+            string iconPath = HostFiles.FindUpward(_exeDir, "icon.ico", 1);
+            if (iconPath != null)
+            {
+                try { _icon.Icon = new Icon(iconPath); }
+                catch { _icon.Icon = SystemIcons.Application; }
+            }
+            else
+            {
+                _icon.Icon = SystemIcons.Application;
+            }
+            string startupText = TruncateTooltip("Furphy - Starting...");
+            _icon.Text = startupText;
+            _tooltipCurrent = startupText;
+            _message = startupText;
+            _icon.MouseClick += new MouseEventHandler(Icon_MouseClick);
+            _icon.MouseDoubleClick += new MouseEventHandler(Icon_MouseDoubleClick);
+            _icon.Visible = true;
+        }
+
+        private void BuildContextMenu()
+        {
+            _menu = new ContextMenuStrip();
+
+            ToolStripMenuItem openItem = new ToolStripMenuItem("Open Furphy Addon Manager");
+            openItem.Click += new EventHandler(MenuOpen_Click);
+            _menu.Items.Add(openItem);
+
+            ToolStripMenuItem checkItem = new ToolStripMenuItem("Check for updates now");
+            checkItem.Click += new EventHandler(MenuCheckNow_Click);
+            _menu.Items.Add(checkItem);
+
+            _menu.Items.Add(new ToolStripSeparator());
+
+            _startupMenuItem = new ToolStripMenuItem("Start with Windows");
+            _startupMenuItem.CheckOnClick = false;
+            _startupMenuItem.Checked = StartupRegistry.Exists();
+            _startupMenuItem.Click += new EventHandler(MenuStartup_Click);
+            _menu.Items.Add(_startupMenuItem);
+
+            _menu.Items.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem quitItem = new ToolStripMenuItem("Quit");
+            quitItem.Click += new EventHandler(MenuQuit_Click);
+            _menu.Items.Add(quitItem);
+
+            _menu.Opening += new System.ComponentModel.CancelEventHandler(Menu_Opening);
+        }
+
+        private void Menu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            try { _startupMenuItem.Checked = StartupRegistry.Exists(); } catch { }
+        }
+
+        private void MenuOpen_Click(object sender, EventArgs e)
+        {
+            ActivateOrLaunch(false);
+        }
+
+        private void MenuCheckNow_Click(object sender, EventArgs e)
+        {
+            LogHost("[tray] check-now requested from menu");
+            try { _manualTrigger.Set(); } catch { }
+        }
+
+        private void MenuStartup_Click(object sender, EventArgs e)
+        {
+            bool currentlyOn = StartupRegistry.Exists();
+            if (currentlyOn)
+            {
+                StartupRegistry.Disable();
+                LogHost("[tray] Start with Windows disabled via menu");
+            }
+            else
+            {
+                StartupRegistry.Enable(_exePath);
+                LogHost("[tray] Start with Windows enabled via menu");
+            }
+            try { _startupMenuItem.Checked = StartupRegistry.Exists(); } catch { }
+        }
+
+        private void MenuQuit_Click(object sender, EventArgs e)
+        {
+            LogHost("[tray] quit selected");
+            try { _stopEvent.Set(); } catch { }
+        }
+
+        private void Icon_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                ActivateOrLaunch(false);
+            }
+        }
+
+        private void Icon_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                ActivateOrLaunch(false);
+            }
+        }
+
+        // Brings an existing main window to the front, or starts a new
+        // one - never both, and never two new processes for one rapid
+        // double-click (the 5s cooldown below covers the gap between
+        // Process.Start returning and the new process's window actually
+        // existing for FindWindow to see). dryRun (--tray-selftest) skips
+        // the actual Process.Start but still reports what would happen.
+        private string ActivateOrLaunch(bool dryRun)
+        {
+            lock (_launchLock)
+            {
+                bool activated = WindowActivation.ActivateWindowByTitle(AppConstants.WindowTitle);
+                if (activated)
+                {
+                    LogHost("[tray] activated existing window");
+                    return "activate";
+                }
+
+                if (dryRun)
+                {
+                    return "launch";
+                }
+
+                if ((DateTime.UtcNow - _lastLaunchAttemptUtc).TotalSeconds < 5)
+                {
+                    return "launch";
+                }
+                _lastLaunchAttemptUtc = DateTime.UtcNow;
+                StartMainProcess();
+                LogHost("[tray] launched main window process");
+                return "launch";
+            }
+        }
+
+        private void StartMainProcess()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(_exePath,
+                    "--port " + _port.ToString(CultureInfo.InvariantCulture));
+                psi.WorkingDirectory = Path.GetDirectoryName(_exePath);
+                psi.UseShellExecute = false;
+                Process p = Process.Start(psi);
+                if (p != null) { p.Dispose(); }
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] failed to launch main window: " + ex.Message);
+            }
+        }
+
+        // -------------------------------------------------- scheduling
+
+        private void WorkerLoop()
+        {
+            try
+            {
+                LogHost("[tray] background loop started - first cycle in ~90s");
+                if (WaitForNextCycle(90))
+                {
+                    FinalizeExit();
+                    return;
+                }
+
+                while (true)
+                {
+                    TrayBackgroundSettings settings = TraySettingsReader.Read(_settingsPath);
+                    RunCycle(settings);
+
+                    int waitSeconds;
+                    lock (_stateLock)
+                    {
+                        if (_nextRunAtUtc.HasValue)
+                        {
+                            double secs = (_nextRunAtUtc.Value - DateTime.UtcNow).TotalSeconds;
+                            waitSeconds = secs > 0 ? (int)secs : 0;
+                        }
+                        else
+                        {
+                            waitSeconds = settings.IntervalMinutes * 60;
+                        }
+                    }
+
+                    if (WaitForNextCycle(waitSeconds))
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] worker loop crashed: " + ex.Message);
+            }
+            FinalizeExit();
+        }
+
+        // Waits up to totalSeconds, checking every <=60s slice for the
+        // stop event (returns true immediately - "stop the loop"), a
+        // manual "check now" trigger (returns false early - "run a cycle
+        // now"), or settings.json's backgroundUpdates having gone false
+        // (returns true - contract's once-a-minute disabled check; here
+        // effectively every slice, which only ever checks more often than
+        // required).
+        private bool WaitForNextCycle(int totalSeconds)
+        {
+            WaitHandle[] handles = new WaitHandle[] { _stopEvent, _manualTrigger };
+            int remaining = totalSeconds;
+            while (true)
+            {
+                int slice = remaining < 60 ? remaining : 60;
+                if (slice < 1) slice = 1;
+                int idx = WaitHandle.WaitAny(handles, slice * 1000);
+                if (idx == 0)
+                {
+                    LogHost("[tray] stop event signaled");
+                    return true;
+                }
+                if (idx == 1)
+                {
+                    LogHost("[tray] manual check-now trigger fired");
+                    return false;
+                }
+                TrayBackgroundSettings s = TraySettingsReader.Read(_settingsPath);
+                if (!s.BackgroundUpdates)
+                {
+                    LogHost("[tray] backgroundUpdates is now false - exiting");
+                    return true;
+                }
+                remaining -= slice;
+                if (remaining <= 0) return false;
+            }
+        }
+
+        private void FinalizeExit()
+        {
+            WriteStateFile(false);
+            LogHost("[tray] exiting");
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new MethodInvoker(delegate() { ExitCode = 0; Close(); }));
+                }
+            }
+            catch { }
+        }
+
+        // -------------------------------------------------- the cycle itself
+
+        private TrayCycleOutcome RunCycle(TrayBackgroundSettings settings)
+        {
+            TrayCycleOutcome outcome = new TrayCycleOutcome();
+            LogHost("[tray] cycle start");
+            SetTooltip("Furphy - Checking...");
+
+            // (a) WoW running check.
+            if (WowDetector.IsRunning(_options.WowFakeProcessName))
+            {
+                LogHost("[tray] cycle skipped: WoW is running");
+                CompleteCycle("skipped_wow_running", new List<string>(), new List<string>(),
+                    "Furphy - Waiting: WoW is running", DateTime.UtcNow.AddMinutes(10), false);
+                return outcome;
+            }
+
+            // (b) ensure the server answers /api/ping, starting it if not.
+            bool pingOk = Http.GetString(PingUrl(), 3000) != null;
+            if (!pingOk)
+            {
+                outcome.ServerStarted = TryStartServer();
+                DateTime pingDeadline = DateTime.UtcNow.AddSeconds(20);
+                while (DateTime.UtcNow < pingDeadline)
+                {
+                    if (Http.GetString(PingUrl(), 2000) != null) { pingOk = true; break; }
+                    // Same responsiveness fix as the job-poll loop below:
+                    // a stop request during the ping-wait should not add
+                    // up to 20s of extra delay before the tray can exit.
+                    if (_stopEvent.WaitOne(1000))
+                    {
+                        LogHost("[tray] stop requested while waiting for addon-server");
+                        return outcome;
+                    }
+                }
+            }
+            if (!pingOk)
+            {
+                LogHost("[tray] cycle error: addon-server did not answer /api/ping");
+                CompleteCycle("error", new List<string>(), new List<string>(),
+                    "Furphy - Could not reach the addon server",
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                return outcome;
+            }
+
+            // (c) POST /api/jobs {"kind":"sync"}.
+            HttpResult postResult = Http.PostJson(JobsUrl(), "{\"kind\":\"sync\"}", 10000);
+            outcome.JobPostStatus = postResult.StatusCode;
+            if (postResult.StatusCode == 409)
+            {
+                LogHost("[tray] cycle skipped: server busy (409)");
+                CompleteCycle("skipped_busy", new List<string>(), new List<string>(),
+                    "Furphy - Waiting: another job is running", DateTime.UtcNow.AddMinutes(5), false);
+                return outcome;
+            }
+            if (postResult.NetworkError || postResult.StatusCode != 202)
+            {
+                LogHost("[tray] cycle error: POST /api/jobs status=" + postResult.StatusCode.ToString(CultureInfo.InvariantCulture));
+                CompleteCycle("error", new List<string>(), new List<string>(),
+                    "Furphy - Sync request failed",
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                return outcome;
+            }
+            string jobId = ExtractJobId(postResult.Body);
+            outcome.JobId = jobId;
+            if (string.IsNullOrEmpty(jobId))
+            {
+                LogHost("[tray] cycle error: POST /api/jobs returned no jobId");
+                CompleteCycle("error", new List<string>(), new List<string>(),
+                    "Furphy - Sync request failed",
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                return outcome;
+            }
+
+            // (d) poll GET /api/jobs/<id> every 2s, cap 15 minutes.
+            DateTime pollDeadline = DateTime.UtcNow.AddMinutes(15);
+            Dictionary<string, object> finalJob = null;
+            bool interrupted = false;
+            while (DateTime.UtcNow < pollDeadline)
+            {
+                // Wait on the stop event instead of a blind sleep so
+                // Quit / a stage-B TrayStop signal during a sync is
+                // honored within ~2s instead of blocking exit for up to
+                // 15 minutes.
+                if (_stopEvent.WaitOne(2000))
+                {
+                    LogHost("[tray] stop requested mid-cycle");
+                    interrupted = true;
+                    break;
+                }
+                string body = Http.GetString(JobUrl(jobId), 5000);
+                if (string.IsNullOrEmpty(body)) continue;
+                Dictionary<string, object> job = MiniJson.Parse(body) as Dictionary<string, object>;
+                if (job == null) continue;
+
+                object progressObj;
+                if (job.TryGetValue("progress", out progressObj) && progressObj is Dictionary<string, object>)
+                {
+                    SetTooltip(BuildProgressTooltip((Dictionary<string, object>)progressObj));
+                }
+
+                object stateObj;
+                string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
+                if (state == "done" || state == "failed")
+                {
+                    finalJob = job;
+                    break;
+                }
+            }
+
+            if (interrupted)
+            {
+                // Stop was requested mid-poll - exit quietly without
+                // recording an "error" cycle; WorkerLoop/RunSelftestSequence
+                // is about to shut the tray down anyway.
+                return outcome;
+            }
+
+            if (finalJob == null)
+            {
+                LogHost("[tray] cycle error: sync job did not finish within 15 minutes");
+                CompleteCycle("error", new List<string>(), new List<string>(),
+                    "Furphy - Sync timed out",
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                return outcome;
+            }
+
+            // (e) classify results.
+            List<string> updated = new List<string>();
+            List<string> failed = new List<string>();
+            object resultsObj;
+            if (finalJob.TryGetValue("results", out resultsObj) && resultsObj is List<object>)
+            {
+                List<object> results = (List<object>)resultsObj;
+                for (int i = 0; i < results.Count; i++)
+                {
+                    Dictionary<string, object> row = results[i] as Dictionary<string, object>;
+                    if (row == null) continue;
+                    object statusObj;
+                    object nameObj;
+                    string status = row.TryGetValue("status", out statusObj) ? statusObj as string : null;
+                    string name = row.TryGetValue("name", out nameObj) ? nameObj as string : null;
+                    if (string.IsNullOrEmpty(name)) name = "?";
+                    if (string.Equals(status, "Installed", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(status, "Updated", StringComparison.OrdinalIgnoreCase))
+                    {
+                        updated.Add(name);
+                    }
+                    else if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        failed.Add(name);
+                    }
+                }
+            }
+
+            // A hard job-level failure (sync CLI crashed, execution
+            // policy error, results never populated) comes back as
+            // state=="failed" with an empty results list - do not let
+            // that silently fall through to "up_to_date" below.
+            object jobStateObj;
+            string jobState = finalJob.TryGetValue("state", out jobStateObj) ? jobStateObj as string : null;
+            if (string.Equals(jobState, "failed", StringComparison.OrdinalIgnoreCase) &&
+                failed.Count == 0 && updated.Count == 0)
+            {
+                object errObj;
+                string errMsg = (finalJob.TryGetValue("error", out errObj) && errObj != null)
+                    ? Convert.ToString(errObj, CultureInfo.InvariantCulture)
+                    : "sync job failed";
+                LogHost("[tray] cycle error: sync job failed: " + errMsg);
+                CompleteCycle("error", updated, failed,
+                    "Furphy - Sync failed: " + errMsg,
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
+                return outcome;
+            }
+
+            string nowStamp = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture);
+            string result;
+            string message;
+            bool balloon;
+            if (failed.Count > 0)
+            {
+                result = "failed";
+                message = (failed.Count == 1)
+                    ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
+                    : "Furphy - " + failed.Count.ToString(CultureInfo.InvariantCulture) +
+                        " addons failed to update at " + nowStamp + " - open for details";
+                balloon = true;
+            }
+            else if (updated.Count > 0)
+            {
+                result = "updated";
+                message = "Furphy - Updated " + updated.Count.ToString(CultureInfo.InvariantCulture) +
+                    " at " + nowStamp + ": " + JoinNames(updated);
+                balloon = true;
+            }
+            else
+            {
+                result = "up_to_date";
+                message = "Furphy - Everything's up to date - checked " + nowStamp;
+                balloon = false;
+            }
+
+            LogHost("[tray] cycle done result=" + result +
+                " updated=" + updated.Count.ToString(CultureInfo.InvariantCulture) +
+                " failed=" + failed.Count.ToString(CultureInfo.InvariantCulture));
+            CompleteCycle(result, updated, failed, message, DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), balloon);
+            return outcome;
+        }
+
+        private void CompleteCycle(string result, List<string> updated, List<string> failed, string message,
+            DateTime nextRunAtUtc, bool balloon)
+        {
+            string truncated = TruncateTooltip(message);
+            lock (_stateLock)
+            {
+                _lastResult = result;
+                _updatedNames = updated;
+                _failedNames = failed;
+                _message = truncated;
+                _lastRunAtUtc = DateTime.UtcNow;
+                _nextRunAtUtc = nextRunAtUtc;
+            }
+            SetTooltip(truncated);
+            WriteStateFile(true);
+            if (balloon)
+            {
+                ShowBalloon(result, truncated);
+            }
+        }
+
+        private static string JoinNames(List<string> names)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(names[i]);
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildProgressTooltip(Dictionary<string, object> progress)
+        {
+            object indexObj;
+            object totalObj;
+            int index = progress.TryGetValue("index", out indexObj) ? JsonUtil.ToInt(indexObj, 0) : 0;
+            int total = progress.TryGetValue("total", out totalObj) ? JsonUtil.ToInt(totalObj, 0) : 0;
+            if (total > 0)
+            {
+                return "Furphy - Updating " + index.ToString(CultureInfo.InvariantCulture) +
+                    " of " + total.ToString(CultureInfo.InvariantCulture) + "...";
+            }
+            return "Furphy - Checking...";
+        }
+
+        private static string ExtractJobId(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return null;
+            Dictionary<string, object> obj = MiniJson.Parse(body) as Dictionary<string, object>;
+            if (obj == null) return null;
+            object v;
+            if (obj.TryGetValue("jobId", out v) && v != null)
+            {
+                return Convert.ToString(v, CultureInfo.InvariantCulture);
+            }
+            return null;
+        }
+
+        private string PingUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping"; }
+        private string JobsUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs"; }
+        private string JobUrl(string id) { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs/" + id; }
+
+        // Starts addon-server.ps1 exactly as Addon Manager.vbs does, but
+        // from C# with no window flash (UseShellExecute=false,
+        // CreateNoWindow=true) instead of the .vbs's WindowStyle-hidden
+        // sh.Run.
+        private bool TryStartServer()
+        {
+            if (string.IsNullOrEmpty(_addonServerScriptPath))
+            {
+                LogHost("[tray] cannot start server: addon-server.ps1 not found");
+                return false;
+            }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "powershell.exe";
+                psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + _addonServerScriptPath + "\"";
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.WorkingDirectory = Path.GetDirectoryName(_addonServerScriptPath);
+                Process p = Process.Start(psi);
+                if (p != null) { p.Dispose(); }
+                LogHost("[tray] started addon-server.ps1");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] failed to start addon-server.ps1: " + ex.Message);
+                return false;
+            }
+        }
+
+        // -------------------------------------------------- tooltip/state
+
+        private static string TruncateTooltip(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            if (s.Length <= 118) return s;
+            return s.Substring(0, 115) + "...";
+        }
+
+        // Marshals onto the UI thread since this is called from the
+        // background worker/ThreadPool thread but NotifyIcon.Text must be
+        // set from the thread that owns its window.
+        private void SetTooltip(string text)
+        {
+            string t = TruncateTooltip(text);
+            lock (_stateLock) { _tooltipCurrent = t; }
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new MethodInvoker(delegate() { try { _icon.Text = t; } catch { } }));
+                }
+                else
+                {
+                    try { _icon.Text = t; } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void ShowBalloon(string result, string tooltipText)
+        {
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new MethodInvoker(delegate()
+                    {
+                        try
+                        {
+                            _icon.BalloonTipTitle = AppConstants.WindowTitle;
+                            _icon.BalloonTipText = tooltipText;
+                            _icon.BalloonTipIcon = (result == "failed") ? ToolTipIcon.Warning : ToolTipIcon.Info;
+                            _icon.ShowBalloonTip(8000);
+                        }
+                        catch { }
+                    }));
+                }
+            }
+            catch { }
+        }
+
+        // Rewrites tray-state.json atomically. Reuses HostFiles.
+        // UpdateJsonObject's temp-file-then-move write by clearing the
+        // dictionary it hands the mutator and refilling it from scratch -
+        // this file is a full snapshot each cycle, not a merge.
+        private void WriteStateFile(bool running)
+        {
+            string lastResult;
+            List<string> updated;
+            List<string> failed;
+            string message;
+            DateTime? lastRunAtUtc;
+            DateTime? nextRunAtUtc;
+            lock (_stateLock)
+            {
+                lastResult = _lastResult;
+                updated = new List<string>(_updatedNames);
+                failed = new List<string>(_failedNames);
+                message = _message;
+                lastRunAtUtc = _lastRunAtUtc;
+                nextRunAtUtc = _nextRunAtUtc;
+            }
+
+            Dictionary<string, object> snapshot = new Dictionary<string, object>();
+            snapshot["running"] = running;
+            snapshot["pid"] = (long)_pid;
+            snapshot["lastRunAt"] = lastRunAtUtc.HasValue ? (object)ToIso(lastRunAtUtc.Value) : null;
+            snapshot["lastResult"] = lastResult;
+            snapshot["updatedNames"] = updated;
+            snapshot["failedNames"] = failed;
+            snapshot["message"] = message;
+            snapshot["nextRunAt"] = nextRunAtUtc.HasValue ? (object)ToIso(nextRunAtUtc.Value) : null;
+
+            HostFiles.UpdateJsonObject(_trayStatePath, delegate(Dictionary<string, object> d)
+            {
+                d.Clear();
+                foreach (KeyValuePair<string, object> kv in snapshot)
+                {
+                    d[kv.Key] = kv.Value;
+                }
+            });
+            _stateFileWritten = true;
+        }
+
+        private static string ToIso(DateTime utc)
+        {
+            return utc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        }
+
+        private void LogHost(string message)
+        {
+            LogWriter.Append(_hostLogPath, message);
+        }
+
+        // -------------------------------------------------- --tray-selftest
+
+        // Guards the whole selftest sequence: an unhandled exception on a
+        // ThreadPool thread would otherwise kill the process outright
+        // (default .NET Framework behavior), skipping WriteMarker and
+        // FinalizeExit - leaving a ghost tray icon and hanging whatever
+        // test harness is waiting on the marker file. This mirrors the
+        // guarantee WorkerLoop's own try/catch + FinalizeExit already
+        // gives the real --tray path.
+        private void RunSelftestSequenceSafe()
+        {
+            try
+            {
+                RunSelftestSequence();
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] selftest sequence crashed: " + ex.Message);
+                WriteSelftestCrashMarker(ex);
+            }
+            finally
+            {
+                FinalizeExit();
+            }
+        }
+
+        // Best-effort marker for the case RunSelftestSequenceSafe's catch
+        // handles - same field shape as the normal marker and
+        // WriteMutexBusyMarker, but reflecting "started, then crashed"
+        // (mutexHeld stays true since this process still holds it;
+        // exitCode is 1 so a caller can tell the run did not complete
+        // cleanly). Never includes exception detail beyond ex.Message,
+        // which is already local file/path/status text, not a secret.
+        private void WriteSelftestCrashMarker(Exception ex)
+        {
+            if (string.IsNullOrEmpty(_options.TraySelftestMarkerPath)) return;
+            Dictionary<string, object> marker = new Dictionary<string, object>();
+            marker["iconShown"] = false;
+            try { marker["iconShown"] = _icon != null && _icon.Visible; } catch { }
+            marker["tooltip"] = "selftest crashed: " + ex.Message;
+            marker["lastResult"] = "error";
+            marker["updatedNames"] = new List<string>();
+            marker["failedNames"] = new List<string>();
+            marker["jobId"] = null;
+            marker["jobPostStatus"] = null;
+            marker["serverStarted"] = false;
+            marker["clickAction"] = null;
+            marker["runValueWritten"] = null;
+            marker["runValueRemoved"] = false;
+            marker["stateFileWritten"] = _stateFileWritten;
+            marker["mutexHeld"] = true;
+            marker["exitCode"] = (long)1;
+            WriteMarker(marker);
+        }
+
+        private void RunSelftestSequence()
+        {
+            bool iconShown = false;
+            try { iconShown = _icon != null && _icon.Visible; } catch { }
+
+            TrayBackgroundSettings settings = TraySettingsReader.Read(_settingsPath);
+            TrayCycleOutcome outcome = RunCycle(settings);
+
+            string clickAction = ActivateOrLaunch(true);
+
+            // Toggle Start with Windows on, record the exact value text,
+            // then always disable it again - the harness must not leave
+            // the Run value behind after a test run.
+            string runValueWritten = null;
+            bool runValueRemoved = false;
+            try
+            {
+                StartupRegistry.Enable(_exePath);
+                runValueWritten = StartupRegistry.ReadValue();
+            }
+            finally
+            {
+                bool disabled = StartupRegistry.Disable();
+                runValueRemoved = disabled && !StartupRegistry.Exists();
+            }
+            // Marshal onto the UI thread like SetTooltip/ShowBalloon do -
+            // this runs on a ThreadPool thread and ToolStripMenuItem is
+            // still UI state even though it won't throw the cross-thread
+            // exception a Control would.
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    bool startupExists = StartupRegistry.Exists();
+                    BeginInvoke(new MethodInvoker(delegate()
+                    {
+                        try { _startupMenuItem.Checked = startupExists; } catch { }
+                    }));
+                }
+            }
+            catch { }
+
+            string tooltip;
+            string lastResult;
+            List<string> updated;
+            List<string> failed;
+            lock (_stateLock)
+            {
+                tooltip = _tooltipCurrent;
+                lastResult = _lastResult;
+                updated = new List<string>(_updatedNames);
+                failed = new List<string>(_failedNames);
+            }
+
+            Dictionary<string, object> marker = new Dictionary<string, object>();
+            marker["iconShown"] = iconShown;
+            marker["tooltip"] = tooltip;
+            marker["lastResult"] = lastResult;
+            marker["updatedNames"] = updated;
+            marker["failedNames"] = failed;
+            marker["jobId"] = outcome.JobId;
+            marker["jobPostStatus"] = outcome.JobPostStatus.HasValue ? (object)(long)outcome.JobPostStatus.Value : null;
+            marker["serverStarted"] = outcome.ServerStarted;
+            marker["clickAction"] = clickAction;
+            marker["runValueWritten"] = runValueWritten;
+            marker["runValueRemoved"] = runValueRemoved;
+            marker["stateFileWritten"] = _stateFileWritten;
+            marker["mutexHeld"] = true;
+            marker["exitCode"] = (long)0;
+
+            WriteMarker(marker);
+            // FinalizeExit() is called by RunSelftestSequenceSafe's
+            // finally block (both the normal-completion path here and
+            // any crash path go through the same single call now).
+        }
+
+        private void WriteMarker(Dictionary<string, object> marker)
+        {
+            if (string.IsNullOrEmpty(_options.TraySelftestMarkerPath)) return;
+            try
+            {
+                string json = MiniJson.Write(marker);
+                string tmpPath = _options.TraySelftestMarkerPath + ".tmp";
+                File.WriteAllText(tmpPath, json, new UTF8Encoding(false));
+                if (File.Exists(_options.TraySelftestMarkerPath))
+                {
+                    try { File.Delete(_options.TraySelftestMarkerPath); } catch { }
+                }
+                File.Move(tmpPath, _options.TraySelftestMarkerPath);
+                LogHost("[tray] selftest marker written: " + _options.TraySelftestMarkerPath);
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] failed to write selftest marker: " + ex.Message);
             }
         }
     }
