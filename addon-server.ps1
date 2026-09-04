@@ -260,6 +260,23 @@ function Get-DefaultSettings {
         # opaque blob, this shape can also be reached by a client sending
         # arbitrary JSON to the API directly.
         hostTheme          = $null
+        # Round 18 (tray stage B): the native host's background-updater
+        # settings. These three keys are also read directly by
+        # host\FurphyHost.cs's own TraySettingsReader (stage A, already
+        # shipped) - this server round-trips them through the API/SPA the
+        # same way adFilter/cfFocus are round-tripped, with the identical
+        # default/clamp values TraySettingsReader already uses so both
+        # readers of settings.json always agree. backgroundUpdates OFF by
+        # default (Eric never asked for this to run unattended out of the
+        # box); backgroundIntervalMinutes defaults to 120 (2 hours), clamped
+        # 30..1440 on every write; runAtStartup OFF by default and
+        # deliberately independent of backgroundUpdates - see
+        # Handle-SettingsPut's comment and SPEC.md's tray section for the
+        # "Start with Windows also turns background updates on" rule, which
+        # lives in the SPA (ui\app.js), not here.
+        backgroundUpdates          = $false
+        backgroundIntervalMinutes  = 120
+        runAtStartup               = $false
     }
 }
 
@@ -312,6 +329,22 @@ function Get-Settings {
         # the WRITE path (Handle-SettingsPut/Test-HostTheme) where it can
         # actually stop a bad value from being saved in the first place.
         if ($null -ne $obj.hostTheme) { $result.hostTheme = $obj.hostTheme }
+        # Round 18 (tray stage B): backgroundUpdates/runAtStartup are plain
+        # bool coercions, same pattern as adFilter/cfFocus above.
+        # backgroundIntervalMinutes is clamped 30..1440 on READ too (not just
+        # on the PUT path below) so a value hand-edited into settings.json,
+        # or left over from a future build with a wider range, can never
+        # reach the tray/SPA unclamped - matches
+        # host\FurphyHost.cs's TraySettingsReader, which applies the same
+        # clamp on every read for the same reason.
+        if ($null -ne $obj.backgroundUpdates) { $result.backgroundUpdates = [bool]$obj.backgroundUpdates }
+        if ($null -ne $obj.backgroundIntervalMinutes) {
+            $interval = [int]$obj.backgroundIntervalMinutes
+            if ($interval -lt 30) { $interval = 30 }
+            if ($interval -gt 1440) { $interval = 1440 }
+            $result.backgroundIntervalMinutes = $interval
+        }
+        if ($null -ne $obj.runAtStartup) { $result.runAtStartup = [bool]$obj.runAtStartup }
         # Round 16 (E22, 2026-09-04, at Eric's explicit request): the
         # CurseForge API key feature is removed entirely. An existing
         # settings.json from before this round may still carry a stored
@@ -362,6 +395,11 @@ function Get-SettingsView {
         # secret, and the UI never displays it (only the native host reads
         # it, at startup, to paint the right chrome before the page loads).
         hostTheme         = $Settings.hostTheme
+        # Round 18 (tray stage B): pass through unmasked, same as adFilter/
+        # cfFocus - none of these three are secrets.
+        backgroundUpdates         = $Settings.backgroundUpdates
+        backgroundIntervalMinutes = $Settings.backgroundIntervalMinutes
+        runAtStartup              = $Settings.runAtStartup
     }
 }
 
@@ -4463,6 +4501,28 @@ function Handle-SettingsPut {
         }
         $settings.hostTheme = $body.hostTheme
     }
+    # Round 18 (tray stage B): backgroundUpdates/runAtStartup save exactly
+    # like adFilter/cfFocus above - bool coercion, no rejection possible.
+    # backgroundIntervalMinutes is CLAMPED (not rejected with a 400) into
+    # 30..1440, matching the "int clamped 30..1440" pattern the task brief
+    # calls for and the read-path clamp in Get-Settings above - a client
+    # sending 5 or 999999 silently ends up at 30 or 1440 rather than erroring,
+    # consistent with there being no invalid integer here, only an
+    # out-of-range one. The SPA's own interval <select> only ever offers the
+    # five clamp-safe values (60/120/240/480/1440) so this path is a
+    # defense-in-depth backstop, not something the normal UI can trigger.
+    if ($null -ne $body.backgroundUpdates) {
+        $settings.backgroundUpdates = [bool]$body.backgroundUpdates
+    }
+    if ($null -ne $body.backgroundIntervalMinutes) {
+        $interval = [int]$body.backgroundIntervalMinutes
+        if ($interval -lt 30) { $interval = 30 }
+        if ($interval -gt 1440) { $interval = 1440 }
+        $settings.backgroundIntervalMinutes = $interval
+    }
+    if ($null -ne $body.runAtStartup) {
+        $settings.runAtStartup = [bool]$body.runAtStartup
+    }
 
     try {
         Save-Settings -Settings $settings
@@ -4471,6 +4531,247 @@ function Handle-SettingsPut {
         return
     }
     Send-Json -Context $Context -StatusCode 200 -Body (Get-SettingsView -Settings $settings)
+}
+
+# =====================================================================
+# Tray + start-with-Windows (Round 18, tray stage B)
+#
+# Stage A (already shipped, host\FurphyHost.cs) is the actual --tray
+# process: a NotifyIcon-only run mode guarded by the "FurphyAddonManager.Tray"
+# Mutex, exited by setting the "FurphyAddonManager.TrayStop" EventWaitHandle
+# or by backgroundUpdates going false (checked every <=60s), writing
+# tray-state.json next to settings.json on every cycle. This section is the
+# SERVER's half of stage B: start/stop that process, report its state, and
+# register/unregister the HKCU Run value - the SPA (ui\app.js) never touches
+# the registry or spawns FurphyHost.exe directly, only these endpoints do.
+# =====================================================================
+
+function Get-TrayExePath {
+    <# host\bin\FurphyHost.exe under the app root - built by host\build-host.ps1. #>
+    return Join-Path -Path (Join-Path -Path $Script:Root -ChildPath 'host\bin') -ChildPath 'FurphyHost.exe'
+}
+
+function Get-TrayStatePath {
+    <# tray-state.json sits next to settings.json - host\FurphyHost.cs's
+       TrayForm writes it there (Path.Combine(logDir, "tray-state.json") where
+       logDir is settings.json's own directory), so this just mirrors that. #>
+    return Join-Path -Path $Script:Root -ChildPath 'tray-state.json'
+}
+
+function Get-TrayRunValue {
+    <#
+      The exact HKCU Run value string this app's tray contract uses:
+      "<quoted exe path>" --tray (quoted path, one space, --tray). Must stay
+      byte-identical to host\FurphyHost.cs's own
+      StartupRegistry.BuildRunValue, since either side may write it and both
+      sides need to recognize what the other wrote.
+    #>
+    return '"' + (Get-TrayExePath) + '" --tray'
+}
+
+function Read-TrayState {
+    <# Parsed tray-state.json, or $null if missing/empty/unreadable - never throws. #>
+    $path = Get-TrayStatePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        return ($raw | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+}
+
+function Test-TrayProcessAlive {
+    <#
+      True only if $ProcId is a LIVE process that is actually a --tray
+      instance of FurphyHost - guards against a stale tray-state.json (left
+      behind by a crash or a `taskkill`) reporting "running" just because
+      some unrelated process has since reused the same pid.
+
+      A ProcessName match alone is NOT enough here: the tray and the normal
+      foreground app window are the exact same executable
+      (host\bin\FurphyHost.exe), so a crashed/killed tray's pid can be
+      reused by an ordinary (non-tray) launch of that same exe and still
+      pass a name-only check. Cross-checking the live process's own command
+      line for the "--tray" argument (the exact way Handle-TrayStart itself
+      launches it - see Start-Process -ArgumentList '--tray' above) is what
+      actually distinguishes the two.
+    #>
+    param([int]$ProcId)
+
+    if ($ProcId -le 0) { return $false }
+    try {
+        $proc = Get-Process -Id $ProcId -ErrorAction Stop
+        if ($proc.ProcessName -ne 'FurphyHost') { return $false }
+    } catch {
+        return $false
+    }
+    try {
+        $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = " + $ProcId) -ErrorAction Stop
+        if ($null -eq $cim -or [string]::IsNullOrEmpty($cim.CommandLine)) { return $false }
+        return ($cim.CommandLine.TrimEnd() -like '*--tray')
+    } catch {
+        # Get-CimInstance failing (WMI hiccup, access denied, etc.) should
+        # not be treated as "definitely not a tray process" OR "definitely
+        # is one" - fall back to the name-only signal rather than blocking
+        # every tray status check on a transient WMI error.
+        return $true
+    }
+}
+
+function Test-StartupRegistered {
+    <# True only if the HKCU Run value exists AND matches Get-TrayRunValue
+       exactly - a value some other tool wrote under the same name, or a
+       stale one pointing at a moved exe, correctly reads as "not registered"
+       by Furphy's own contract. #>
+    try {
+        $prop = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+        if ($null -eq $prop) { return $false }
+        return ([string]$prop.FurphyAddonManager -ceq (Get-TrayRunValue))
+    } catch {
+        return $false
+    }
+}
+
+function Get-TrayStatusView {
+    <# GET /api/tray/status body. `running` is true only if tray-state.json
+       says running AND that pid is alive AND is actually FurphyHost.exe -
+       see Test-TrayProcessAlive. #>
+    $state = Read-TrayState
+    $running = $false
+    if ($null -ne $state -and $null -ne $state.running -and [bool]$state.running -and $null -ne $state.pid) {
+        $running = Test-TrayProcessAlive -ProcId ([int]$state.pid)
+    }
+    return @{
+        running           = $running
+        state             = $state
+        startupRegistered = (Test-StartupRegistered)
+    }
+}
+
+function Handle-TrayStatus {
+    <# GET /api/tray/status #>
+    param($Context, $RouteMatch)
+
+    try {
+        Send-Json -Context $Context -StatusCode 200 -Body (Get-TrayStatusView)
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-TrayStart {
+    <#
+      POST /api/tray/start - Start-Process host\bin\FurphyHost.exe --tray
+      (a GUI exe; no window-hiding flag needed). 409 if a live tray already
+      holds the job; 501 if the exe was never built.
+    #>
+    param($Context, $RouteMatch)
+
+    try {
+        $status = Get-TrayStatusView
+        if ($status.running) {
+            Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'tray already running'; state = $status.state }
+            return
+        }
+        $exePath = Get-TrayExePath
+        if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+            Send-Json -Context $Context -StatusCode 501 -Body @{ error = 'FurphyHost.exe not found - the native host was not built' }
+            return
+        }
+        $hostBinDir = Split-Path -Path $exePath -Parent
+        Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $hostBinDir | Out-Null
+        Send-Json -Context $Context -StatusCode 202 -Body @{ ok = $true }
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-TrayStop {
+    <#
+      POST /api/tray/stop - signals the "FurphyAddonManager.TrayStop"
+      EventWaitHandle a live --tray process is waiting on. OpenExisting
+      throws (caught, not a 500) when no tray currently holds that name -
+      that is the normal "nothing to stop" case, not a server error, so it
+      still returns 200 with ok:false per the stage-B contract. Reset() is
+      deliberately not called: the contract has the tray exit on this
+      signal, not loop back around waiting for another one.
+    #>
+    param($Context, $RouteMatch)
+
+    $ev = $null
+    try {
+        $ev = [System.Threading.EventWaitHandle]::OpenExisting('FurphyAddonManager.TrayStop')
+        $ev.Set() | Out-Null
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
+    } catch {
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $false; reason = 'not running' }
+    } finally {
+        if ($null -ne $ev) { try { $ev.Close() } catch { } }
+    }
+}
+
+function Handle-StartupRegister {
+    <#
+      POST /api/startup/register - writes HKCU Run "FurphyAddonManager" =
+      Get-TrayRunValue and sets runAtStartup=true. Deliberately does NOT
+      touch backgroundUpdates here - the "turning Start with Windows on also
+      turns background updates on" rule (task brief) is a single-PUT,
+      single-toast SPA-side decision (Actions.setRunAtStartup, ui\app.js),
+      not something this endpoint imposes on every caller.
+    #>
+    param($Context, $RouteMatch)
+
+    try {
+        $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if (-not (Test-Path -LiteralPath $keyPath)) {
+            New-Item -Path $keyPath -Force | Out-Null
+        }
+        Set-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -Value (Get-TrayRunValue) -Type String
+
+        $settings = Get-Settings
+        $settings.runAtStartup = $true
+        Save-Settings -Settings $settings
+
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; settings = (Get-SettingsView -Settings $settings) }
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-StartupUnregister {
+    <# POST /api/startup/unregister - removes the Run value (if present) and sets runAtStartup=false. #>
+    param($Context, $RouteMatch)
+
+    try {
+        $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if (Test-Path -LiteralPath $keyPath) {
+            $existing = Get-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                Remove-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+            }
+        }
+
+        $settings = Get-Settings
+        $settings.runAtStartup = $false
+        Save-Settings -Settings $settings
+
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; settings = (Get-SettingsView -Settings $settings) }
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
+}
+
+function Handle-StartupStatus {
+    <# GET /api/startup/status #>
+    param($Context, $RouteMatch)
+
+    try {
+        Send-Json -Context $Context -StatusCode 200 -Body @{ registered = (Test-StartupRegistered) }
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+    }
 }
 
 # =====================================================================
@@ -4769,6 +5070,13 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/protocol/status$'; Handler = 'Handle-ProtocolStatus' }
     @{ Method = 'POST'; Pattern = '^/api/protocol/register$'; Handler = 'Handle-ProtocolRegister' }
     @{ Method = 'POST'; Pattern = '^/api/protocol/unregister$'; Handler = 'Handle-ProtocolUnregister' }
+    # Round 18 (tray stage B)
+    @{ Method = 'GET'; Pattern = '^/api/tray/status$'; Handler = 'Handle-TrayStatus' }
+    @{ Method = 'POST'; Pattern = '^/api/tray/start$'; Handler = 'Handle-TrayStart' }
+    @{ Method = 'POST'; Pattern = '^/api/tray/stop$'; Handler = 'Handle-TrayStop' }
+    @{ Method = 'POST'; Pattern = '^/api/startup/register$'; Handler = 'Handle-StartupRegister' }
+    @{ Method = 'POST'; Pattern = '^/api/startup/unregister$'; Handler = 'Handle-StartupUnregister' }
+    @{ Method = 'GET'; Pattern = '^/api/startup/status$'; Handler = 'Handle-StartupStatus' }
     @{ Method = 'GET'; Pattern = '^/api/diagnostics$'; Handler = 'Handle-Diagnostics' }
     # Round 16 (E22): the only CurseForge routes left, both keyless - every
     # key-gated /api/cf/* route (search/categories/mods/description/files/
@@ -4887,7 +5195,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.4.0'
+$Script:Version = '1.5.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

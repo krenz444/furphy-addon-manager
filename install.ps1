@@ -23,7 +23,10 @@
    -SkipAdopt        Skip scanning AddOns and adopting untracked folders.
    -Uninstall        Remove the app files, shortcuts and protocol
                       registration. AddOns and addons.json/settings.json/
-                      state.json/logs/backups are left alone.
+                      state.json/logs/backups are left alone. Also removes
+                      the "Start with Windows" registration and stops a
+                      running background tray (Round 18) before deleting
+                      files.
 
  Exit codes: 0 success, 2 could not find/validate the WoW folder.
 =====================================================================
@@ -161,6 +164,62 @@ function Find-BattleNetExe {
 
 if ($Uninstall) {
     Write-Step "Uninstalling Furphy Addon Manager from $retail"
+
+    # Round 18 (tray stage B): stop any running tray before touching files -
+    # the app files removal below deletes host\ (FurphyHost.exe included,
+    # since 'host' is not in $keepDirs further down), which must not happen
+    # while that exe is still running out of the folder being deleted. Order
+    # here matters: remove the Run value FIRST (so a logon during a slow
+    # uninstall can't relaunch the tray), then signal the running instance to
+    # exit, then wait for it before any Remove-Item touches host\.
+    $trayExePath = Join-Path -Path $appDest -ChildPath 'host\bin\FurphyHost.exe'
+    try {
+        $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if (Test-Path -LiteralPath $runKeyPath) {
+            $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                Remove-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+                Write-Info 'Removed "Start with Windows" registration.'
+            }
+        }
+    } catch {
+        Write-Warn2 "Could not remove the Start-with-Windows registry value: $($_.Exception.Message)"
+    }
+
+    $trayStopEvent = $null
+    try {
+        $trayStopEvent = [System.Threading.EventWaitHandle]::OpenExisting('FurphyAddonManager.TrayStop')
+        $trayStopEvent.Set() | Out-Null
+    } catch {
+        # No live tray holds this event - nothing to stop.
+        $trayStopEvent = $null
+    } finally {
+        if ($null -ne $trayStopEvent) { try { $trayStopEvent.Close() } catch { } }
+    }
+
+    if (Test-Path -LiteralPath $trayExePath -PathType Leaf) {
+        $waitedMs = 0
+        $stillRunning = $true
+        while ($waitedMs -lt 10000) {
+            $procs = Get-Process -Name 'FurphyHost' -ErrorAction SilentlyContinue
+            $matched = $false
+            if ($procs) {
+                foreach ($p in $procs) {
+                    try {
+                        if ($p.Path -and ([string]$p.Path).Equals($trayExePath, [System.StringComparison]::OrdinalIgnoreCase)) { $matched = $true }
+                    } catch { }
+                }
+            }
+            if (-not $matched) { $stillRunning = $false; break }
+            Start-Sleep -Milliseconds 500
+            $waitedMs += 500
+        }
+        if ($stillRunning) {
+            Write-Warn2 'The background tray (FurphyHost.exe --tray) did not exit within 10 seconds - it may still be holding files open.'
+        } else {
+            Write-Info 'Background tray stopped.'
+        }
+    }
 
     if (-not $NoProtocol) {
         $regScript = Join-Path -Path $appDest -ChildPath 'register-protocol.ps1'

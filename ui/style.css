@@ -82,6 +82,13 @@
   color-scheme: dark;
 }
 
+/* THEMES-SPEC.md Set B (section 3.2): this theme's own swatch-preview rule for the
+   picker grid, colocated with its token block like every other theme's -
+   "dark" has no [data-theme="dark"] token block of its own (the bare :root
+   above already IS Dark - see the existing chevron comment ~line 1099), so
+   this one rule lives here instead, right after the tokens it previews. */
+.theme-swatch[data-theme-value="dark"] { --sw-bg:#1c1d21; --sw-bg2:#141518; --sw-accent:#f16436; --sw-text:#e7e7ea; }
+
 /* ==========================================================================
    Light theme - swaps every color token above. Applied via [data-theme="light"]
    on <html> (Prefs.setTheme in app.js), stamped there before first paint so
@@ -132,6 +139,9 @@
   --banner-danger-text: #8f1f1f;
   --form-error-text: #9c2b2b;
 }
+
+/* THEMES-SPEC.md Set B (section 3.2): swatch-preview rule for the picker grid. */
+.theme-swatch[data-theme-value="light"] { --sw-bg:#ffffff; --sw-bg2:#f4f5f7; --sw-accent:#d9531f; --sw-text:#1b1c1f; }
 
 /* ==========================================================================
    Vaporwave theme - third Appearance option (E15), applied via
@@ -191,6 +201,9 @@
   --danger-border: rgba(255, 79, 121, 0.35);
   --danger-outline-border: rgba(255, 79, 121, 0.4);
 }
+
+/* THEMES-SPEC.md Set B (section 3.2): swatch-preview rule for the picker grid. */
+.theme-swatch[data-theme-value="vaporwave"] { --sw-bg:#1a0b2e; --sw-bg2:#12081f; --sw-accent:#ff71ce; --sw-text:#f3e9ff; }
 
 /* ==========================================================================
    Lofi Night theme (E15b) - fourth Appearance option, and now the DEFAULT
@@ -265,6 +278,574 @@
   --radius: 10px;
   --radius-lg: 16px;
 }
+
+/* THEMES-SPEC.md Set B (section 3.2): swatch-preview rule for the picker grid. */
+.theme-swatch[data-theme-value="lofi"] { --sw-bg:#161b34; --sw-bg2:#0f1226; --sw-accent:#ffb86b; --sw-text:#f2eee6; }
+
+/* ==========================================================================
+   Round 18 theme expansion (Set A) - ten new Appearance options, chosen and
+   specced end-to-end in THEMES-SPEC.md section 1 (concept, judge-verified
+   contrast ratios, verbatim token blocks). Applied via [data-theme="X"] the
+   same way Light/Vaporwave/Lofi Night are applied above. Each block below
+   redefines every token the dark theme defines (nothing falls through) plus
+   whatever extra tokens (--secondary, --accent-active, geometry) that theme
+   needs, exactly as given in the spec. Each block's own `.theme-swatch[data-
+   theme-value="X"]` preview rule is colocated right after it per THEMES-SPEC
+   section 3.2, so a palette update and its swatch preview can never drift
+   apart. The picker's base grid/swatch CSS (`.theme-grid`, `.theme-swatch`,
+   etc.) and the four swatch-preview rules for Dark/Light/Vaporwave/Lofi Night
+   were added by the later Set B change set (see the "Round 18 (Set B -
+   picker)" block further down this file) - Dark/Light/Vaporwave/Lofi Night's
+   own token blocks above remain byte-for-byte unchanged.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Terminal Green - terminal-green
+   -------------------------------------------------------------------------- */
+:root[data-theme="terminal-green"] {
+  color-scheme: dark;
+  --bg-0: #050806;
+  --bg-1: #0a100c;
+  --bg-2: #101a13;
+  --bg-3: #17251b;
+  --border: #1f3524;
+  --border-soft: #132015;
+  --border-hover: #2c4a34;
+
+  --text: #5affa0;
+  --text-muted: #3fcf82;
+  --text-faint: #2fa869;
+
+  --accent: #39ff88;
+  --accent-hover: #6dffa8;
+  --accent-active: #1fdb6c;
+  --accent-text: #04150a;
+
+  --success: #39ff88;
+  --warning: #ffcc33;
+  --danger: #ff5c5c;
+  --info: #59e6ff;
+
+  --success-tint: rgba(57, 255, 136, .14);
+  --warning-tint: rgba(255, 204, 51, .14);
+  --danger-tint: rgba(255, 92, 92, .14);
+  --info-tint: rgba(89, 230, 255, .14);
+  --accent-tint: rgba(57, 255, 136, .16);
+  --muted-tint: rgba(63, 207, 130, .12);
+
+  --banner-danger-text: #ffb3b3;
+  --form-error-text: #ff9d9d;
+
+  --danger-hover: #ff7d7d;
+  --danger-text: #2a0505;
+  --danger-border: rgba(255, 92, 92, .35);
+  --danger-outline-border: rgba(255, 92, 92, .4);
+
+  --focus-ring: var(--accent);
+
+  --radius-sm: 2px;
+  --radius: 4px;
+  --radius-lg: 6px;
+}
+
+:root[data-theme="terminal-green"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%233fcf82' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="terminal-green"] { --sw-bg:#0a100c; --sw-bg2:#050806; --sw-accent:#39ff88; --sw-text:#5affa0; }
+
+/* --------------------------------------------------------------------------
+   2. Arctic Ice - arctic-ice
+   -------------------------------------------------------------------------- */
+:root[data-theme="arctic-ice"] {
+  color-scheme: light;
+  --bg-0: #eef4f7;
+  --bg-1: #ffffff;
+  --bg-2: #e2edf3;
+  --bg-3: #d2e3ec;
+  --border: #c3d7e2;
+  --border-soft: #dbe8ef;
+  --border-hover: #a9c4d4;
+
+  --text: #14232c;
+  --text-muted: #47606c;
+  --text-faint: #48626e;
+
+  --accent: #0c6c8f;
+  --accent-hover: #0a5977;
+  --accent-active: #084a63;
+  --accent-text: #f2fbff;
+
+  --success: #0a6e4c;
+  --warning: #7d5900;
+  --danger: #a92c26;
+  --info: #215e8f;
+
+  --success-tint: rgba(10, 110, 76, .10);
+  --warning-tint: rgba(125, 89, 0, .10);
+  --danger-tint: rgba(169, 44, 38, .10);
+  --info-tint: rgba(33, 94, 143, .10);
+  --accent-tint: rgba(12, 108, 143, .12);
+  --muted-tint: rgba(71, 96, 108, .10);
+
+  --banner-danger-text: #a92c26;
+  --form-error-text: #a92c26;
+
+  --danger-hover: #8f231e;
+  --danger-text: #fff5f4;
+  --danger-border: rgba(169, 44, 38, .35);
+  --danger-outline-border: rgba(169, 44, 38, .4);
+
+  --focus-ring: var(--accent);
+}
+
+:root[data-theme="arctic-ice"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%2347606c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="arctic-ice"] { --sw-bg:#ffffff; --sw-bg2:#eef4f7; --sw-accent:#0c6c8f; --sw-text:#14232c; }
+
+/* --------------------------------------------------------------------------
+   3. Art Deco - art-deco-gold
+   -------------------------------------------------------------------------- */
+:root[data-theme="art-deco-gold"] {
+  color-scheme: dark;
+  --bg-0: #0c0c0d;
+  --bg-1: #141416;
+  --bg-2: #1c1c1f;
+  --bg-3: #262629;
+  --border: #33302a;
+  --border-soft: #201f1c;
+  --border-hover: #4a4438;
+
+  --text: #f2e6c9;
+  --text-muted: #b8a97e;
+  --text-faint: #998c6c;
+
+  --accent: #d4af37;
+  --accent-hover: #e6c65c;
+  --accent-active: #b8932a;
+  --accent-text: #1a1408;
+
+  --success: #2fae6c;
+  --warning: #e08a2e;
+  --danger: #ff6e5f;
+  --info: #4f8fe0;
+
+  --success-tint: rgba(47, 174, 108, .14);
+  --warning-tint: rgba(224, 138, 46, .14);
+  --danger-tint: rgba(255, 110, 95, .12);
+  --info-tint: rgba(79, 143, 224, .14);
+  --accent-tint: rgba(212, 175, 55, .16);
+  --muted-tint: rgba(184, 169, 126, .12);
+
+  --banner-danger-text: #ffc0b6;
+  --form-error-text: #ffaa9c;
+
+  --danger-hover: #ff8b7e;
+  --danger-text: #2a0805;
+  --danger-border: rgba(255, 110, 95, .35);
+  --danger-outline-border: rgba(255, 110, 95, .4);
+
+  --focus-ring: var(--accent);
+
+  --radius-sm: 2px;
+  --radius: 4px;
+  --radius-lg: 8px;
+}
+
+:root[data-theme="art-deco-gold"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23b8a97e' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="art-deco-gold"] { --sw-bg:#141416; --sw-bg2:#0c0c0d; --sw-accent:#d4af37; --sw-text:#f2e6c9; }
+
+/* --------------------------------------------------------------------------
+   4. Alpine Dawn - alpine-dawn
+   -------------------------------------------------------------------------- */
+:root[data-theme="alpine-dawn"] {
+  color-scheme: dark;
+  --bg-0: #10151c;
+  --bg-1: #161d27;
+  --bg-2: #1f2833;
+  --bg-3: #2a3540;
+  --border: #33404c;
+  --border-soft: #1f2833;
+  --border-hover: #44525f;
+
+  --text: #eef2f5;
+  --text-muted: #a8b7c4;
+  --text-faint: #95a5b1;
+
+  --accent: #ff8c5a;
+  --accent-hover: #ffa478;
+  --accent-active: #e8703c;
+  --accent-text: #2a1206;
+
+  --success: #5ed6a0;
+  --warning: #ffcb61;
+  --danger: #ff7a7d;
+  --info: #6ec6ff;
+
+  --secondary: #ffb0c8;
+
+  --success-tint: rgba(94, 214, 160, .14);
+  --warning-tint: rgba(255, 203, 97, .14);
+  --danger-tint: rgba(255, 122, 125, .14);
+  --info-tint: rgba(110, 198, 255, .14);
+  --accent-tint: rgba(255, 140, 90, .14);
+  --muted-tint: rgba(168, 183, 196, .14);
+
+  --banner-danger-text: #ffc4c6;
+  --form-error-text: #ffb0b5;
+
+  --danger-hover: #ff9698;
+  --danger-text: #2a0e0e;
+  --danger-border: rgba(255, 122, 125, .35);
+  --danger-outline-border: rgba(255, 122, 125, .4);
+
+  --focus-ring: var(--secondary);
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+:root[data-theme="alpine-dawn"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23a8b7c4' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="alpine-dawn"] { --sw-bg:#161d27; --sw-bg2:#10151c; --sw-accent:#ff8c5a; --sw-text:#eef2f5; }
+
+/* --------------------------------------------------------------------------
+   5. Matcha - matcha
+   -------------------------------------------------------------------------- */
+:root[data-theme="matcha"] {
+  color-scheme: light;
+  --bg-0: #f1efe1;
+  --bg-1: #faf9f0;
+  --bg-2: #eae6d3;
+  --bg-3: #ddd7bd;
+  --border: #cec5a0;
+  --border-soft: #e2ddc7;
+  --border-hover: #b3a878;
+
+  --text: #24301f;
+  --text-muted: #52604a;
+  --text-faint: #556150;
+
+  --accent: #4f7942;
+  --accent-hover: #3e6333;
+  --accent-active: #345228;
+  --accent-text: #f5f8ee;
+
+  --success: #1f6b40;
+  --warning: #7d4f00;
+  --danger: #a5342a;
+  --info: #1f5570;
+
+  --success-tint: rgba(31, 107, 64, .10);
+  --warning-tint: rgba(125, 79, 0, .10);
+  --danger-tint: rgba(165, 52, 42, .10);
+  --info-tint: rgba(31, 85, 112, .10);
+  --accent-tint: rgba(79, 121, 66, .12);
+  --muted-tint: rgba(82, 96, 74, .10);
+
+  --banner-danger-text: #a5342a;
+  --form-error-text: #a5342a;
+
+  --danger-hover: #8a2921;
+  --danger-text: #fff5f3;
+  --danger-border: rgba(165, 52, 42, .35);
+  --danger-outline-border: rgba(165, 52, 42, .4);
+
+  --focus-ring: var(--accent);
+}
+
+:root[data-theme="matcha"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%2352604a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="matcha"] { --sw-bg:#faf9f0; --sw-bg2:#f1efe1; --sw-accent:#4f7942; --sw-text:#24301f; }
+
+/* --------------------------------------------------------------------------
+   6. Desert Night - desert-night
+   -------------------------------------------------------------------------- */
+:root[data-theme="desert-night"] {
+  color-scheme: dark;
+  --bg-0: #120e1a;
+  --bg-1: #1a1424;
+  --bg-2: #251c31;
+  --bg-3: #302640;
+  --border: #3a2e4d;
+  --border-soft: #251c31;
+  --border-hover: #4d3d63;
+
+  --text: #f3ece0;
+  --text-muted: #b0a0b8;
+  --text-faint: #9c8caa;
+
+  --accent: #ffa552;
+  --accent-hover: #ffb873;
+  --accent-active: #e88c38;
+  --accent-text: #2a1608;
+
+  --success: #8ed966;
+  --warning: #ffcc66;
+  --danger: #ff6f82;
+  --info: #6fa8dc;
+
+  --secondary: #d876c9;
+
+  --success-tint: rgba(142, 217, 102, .14);
+  --warning-tint: rgba(255, 204, 102, .14);
+  --danger-tint: rgba(255, 111, 130, .14);
+  --info-tint: rgba(111, 168, 220, .14);
+  --accent-tint: rgba(255, 165, 82, .14);
+  --muted-tint: rgba(176, 160, 184, .14);
+
+  --banner-danger-text: #ffc4cd;
+  --form-error-text: #ffadb8;
+
+  --danger-hover: #ff8998;
+  --danger-text: #2a0e14;
+  --danger-border: rgba(255, 111, 130, .35);
+  --danger-outline-border: rgba(255, 111, 130, .4);
+
+  --focus-ring: var(--secondary);
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+:root[data-theme="desert-night"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23b0a0b8' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="desert-night"] { --sw-bg:#1a1424; --sw-bg2:#120e1a; --sw-accent:#ffa552; --sw-text:#f3ece0; }
+
+/* --------------------------------------------------------------------------
+   7. Tokyo Rain - tokyo-rain
+   -------------------------------------------------------------------------- */
+:root[data-theme="tokyo-rain"] {
+  color-scheme: dark;
+  --bg-0: #0b0d14;
+  --bg-1: #12151f;
+  --bg-2: #1a1e2c;
+  --bg-3: #232838;
+  --border: #2c3244;
+  --border-soft: #1a1e2c;
+  --border-hover: #3a4258;
+
+  --text: #e8ecf5;
+  --text-muted: #9aa3ba;
+  --text-faint: #8892ac;
+
+  --accent: #ff5aa8;
+  --accent-hover: #ff7ab8;
+  --accent-active: #e8409e;
+  --accent-text: #1a0e18;
+
+  --success: #2fe6a7;
+  --warning: #ffb347;
+  --danger: #ff6478;
+  --info: #4dd9ff;
+
+  --secondary: #4dd9ff;
+
+  --success-tint: rgba(47, 230, 167, .14);
+  --warning-tint: rgba(255, 179, 71, .14);
+  --danger-tint: rgba(255, 100, 120, .14);
+  --info-tint: rgba(77, 217, 255, .14);
+  --accent-tint: rgba(255, 90, 168, .14);
+  --muted-tint: rgba(154, 163, 186, .14);
+
+  --banner-danger-text: #ffb8c4;
+  --form-error-text: #ffa3b3;
+
+  --danger-hover: #ff8494;
+  --danger-text: #2a0a10;
+  --danger-border: rgba(255, 100, 120, .35);
+  --danger-outline-border: rgba(255, 100, 120, .4);
+
+  --focus-ring: var(--secondary);
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+:root[data-theme="tokyo-rain"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%239aa3ba' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="tokyo-rain"] { --sw-bg:#12151f; --sw-bg2:#0b0d14; --sw-accent:#ff5aa8; --sw-text:#e8ecf5; }
+
+/* --------------------------------------------------------------------------
+   8. Brushed Steel - brushed-steel
+   -------------------------------------------------------------------------- */
+:root[data-theme="brushed-steel"] {
+  color-scheme: dark;
+  --bg-0: #1b1d21;
+  --bg-1: #24272c;
+  --bg-2: #2e3238;
+  --bg-3: #323740;
+  --border: #3f454d;
+  --border-soft: #2c3036;
+  --border-hover: #545c66;
+
+  --text: #e8eaed;
+  --text-muted: #a3aab3;
+  --text-faint: #9ba2ac;
+
+  --accent: #4fa8e0;
+  --accent-hover: #6ebbea;
+  --accent-active: #2f8ac2;
+  --accent-text: #08202f;
+
+  --success: #4cc38a;
+  --warning: #f2b134;
+  --danger: #ff7a6b;
+  --info: #4fc3c7;
+
+  --success-tint: rgba(76, 195, 138, .14);
+  --warning-tint: rgba(242, 177, 52, .14);
+  --danger-tint: rgba(255, 122, 107, .12);
+  --info-tint: rgba(79, 195, 199, .14);
+  --accent-tint: rgba(79, 168, 224, .16);
+  --muted-tint: rgba(163, 170, 179, .12);
+
+  --banner-danger-text: #ffb8ac;
+  --form-error-text: #ffa599;
+
+  --danger-hover: #ff9686;
+  --danger-text: #2a0805;
+  --danger-border: rgba(255, 122, 107, .35);
+  --danger-outline-border: rgba(255, 122, 107, .4);
+
+  --focus-ring: var(--accent);
+
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+:root[data-theme="brushed-steel"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23a3aab3' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="brushed-steel"] { --sw-bg:#24272c; --sw-bg2:#1b1d21; --sw-accent:#4fa8e0; --sw-text:#e8eaed; }
+
+/* --------------------------------------------------------------------------
+   9. Aurora Sky - aurora-sky
+   -------------------------------------------------------------------------- */
+:root[data-theme="aurora-sky"] {
+  color-scheme: dark;
+  --bg-0: #070b12;
+  --bg-1: #0d131c;
+  --bg-2: #141d29;
+  --bg-3: #1c2836;
+  --border: #233040;
+  --border-soft: #141d29;
+  --border-hover: #324256;
+
+  --text: #eef4f2;
+  --text-muted: #9fb3ad;
+  --text-faint: #7d938c;
+
+  --accent: #b98cf7;
+  --accent-hover: #caa4ff;
+  --accent-active: #a06ef0;
+  --accent-text: #1c1030;
+
+  --success: #4ce8a3;
+  --warning: #ffcf6b;
+  --danger: #ff6478;
+  --info: #5ad1e0;
+
+  --secondary: #ff7ad1;
+
+  --success-tint: rgba(76, 232, 163, .14);
+  --warning-tint: rgba(255, 207, 107, .14);
+  --danger-tint: rgba(255, 100, 120, .14);
+  --info-tint: rgba(90, 209, 224, .14);
+  --accent-tint: rgba(185, 140, 247, .14);
+  --muted-tint: rgba(159, 179, 173, .14);
+
+  --banner-danger-text: #ffc0c9;
+  --form-error-text: #ffa9b4;
+
+  --danger-hover: #ff8494;
+  --danger-text: #2a0a10;
+  --danger-border: rgba(255, 100, 120, .35);
+  --danger-outline-border: rgba(255, 100, 120, .4);
+
+  --focus-ring: var(--secondary);
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+:root[data-theme="aurora-sky"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%239fb3ad' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="aurora-sky"] { --sw-bg:#0d131c; --sw-bg2:#070b12; --sw-accent:#b98cf7; --sw-text:#eef4f2; }
+
+/* --------------------------------------------------------------------------
+   10. Strawberry Cream - strawberry-cream
+   -------------------------------------------------------------------------- */
+:root[data-theme="strawberry-cream"] {
+  color-scheme: light;
+  --bg-0: #faf1ee;
+  --bg-1: #fffbfa;
+  --bg-2: #f5e2e0;
+  --bg-3: #efd0ce;
+  --border: #e3bcb8;
+  --border-soft: #f0d9d6;
+  --border-hover: #d1a09b;
+
+  --text: #3a2220;
+  --text-muted: #6b4844;
+  --text-faint: #754e4a;
+
+  --accent: #c43d59;
+  --accent-hover: #ab304a;
+  --accent-active: #93273f;
+  --accent-text: #fff5f6;
+
+  --success: #166b45;
+  --warning: #7d5400;
+  --danger: #a5342a;
+  --info: #2c5f8a;
+
+  --secondary: #e8a0b0;
+
+  --success-tint: rgba(22, 107, 69, .10);
+  --warning-tint: rgba(125, 84, 0, .10);
+  --danger-tint: rgba(165, 52, 42, .10);
+  --info-tint: rgba(44, 95, 138, .10);
+  --accent-tint: rgba(196, 61, 89, .12);
+  --muted-tint: rgba(107, 72, 68, .10);
+
+  --banner-danger-text: #a5342a;
+  --form-error-text: #a5342a;
+
+  --danger-hover: #8a2921;
+  --danger-text: #fff5f4;
+  --danger-border: rgba(165, 52, 42, .35);
+  --danger-outline-border: rgba(165, 52, 42, .4);
+
+  --focus-ring: var(--accent);
+}
+
+:root[data-theme="strawberry-cream"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%236b4844' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="strawberry-cream"] { --sw-bg:#fffbfa; --sw-bg2:#faf1ee; --sw-accent:#c43d59; --sw-text:#3a2220; }
 
 * { box-sizing: border-box; }
 
@@ -1131,7 +1712,9 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .switch input:checked ~ .switch-track .switch-thumb { transform: translateX(16px); background: var(--accent); }
 .switch input:focus-visible ~ .switch-track { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
-/* Two-option segmented toggle (Settings > Appearance: density, theme). */
+/* Two-option segmented toggle (Settings > Appearance: density). Theme used
+   to live here too (four options) before Round 18 Set B replaced it with the
+   .theme-grid swatch picker below - kept for Density alone. */
 .segmented { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px; gap: 2px; margin-top: 8px; }
 .segmented-btn {
   border: none;
@@ -1147,6 +1730,68 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .segmented-btn:hover { color: var(--text); }
 .segmented-btn.is-active { background: var(--bg-3); color: var(--text); }
 .segmented-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* ==========================================================================
+   Round 18 (Set B - picker) - swatch-grid theme picker, THEMES-SPEC.md
+   section 3.2, verbatim. Replaces the old 4-option `#theme-toggle` segmented
+   control (Settings > Appearance: Theme). Rendered by app.js's
+   Views.settings.buildThemeGrid() from the single THEMES array (section 4) -
+   one `.theme-swatch` button per theme, `role="radio"` inside a
+   `role="radiogroup"` container (`#theme-grid` in index.html). Each swatch's
+   own preview colors (--sw-bg/--sw-bg2/--sw-accent/--sw-text) come from the
+   `.theme-swatch[data-theme-value="X"]` rule colocated with that theme's own
+   `:root[data-theme="X"]` token block elsewhere in this file - a swatch for a
+   theme that isn't the currently-active one can't read that theme's real
+   custom properties via var(), since those only exist inside that theme's own
+   attribute-selector scope, hence this small hardcoded-per-theme preview set.
+   The selection ring below deliberately uses the LIVE app's own --accent/
+   --bg-1 (not the swatched theme's --sw-accent/--sw-bg) so it stays visible
+   regardless of which theme is currently active.
+   ========================================================================== */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+  /* .settings-row-col (this grid's parent) is a column flexbox with
+     align-items:flex-start, so a flex child's cross-axis (width) size
+     defaults to fit-content, not the row's full width - without this the
+     auto-fill track above has no real width to distribute columns into and
+     collapses to a single 88px column. width:100% gives it one to wrap
+     against, matching the "~4-5 per row" layout THEMES-SPEC.md calls for. */
+  width: 100%;
+}
+.theme-swatch {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 8px 6px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-1); cursor: pointer; transition: var(--fast);
+}
+.theme-swatch:hover { border-color: var(--border-hover); }
+.theme-swatch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.theme-swatch-preview {
+  width: 100%; height: 40px; border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--sw-bg) 0 60%, var(--sw-bg2, var(--sw-bg)) 60% 100%);
+  border: 1px solid rgba(0,0,0,.18);
+  position: relative; overflow: hidden;
+}
+.theme-swatch-accent {
+  position: absolute; left: 6px; bottom: 6px; width: 12px; height: 12px;
+  border-radius: 50%; background: var(--sw-accent); box-shadow: 0 0 0 2px var(--sw-bg);
+}
+.theme-swatch-text {
+  position: absolute; right: 7px; top: 5px; font: 700 11px system-ui, sans-serif; color: var(--sw-text);
+}
+.theme-swatch-check {
+  position: absolute; right: 5px; bottom: 5px; color: var(--sw-accent);
+  opacity: 0; transition: var(--fast);
+}
+.theme-swatch-name { font-size: 12px; color: var(--text-muted); text-align: center; }
+.theme-swatch[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--bg-1), 0 0 0 3px var(--accent);
+}
+.theme-swatch[aria-checked="true"] .theme-swatch-name { color: var(--text); font-weight: 600; }
+.theme-swatch[aria-checked="true"] .theme-swatch-check { opacity: 1; }
 
 .settings-advanced { margin-top: 2px; }
 .settings-advanced > summary {
@@ -1775,5 +2420,397 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 @media (prefers-reduced-motion: reduce) {
   .lofi-star-1, .lofi-star-2, .lofi-star-3, .lofi-star-4, .lofi-cat-tail {
     animation: none;
+  }
+}
+
+/* ==========================================================================
+   Round 18 theme expansion (Set A) - signature touches for the ten new
+   themes above. Same discipline as Vaporwave/Lofi Night's own signature
+   blocks earlier in this file: art layers are CSS-only (a pseudo-element's
+   background, built from gradients and/or an inline data-URI SVG - never a
+   new element in index.html, which is out of this change set's scope),
+   pointer-events:none, and never sit above real content (a sibling-content
+   selector gets position:relative + a higher z-index, exactly like
+   `.sidebar > *` above). Every animated touch is wrapped in a
+   prefers-reduced-motion query and visibly stops when reduced motion is
+   requested. Two deviations from the letter of THEMES-SPEC.md section 1,
+   both load-bearing given this file's own markup (documented in the Round 18
+   changelog entry too):
+     - Terminal Green's scanline layer names `.app-shell::before` in the
+       spec, but index.html has no `.app-shell` element - the equivalent
+       full-viewport wrapper here is `#app` (`#app { height:100vh }`,
+       style.css ~line 319), so the layer is `#app::before` instead.
+     - Strawberry Cream's brand-icon sparkle is spec'd as generated content
+       on `.brand-icon`, but that element is an `<img>` in index.html and
+       `::before`/`::after` are not reliably rendered on replaced elements by
+       any browser; the same "small pulse near the icon" read is produced
+       instead with an animated `drop-shadow()` on the `<img>` itself.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Terminal Green - CRT scanlines over the whole app, phosphor glow on brand/
+   active-nav/primary-button (always on - it's a static "hot" look, not
+   motion), optional flicker pulse gated to run only when motion is fine.
+   -------------------------------------------------------------------------- */
+:root[data-theme="terminal-green"] #app { position: relative; }
+:root[data-theme="terminal-green"] #app::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: repeating-linear-gradient(180deg, rgba(0, 0, 0, .09) 0 1px, transparent 1px 3px);
+}
+:root[data-theme="terminal-green"] #app > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="terminal-green"] .brand-name,
+:root[data-theme="terminal-green"] .nav-item.is-active {
+  text-shadow: 0 0 6px rgba(57, 255, 136, .55);
+}
+:root[data-theme="terminal-green"] .btn-accent {
+  box-shadow: 0 0 0 1px rgba(57, 255, 136, .4), 0 0 6px rgba(57, 255, 136, .55);
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes terminal-flicker {
+    0%, 100% { opacity: .94; }
+    50% { opacity: 1; }
+  }
+  :root[data-theme="terminal-green"] .brand-name,
+  :root[data-theme="terminal-green"] .nav-item.is-active,
+  :root[data-theme="terminal-green"] .btn-accent {
+    animation: terminal-flicker 3s ease-in-out infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Arctic Ice - deliberately no motion. Two static frost-glows behind the
+   sidebar's top corners; zero keyframes, nothing to gate.
+   -------------------------------------------------------------------------- */
+:root[data-theme="arctic-ice"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="arctic-ice"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="arctic-ice"] .sidebar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, .55) 0%, transparent 60%),
+    radial-gradient(circle at 100% 0%, rgba(255, 255, 255, .45) 0%, transparent 55%);
+}
+
+/* --------------------------------------------------------------------------
+   Art Deco - overlaid diagonal hairline lattice behind the sidebar (masked
+   fade-upward, same pattern as Vaporwave's grid), double gold hairline frame
+   on the active nav item and the top edge of settings groups. Static.
+   -------------------------------------------------------------------------- */
+:root[data-theme="art-deco-gold"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="art-deco-gold"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="art-deco-gold"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 150px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    repeating-linear-gradient(45deg, rgba(212, 175, 55, .06) 0, rgba(212, 175, 55, .06) 1px, transparent 1px, transparent 22px),
+    repeating-linear-gradient(-45deg, rgba(212, 175, 55, .06) 0, rgba(212, 175, 55, .06) 1px, transparent 1px, transparent 22px);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+:root[data-theme="art-deco-gold"] .nav-item.is-active {
+  box-shadow: 0 0 0 1px rgba(212, 175, 55, .5), 0 2px 0 rgba(212, 175, 55, .25);
+}
+:root[data-theme="art-deco-gold"] .settings-group {
+  box-shadow: 0 0 0 1px rgba(212, 175, 55, .5), 0 2px 0 rgba(212, 175, 55, .25);
+}
+
+/* --------------------------------------------------------------------------
+   Alpine Dawn - static ridgeline silhouette + first-light band behind the
+   sidebar. No animation at all.
+   -------------------------------------------------------------------------- */
+:root[data-theme="alpine-dawn"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="alpine-dawn"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="alpine-dawn"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 130px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    linear-gradient(to top, rgba(255, 140, 90, .12), rgba(255, 176, 200, .08) 45%, transparent 70%),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='232' height='130' viewBox='0 0 232 130'><polygon points='0,130 0,70 30,52 60,66 95,30 130,58 160,40 195,64 232,44 232,130' fill='%232a3540'/></svg>") bottom / 100% 100% no-repeat;
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+
+/* --------------------------------------------------------------------------
+   Matcha - a small teacup low in the sidebar, below the nav list, with a
+   pair of steam wisps baked into the same graphic; the whole graphic
+   breathes gently (opacity + a few px of lift) to read as rising steam.
+   Static under reduced motion.
+   -------------------------------------------------------------------------- */
+:root[data-theme="matcha"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="matcha"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="matcha"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  width: 40px;
+  height: 36px;
+  pointer-events: none;
+  z-index: 0;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='40' height='36' viewBox='0 0 40 36'><path d='M14 10c-1 -4 1 -6 1 -6' stroke='%234f7942' stroke-width='1.4' fill='none' stroke-linecap='round' opacity='.55'/><path d='M20 8c-1 -5 2 -7 2 -7' stroke='%234f7942' stroke-width='1.4' fill='none' stroke-linecap='round' opacity='.4'/><path d='M6 16h24l-2 12a3 3 0 0 1-3 3H11a3 3 0 0 1-3-3z' fill='%23eae6d3' stroke='%23cec5a0' stroke-width='1'/><path d='M30 18c4 0 6 2 6 5s-2 5-6 5' fill='none' stroke='%23cec5a0' stroke-width='1.4'/><ellipse cx='18' cy='16' rx='12' ry='2.5' fill='%234f7942'/></svg>") no-repeat;
+  background-size: contain;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes matcha-steam {
+    0%, 100% { opacity: .7; transform: translateY(0); }
+    50% { opacity: 1; transform: translateY(-3px); }
+  }
+  :root[data-theme="matcha"] .sidebar::after {
+    animation: matcha-steam 4s ease-in-out infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Desert Night - dune-ridge silhouette behind the sidebar with a small
+   twinkling star field above it (one star carries the accent "ember" tint).
+   Twinkle is gated off under reduced motion; the ridge itself is static.
+   -------------------------------------------------------------------------- */
+:root[data-theme="desert-night"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="desert-night"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="desert-night"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 140px;
+  pointer-events: none;
+  z-index: 0;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='232' height='140' viewBox='0 0 232 140'><polygon points='0,140 0,86 40,70 90,92 140,60 190,84 232,68 232,140' fill='%23302640'/></svg>") bottom / 100% 100% no-repeat;
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+:root[data-theme="desert-night"] .sidebar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 60px;
+  height: 60px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle 1.4px at 20% 30%, #9c8caa 0 100%, transparent 100%),
+    radial-gradient(circle 1.2px at 45% 60%, #9c8caa 0 100%, transparent 100%),
+    radial-gradient(circle 1.6px at 70% 20%, #ffa552 0 100%, transparent 100%),
+    radial-gradient(circle 1.3px at 88% 50%, #9c8caa 0 100%, transparent 100%);
+  opacity: .5;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes desert-twinkle {
+    0%, 100% { opacity: .3; }
+    50% { opacity: .8; }
+  }
+  :root[data-theme="desert-night"] .sidebar::before {
+    animation: desert-twinkle 4s ease-in-out infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Tokyo Rain - two blurred neon blobs low in the sidebar (like signage
+   reflected in a puddle) plus faint diagonal rain-streak hairlines; the
+   accent blob's layer breathes slowly. Static under reduced motion.
+   -------------------------------------------------------------------------- */
+:root[data-theme="tokyo-rain"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="tokyo-rain"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="tokyo-rain"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 150px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    repeating-linear-gradient(115deg, rgba(154, 163, 186, .05) 0, rgba(154, 163, 186, .05) 1px, transparent 1px, transparent 18px),
+    radial-gradient(circle 60px at 15% 100%, rgba(255, 90, 168, .12), transparent 100%),
+    radial-gradient(circle 60px at 85% 100%, rgba(77, 217, 255, .12), transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes tokyo-pulse {
+    0%, 100% { opacity: .7; }
+    50% { opacity: 1; }
+  }
+  :root[data-theme="tokyo-rain"] .sidebar::after {
+    animation: tokyo-pulse 6s ease-in-out infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Brushed Steel - faint diagonal aluminum grain over the sidebar, four
+   corner "rivet" dots on settings-group cards only. Entirely static.
+   -------------------------------------------------------------------------- */
+:root[data-theme="brushed-steel"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="brushed-steel"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="brushed-steel"] .sidebar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: repeating-linear-gradient(115deg, rgba(255, 255, 255, .035) 0 1px, transparent 1px 3px);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+:root[data-theme="brushed-steel"] .settings-group {
+  position: relative;
+}
+:root[data-theme="brushed-steel"] .settings-group::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle 1.5px at 6px 6px, rgba(0, 0, 0, .3), transparent 100%),
+    radial-gradient(circle 1.5px at calc(100% - 6px) 6px, rgba(0, 0, 0, .3), transparent 100%),
+    radial-gradient(circle 1.5px at 6px calc(100% - 6px), rgba(0, 0, 0, .3), transparent 100%),
+    radial-gradient(circle 1.5px at calc(100% - 6px) calc(100% - 6px), rgba(0, 0, 0, .3), transparent 100%);
+}
+
+/* --------------------------------------------------------------------------
+   Aurora Sky - three soft wavy bands of light behind the sidebar (green,
+   violet, pink), a slow horizontal drift with a gentle opacity breathe on
+   the whole layer. Static three-band glow under reduced motion.
+   -------------------------------------------------------------------------- */
+:root[data-theme="aurora-sky"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="aurora-sky"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="aurora-sky"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: -20px;
+  right: -20px;
+  bottom: -10px;
+  height: 170px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 140px 40px at 30% 100%, rgba(76, 232, 163, .10), transparent 100%),
+    radial-gradient(ellipse 160px 50px at 60% 80%, rgba(185, 140, 247, .10), transparent 100%),
+    radial-gradient(ellipse 150px 45px at 85% 100%, rgba(255, 122, 209, .08), transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes aurora-drift {
+    0%, 100% { transform: translateX(-8px); opacity: .85; }
+    50% { transform: translateX(8px); opacity: 1; }
+  }
+  :root[data-theme="aurora-sky"] .sidebar::after {
+    animation: aurora-drift 18s ease-in-out infinite;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Strawberry Cream - a static scatter of sprinkle dots behind the top of
+   the sidebar, plus a small pulsing sparkle glow on the brand icon (an
+   animated drop-shadow, since generated content isn't reliable on an
+   <img> - see the file-header note above). Sparkle freezes at a fixed
+   glow under reduced motion; the sprinkle scatter is static regardless.
+   -------------------------------------------------------------------------- */
+:root[data-theme="strawberry-cream"] .sidebar {
+  position: relative;
+  overflow: hidden;
+}
+:root[data-theme="strawberry-cream"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="strawberry-cream"] .sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  pointer-events: none;
+  z-index: 0;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='232' height='60' viewBox='0 0 232 60'><rect x='20' y='14' width='8' height='2.5' rx='1.25' fill='%23c43d59' opacity='.3' transform='rotate(20 24 15)'/><circle cx='60' cy='30' r='2' fill='%23e8a0b0' opacity='.3'/><rect x='100' y='10' width='7' height='2.5' rx='1.25' fill='%237d5400' opacity='.3' transform='rotate(-15 103 11)'/><circle cx='150' cy='24' r='2.2' fill='%23c43d59' opacity='.3'/><rect x='185' y='16' width='8' height='2.5' rx='1.25' fill='%23e8a0b0' opacity='.3' transform='rotate(40 189 17)'/><circle cx='210' cy='32' r='1.8' fill='%237d5400' opacity='.3'/></svg>") no-repeat;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes sc-sparkle {
+    0%, 100% { filter: drop-shadow(0 0 0 rgba(196, 61, 89, 0)); }
+    50% { filter: drop-shadow(0 0 3px rgba(196, 61, 89, .7)); }
+  }
+  :root[data-theme="strawberry-cream"] .brand-icon {
+    animation: sc-sparkle 3s ease-in-out infinite;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="strawberry-cream"] .brand-icon {
+    filter: drop-shadow(0 0 2px rgba(196, 61, 89, .56));
   }
 }

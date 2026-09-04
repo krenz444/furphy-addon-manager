@@ -775,13 +775,14 @@ namespace Furphy
             "localhost"
         };
 
-        // Chrome colors track the app's CURRENT theme (Lofi Night, Dark,
-        // Light or Vaporwave) instead of a hard-coded palette - see
-        // ROADMAP.md "E19"/"theme sync". Instance (not static readonly)
-        // fields so ApplyTheme(name, colors) can repaint them live from a
-        // "theme" WebMessage posted by the page; InitializeDefaultTheme
-        // seeds them with Lofi Night (the app's current default theme)
-        // before LoadPersistedTheme overlays any settings.json hostTheme.
+        // Chrome colors track the app's CURRENT theme (any of the SPA's
+        // theme picker entries - Vaporwave, Lofi Night, Dark, Light, etc.)
+        // instead of a hard-coded palette - see ROADMAP.md "E19"/"theme
+        // sync". Instance (not static readonly) fields so ApplyTheme(name,
+        // colors) can repaint them live from a "theme" WebMessage posted
+        // by the page; InitializeDefaultTheme seeds them with Vaporwave
+        // (the app's current default theme, round 12/18) before
+        // LoadPersistedTheme overlays any settings.json hostTheme.
         // bg0/bg1/bg2/bg3/border/text/muted/accent below are the exact
         // names used in the WebMessage/settings.json "colors" object.
         private Color ChromeBg;       // bg0
@@ -913,7 +914,7 @@ namespace Furphy
             _port = ResolvePort();
             _hostVersion = ResolveHostVersion(exeDir);
 
-            // Seed the chrome palette with Lofi Night, then overlay any
+            // Seed the chrome palette with Vaporwave, then overlay any
             // persisted settings.json hostTheme - BEFORE BuildUi() below so
             // every control is constructed with the right colors from the
             // start instead of flashing default then repainting. A live
@@ -1103,22 +1104,29 @@ namespace Furphy
 
         // ------------------------------------------------------- theming
 
-        // Lofi Night - the app's current default theme (ui/style.css
-        // data-theme="lofi": --bg-0.. --bg-3, --border, --text,
-        // --text-muted, --accent). Overwritten by LoadPersistedTheme
+        // Vaporwave - the app's default theme again as of round 12/18
+        // (ui/style.css data-theme="vaporwave": --bg-0.. --bg-3, --border,
+        // --text, --text-muted, --accent - verbatim from THEMES-SPEC.md
+        // section 2's "Vaporwave's 8-color host palette", unmodified from
+        // the existing, unmodified Vaporwave token block in style.css).
+        // Superseded round 11's flip to Lofi Night as the built-in
+        // cold-start default. Overwritten by LoadPersistedTheme
         // (settings.json hostTheme) and, live, by ApplyTheme whenever a
-        // "theme" WebMessage arrives (HandleThemeMessage).
+        // "theme" WebMessage arrives (HandleThemeMessage) - an existing
+        // user's persisted hostTheme (Lofi Night or otherwise) still wins,
+        // this only changes what a brand-new profile paints before the
+        // page reports in.
         private void InitializeDefaultTheme()
         {
-            ChromeBg = Color.FromArgb(0x0f, 0x12, 0x26);       // --bg-0
-            ChromeBgAlt = Color.FromArgb(0x16, 0x1b, 0x34);    // --bg-1
-            ChromeBgActive = Color.FromArgb(0x1e, 0x24, 0x45); // --bg-2
-            ChromeHover = Color.FromArgb(0x26, 0x2d, 0x55);    // --bg-3
-            _chromeBorder = Color.FromArgb(0x34, 0x3b, 0x66);  // --border
-            ChromeText = Color.FromArgb(0xf2, 0xee, 0xe6);     // --text
-            ChromeMuted = Color.FromArgb(0xb3, 0xb1, 0xc9);    // --text-muted
-            ChromeAccent = Color.FromArgb(0xff, 0xb8, 0x6b);   // --accent
-            _themeName = "lofi";
+            ChromeBg = Color.FromArgb(0x12, 0x08, 0x1f);       // --bg-0
+            ChromeBgAlt = Color.FromArgb(0x1a, 0x0b, 0x2e);    // --bg-1
+            ChromeBgActive = Color.FromArgb(0x24, 0x16, 0x40); // --bg-2
+            ChromeHover = Color.FromArgb(0x2d, 0x1b, 0x4e);    // --bg-3
+            _chromeBorder = Color.FromArgb(0x3a, 0x2a, 0x5c);  // --border
+            ChromeText = Color.FromArgb(0xf3, 0xe9, 0xff);     // --text
+            ChromeMuted = Color.FromArgb(0xb9, 0xa6, 0xd6);    // --text-muted
+            ChromeAccent = Color.FromArgb(0xff, 0x71, 0xce);   // --accent
+            _themeName = "vaporwave";
         }
 
         // Reads settings.json's optional hostTheme = {name, colors} and, if
@@ -1936,6 +1944,7 @@ namespace Furphy
 
             EnsureAdFilterInfra();
             EnsureCfFocusInfra();
+            SyncCfFocusToPage("init");
 
             if (_options.SelftestActive)
             {
@@ -1983,6 +1992,12 @@ namespace Furphy
         private void CfWebView_NavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
             _cfLoading = false;
+            // Round 18 fix: settings.json is authoritative over the CF
+            // pane's own localStorage 'cfFocusEnabled' cache - see
+            // SyncCfFocusToPage's comment for why this must run on every
+            // completed navigation, not just when the host's own in-memory
+            // view of the setting happens to change.
+            SyncCfFocusToPage("navigation-completed");
             SendCfState();
         }
 
@@ -2825,6 +2840,43 @@ boot();
             EnsureCfFocusInfra();
             PushCfFocusLive(enabled);
             LogHost("cf-focus set enabled=" + enabled.ToString(CultureInfo.InvariantCulture));
+        }
+
+        // Round 18 fix: settings.json must be AUTHORITATIVE over the CF
+        // pane's own localStorage 'cfFocusEnabled' cache. Before this fix,
+        // the injected script's readStoredEnabled() let a stale localStorage
+        // value silently win forever (e.g. after toggling off once in the
+        // page, or leftover state from an earlier test/profile) while
+        // settings.json - and Settings' own display of it - said otherwise,
+        // because the host only ever pushed a fresh value when its OWN
+        // in-memory _cfFocusEnabled changed (CfWebView_NavigationStarting's
+        // freshCfFocus != _cfFocusEnabled check), never merely because the
+        // page might have a different, out-of-sync value it never told the
+        // host about.
+        //
+        // Fix: called unconditionally on every CF-pane NavigationCompleted
+        // (and once after CfWebView_InitCompleted) so settings.json's
+        // current value is re-pushed into the page every time - idempotent,
+        // via the same PushCfFocusLive that both a live in-app toggle and
+        // NavigationStarting's out-of-band resync already use (writes
+        // localStorage['cfFocusEnabled'] and calls the page's own
+        // window.__cfFocusSetEnabled if it's already booted). The page's
+        // stored flag becomes purely a cache of the setting, never a
+        // second source of truth. Logs one line only when the freshly-read
+        // value differs from the host's own last-known value, so a normal
+        // run (setting unchanged) stays silent on every navigation.
+        private void SyncCfFocusToPage(string context)
+        {
+            bool fresh = ReadCfFocusSetting();
+            bool changed = fresh != _cfFocusEnabled;
+            _cfFocusEnabled = fresh;
+            EnsureCfFocusInfra();
+            PushCfFocusLive(fresh);
+            if (changed)
+            {
+                LogHost("cf-focus resynced from settings.json (" + context + "): enabled=" +
+                    fresh.ToString(CultureInfo.InvariantCulture));
+            }
         }
 
         // Fire-and-forget ExecuteScriptAsync (GC.KeepAlive, never awaited -
