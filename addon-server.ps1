@@ -933,8 +933,18 @@ function Build-CliArgs {
 }
 
 function New-CliProcessArgs {
-    <# Full powershell.exe argument list for one addon-sync.ps1 invocation. #>
-    param([System.Collections.Generic.List[object]]$CliArgs)
+    <#
+      Full powershell.exe argument list for one addon-sync.ps1 invocation.
+      -ProgressPath (CS1) is optional and, when supplied, threads straight
+      through to addon-sync.ps1's own -ProgressPath param - see Start-Job,
+      the only caller that ever passes it (sync/check/add/install job kinds
+      per UX-SPEC.md section 4.2; every other caller of this function omits
+      it, and addon-sync.ps1 already no-ops cleanly when it is absent).
+    #>
+    param(
+        [System.Collections.Generic.List[object]]$CliArgs,
+        [string]$ProgressPath
+    )
 
     $psArgs = New-Object 'System.Collections.Generic.List[object]'
     $psArgs.Add('-NoProfile')
@@ -949,6 +959,10 @@ function New-CliProcessArgs {
     if ($Script:AddonsPathOverride) {
         $psArgs.Add('-AddonsPath')
         $psArgs.Add('"' + $Script:AddonsPathOverride + '"')
+    }
+    if ($ProgressPath) {
+        $psArgs.Add('-ProgressPath')
+        $psArgs.Add('"' + $ProgressPath + '"')
     }
     Write-Output -NoEnumerate $psArgs
 }
@@ -1138,7 +1152,18 @@ function Start-Job {
         $syncLogOffset = (Get-Item -LiteralPath $Script:SyncLogPath).Length
     }
 
-    $psArgs = New-CliProcessArgs -CliArgs $cliArgs
+    # CS1: -ProgressPath is threaded only for the job kinds UX-SPEC.md
+    # section 4.2 names (sync/check/add/install - $cliKind is already 'sync'
+    # for a launch-with-update, which counts). remove/rollback and the
+    # multi-phase import/switch-source kinds (built by their own Start-*Job
+    # helpers, never reaching this single-phase path) get no progress file -
+    # Update-JobStatus's read is likewise gated on $Job.ProgressPath being set.
+    $progressPath = $null
+    if ($cliKind -eq 'sync' -or $cliKind -eq 'check' -or $cliKind -eq 'add' -or $cliKind -eq 'install') {
+        $progressPath = Join-Path -Path $Script:JobsDir -ChildPath "$jobId.progress.json"
+    }
+
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs -ProgressPath $progressPath
 
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
@@ -1167,6 +1192,10 @@ function Start-Job {
         ErrFile       = $errFile
         SyncLogOffset = $syncLogOffset
         LaunchAfter   = $launchAfter
+        # CS1: $null for every job kind that gets no -ProgressPath (see
+        # above) - Update-JobStatus's best-effort read no-ops on a falsy
+        # ProgressPath exactly like Write-ProgressStep itself does CLI-side.
+        ProgressPath  = $progressPath
     }
     Add-JobToHistory -Job $job
     $Script:CurrentJob = $job
@@ -1636,8 +1665,43 @@ function Apply-JobCompletionSideEffects {
       so the save always picks up both this function's updateAvailable/
       lastRun changes AND the job's own final state/results in a single
       write, regardless of whether the job ultimately succeeded or failed.
+
+      CS1 (UX-SPEC.md section 4.2): Update-JobStatus now calls this on BOTH
+      of its outcomes, not just success - the failure branch immediately
+      below is what runs on the failed call ($Job.state is already 'failed'
+      and $Job.error already set by the caller before it calls in). It
+      returns before touching updateAvailable/lastRun/UpdatesCheckedAt at
+      all, so a failed job's effect here is scoped to exactly the two new
+      freshness fields - mirrors how a successful 'check' job already sets
+      $Script:UpdatesCheckedAt below, just for the failure side of that same
+      "did the freshness picture just change" question. Every successful
+      call clears both fields first (a later success after an earlier
+      failure must un-stick the freshness headline from check_failed).
+
+      Review fix (post-CS6): the failure branch only records
+      LastCheckFailed/LastCheckError for the kinds that actually touch
+      CurseForge/Wago (the same 'sync','check','add','install','launch'
+      list Get-ComputedFreshness's own 'checking' condition already uses)
+      - a failed 'remove'/'rollback'/other job no longer flips the
+      app-wide freshness headline to "Couldn't check - Retry", since that
+      headline's own Retry action only re-runs a check and has nothing to
+      do with an uninstall/rollback failure. Those failures still surface
+      through their own job-panel/toast error, unaffected by this gate.
     #>
     param($Job, $Parsed)
+
+    if ($Job.state -eq 'failed') {
+        if (@('sync', 'check', 'add', 'install', 'launch') -contains $Job.kind) {
+            $Script:LastCheckFailed = $true
+            $errMsg = $Job.error
+            if (-not $errMsg) { $errMsg = 'Unknown error' }
+            $Script:LastCheckError = $errMsg
+        }
+        return
+    }
+
+    $Script:LastCheckFailed = $false
+    $Script:LastCheckError = $null
 
     $action = $null
     if ($Parsed -and $Parsed.action) {
@@ -2054,6 +2118,29 @@ function Update-JobStatus {
         # tolerate transient read failures while the CLI is still writing
     }
 
+    # CS1: best-effort read of the CLI's progress.json (UX-SPEC.md section
+    # 4.2) - same shape/reasoning as the sync.log tail just above: the CLI
+    # may be mid-write (Write-ProgressStep's own Move-Item -Force makes each
+    # individual write atomic, but nothing stops this read from landing
+    # between two writes), so a parse failure here is tolerated exactly like
+    # a transient log-read failure is, never surfaced to the caller. Only
+    # ever set for a job kind Start-Job actually threaded -ProgressPath for;
+    # $Job.ProgressPath is $null (falsy) for every other kind, same guard
+    # shape Write-ProgressStep itself uses CLI-side.
+    if ($Job.ProgressPath) {
+        try {
+            if (Test-Path -LiteralPath $Job.ProgressPath) {
+                $progressText = [System.IO.File]::ReadAllText($Job.ProgressPath, [System.Text.Encoding]::UTF8)
+                if ($progressText -and $progressText.Trim().Length -gt 0) {
+                    $progressObj = $progressText | ConvertFrom-Json -ErrorAction Stop
+                    Add-Member -InputObject $Job -MemberType NoteProperty -Name 'progress' -Value $progressObj -Force
+                }
+            }
+        } catch {
+            # tolerate transient read/parse failures while the CLI is mid-write
+        }
+    }
+
     if (-not $Job.Process.HasExited) {
         return $Job
     }
@@ -2126,6 +2213,13 @@ function Update-JobStatus {
         if (-not $errMsg -and $parseError) { $errMsg = "Could not parse CLI output as JSON: $parseError" }
         if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
         $Job.error = $errMsg
+
+        # CS1 (UX-SPEC.md section 4.2): mirrors the success branch's own
+        # Apply-JobCompletionSideEffects call just above - $Job.state/.error
+        # are already set to their final failed values on the lines just
+        # above, so the function's failure branch (see its own doc comment)
+        # has everything it needs.
+        Apply-JobCompletionSideEffects -Job $Job -Parsed $parsed
     }
 
     try {
@@ -2140,10 +2234,14 @@ function Update-JobStatus {
     # Round 3: persist lastRun + job history to state.json now that this
     # job's final state/results/error are all set (Apply-JobCompletionSideEffects,
     # above, already updated $Script:LastRun/UpdateAvailable/UpdatesCheckedAt
-    # for a successful job). Called once here for BOTH the done and failed
-    # outcomes - not from inside Apply-JobCompletionSideEffects, which only
-    # ever runs on success - so a failed job still lands in the persisted
-    # history instead of vanishing on the next restart.
+    # for a successful job, or $Script:LastCheckFailed/LastCheckError for a
+    # failed one - see its own updated doc comment). Called once here for
+    # BOTH the done and failed outcomes; CS1 changed
+    # Apply-JobCompletionSideEffects itself to also run on both outcomes
+    # (previously success-only), but this call still needs to stay right
+    # here regardless, since it's this Save-CheckState that actually writes
+    # either branch's bookkeeping to state.json - without it, a failed job
+    # would still vanish from the persisted history on the next restart.
     Save-CheckState
 
     return $Job
@@ -2166,6 +2264,12 @@ function Get-JobStatusView {
         log        = $Job.log.ToArray()
         results    = $Job.results.ToArray()
         error      = $Job.error
+        # CS1 (UX-SPEC.md section 4.2): whatever Update-JobStatus's
+        # best-effort progress.json read last parsed, or $null - reading a
+        # NoteProperty that was never added (a job kind with no
+        # -ProgressPath, or one never polled while running) is always safe
+        # in PowerShell, unlike writing one.
+        progress   = $Job.progress
     }
 }
 
@@ -2177,6 +2281,42 @@ function Get-CurrentOrLastJobSummary {
         return Get-JobStatusView -Job $Script:Jobs[$Script:Jobs.Count - 1]
     }
     return $null
+}
+
+function Get-ComputedFreshness {
+    <#
+      CS1 (UX-SPEC.md sections 2.1/4.2): the one freshness enum, computed
+      server-side so the client "never derives freshness from other
+      fields" per that spec's own rule. One new value each call - never
+      cached - from the existing check state plus whichever job is current:
+        checking          - a sync/check/add/install job (the kinds that
+                             actually touch CurseForge/Wago) is running now.
+        check_failed       - the most recent such job ended in $Job.state
+                             'failed' (Apply-JobCompletionSideEffects' new
+                             failure branch is what sets this).
+        not_checked        - nothing has ever completed a check/sync.
+        updates_available  - $Script:UpdateAvailable has at least one entry.
+        up_to_date          - none of the above.
+      -CurrentJobView is the same Get-JobStatusView-shaped object
+      Handle-State already computes for its own "job" field - passed in
+      rather than recomputed here so a single /api/state call never polls
+      the running job's Update-JobStatus twice.
+    #>
+    param($CurrentJobView)
+
+    if ($CurrentJobView -and $CurrentJobView.state -eq 'running' -and (@('sync', 'check', 'add', 'install', 'launch') -contains $CurrentJobView.kind)) {
+        return 'checking'
+    }
+    if ($Script:LastCheckFailed) {
+        return 'check_failed'
+    }
+    if (-not $Script:UpdatesCheckedAt) {
+        return 'not_checked'
+    }
+    if ($Script:UpdateAvailable -and $Script:UpdateAvailable.Count -gt 0) {
+        return 'updates_available'
+    }
+    return 'up_to_date'
 }
 
 # =====================================================================
@@ -4106,12 +4246,23 @@ function Handle-State {
     }
 
     $settings = Get-Settings
+    $currentJobView = Get-CurrentOrLastJobSummary
     $body = [PSCustomObject]@{
         addons           = $addonsOut.ToArray()
         settings         = Get-SettingsView -Settings $settings
         lastRun          = $Script:LastRun
-        job              = (Get-CurrentOrLastJobSummary)
+        job              = $currentJobView
         updatesCheckedAt = $Script:UpdatesCheckedAt
+        # CS1 (UX-SPEC.md sections 2.1/4.2): the one computed freshness enum
+        # (see Get-ComputedFreshness) plus the two raw fields it (and a
+        # failed-check Retry flow) read from - lastCheckFailed/lastCheckError
+        # persist across polls in-memory only (Apply-JobCompletionSideEffects'
+        # failure branch sets them; a later success clears them), so a failed
+        # check stays visible after reload instead of being silently
+        # overwritten by the old "checked X ago" timestamp.
+        freshness        = (Get-ComputedFreshness -CurrentJobView $currentJobView)
+        lastCheckFailed  = [bool]$Script:LastCheckFailed
+        lastCheckError   = $Script:LastCheckError
         # E13: read once at startup (Script:ClientBuildInfo) - see the
         # Startup section - not re-read from disk on every /api/state poll.
         clientBuild      = $Script:ClientBuildInfo.clientBuild
@@ -4901,6 +5052,28 @@ function Handle-Open {
                 }
                 Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $backupsPath + '"')
             }
+            'logs' {
+                # CS4 (UX-SPEC.md 6.2): Settings > Advanced > Troubleshooting's
+                # single "Open logs folder" button, replacing the four
+                # separate "Open sync log / Open last run report / Open
+                # server log / Open backups folder" buttons. Rather than pick
+                # one of those four files, this opens the app's own root
+                # folder in Explorer - sync.log, server.log, last-run.txt and
+                # backups\ all already live there side by side. Allow-listed
+                # to exactly $Script:Root (no user-suppliable path here at
+                # all, unlike 'url'/'curseforge' below). Created first if
+                # somehow missing - mirrors 'backups' above, the app owns
+                # this directory outright.
+                if (-not (Test-Path -LiteralPath $Script:Root)) {
+                    try {
+                        New-Item -ItemType Directory -Path $Script:Root -Force | Out-Null
+                    } catch {
+                        Send-Json -Context $Context -StatusCode 500 -Body @{ error = "Could not create app folder: $($_.Exception.Message)" }
+                        return
+                    }
+                }
+                Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $Script:Root + '"')
+            }
             'url' {
                 # E3: drawer's "Search CurseForge" button for a missing dependency,
                 # used only when no API key is configured (a keyed session switches
@@ -5131,7 +5304,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.0.0'
+$Script:Version = '1.1.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -5152,6 +5325,13 @@ $Script:CfCache = @{}
 $Script:UpdateAvailable = @{}
 $Script:LastRun = $null
 $Script:UpdatesCheckedAt = $null
+# CS1 (UX-SPEC.md section 4.2): in-memory only, never persisted to
+# state.json (Save-CheckState is intentionally untouched by this pass) - a
+# server restart forgets a stale failure, which is the right default: the
+# freshness headline should reflect "have we actually seen a failure since
+# this server came up", not resurrect one from a previous run.
+$Script:LastCheckFailed = $false
+$Script:LastCheckError = $null
 $Script:LastRequestTime = Get-Date
 # E19: see Invoke-Route's static-file branch / Handle-Ping - flips to
 # 'webview2' the first time the native host's Furphy tab loads.

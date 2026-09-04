@@ -74,6 +74,14 @@
                             path's game root (three levels up from
                             <AddOns>\Interface\AddOns). Intended for tests -
                             never reads the real WoW folder when given.
+   -ProgressPath <path>    Optional. While a sync loop runs, atomically
+                            writes a small JSON progress snapshot
+                            ({total,index,addon,phase[,bytesDone,
+                            bytesTotal,failPhase]}) to this path after every
+                            phase change, for a caller (addon-server.ps1) to
+                            poll mid-run. Absent -> every write is a no-op.
+                            Purely additive telemetry; never changes what
+                            gets synced or the final -Json stdout shape.
 
  WAGO ADDONS (E12): -Add, -Only, -Unpin, -Ignore, -Unignore, -Rollback,
    -Remove and -Files all also accept a Wago target in place of (or mixed
@@ -123,7 +131,8 @@ param(
     [switch]$Json,
     [switch]$Launcher,
     [string[]]$Rollback,
-    [string]$BuildInfoPath
+    [string]$BuildInfoPath,
+    [string]$ProgressPath
 )
 
 $ProgressPreference = 'SilentlyContinue'
@@ -151,6 +160,61 @@ function Write-Log {
     }
 }
 
+function Write-ProgressStep {
+    <#
+      Mirrors Write-Log's "never abort the run" contract: serializes a small
+      progress snapshot to $script:ProgressPath, atomically (temp file +
+      Move-Item -Force), so a caller polling that path (addon-server.ps1)
+      never reads a half-written file. A complete no-op when $script:ProgressPath
+      is empty (the default, unset) - callers pass this on every phase
+      change unconditionally, and this function is the single place that
+      decides whether that turns into an actual write.
+
+      -Phase is one of: queued, checking, downloading, installing,
+      up_to_date, done, failed. -BytesDone/-BytesTotal are the optional
+      download-progress fields (omitted from the JSON when not supplied -
+      see UX-SPEC.md section 4.4, not implemented yet in this pass).
+      -FailPhase is an additive field (not in the original UX-SPEC.md
+      example payload - see that doc's CS1 note) carrying which phase a
+      failure happened during (checking/downloading/installing), so a
+      caller can map it to a plain-language reason without parsing
+      exception text.
+    #>
+    param(
+        [int]$Total = 0,
+        [int]$Index = 0,
+        $Addon = $null,
+        [Parameter(Mandatory = $true)][string]$Phase,
+        $BytesDone = $null,
+        $BytesTotal = $null,
+        $FailPhase = $null
+    )
+
+    if (-not $script:ProgressPath) {
+        return
+    }
+
+    try {
+        $obj = [ordered]@{
+            total = $Total
+            index = $Index
+            addon = $Addon
+            phase = $Phase
+        }
+        if ($null -ne $BytesDone) { $obj['bytesDone'] = $BytesDone }
+        if ($null -ne $BytesTotal) { $obj['bytesTotal'] = $BytesTotal }
+        if ($FailPhase) { $obj['failPhase'] = $FailPhase }
+
+        $json = ConvertTo-Json -InputObject $obj -Depth 5
+        $tmpPath = "$script:ProgressPath.tmp"
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $script:ProgressPath -Force
+    } catch {
+        # Progress reporting must never abort the run.
+    }
+}
+
 # =====================================================================
 # HTTP helpers
 # =====================================================================
@@ -169,16 +233,137 @@ function Get-ExceptionStatusCode {
     return $code
 }
 
+function Invoke-HttpDownloadWithProgress {
+    <#
+      CS6 (UX-SPEC.md section 4.4): downloads $Uri to $OutFile with
+      byte-level progress, calling Write-ProgressStep (phase 'downloading',
+      bytesDone/bytesTotal) at most every 250ms or 256KB.
+
+      Invoke-WebRequest -OutFile gives no progress callback in PS 5.1, so
+      this uses [System.Net.HttpWebRequest] directly and copies the
+      response stream into a [System.IO.FileStream] in 64KB chunks. Kept
+      as a small, self-contained helper used ONLY by the -OutFile branches
+      of Invoke-CfRequest/Invoke-WagoRequest, which still own all retry
+      (429/403 for CF, 429/503 for Wago) and pacing logic exactly as
+      before -- this function is a drop-in replacement for one
+      Invoke-WebRequest -OutFile call, nothing more:
+        - Redirects (e.g. the CDN 302) are followed: AllowAutoRedirect
+          defaults to $true on HttpWebRequest, same as Invoke-WebRequest.
+        - Same UserAgent and the caller's -Headers hashtable (Accept and
+          Referer map to their dedicated HttpWebRequest properties since
+          HttpWebRequest rejects setting those via the generic Headers
+          collection; anything else goes through Headers.Add).
+        - Same -TimeoutSec applied to both .Timeout and .ReadWriteTimeout
+          (the latter guards a stalled read mid-stream, which .Timeout
+          alone does not cover for a slow/dead connection).
+        - TLS 1.2 is already forced script-wide via ServicePointManager
+          (line ~139), which HttpWebRequest also honors -- no change
+          needed here.
+        - On a non-2xx response, HttpWebRequest.GetResponse() throws a
+          System.Net.WebException whose .Response is an HttpWebResponse
+          carrying .StatusCode -- the exact shape Get-ExceptionStatusCode
+          already reads, so the 429/403/503 retry branches in
+          Invoke-CfRequest/Invoke-WagoRequest see identical status codes
+          to before and their error messages/wording are unaffected.
+      Every stream/response object is disposed in a finally block even on
+      a thrown exception, so a failed attempt never leaks a file handle
+      that would block the next retry's FileMode.Create.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [hashtable]$Headers,
+        [Parameter(Mandatory = $true)][string]$UserAgent,
+        [Parameter(Mandatory = $true)][string]$OutFile,
+        [int]$TimeoutSec = 30,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
+    )
+
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.Method = 'GET'
+    $request.UserAgent = $UserAgent
+    $request.Timeout = $TimeoutSec * 1000
+    $request.ReadWriteTimeout = $TimeoutSec * 1000
+    $request.AllowAutoRedirect = $true
+
+    if ($Headers) {
+        foreach ($k in $Headers.Keys) {
+            switch ($k) {
+                'Accept' { $request.Accept = $Headers[$k] }
+                'Referer' { $request.Referer = $Headers[$k] }
+                default { $request.Headers.Add($k, $Headers[$k]) }
+            }
+        }
+    }
+
+    $response = $null
+    $responseStream = $null
+    $fileStream = $null
+    try {
+        $response = $request.GetResponse()
+
+        $bytesTotal = $null
+        if ($response.ContentLength -ge 0) {
+            $bytesTotal = [int64]$response.ContentLength
+        }
+
+        $responseStream = $response.GetResponseStream()
+        $fileStream = New-Object System.IO.FileStream($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+
+        $buffer = New-Object byte[] 65536
+        $bytesDone = [int64]0
+        $lastWriteAt = Get-Date
+        $lastWriteBytes = [int64]0
+
+        while ($true) {
+            $read = $responseStream.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) {
+                break
+            }
+            $fileStream.Write($buffer, 0, $read)
+            $bytesDone += $read
+
+            $now = Get-Date
+            $elapsedMs = ($now - $lastWriteAt).TotalMilliseconds
+            $sinceBytes = $bytesDone - $lastWriteBytes
+            if (($elapsedMs -ge 250) -or ($sinceBytes -ge 262144)) {
+                Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $ProgressAddon -Phase 'downloading' -BytesDone $bytesDone -BytesTotal $bytesTotal
+                $lastWriteAt = $now
+                $lastWriteBytes = $bytesDone
+            }
+        }
+
+        # Final snapshot so a last sub-threshold chunk (or a file smaller
+        # than 256KB/250ms, which never hit the throttle above at all) is
+        # still reflected before the caller moves on to phase 'installing'.
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $ProgressAddon -Phase 'downloading' -BytesDone $bytesDone -BytesTotal $bytesTotal
+    } finally {
+        if ($fileStream) { $fileStream.Dispose() }
+        if ($responseStream) { $responseStream.Dispose() }
+        if ($response) { $response.Dispose() }
+    }
+}
+
 function Invoke-CfRequest {
     <#
       Performs one CurseForge HTTP request (JSON GET, or a file download
       when -OutFile is supplied). Retries once on HTTP 429/403 after a
       5 second wait. Always paces itself with a 300ms sleep so that
       consecutive calls (list or download) never fire back to back.
+
+      -ProgressTotal/-ProgressIndex/-ProgressAddon (CS6) are forwarded to
+      Invoke-HttpDownloadWithProgress for the -OutFile branch only, so the
+      byte-level progress line can carry the same n-of-N context the
+      caller's phase writes already use. Unused (and harmless, defaulted)
+      for the plain JSON-GET branch.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
-        [string]$OutFile
+        [string]$OutFile,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
     )
 
     $headers = @{
@@ -197,7 +382,7 @@ function Invoke-CfRequest {
         $lastError = $null
         try {
             if ($OutFile) {
-                Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec 30 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
                 $result = $null
             } else {
                 $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
@@ -347,18 +532,27 @@ function Get-CfFileById {
 }
 
 function Get-DownloadedZip {
-    <# Downloads and verifies the selected file into staging; returns the zip path. #>
+    <#
+      Downloads and verifies the selected file into staging; returns the
+      zip path. -ProgressTotal/-ProgressIndex/-ProgressAddon (CS6) are
+      passed straight through to Invoke-CfRequest for the byte-level
+      progress writes; all optional/default to no-progress so a caller
+      that omits them behaves exactly as before.
+    #>
     param(
         [Parameter(Mandatory = $true)][int]$ProjectId,
         [Parameter(Mandatory = $true)]$SelectedFile,
-        [Parameter(Mandatory = $true)][string]$StagingPath
+        [Parameter(Mandatory = $true)][string]$StagingPath,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
     )
 
     $fileId = [int64]$SelectedFile.id
     $zipPath = Join-Path -Path $StagingPath -ChildPath ("{0}-{1}.zip" -f $ProjectId, $fileId)
     $downloadUri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files/$fileId/download"
 
-    Invoke-CfRequest -Uri $downloadUri -OutFile $zipPath | Out-Null
+    Invoke-CfRequest -Uri $downloadUri -OutFile $zipPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon | Out-Null
 
     if (-not (Test-Path -LiteralPath $zipPath)) {
         throw "Download did not produce a file for project $ProjectId file $fileId"
@@ -397,11 +591,17 @@ function Invoke-WagoRequest {
       HTTP 429/503 after a 5 second wait (Wago's documented retry codes -
       CurseForge's Invoke-CfRequest above retries on 429/403 instead).
       Always paces itself with a 300ms sleep, same as Invoke-CfRequest.
+
+      -ProgressTotal/-ProgressIndex/-ProgressAddon (CS6): see the matching
+      note on Invoke-CfRequest above; same forwarding, same no-op default.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
         [hashtable]$Headers,
-        [string]$OutFile
+        [string]$OutFile,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
     )
 
     $mergedHeaders = @{ 'Accept' = 'text/html, application/xhtml+xml' }
@@ -420,7 +620,7 @@ function Invoke-WagoRequest {
         $lastError = $null
         try {
             if ($OutFile) {
-                Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec 30 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
                 $result = $null
             } else {
                 $result = Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
@@ -624,11 +824,19 @@ function Select-WagoRelease {
 }
 
 function Get-WagoDownloadedZip {
-    <# Downloads and verifies one Wago release's signed download link into staging; returns the zip path. #>
+    <#
+      Downloads and verifies one Wago release's signed download link into
+      staging; returns the zip path. -ProgressTotal/-ProgressIndex/
+      -ProgressAddon (CS6): see Get-DownloadedZip's matching note; same
+      forwarding, same no-op default.
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$Slug,
         [Parameter(Mandatory = $true)]$Release,
-        [Parameter(Mandatory = $true)][string]$StagingPath
+        [Parameter(Mandatory = $true)][string]$StagingPath,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
     )
 
     $releaseId = [string]$Release.id
@@ -638,7 +846,7 @@ function Get-WagoDownloadedZip {
     if (-not $Release.download_link) {
         throw "Release $releaseId for wago:$Slug has no download_link"
     }
-    Invoke-WagoRequest -Uri $Release.download_link -OutFile $zipPath | Out-Null
+    Invoke-WagoRequest -Uri $Release.download_link -OutFile $zipPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon | Out-Null
 
     if (-not (Test-Path -LiteralPath $zipPath)) {
         throw "Download did not produce a file for wago:$Slug release $releaseId"
@@ -2001,7 +2209,14 @@ function Sync-SingleAddon {
         [switch]$DryRun,
         [int]$DefaultMaxReleaseType = 1,
         $FileIdOverride = $null,
-        [switch]$ExplicitTarget
+        [switch]$ExplicitTarget,
+        # CS1: caller-supplied n-of-N context for Write-ProgressStep. The
+        # main loop already knows Total/Index (it owns the loop counter);
+        # this function only ever writes the downloading/installing
+        # sub-phases for the single addon it is currently processing, so it
+        # needs those two numbers handed in rather than recomputing them.
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0
     )
 
     # E12: a Wago-sourced record is processed by its own function rather
@@ -2010,7 +2225,7 @@ function Sync-SingleAddon {
     # caller of Sync-SingleAddon (the main sync loop) is unchanged; this
     # dispatch is the only new code path they see.
     if ($Record.source -eq 'wago') {
-        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget
+        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex
     }
 
     $projectId = [int]$Record.projectId
@@ -2018,6 +2233,11 @@ function Sync-SingleAddon {
     if (-not $displayLabel) {
         $displayLabel = "project $projectId"
     }
+    # CS1: tracks the last phase this addon actually reached, so a caught
+    # exception below can stamp Write-ProgressStep's -FailPhase without
+    # parsing the exception text (UX-SPEC.md section 4.1's "each caught
+    # exception... stamps which phase it happened in").
+    $currentPhase = 'checking'
 
     try {
         if ($Record.ignoreUpdates -and (-not $Force) -and (-not $ExplicitTarget)) {
@@ -2063,7 +2283,7 @@ function Sync-SingleAddon {
             $selected = Get-CfFileById -ProjectId $projectId -FileId $pinTarget
             if (-not $selected) {
                 Write-Log -Level 'WARN' -Message "File id $pinTarget not found for project $projectId ($displayLabel)"
-                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
             }
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
@@ -2147,8 +2367,12 @@ function Sync-SingleAddon {
             return [PSCustomObject]@{ Status = $dryRunStatus; Name = $displayLabel; Version = $versionText; FileId = $selectedFileId }
         }
 
-        $zipPath = Get-DownloadedZip -ProjectId $projectId -SelectedFile $selected -StagingPath $StagingPath
+        $currentPhase = 'downloading'
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'downloading'
+        $zipPath = Get-DownloadedZip -ProjectId $projectId -SelectedFile $selected -StagingPath $StagingPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $displayLabel
 
+        $currentPhase = 'installing'
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
         $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $projectId -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
 
         if ($newFolders.Count -eq 0) {
@@ -2157,7 +2381,7 @@ function Sync-SingleAddon {
             # record's folders, so the disk no longer has them even though the
             # swap itself failed. Reflect that on the record.
             $Record.folders = $newFolders.ToArray()
-            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
         $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders
@@ -2245,7 +2469,7 @@ function Sync-SingleAddon {
 
     } catch {
         Write-Log -Level 'ERROR' -Message "Failed processing project $projectId ($displayLabel) : $($_.Exception.Message)"
-        return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+        return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
     }
 }
 
@@ -2286,7 +2510,10 @@ function Sync-SingleWagoAddon {
         [switch]$DryRun,
         [int]$DefaultMaxReleaseType = 1,
         $FileIdOverride = $null,
-        [switch]$ExplicitTarget
+        [switch]$ExplicitTarget,
+        # CS1: see Sync-SingleAddon's identical params for why.
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0
     )
 
     $slug = $Record.slug
@@ -2294,6 +2521,8 @@ function Sync-SingleWagoAddon {
     if (-not $displayLabel) {
         $displayLabel = "wago:$slug"
     }
+    # CS1: see Sync-SingleAddon's identical tracker for why.
+    $currentPhase = 'checking'
 
     try {
         if ($Record.ignoreUpdates -and (-not $Force) -and (-not $ExplicitTarget)) {
@@ -2328,7 +2557,7 @@ function Sync-SingleWagoAddon {
             $selected = Get-WagoReleaseById -Slug $slug -ReleaseId $pinTarget
             if (-not $selected) {
                 Write-Log -Level 'WARN' -Message "Release id $pinTarget not found for wago:$slug ($displayLabel)"
-                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
             }
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
@@ -2392,15 +2621,19 @@ function Sync-SingleWagoAddon {
             return [PSCustomObject]@{ Status = 'Would-update'; Name = $displayLabel; Version = $versionText; FileId = $selectedFileId }
         }
 
-        $zipPath = Get-WagoDownloadedZip -Slug $slug -Release $selected -StagingPath $StagingPath
+        $currentPhase = 'downloading'
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'downloading'
+        $zipPath = Get-WagoDownloadedZip -Slug $slug -Release $selected -StagingPath $StagingPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $displayLabel
 
+        $currentPhase = 'installing'
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
         $backupKey = Get-RecordBackupKey -Record $Record
         $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
 
         if ($newFolders.Count -eq 0) {
             Write-Log -Level 'ERROR' -Message "Install produced zero usable folders for wago:$slug ($displayLabel)"
             $Record.folders = $newFolders.ToArray()
-            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
         $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders
@@ -2466,7 +2699,7 @@ function Sync-SingleWagoAddon {
 
     } catch {
         Write-Log -Level 'ERROR' -Message "Failed processing wago:$slug ($displayLabel) : $($_.Exception.Message)"
-        return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
+        return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
     }
 }
 
@@ -2776,6 +3009,11 @@ $script:LogPath = Join-Path -Path $scriptRootPath -ChildPath 'sync.log'
 $script:LastRunPath = Join-Path -Path $scriptRootPath -ChildPath 'last-run.txt'
 $script:SettingsPath = Join-Path -Path $scriptRootPath -ChildPath 'settings.json'
 $script:BackupsPath = Join-Path -Path $scriptRootPath -ChildPath 'backups'
+# CS1: -ProgressPath is an opt-in caller-supplied path (addon-server.ps1
+# threads one per job); Write-ProgressStep reads this script-scoped copy so
+# every call site just calls it with phase data, never re-threading the
+# path itself through every function signature.
+$script:ProgressPath = $ProgressPath
 
 try {
     # ---- Load config ----
@@ -3477,6 +3715,14 @@ try {
         }
     }
 
+    # CS1: n-of-N progress reporting (UX-SPEC.md section 4.1). $progressIndex
+    # is the count of addons already FINISHED (bumped after each one below),
+    # so a determinate bar can render index/total at any point mid-run. A
+    # complete no-op end to end when -ProgressPath was never supplied
+    # (Write-ProgressStep's own guard).
+    $progressIndex = 0
+    Write-ProgressStep -Total $toSync.Count -Index 0 -Addon $null -Phase 'queued'
+
     foreach ($record in $toSync) {
         # E12: reference-equality membership check replaces the pre-E12
         # int64 HashSet.Contains - toSync is itself already exactly
@@ -3500,7 +3746,22 @@ try {
             $fileIdOverrideForRecord = $FileId
         }
 
-        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit
+        # CS1: same "name, else a source-appropriate placeholder" fallback
+        # Sync-SingleAddon/Sync-SingleWagoAddon each use internally for
+        # their own $displayLabel - kept in sync with those on purpose so
+        # the "checking" step's addon name matches whatever the "downloading"/
+        # "installing" steps written from inside the sync function say next.
+        $progressLabel = $record.name
+        if (-not $progressLabel) {
+            if ($record.source -eq 'wago') {
+                $progressLabel = "wago:$($record.slug)"
+            } else {
+                $progressLabel = "project $($record.projectId)"
+            }
+        }
+        Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $progressLabel -Phase 'checking'
+
+        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex
 
         # For a real (non-DryRun) Installed/Updated row, Sync-SingleAddon
         # mutates $record.fileId in place before returning, so $record.fileId
@@ -3515,6 +3776,29 @@ try {
             $rowFileId = $rowResult.FileId
         }
         $resultsRows.Add([PSCustomObject]@{ Status = $rowResult.Status; Name = $rowResult.Name; Version = $rowResult.Version; ProjectId = $record.projectId; FileId = $rowFileId; WagoSlug = $record.slug })
+
+        # CS1: bump index (this addon is now finished, one way or another)
+        # and write the final per-addon phase, mapped from the same
+        # $rowResult.Status the row above was just built from (UX-SPEC.md
+        # section 4.1 point 5). A caught failure's FailPhase (set inside
+        # Sync-SingleAddon/Sync-SingleWagoAddon's own catch block, or a
+        # "file/release id not found"/zero-usable-folders return - see those
+        # functions) rides along on the same write so a UI reading
+        # progress.json's very last entry for a failed addon still gets which
+        # sub-phase it failed during without parsing $rowResult itself.
+        $progressIndex = $progressIndex + 1
+        switch ($rowResult.Status) {
+            'Up-to-date' { $mappedPhase = 'up_to_date' }
+            'Failed'     { $mappedPhase = 'failed' }
+            'Installed'  { $mappedPhase = 'done' }
+            'Updated'    { $mappedPhase = 'done' }
+            default      { $mappedPhase = 'done' }
+        }
+        $rowFailPhase = $null
+        if (Get-Member -InputObject $rowResult -Name 'FailPhase' -MemberType NoteProperty) {
+            $rowFailPhase = $rowResult.FailPhase
+        }
+        Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $rowResult.Name -Phase $mappedPhase -FailPhase $rowFailPhase
     }
 
     # ---- Drop placeholder records for adds that never got an installable file ----

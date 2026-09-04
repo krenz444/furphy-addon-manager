@@ -25,7 +25,13 @@
   --accent-text: #1a0e08;
   --success: #3ddc84;
   --warning: #f5b400;
-  --danger: #ef4a4a;
+  /* Review fix: nudged from #ef4a4a - measured contrast of .chip-danger's
+     text (this token) against its own --danger-tint background composited
+     over --bg-0 was 4.33:1, just under WCAG AA's 4.5:1 for normal text;
+     this brighter value clears ~4.70:1 in the same measurement while
+     staying visually the same "danger red". --danger-hover/-text/-border
+     are unaffected (separate tokens). */
+  --danger: #f45454;
   --info: #4a9eef;
 
   /* danger button's own hover/text shades, its outline variant's border, and
@@ -99,14 +105,24 @@
   --text-faint: #797b82;
 
   --accent: #d9531f;
-  --accent-hover: #c2461a;
+  /* Review fix: nudged from #c2461a - .chip-busy (color: --accent-hover on
+     background: --accent-tint, style.css ~line 804) composited over this
+     theme's --bg-0 body background measured 3.97:1, under the 4.5:1 floor.
+     This darker value clears ~5.0:1 in the same measurement while only
+     improving the other --accent-hover uses (btn-accent hover fill,
+     link-btn hover text, source-badge.is-cf) which already passed. */
+  --accent-hover: #a83c16;
   --accent-text: #1a0e08;
-  --success: #157a45;
+  --success: #0f6b3c;
   --warning: #8a5a00;
-  --danger: #c62f2f;
+  /* Review fix: nudged from #c62f2f - same .chip-danger contrast check as
+     dark theme's own --danger comment above measured 4.31:1 here (text
+     over --danger-tint composited over --bg-0), just under AA; this
+     slightly darker value clears ~4.70:1 in the same measurement. */
+  --danger: #bd2a2a;
   --info: #1f5fa8;
 
-  --success-tint: rgba(21, 122, 69, 0.12);
+  --success-tint: rgba(15, 107, 60, 0.12);
   --warning-tint: rgba(138, 90, 0, 0.12);
   --danger-tint: rgba(198, 47, 47, 0.10);
   --info-tint: rgba(31, 95, 168, 0.10);
@@ -364,11 +380,39 @@ button { font-family: inherit; }
 
 .sidebar-bottom { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 
-.status-line { display: flex; align-items: center; gap: 6px; padding: 4px 4px 0; font-size: 12px; color: var(--text-faint); }
+/* CS2 (UX-SPEC.md section 2.1): the freshness headline (Components.Freshness,
+   its sidebar mount) - a separate line/fact from the connectivity dot below.
+   Compact sizing to fit the sidebar; the My Addons mount (.myaddons-freshness)
+   below reuses the same row markup at full size. */
+.freshness-line { padding: 2px 4px 0; }
+.freshness-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.freshness-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.freshness-dot.is-success { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
+.freshness-dot.is-warning { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-tint); }
+.freshness-dot.is-danger { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-tint); }
+.freshness-dot.is-checking { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); animation: pulse 1.1s ease-in-out infinite; }
+.freshness-dot.is-muted { background: var(--text-faint); }
+.freshness-headline { color: var(--text); font-weight: 600; }
+button.freshness-headline { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: var(--danger); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+button.freshness-headline:hover { color: var(--danger-hover); }
+.freshness-clause { color: var(--text-faint); font-weight: 400; }
+/* Review fix: dot-only sidebar mount (Components.Freshness dotOnly) renders
+   the dot as a real <button> when a Retry is available, so the click-to-
+   retry affordance survives losing its label - reset the default button
+   chrome so it still reads as the same small circle, not a pill/box. */
+.freshness-dot-btn { display: block; border: none; padding: 0; margin: 0; cursor: pointer; }
+.freshness-dot-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* CS2 (UX-SPEC.md section 2.1): connectivity is a SEPARATE fact from
+   freshness, never folded into the same dot/text - deliberately only ever
+   grey or green (never red/amber) so it can't be mistaken for the
+   freshness headline's own danger state; it carries visible text only in
+   the two problem states (#status-text is left empty otherwise). */
+.status-line { display: flex; align-items: center; gap: 6px; padding: 4px 4px 0; font-size: 11.5px; color: var(--text-faint); }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
 .status-dot[data-state="ok"] { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
-.status-dot[data-state="error"] { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-tint); }
-.status-dot[data-state="connecting"] { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-tint); }
+.status-dot[data-state="error"] { background: var(--text-faint); }
+.status-dot[data-state="connecting"] { background: var(--text-faint); animation: pulse 1.1s ease-in-out infinite; }
 
 /* min-height: 0 overrides the flex default of min-height:auto, which would
    otherwise let this column stretch to its content's height (defeating
@@ -387,12 +431,6 @@ button { font-family: inherit; }
   font-size: 13px;
 }
 .banner .icon { stroke: var(--danger); }
-/* E16: a non-blocking, neutral-toned variant of .banner - Browse's keyless-
-   mode notice, unlike the danger-toned "server not reachable" banner this
-   class was originally built for. Same --info/--info-tint pairing
-   .form-msg.is-info already uses across all three themes. */
-.banner.is-info { background: var(--info-tint); color: var(--info); border-bottom: 1px solid var(--border); }
-.banner.is-info .icon { stroke: var(--info); }
 
 .main { flex: 1; min-width: 0; padding: 20px 24px 96px; overflow-y: auto; }
 
@@ -529,43 +567,6 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .inline-form { display: flex; gap: 8px; }
 .inline-form input { flex: 1; }
 
-/* Round 9: Browse's "Search on CurseForge.com" row - jumps to CurseForge's
-   own website search (a separate window, not this app's in-app search) -
-   its own compact card rather than living in .topbar, so it never crowds
-   the main search/category/sort controls and reads as clearly distinct. */
-.cf-web-search {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.cf-web-search-field { min-width: 220px; flex: 1 1 220px; }
-.cf-web-search-hint { flex-basis: 100%; margin: 0; }
-/* E19 (script/registration itself is E17's, unchanged): the curseforge://
-   handler status pill + toggle, painted by Components.ProtocolControl into
-   this row - a hairline divider separates it from the search controls
-   above since it is a different kind of setting (not a search action). */
-.cf-web-search-protocol {
-  flex-basis: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-.cf-web-search-protocol .muted-text { margin: 0; }
-
-/* E19: shared by both places Components.ProtocolControl.render() paints
-   into (Settings > Game's row, the CurseForge Browse pane above) - the
-   status chip and the toggle switch side by side. */
-.protocol-control-row { display: flex; align-items: center; gap: 10px; }
-
 /* ==========================================================================
    Top bars / list summaries
    ========================================================================== */
@@ -576,12 +577,16 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .list-summary { font-size: 12.5px; color: var(--text-faint); padding: 2px 2px 4px; }
 .list-summary strong { color: var(--text-muted); font-weight: 600; }
 
-/* E5: My Addons header's "Last run: ... · Details" line. */
-.lastrun-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-faint); padding: 0 2px 4px; }
+/* CS2 (UX-SPEC.md sections 1.1/2.2): the freshness headline's second mount,
+   full-size, atop My Addons - replaces the old summary sentence AND the
+   separate "Last run" line this rule used to belong to. */
+.myaddons-freshness { padding: 2px 2px 6px; }
+.myaddons-freshness .freshness-row { font-size: 13.5px; }
+.myaddons-freshness .freshness-dot { width: 8px; height: 8px; }
 
 /* Generic link-styled button - a <button> (for keyboard/click handling) that
-   reads as an inline text link. Used by the Last run "Details" line and the
-   job results panel's per-row "What changed" control. */
+   reads as an inline text link. Used by the job results panel's per-row
+   "What changed"/"Retry" controls. */
 .link-btn {
   background: none;
   border: none;
@@ -670,7 +675,13 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
    that gap - every column (including .col-addon, given an explicit width
    below) is honored exactly, so the numbers in this file are now the real
    rendered width, not just an estimate of it. */
-.addon-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0 6px; min-width: 1030px; }
+/* CS2 (UX-SPEC.md section 3.1): 7 columns -> 5 (checkbox, Addon, Version,
+   Status, kebab). Installed/Latest/Compat/Updated are all gone (merged into
+   Version/Status, or moved into the kebab menu), so the table is
+   considerably narrower now and no longer needs the old >1100px-breakpoint
+   column-dropping dance - min-width comfortably clears the app's documented
+   1000px minimum window width (720px content area) on its own. */
+.addon-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0 6px; min-width: 560px; }
 .addon-table thead th {
   text-align: left;
   font-size: 11px;
@@ -681,50 +692,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   padding: 0 12px 6px;
 }
 .addon-table .col-checkbox { width: 34px; padding-left: 14px; }
-.addon-table .col-version { width: 110px; }
-.addon-table .col-status { width: 150px; }
-.addon-table .col-compat { width: 150px; }
-.addon-table .col-updated { width: 140px; }
+.addon-table .col-version { width: 150px; }
+.addon-table .col-status { width: 190px; }
 .addon-table .col-menu { width: 44px; }
 .addon-table td.checkbox-cell { padding-left: 14px; }
-
-/* At the app's documented 1000px minimum window width, the content area
-   (1000 - 232px sidebar - 48px .main padding = 720px) is narrower than the
-   table's normal min-width, forcing a horizontal scroll to reach
-   Latest/Updated even though the kebab column is pinned. Below ~1100px,
-   drop the lowest-priority column (Updated - still visible via the row's
-   own hover/full-date title, and sortable via the header even while hidden)
-   and shrink every remaining column - including the Addon name column,
-   uncapped everywhere else, now given a real width here so table-layout:
-   fixed has a number to enforce - so the total genuinely fits in 720px.
-   Column budget at this breakpoint (checkbox 34 + name 190 + installed 78
-   + latest 78 + status 128 + compat 140 + menu 44 = 692px, min-width below)
-   leaves a ~28px buffer under the 720px floor, verified against a live
-   render of this file at window widths 1000-1100px (not just arithmetic on
-   paper, which is what produced the previous, still-too-wide 810px). */
-/* Round 4 fix: fallback copy of the Updated cell's relative time, folded into
-   the status cell - hidden here, shown only inside the max-width:1100px
-   media query below where the real Updated column is dropped, so the
-   information doesn't just disappear with no affordance at narrow widths.
-   Round 9 fix: this base rule must come BEFORE the media query - a later,
-   equal-specificity `.updated-fallback{display:none}` used to sit after the
-   media query in source order and always won regardless of viewport width
-   (confirmed live: at 1000px, matchMedia('(max-width:1100px)').matches was
-   true and the fallback span existed in the DOM with the right text, but
-   getComputedStyle still showed display:none) - moving the base declaration
-   here lets the media query's override actually apply. */
-.updated-fallback { display: none; font-size: 11px; color: var(--text-faint); cursor: default; }
-
-@media (max-width: 1100px) {
-  .addon-table { min-width: 692px; }
-  .addon-table .col-addon { width: 190px; }
-  .addon-table .col-version { width: 78px; }
-  .addon-table .col-status { width: 128px; }
-  .addon-table .col-compat { width: 140px; }
-  .addon-table .col-updated,
-  .addon-table .updated-cell { display: none; }
-  .updated-fallback { display: inline-block; }
-}
 
 /* Sortable column headers: a plain-looking button that inherits the <th>'s
    uppercase/faint styling (form controls don't inherit font/color/text-transform
@@ -805,11 +776,6 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
    "via catalogue" in the drawer header - distinct from .source-badge's
    per-source identity colors (this is about provenance, not identity, so
    it stays muted regardless of which source it names). */
-.source-pill {
-  flex: none; display: inline-flex; align-items: center; padding: 1px 6px;
-  border-radius: 999px; font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
-  background: var(--bg-3); color: var(--text-faint); border: 1px solid var(--border-soft);
-}
 .source-note { margin-top: 8px; }
 
 /* E12: "Also on Wago/CurseForge" cross-link in the drawer header, when the
@@ -843,15 +809,15 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .chip-danger { background: var(--danger-tint); color: var(--danger); }
 .chip-busy { background: var(--accent-tint); color: var(--accent-hover); }
 .chip-busy .chip-dot { animation: pulse 1s ease-in-out infinite; }
+/* CS2 (UX-SPEC.md section 3.2): an actionable pill (Update / Couldn't
+   update — Retry) is a real <button>, not a <span> - reset the button
+   chrome a chip-* color class doesn't already cover. */
+button.chip.chip-action { border: none; font: inherit; cursor: pointer; }
+button.chip.chip-action:hover:not(:disabled) { filter: brightness(1.15); }
+button.chip.chip-action:disabled { cursor: not-allowed; opacity: 0.6; }
+button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-
-/* E3: the Status cell can carry the normal status chip plus a "Missing: n"
-   warning chip (dependencies are orthogonal to update/pin/ignore status) -
-   stacked rather than side-by-side so neither wraps into the next column. */
-.status-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-
-.updated-cell { color: var(--text-muted); font-size: 12.5px; cursor: default; }
 
 .menu-wrap { display: flex; justify-content: flex-end; }
 /* Portalled to <body> with fixed positioning (see Components.Dropdown) so it is
@@ -888,6 +854,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .dropdown-item.is-danger { color: var(--danger); }
 .dropdown-item:disabled { color: var(--text-faint); cursor: not-allowed; }
 .dropdown-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+/* CS2: a non-interactive info line inside a kebab menu (e.g. "Installed
+   3h ago") - same box as .dropdown-item so it lines up, but no hover/press
+   affordance since it isn't clickable. */
+.dropdown-info { padding: 8px 10px; font-size: 12.5px; color: var(--text-faint); cursor: default; }
 
 /* ==========================================================================
    Skeletons / empty / error states
@@ -917,6 +887,8 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .empty-state h3, .error-state h3 { color: var(--text); }
 .empty-state p, .error-state p { color: var(--text-faint); max-width: 360px; }
 .empty-state .btn, .error-state .btn { margin-top: 6px; }
+.empty-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.empty-actions .btn { margin-top: 0; }
 
 /* ==========================================================================
    Browse view
@@ -954,14 +926,6 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .browse-card-cat { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--bg-2); color: var(--text-faint); }
 .browse-card-footer { margin-top: auto; padding-top: 4px; }
 .browse-card-footer .btn { width: 100%; }
-
-.loadmore-wrap { display: flex; justify-content: center; padding: 16px 0 40px; }
-
-/* E12: Browse's CurseForge/Wago source switch - sits above both the no-key
-   panel and the shared search/grid content, always visible, reusing the
-   same .segmented control Settings > Appearance's Density/Theme toggles
-   already define. */
-.browse-source-row { padding: 16px 0 0; }
 
 .nokey-panel { display: flex; gap: 16px; align-items: flex-start; padding-top: 24px; flex-wrap: wrap; }
 .nokey-card {
@@ -1053,11 +1017,45 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .segmented-btn.is-active { background: var(--bg-3); color: var(--text); }
 .segmented-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
-.apikey-row { display: flex; gap: 8px; align-items: center; }
+.apikey-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
 .password-field { position: relative; flex: 1; }
 .password-field input { width: 100%; padding-right: 40px; }
 .password-field .icon-btn { position: absolute; right: 3px; top: 2px; }
-.apikey-status { font-size: 12.5px; color: var(--text-faint); margin-top: 10px; }
+
+/* CS4 (UX-SPEC.md 6.1/6.2): the "Add a CurseForge key" collapsed row and the
+   single Advanced disclosure wrapping every non-Essentials settings group. */
+.settings-collapse-row {
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border-soft);
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.settings-collapse-row:first-of-type { border-top: none; padding-top: 4px; }
+.settings-collapse-row:hover .settings-row-label { color: var(--accent); }
+.settings-collapse-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.settings-collapse-chevron { color: var(--text-faint); flex: none; transition: color var(--fast); }
+.settings-collapse-row:hover .settings-collapse-chevron { color: var(--text-muted); }
+#apikey-expand { padding-bottom: 4px; }
+
+.settings-advanced { margin-top: 2px; }
+.settings-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 8px 2px;
+  user-select: none;
+}
+.settings-advanced > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::before { content: "▸ "; color: var(--text-faint); }
+.settings-advanced[open] > summary::before { content: "▾ "; }
+.settings-advanced > summary:hover { color: var(--text); }
+.settings-advanced-body { display: flex; flex-direction: column; gap: 14px; margin-top: 4px; }
 
 .untracked-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .untracked-row {
@@ -1208,8 +1206,6 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
    dep-dot + name + button. */
 .compat-section { margin-top: 16px; }
 .compat-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.compat-detail { font-size: 12px; }
-
 .versions-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; }
 .versions-table th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--text-faint); padding: 0 10px 4px; }
 .versions-table td { padding: 9px 10px; background: var(--bg-2); border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); font-size: 12.5px; vertical-align: middle; }
@@ -1256,6 +1252,47 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .job-panel-body { border-top: 1px solid var(--border-soft); max-height: 260px; overflow-y: auto; padding: 10px 12px; }
+
+/* CS2 (UX-SPEC.md section 4.3): the determinate n-of-N bar + current-item
+   phase line - the panel's primary view while a progress-tracked job runs.
+   A plain <progress> element styled per-theme; omitting `value` (the
+   "check"-kind case, set in JS) renders it indeterminate/animated in every
+   browser without any extra CSS. */
+.job-progress-wrap { margin-bottom: 10px; }
+.job-progress-label { font-size: 12.5px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.job-progress-bar { -webkit-appearance: none; appearance: none; border: none; width: 100%; height: 8px; border-radius: 999px; }
+.job-progress-bar::-webkit-progress-bar { background: var(--bg-2); border-radius: 999px; }
+.job-progress-bar::-webkit-progress-value { background: var(--accent); border-radius: 999px; transition: width var(--fast); }
+.job-progress-bar::-moz-progress-bar { background: var(--accent); border-radius: 999px; }
+/* Review fix: appearance:none above (needed so the determinate bar's fill/
+   track pick up theme tokens) also suppresses the browser's own built-in
+   indeterminate animation for a value-less <progress>, leaving a flat,
+   static bar for the whole duration of a "check"-kind job. JS toggles this
+   class alongside removeAttribute("value") (Components.JobPanel.update) so
+   this state gets its own themed sweep instead of reading as stalled. The
+   track background carries the animation (the webkit "value" pseudo has 0
+   width with no value set, so it contributes nothing here); Firefox's
+   native indeterminate rendering already animates on its own and is left
+   alone. */
+.job-progress-bar.is-indeterminate::-webkit-progress-bar {
+  background: linear-gradient(90deg, var(--bg-2) 0%, var(--bg-2) 35%, var(--accent) 50%, var(--bg-2) 65%, var(--bg-2) 100%);
+  background-size: 260% 100%;
+  animation: job-progress-sweep 1.3s ease-in-out infinite;
+}
+@keyframes job-progress-sweep {
+  0% { background-position: 130% 0; }
+  100% { background-position: -130% 0; }
+}
+.job-progress-current { margin-top: 6px; font-size: 12px; color: var(--text-muted); min-height: 1.4em; }
+
+/* CS2: the raw log, moved behind a closed-by-default disclosure - reachable,
+   never the default view. */
+.job-details summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--text-faint); list-style: none; }
+.job-details summary::-webkit-details-marker { display: none; }
+.job-details summary::before { content: "▸ "; }
+.job-details[open] summary::before { content: "▾ "; }
+.job-details summary:hover { color: var(--text-muted); }
+.job-details[open] summary { margin-bottom: 6px; }
 .job-log {
   margin: 0;
   font-family: Consolas, "Cascadia Mono", monospace;
@@ -1264,7 +1301,7 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   white-space: pre-wrap;
   word-break: break-word;
 }
-.job-results { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.job-results { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
 .job-result-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 4px 2px; border-top: 1px solid var(--border-soft); }
 .job-result-row:first-child { border-top: none; }
 /* E5: wraps the row's name + optional "What changed" control so the pair
@@ -1272,6 +1309,10 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
    row's existing justify-content:space-between. */
 .job-result-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .job-result-whatchanged { font-size: 11.5px; white-space: nowrap; }
+/* CS2: a failed row's plain-language reason + inline Retry, replacing the
+   chip a successful row shows in the same slot. */
+.job-result-fail { display: flex; align-items: center; gap: 10px; flex: none; white-space: nowrap; }
+.job-result-reason { color: var(--danger); font-size: 12px; }
 
 /* ==========================================================================
    Toasts
@@ -1405,10 +1446,9 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 [data-density="compact"] .settings-row { padding: 6px 0; }
 [data-density="compact"] .browse-card { padding: 10px; gap: 6px; }
 [data-density="compact"] .list-summary { padding: 1px 2px 2px; }
-[data-density="compact"] .lastrun-line { padding: 1px 2px 2px; }
+[data-density="compact"] .myaddons-freshness { padding: 1px 2px 3px; }
 [data-density="compact"] .filter-chips { padding-bottom: 2px; }
 [data-density="compact"] .filter-chip { padding: 3px 8px; }
-[data-density="compact"] .status-cell { gap: 3px; }
 [data-density="compact"] .dep-row { padding: 6px 10px; }
 [data-density="compact"] .diag-row { padding: 6px 10px; }
 [data-density="compact"] .selection-bar { padding: 5px 10px; margin-bottom: 6px; }
