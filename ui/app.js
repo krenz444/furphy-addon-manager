@@ -140,8 +140,10 @@ const Mock = (function () {
           else if (obj.action === "go" && obj.url) cfNavigate(obj.url);
         }
         // cf-rect: nothing to reply to, already logged above.
-        // cf-hide, theme, open-curseforge (legacy compat): accepted, no
-        // reply needed for this mock's own purposes.
+        // cf-hide, theme, open-curseforge (legacy compat), cf-focus (Round
+        // 16/E22): accepted, no reply needed for this mock's own purposes -
+        // the page->host postMessage console.log above is the whole point
+        // of exercising the toggle under ?mock=1&host=webview2.
       },
       addEventListener: function (type, cb) { if (type === "message") cfListeners.push(cb); },
       removeEventListener: function (type, cb) {
@@ -161,8 +163,11 @@ const Mock = (function () {
 
   // E19: adFilter/hostWindow join the mock settings shape too, so Settings'
   // Browsing card and the protocol row are exercisable under ?mock=1.
-  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, cfApiKey: "", port: 47831, adFilter: false, hostWindow: null };
-  let hasKey = false;
+  // adFilter defaults true as of 2026-09-04 (Eric's explicit ask, SPEC E22 -
+  // was OFF by default originally, see Get-DefaultSettings on the server).
+  // Round 16 (E22): cfFocus joins them too, default true (see
+  // Get-DefaultSettings on the server).
+  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null };
   // E19: mock curseforge:// handler state - toggled entirely in-memory by
   // the /api/protocol/register|unregister handling below, no real registry
   // access. ?mock=1&host=webview2 also flips /api/ping's host field, so the
@@ -260,44 +265,12 @@ const Mock = (function () {
     { folder: "leftover_stuff", title: null, version: null, hasToc: false }
   ];
 
-  const categories = [
-    { id: 1001, name: "Combat", slug: "combat", iconUrl: "", parentCategoryId: 0 },
-    { id: 1002, name: "Auction & Economy", slug: "auction-economy", iconUrl: "", parentCategoryId: 0 },
-    { id: 1003, name: "Map & Minimap", slug: "map-minimap", iconUrl: "", parentCategoryId: 0 },
-    { id: 1004, name: "UI Replacement", slug: "ui-replacement", iconUrl: "", parentCategoryId: 0 }
-  ];
-
-  function fakeMod(id, name, summary) {
-    return {
-      id: id, name: name, slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-      summary: summary,
-      downloadCount: Math.floor(Math.random() * 5000000) + 10000,
-      logo: { thumbnailUrl: "", url: "" },
-      authors: [{ name: "AddonAuthor" }],
-      categories: [categories[id % categories.length]],
-      dateModified: new Date(Date.now() - (id % 30) * 24 * 3600e3).toISOString(),
-      dateReleased: new Date(Date.now() - (id % 30) * 24 * 3600e3).toISOString(),
-      dateCreated: new Date(Date.now() - 900 * 24 * 3600e3).toISOString(),
-      links: { websiteUrl: "https://www.curseforge.com/wow/addons/" + id, sourceUrl: "https://github.com/example/" + id, issuesUrl: "" },
-      screenshots: [],
-      latestFilesIndexes: [{ gameVersion: "12.0.0", fileId: id * 10, releaseType: 1, gameVersionTypeId: 517 }],
-      allowModDistribution: true
-    };
-  }
-
-  const browsePool = [];
-  for (let i = 1; i <= 34; i++) {
-    browsePool.push(fakeMod(90000 + i, "Sample Addon " + i, "A tidy little addon that does something useful for raiders and casuals alike."));
-  }
-
   // E16 (keyless CurseForge enrichment): a small offline-catalogue-shaped
-  // fixture pool, distinct from browsePool above (which represents the
-  // OFFICIAL /api/cf/search results a keyed session sees) - exercises
-  // /api/cf/browse and the "addon-radar"/"catalogue-only" drawer branches
-  // under ?mock=1 with no key configured. 1521253 deliberately matches
-  // BonusRollConfirm's real tracked projectId (see the addons fixture
-  // above) so opening ITS row with no key exercises the enrichment path
-  // for an already-tracked addon, not just a Browse card.
+  // fixture pool - exercises /api/cf/browse and the "addon-radar"/
+  // "catalogue-only" drawer branches under ?mock=1. 1521253 deliberately
+  // matches BonusRollConfirm's real tracked projectId (see the addons fixture
+  // above) so opening ITS row exercises the enrichment path for an
+  // already-tracked addon, not just a Browse card.
   const cfCatalogueMock = [
     { id: 1521253, name: "BonusRollConfirm", slug: "bonusrollconfirm", downloadCount: 12000, lastUpdated: new Date(Date.now() - 5 * 24 * 3600e3).toISOString(), logoUrl: "" },
     { id: 25301, name: "Details! Damage Meter", slug: "details-damage-meter", downloadCount: 45000000, lastUpdated: new Date().toISOString(), logoUrl: "" }
@@ -868,7 +841,6 @@ const Mock = (function () {
             { name: "settings.json", ok: true, detail: "valid" },
             { name: "addons.json", ok: true, detail: addons.length + " records" },
             { name: "CurseForge reachability", ok: true, detail: "Reachable (HTTP 200)" },
-            { name: "CurseForge API key", ok: true, detail: hasKey ? "Key is valid" : "No API key configured (optional)" },
             { name: "Disk space", ok: true, detail: "412.6 GB free on C:\\" },
             { name: "PowerShell version", ok: true, detail: "5.1.19041.4291" },
             { name: "Server uptime", ok: true, detail: "12m" },
@@ -885,9 +857,9 @@ const Mock = (function () {
       if (p === "/api/settings" && method === "PUT") {
         if (typeof body.releaseType === "number") mockSettings.releaseType = body.releaseType;
         if (typeof body.autoUpdateOnLaunch === "boolean") mockSettings.autoUpdateOnLaunch = body.autoUpdateOnLaunch;
-        if (typeof body.cfApiKey === "string") { hasKey = body.cfApiKey.length > 0; mockSettings.cfApiKey = body.cfApiKey; }
         if (typeof body.port === "number") mockSettings.port = body.port;
         if (typeof body.adFilter === "boolean") mockSettings.adFilter = body.adFilter;
+        if (typeof body.cfFocus === "boolean") mockSettings.cfFocus = body.cfFocus;
         if (body.hostWindow !== undefined && body.hostWindow !== null) mockSettings.hostWindow = body.hostWindow;
         return currentSettings();
       }
@@ -904,32 +876,11 @@ const Mock = (function () {
         protocolRegistered = false;
         return { registered: false, currentHandler: "", handlerPath: "...\\curseforge-handler.vbs", handlerExists: true };
       }
-      if (p === "/api/settings/test-key" && method === "POST") {
-        const key = (body && body.cfApiKey) || mockSettings.cfApiKey;
-        if (key && key.length >= 8) return { ok: true, message: "Key is valid." };
-        return { ok: false, message: "Key rejected by CurseForge." };
-      }
-      // E16: /api/cf/enrich/*, /api/cf/browse and /api/cf/catalogue/refresh
-      // are always keyless-capable (no 409 no-key gate) - exempted from the
-      // blanket no-key 409 below, matching the real server (Handle-CfEnrich/
-      // Handle-CfBrowse/Handle-CfCatalogueRefresh never check for a key at
-      // all) and the client's own isKeylessCfPath exemption.
-      const isKeylessCfMockPath = p.indexOf("/api/cf/enrich/") === 0 || p === "/api/cf/browse" || p === "/api/cf/catalogue/refresh";
-      if (p.indexOf("/api/cf/") === 0 && !isKeylessCfMockPath) {
-        if (!hasKey) return { __status: 409, error: "no-key" };
-        // Round 6 fix: dev-only way to exercise a configured-but-rejected key
-        // (real CurseForge 401/403) under ?mock=1 - same length-8 threshold
-        // /api/settings/test-key above already uses, so saving a short key
-        // in Settings and then visiting Browse reproduces the reported bug
-        // (repeated /api/cf/* 403s) without any real network access.
-        if (mockSettings.cfApiKey.length < 8) return { __status: 401, error: "unauthorized" };
-      }
-      // E16: keyless CurseForge enrichment - mirrors the real server's
-      // /api/cf/enrich, /api/cf/browse and /api/cf/catalogue/refresh shapes
-      // closely enough to exercise Browse's keyless-mode UI and the
-      // drawer's cf-keyless branches (incl. a wago-match demo, id 654321)
-      // without a real server. Reachable in mock mode regardless of
-      // mockSettings.cfApiKey - see isKeylessCfMockPath above.
+      // Round 16 (E22, CurseForge key removal): /api/cf/enrich/*,
+      // /api/cf/browse and /api/cf/catalogue/refresh are the only CurseForge
+      // routes left - always keyless, matching the real server
+      // (Handle-CfEnrich/Handle-CfBrowse/Handle-CfCatalogueRefresh never
+      // needed a key even before the key feature was removed).
       const enrichMatch = p.match(/^\/api\/cf\/enrich\/(\d+)$/);
       if (enrichMatch) return mockCfEnrich(Number(enrichMatch[1]));
       if (p === "/api/cf/browse") {
@@ -942,55 +893,6 @@ const Mock = (function () {
       if (p === "/api/cf/catalogue/refresh" && method === "POST") {
         cfCatalogueMockFetchedAt = new Date().toISOString();
         return { ok: true, fetchedAt: cfCatalogueMockFetchedAt, count: cfCatalogueMock.length, source: "instawow-data+strongbox" };
-      }
-      if (p === "/api/cf/categories") return { data: categories };
-      if (p === "/api/cf/search") {
-        const q2 = (q.get("q") || "").toLowerCase();
-        let list = browsePool.filter(function (m) { return !q2 || m.name.toLowerCase().indexOf(q2) !== -1; });
-        const index = Number(q.get("index") || 0);
-        const pageSize = Number(q.get("pageSize") || 20);
-        const page = list.slice(index, index + pageSize);
-        return { data: page, pagination: { index: index, pageSize: pageSize, resultCount: page.length, totalCount: list.length } };
-      }
-      const modMatch = p.match(/^\/api\/cf\/mods\/(\d+)$/);
-      if (modMatch && method === "GET") {
-        const m = browsePool.find(function (x) { return x.id === Number(modMatch[1]); }) || addons.map(function (a) { return fakeMod(a.projectId, a.name, "A great addon."); }).find(function (x) { return x.id === Number(modMatch[1]); });
-        if (!m) return { __status: 404, error: "not found" };
-        return { data: m };
-      }
-      if (p === "/api/cf/mods" && method === "POST") {
-        const ids = body.ids || [];
-        const data = ids.map(function (id) {
-          const fromPool = browsePool.find(function (x) { return x.id === id; });
-          if (fromPool) return fromPool;
-          const a = addons.find(function (x) { return x.projectId === id; });
-          return fakeMod(id, a ? a.name : ("Addon " + id), "A great addon.");
-        });
-        return { data: data };
-      }
-      const descMatch = p.match(/^\/api\/cf\/mods\/(\d+)\/description$/);
-      if (descMatch) return { data: "<p>This addon improves your World of Warcraft experience with <strong>lots</strong> of handy features.</p><ul><li>Fast</li><li>Lightweight</li><li>Configurable</li></ul><script>alert('should be stripped')<" + "/script>" };
-      const filesCfMatch = p.match(/^\/api\/cf\/mods\/(\d+)\/files$/);
-      if (filesCfMatch) {
-        const pid2 = Number(filesCfMatch[1]);
-        const a2 = addons.find(function (x) { return x.projectId === pid2; });
-        const cfFiles = [];
-        for (let i = 0; i < 6; i++) {
-          const fid = (a2 ? a2.fileId : pid2 * 10) - i * 3 + (i === 0 ? 1 : 0);
-          cfFiles.push({ id: fid, displayName: "v" + (6 - i) + ".0." + i, fileName: "file-" + fid + ".zip", fileDate: new Date(Date.now() - i * 10 * 24 * 3600e3).toISOString(), releaseType: i === 1 ? 2 : (i === 4 ? 3 : 1), gameVersions: ["12.0.0"], fileLength: 40000 + i * 9000, downloadCount: 500000 - i * 4000 });
-        }
-        return { data: cfFiles };
-      }
-      const changelogMatch = p.match(/^\/api\/cf\/mods\/(\d+)\/files\/(\d+)\/changelog$/);
-      if (changelogMatch) return { data: "<p>Fixed a bug. Improved performance. Added support for the latest patch.</p>" };
-      if (p === "/api/cf/resolve") {
-        const url = q.get("url") || "";
-        const slugMatch = url.match(/\/wow\/addons\/([a-z0-9-]+)/i);
-        if (slugMatch) {
-          const found = browsePool.find(function (x) { return x.slug === slugMatch[1]; }) || browsePool[0];
-          return { projectId: found.id, name: found.name };
-        }
-        return { __status: 404, error: "not found" };
       }
       // E12 (Wago second source) - keyless, mirrors the real server's
       // /api/wago/* shapes closely enough to exercise Browse's Wago tab and
@@ -1034,7 +936,7 @@ const Mock = (function () {
   function currentSettings() {
     // E13: checkAddonVersion is fixed mock data (read-only info, WTF\Config.wtf
     // - never set via PUT /api/settings, real or mock).
-    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, hasApiKey: hasKey, apiKeyHint: hasKey ? mockSettings.cfApiKey.slice(-4) : "", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0", adFilter: mockSettings.adFilter, hostWindow: mockSettings.hostWindow };
+    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0", adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow };
   }
 })();
 
@@ -1381,54 +1283,12 @@ const Api = (function () {
     return err;
   }
 
-  // Round 6 fix: every /api/cf/* call (LogoCache's batch logo fetch, Browse's
-  // search/categories, the drawer's mod/description/changelog loaders,
-  // Add-by-URL resolve) funnels through this one function, so a rejected key
-  // is detected and reacted to in exactly one place instead of each call
-  // site needing its own 401/403 handling. Live symptom this fixes: with a
-  // rejected key configured, My Addons re-renders on every 800ms job poll,
-  // each one calling LogoCache.ensure again for the same addons - without a
-  // shared "already known rejected" flag that hammered POST /api/cf/mods
-  // roughly once a second, forever.
-  function isCfPath(path) { return path.indexOf("/api/cf/") === 0; }
-
-  // E16: these three /api/cf/* routes are always keyless-capable - no 409
-  // no-key gate, unlike every other /api/cf/* call above them - so a
-  // rejected key must never short-circuit or flag them the way it does the
-  // key-gated ones (isCfPath alone can't tell the two apart, since they
-  // share the same URL prefix).
-  function isKeylessCfPath(path) {
-    return path.indexOf("/api/cf/enrich/") === 0 || path.indexOf("/api/cf/browse") === 0 || path.indexOf("/api/cf/catalogue/") === 0;
-  }
-
-  function noteCfResult(path, status) {
-    if (!isCfPath(path) || isKeylessCfPath(path)) return;
-    if (status === 401 || status === 403) {
-      if (Store.state.cfKeyRejected) return; // already known - never a second banner/toast for the same rejection
-      Store.state.cfKeyRejected = true;
-      Components.Toast.show("Your CurseForge API key was rejected. Fix it in Settings.", "error");
-    } else if (status < 400 && Store.state.cfKeyRejected) {
-      // Cleared by a later call succeeding (e.g. the key was fixed in another
-      // tab/session) - Actions.saveSettings also clears this on any settings
-      // save made from this tab, so both paths documented in the fix note apply.
-      Store.state.cfKeyRejected = false;
-    }
-  }
-
   async function request(method, path, body) {
-    if (isCfPath(path) && !isKeylessCfPath(path) && Store.state.cfKeyRejected) {
-      // A rejected key fails every /api/cf/* call the exact same way - stop
-      // making the call at all (no fetch, no Mock round-trip) rather than
-      // rediscovering the same 401/403 over and over.
-      throw ApiError(403, { error: "key-rejected" });
-    }
-
     if (Mock.enabled) {
       const result = await Mock.handle(method, path, body);
       const status = (result && result.__status) || 200;
       const data = result ? Object.assign({}, result) : {};
       delete data.__status;
-      noteCfResult(path, status);
       if (status >= 400) throw ApiError(status, data);
       return data;
     }
@@ -1449,7 +1309,6 @@ const Api = (function () {
     let data = null;
     const text = await res.text();
     if (text) { try { data = JSON.parse(text); } catch (e) { data = { raw: text }; } }
-    noteCfResult(path, res.status);
 
     if (!res.ok) throw ApiError(res.status, data || {});
     return data;
@@ -1489,7 +1348,6 @@ const Api = (function () {
 
     getSettings: function () { return request("GET", "/api/settings"); },
     putSettings: function (patch) { return request("PUT", "/api/settings", patch); },
-    testKey: function (cfApiKey) { return request("POST", "/api/settings/test-key", cfApiKey === undefined ? {} : { cfApiKey: cfApiKey }); },
     getDiagnostics: function () { return request("GET", "/api/diagnostics"); },
 
     // E19 (script itself is E17's, unchanged) - the curseforge:// install-
@@ -1498,18 +1356,9 @@ const Api = (function () {
     protocolRegister: function () { return request("POST", "/api/protocol/register", {}); },
     protocolUnregister: function () { return request("POST", "/api/protocol/unregister", {}); },
 
-    cfSearch: function (params) { return request("GET", "/api/cf/search" + qs(params)); },
-    cfCategories: function () { return request("GET", "/api/cf/categories"); },
-    cfMod: function (id) { return request("GET", "/api/cf/mods/" + id); },
-    cfMods: function (ids) { return request("POST", "/api/cf/mods", { ids: ids }); },
-    cfDescription: function (id) { return request("GET", "/api/cf/mods/" + id + "/description"); },
-    cfFiles: function (id, params) { return request("GET", "/api/cf/mods/" + id + "/files" + qs(params)); },
-    cfChangelog: function (id, fileId) { return request("GET", "/api/cf/mods/" + id + "/files/" + fileId + "/changelog"); },
-    cfResolve: function (url) { return request("GET", "/api/cf/resolve" + qs({ url: url })); },
-
-    // E16: always keyless-capable (no 409 no-key gate) - the drawer/Browse
-    // call these directly instead of the key-gated cfMod/cfSearch calls
-    // above when no key is configured; see isKeylessCfPath just above.
+    // E16: keyless CurseForge enrichment (Round 16, E22: the only
+    // CurseForge fetch path left, now that the key-gated search/mod/
+    // description/files/changelog/resolve endpoints are gone).
     cfEnrich: function (id) { return request("GET", "/api/cf/enrich/" + id); },
     cfBrowse: function (params) { return request("GET", "/api/cf/browse" + qs(params)); },
     cfCatalogueRefresh: function () { return request("POST", "/api/cf/catalogue/refresh", {}); },
@@ -1568,13 +1417,6 @@ const Store = (function () {
 
     addons: [],
     settings: null,
-    // Round 6 fix: sticky "the saved CurseForge key is being rejected"
-    // signal - set by Api.request the moment any /api/cf/* call comes back
-    // 401/403, read by LogoCache (stop fetching logos) and Views.browse
-    // (show a dedicated panel instead of the search UI). Cleared by
-    // Actions.saveSettings on any settings save, or by a later /api/cf/*
-    // call that succeeds.
-    cfKeyRejected: false,
     lastRun: null,
     job: null,
     jobLabel: null,        // client-chosen human title for the job panel, set by Actions.startJob
@@ -1616,14 +1458,11 @@ const Store = (function () {
       // Store.addonKey / Utils.normalizeId). source records which so every
       // drawer render function knows which branch to take.
       projectId: null,
-      source: "curseforge",   // 'curseforge' | 'wago'
+      source: "cf-keyless",   // 'cf-keyless' | 'wago'
       slug: null,
       tracked: false,        // true when this project has a local addon record
       tab: "overview",
       lastKnownFileId: null,  // addon.fileId as of the last open()/refresh() - lets refresh() detect an update
-      mod: null,              // full CF mod details, once fetched
-      modLoading: false,
-      modError: null,
       files: null,
       filesLoading: false,
       filesError: null,
@@ -1748,14 +1587,6 @@ const Store = (function () {
     return byName ? byName.status : null;
   }
 
-  // Session-lifetime cache of CurseForge mod details, populated by any
-  // successful cfMod/cfMods call. Lets Overview show "the summary if known"
-  // even without a key (e.g. a key was present earlier this session), and
-  // saves refetching mod details the logo prefetch already pulled down.
-  const modCache = {};
-  function cacheMods(list) { (list || []).forEach(function (m) { if (m && m.id) modCache[m.id] = m; }); }
-  function getCachedMod(id) { return modCache[Number(id)] || null; }
-
   // E11: My Addons bulk selection. A plain array of projectIds rather than a
   // Set so it round-trips cleanly through the JSON.stringify comparisons
   // elsewhere in this module (unused here, but keeps the type consistent
@@ -1822,94 +1653,11 @@ const Store = (function () {
   }
 
   return {
-    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor,
     isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons
   };
 })();
 
-/* ==========================================================================
-   LogoCache - localStorage-backed cache of addon logo thumbnails, keyed by
-   CurseForge project id, refreshed at most once per 24h and only ever
-   populated when a key is configured (logos come from a keyed batch call).
-   ========================================================================== */
-const LogoCache = (function () {
-  const KEY = "addonSync.logoCache.v1";
-  const TTL_MS = 24 * 3600 * 1000;
-  // Round 6 fix: "never re-request the same failed logo batch more than once
-  // per 10 minutes" - independent of (and in addition to) the cfKeyRejected
-  // short-circuit below, so a transient network/500 failure also backs off
-  // instead of retrying on every My Addons/Browse render.
-  const FAILURE_BACKOFF_MS = 10 * 60 * 1000;
-  let cache = null;
-  const inFlight = new Set();
-  const failedAt = new Map(); // projectId -> ms timestamp of its last failed fetch attempt (in-memory only, resets on reload)
-
-  function load() {
-    if (cache) return cache;
-    try { cache = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { cache = {}; }
-    if (!cache || typeof cache !== "object") cache = {};
-    return cache;
-  }
-  function persist() { try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) { /* storage unavailable/full - degrade to in-memory only */ } }
-
-  function get(projectId) {
-    const c = load();
-    const rec = c[projectId];
-    if (!rec || Date.now() - rec.ts > TTL_MS) return null;
-    return rec.url || null;
-  }
-
-  // Fetches logos for any of `projectIds` that are missing/stale, then calls
-  // onUpdated() once. No-ops entirely when no API key is configured.
-  async function ensure(projectIds, onUpdated) {
-    if (!Store.state.settings || !Store.state.settings.hasApiKey) return;
-    // Round 6 fix: a rejected key fails every /api/cf/* call the same way -
-    // return immediately (no batch built, no Api call) instead of rediscovering
-    // that on every render while a job is polling (previously this repeated
-    // roughly once a second - see Api.request's own note on the same fix).
-    if (Store.state.cfKeyRejected) return;
-    const c = load();
-    const now = Date.now();
-    const need = [];
-    (projectIds || []).forEach(function (raw) {
-      const id = Number(raw);
-      if (!id || inFlight.has(id)) return;
-      const rec = c[id];
-      if (rec && now - rec.ts <= TTL_MS) return;
-      const failTs = failedAt.get(id);
-      if (failTs && now - failTs < FAILURE_BACKOFF_MS) return;
-      need.push(id);
-    });
-    if (!need.length) return;
-    need.forEach(function (id) { inFlight.add(id); });
-    try {
-      for (let i = 0; i < need.length; i += 50) {
-        const chunk = need.slice(i, i + 50);
-        const res = await Api.cfMods(chunk);
-        const data = (res && res.data) || [];
-        Store.cacheMods(data);
-        data.forEach(function (mod) {
-          c[mod.id] = { url: (mod.logo && (mod.logo.thumbnailUrl || mod.logo.url)) || "", ts: Date.now() };
-          failedAt.delete(mod.id);
-        });
-        // Also remember ids that didn't come back, so a missing mod isn't refetched every render.
-        chunk.forEach(function (id) { if (!c[id]) c[id] = { url: "", ts: Date.now() }; });
-      }
-      persist();
-      if (onUpdated) onUpdated();
-    } catch (e) {
-      // network/key issue - fallback letter avatars remain, silently. Mark
-      // this whole batch as just-failed so the `need` filtering above skips
-      // it for the next 10 minutes rather than retrying on the next render.
-      const ts = Date.now();
-      need.forEach(function (id) { failedAt.set(id, ts); });
-    } finally {
-      need.forEach(function (id) { inFlight.delete(id); });
-    }
-  }
-
-  return { get: get, ensure: ensure };
-})();
 
 /* ==========================================================================
    Round 15: a tiny reference-counted "something modal-ish is open right now"
@@ -2382,7 +2130,7 @@ Components.Freshness = (function () {
 Components.Logo = (function () {
   function build(info, size) {
     size = size || 40;
-    const url = info.thumbnailUrl || LogoCache.get(info.projectId);
+    const url = info.thumbnailUrl;
     if (url) {
       const img = Utils.el("img", { class: "addon-logo", src: url, alt: "", loading: "lazy" });
       img.style.width = size + "px"; img.style.height = size + "px";
@@ -2431,12 +2179,11 @@ Components.Drawer = (function () {
     const isWago = opts.source === "wago" || (typeof key === "string" && key.toLowerCase().indexOf("wago:") === 0);
     const addon = Store.addonByProjectId(key);
     const slug = opts.slug || (addon ? addon.slug : null) || (isWago && typeof key === "string" ? key.slice(5) : null);
-    // E16: a CurseForge-sourced drawer opened with no API key configured
-    // gets its own 'cf-keyless' source, distinct from the keyed
-    // 'curseforge' one - every render function below reads Store.state.drawer.enrich
-    // instead of .mod for that state, via /api/cf/enrich (see loadEnrich).
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    const source = isWago ? "wago" : (hasKey ? "curseforge" : "cf-keyless");
+    // Round 16 (E22, CurseForge key removal): every CurseForge-sourced
+    // drawer is keyless now (the old keyed 'curseforge' source, fed by
+    // Api.cfMod, is gone) - every render function below reads
+    // Store.state.drawer.enrich, populated via /api/cf/enrich (loadEnrich).
+    const source = isWago ? "wago" : "cf-keyless";
     // Round 15 (OverlayTracker): open() can be called again to re-target an
     // already-open drawer at a different addon (no intervening close()) -
     // only count the 0->1 transition, never a re-open while already open.
@@ -2446,7 +2193,6 @@ Components.Drawer = (function () {
         open: true, projectId: key, source: source, slug: slug, tracked: !!addon,
         tab: opts.tab || "overview",
         lastKnownFileId: addon ? addon.fileId : null,
-        mod: isWago ? null : Store.getCachedMod(key), modLoading: false, modError: null,
         files: null, filesLoading: false, filesError: null,
         // E5: opts.changelogFileId lets a caller (Actions.whatChanged) pin the
         // Changelog tab to a specific file - e.g. the version a job just
@@ -2457,7 +2203,7 @@ Components.Drawer = (function () {
         wagoReleases: null, wagoReleasesLoading: false, wagoReleasesError: null,
         wagoGallery: null, wagoGalleryLoading: false, wagoGalleryError: null,
         // E16: keyless CurseForge enrichment (source:'cf-keyless' only -
-        // null/unused for 'curseforge'/'wago').
+        // null/unused for 'wago').
         enrich: null, enrichLoading: false, enrichError: null
       }
     });
@@ -2472,8 +2218,7 @@ Components.Drawer = (function () {
     renderHeader();
     selectTab(Store.state.drawer.tab);
     if (isWago) { loadWagoAddon(); }
-    else if (source === "cf-keyless") { loadEnrich(); }
-    else if (hasKey && !Store.state.drawer.mod) { loadMod(); }
+    else { loadEnrich(); }
   }
 
   function close() {
@@ -2560,26 +2305,9 @@ Components.Drawer = (function () {
     renderDependencies(panel);
   }
 
-  async function loadMod() {
-    const pid = projectId();
-    Store.state.drawer.modLoading = true;
-    try {
-      const res = await Api.cfMod(pid);
-      Store.cacheMods([res.data]);
-      if (projectId() !== pid) return;
-      Store.state.drawer.mod = res.data;
-      renderHeader();
-      if (Store.state.drawer.tab === "screenshots") renderScreenshots();
-    } catch (err) {
-      if (projectId() === pid) Store.state.drawer.modError = err;
-    } finally {
-      if (projectId() === pid) Store.state.drawer.modLoading = false;
-    }
-  }
-
-  // E12: Wago counterpart to loadMod - fetches addon/description/metadata
-  // from the server's keyless Wago proxy. Unlike CF, this never needs an
-  // API key check.
+  // E12: fetches addon/description/metadata from the server's keyless Wago
+  // proxy - Wago has never needed a key, unlike CurseForge's old (now-
+  // removed) key-gated mod loader.
   async function loadWagoAddon() {
     const d = Store.state.drawer;
     const slug = d.slug;
@@ -2702,27 +2430,26 @@ Components.Drawer = (function () {
     const d = Store.state.drawer;
     if (d.source === "wago") { renderWagoHeader(); return; }
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
-    const mod = d.mod;
-    // E16: 'cf-keyless' has no mod (never fetched without a key) - falls
-    // back to the /api/cf/enrich response's own name/logo/downloads/date
-    // instead. Never set for a keyed 'curseforge' drawer (d.enrich stays
-    // null there), so this changes nothing about the pre-E16 keyed path.
+    // Round 16 (E22, CurseForge key removal): every CurseForge-sourced
+    // drawer is keyless now (source is always 'cf-keyless') - this header
+    // has only ever had /api/cf/enrich's data to work with since, so it
+    // reads d.enrich alone (the old richer d.mod branch, fed by the
+    // removed keyed /api/cf/mods/{id} call, is gone).
     const enrich = d.enrich;
     // CS2 bug fix (UX-SPEC.md section 3.5, flagged by every judge as the
     // app's worst functional defect): a TRACKED addon's real name/author is
     // already known locally the instant a row is clicked (Store.state.addons),
-    // so it must win over mod/enrich - both of which start out null and, for
-    // enrich, can themselves resolve to a literal "Project <id>" placeholder
-    // (the keyless catalogue-only fallback - see Mock's mockCfEnrich) that
-    // used to silently override the real tracked name once it loaded. mod/
-    // enrich still supply the name for an UNTRACKED drawer (opened from
-    // Browse, where no local addon record exists at all).
-    const name = (addon && addon.name) ? addon.name : (mod ? mod.name : ((enrich && enrich.name) ? enrich.name : ("Project " + d.projectId)));
-    // Round 4 fix: list every author CurseForge returns ("by A, B"), not just
-    // the first - mod.authors is commonly more than one name.
-    // CS2: same tracked-first priority as name above.
-    const author = (addon && addon.author) ? addon.author : ((mod && mod.authors && mod.authors.length) ? mod.authors.map(function (a) { return a.name; }).join(", ") : null);
-    const logoUrl = mod && mod.logo ? (mod.logo.thumbnailUrl || mod.logo.url) : (enrich ? enrich.logoUrl : null);
+    // so it must win over enrich - which starts out null and can itself
+    // resolve to a literal "Project <id>" placeholder (the catalogue-only
+    // fallback - see Mock's mockCfEnrich) that used to silently override the
+    // real tracked name once it loaded. enrich still supplies the name for
+    // an UNTRACKED drawer (opened from Browse, where no local addon record
+    // exists at all).
+    const name = (addon && addon.name) ? addon.name : ((enrich && enrich.name) ? enrich.name : ("Project " + d.projectId));
+    // CS2: same tracked-first priority as name above. enrich carries no
+    // author field, so an untracked drawer just has none to show.
+    const author = (addon && addon.author) ? addon.author : null;
+    const logoUrl = enrich ? enrich.logoUrl : null;
 
     const children = [
       Utils.el("div", { class: "drawer-header-top" }, [
@@ -2734,27 +2461,7 @@ Components.Drawer = (function () {
       ])
     ];
 
-    if (mod) {
-      const meta = [
-        Utils.el("span", {}, [Utils.formatNumber(mod.downloadCount) + " downloads"]),
-        mod.dateModified ? Utils.el("span", { title: Utils.fullDate(mod.dateModified) }, ["updated " + Utils.relativeTime(mod.dateModified)]) : null
-      ];
-      // Round 4 fix: a lightweight "Popular" badge computed from data already
-      // in the CF mod response (no featured/popularity flag exists in the
-      // documented mod shape, so this uses a download-count threshold instead
-      // of fabricating one) - flagged in the SPEC section 3 stats-display ask.
-      if (mod.downloadCount >= 1000000) meta.push(Components.Chip.build("Popular", "chip-warning"));
-      children.push(Utils.el("div", { class: "drawer-meta" }, meta));
-      if (mod.categories && mod.categories.length) {
-        children.push(Utils.el("div", { class: "drawer-cats" }, mod.categories.map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.name]); })));
-      }
-      // Review fix: parity with the keyless/enrich-only branch below, which
-      // gained a plain "CurseForge" source-badge as part of CS5's provenance-
-      // pill removal - this keyed (has-API-key, real `mod` data) branch never
-      // got the equivalent, so a drawer opened with a CurseForge key showed
-      // no source indicator at all while the keyless path did.
-      children.push(Utils.el("span", { class: "source-badge is-cf" }, ["CurseForge"]));
-    } else if (enrich) {
+    if (enrich) {
       const meta = [];
       if (enrich.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(enrich.downloadCount) + " downloads"]));
       if (enrich.lastUpdated) meta.push(Utils.el("span", { title: Utils.fullDate(enrich.lastUpdated) }, ["updated " + Utils.relativeTime(enrich.lastUpdated)]));
@@ -2773,9 +2480,7 @@ Components.Drawer = (function () {
     }
 
     const links = [];
-    if (mod && mod.links && mod.links.websiteUrl) links.push(Utils.el("a", { class: "btn btn-outline", href: mod.links.websiteUrl, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Website"]));
-    if (mod && mod.links && mod.links.sourceUrl) links.push(Utils.el("a", { class: "btn btn-outline", href: mod.links.sourceUrl, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Source"]));
-    links.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, mod ? mod.slug : d.slug); } }, [Utils.icon("external"), "CurseForge"]));
+    links.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, d.slug); } }, [Utils.icon("external"), "CurseForge"]));
     children.push(Utils.el("div", { class: "drawer-links" }, links));
 
     // E12: the tracked record's own toc-parsed wagoId reveals a CurseForge
@@ -2785,7 +2490,7 @@ Components.Drawer = (function () {
       children.push(Utils.el("div", { class: "drawer-crosssource" }, [Actions.switchSourceButton(addon, "wago", addon.wagoId)]));
     }
 
-    children.push(Utils.el("div", { class: "drawer-primary-action" }, [primaryActionButton(addon, mod)]));
+    children.push(Utils.el("div", { class: "drawer-primary-action" }, [primaryActionButton(addon, enrich ? enrich.name : null)]));
 
     const container = Utils.qs("#drawer-header");
     container.textContent = "";
@@ -2855,7 +2560,7 @@ Components.Drawer = (function () {
   // accent buttons on screen at once. UX-SPEC.md section 1/2.3 are explicit
   // that Update & Play is the ONLY accent button in the app; everything
   // else (including this drawer action) is outline/ghost/menu.
-  function primaryActionButton(addon, mod) {
+  function primaryActionButton(addon, fallbackName) {
     const d = Store.state.drawer;
     const pid = d.projectId;
     if (Store.jobActingOn(pid)) return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, ["Installing…"]);
@@ -2866,7 +2571,7 @@ Components.Drawer = (function () {
     if (d.source === "wago") {
       return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatestWago(d.slug, (d.wagoAddon && d.wagoAddon.addon) ? d.wagoAddon.addon.display_name : null); } }, ["Install"]);
     }
-    return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatest(pid, mod ? mod.name : null); } }, ["Install"]);
+    return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatest(pid, fallbackName); } }, ["Install"]);
   }
 
   // E12: Wago's Overview - always available, no key ever needed. props.description
@@ -2893,51 +2598,22 @@ Components.Drawer = (function () {
     renderDependencies(panel);
   }
 
-  async function renderOverview() {
-    const panel = Utils.qs("#drawer-panel-overview");
+  function renderOverview() {
     if (Store.state.drawer.source === "wago") { renderWagoOverview(); return; }
-    if (Store.state.drawer.source === "cf-keyless") { renderKeylessOverview(); return; }
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    panel.textContent = "";
-    if (!hasKey) {
-      const cached = Store.getCachedMod(projectId());
-      if (cached && cached.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [cached.summary]));
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see descriptions, changelogs and screenshots."])]));
-      renderCompat(panel);
-      renderDependencies(panel);
-      return;
-    }
-    panel.appendChild(Utils.el("div", { class: "rich-content" }, ["Loading description…"]));
-    const pid = projectId();
-    try {
-      const res = await Api.cfDescription(pid);
-      if (projectId() !== pid || Store.state.drawer.tab !== "overview") return;
-      panel.textContent = "";
-      const holder = Utils.el("div", { class: "rich-content" });
-      panel.appendChild(holder);
-      Sanitize.render(holder, res.data);
-      renderCompat(panel);
-      renderDependencies(panel);
-    } catch (err) {
-      if (projectId() !== pid) return;
-      panel.textContent = "";
-      panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Couldn't load the description (" + describeError(err) + ")."]));
-      renderCompat(panel);
-      renderDependencies(panel);
-    }
+    renderKeylessOverview();
   }
 
-  // E16: Overview for a 'cf-keyless' drawer (a CurseForge-sourced addon,
-  // opened with no API key configured) - renders per d.enrich.source.
-  // wago-match reuses E12's Wago overview render VERBATIM (it reads only
-  // d.wagoAddon/d.wagoAddonLoading/d.wagoAddonError, never d.slug) plus a
-  // small attribution note; addon-radar renders its own HTML description
-  // (through the same Sanitize.render pipeline the official CurseForge
-  // description already uses - description_html is real HTML, not
-  // markdown, so it does NOT go through the Markdown module); catalogue-only
-  // (or no match at all) shows the existing no-key placeholder plus a
-  // "View on CurseForge.com" link, since that page is not itself
-  // Cloudflare-blocked the way this app's own scripted requests are.
+  // E16: Overview for the drawer's (only, since Round 16's key removal)
+  // CurseForge fetch path - renders per d.enrich.source. wago-match reuses
+  // E12's Wago overview render VERBATIM (it reads only d.wagoAddon/
+  // d.wagoAddonLoading/d.wagoAddonError, never d.slug) plus a small
+  // attribution note; addon-radar renders its own HTML description (through
+  // the same Sanitize.render pipeline the old keyed CurseForge description
+  // call used - description_html is real HTML, not markdown, so it does
+  // NOT go through the Markdown module); catalogue-only (or no match at
+  // all) shows plain "No description available" text, since that's simply
+  // what's available - CurseForge's own page (linked in the header) is the
+  // fuller source.
   function renderKeylessOverview() {
     const panel = Utils.qs("#drawer-panel-overview");
     const d = Store.state.drawer;
@@ -2982,14 +2658,16 @@ Components.Drawer = (function () {
       // source badge already says where the addon itself comes from;
       // dropped this line rather than reword it.
     } else {
-      if (d.enrich.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [d.enrich.summary]));
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see descriptions, changelogs and screenshots."])]));
-      // Review fix: this used to duplicate the header's own "CurseForge"
-      // link (renderHeader's drawer-links button a few pixels above, same
-      // Actions.openOnCurseForge call) with a differently-worded second
-      // button doing the identical thing - dropped in favor of the one
-      // header link, so at most one "open externally" control shows per
-      // drawer state.
+      if (d.enrich.summary) {
+        panel.appendChild(Utils.el("p", { class: "rich-content" }, [d.enrich.summary]));
+      } else {
+        // Round 16 (E22, CurseForge key removal): no metadata source
+        // matched this addon at all - plain text, never a nudge to add a
+        // key (the key feature is gone). The header's own "CurseForge"
+        // link (renderHeader's drawer-links button a few pixels above) is
+        // the fuller source, so no second "open externally" control here.
+        panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["No description available."]));
+      }
     }
     renderCompat(panel);
     renderDependencies(panel);
@@ -3263,62 +2941,22 @@ Components.Drawer = (function () {
   }
 
   function renderChangelog() {
-    const panel = Utils.qs("#drawer-panel-changelog");
     if (Store.state.drawer.source === "wago") { renderWagoChangelog(); return; }
-    if (Store.state.drawer.source === "cf-keyless") { renderKeylessChangelog(); return; }
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    panel.textContent = "";
-    if (!hasKey) {
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key to see changelogs."])]));
-      return;
-    }
-    const d = Store.state.drawer;
-    if (!d.files) {
-      panel.appendChild(Utils.el("div", { class: "rich-content" }, ["Loading versions…"]));
-      if (!d.filesLoading) renderVersions(); // shares the Versions tab's lazy loader; harmless to also paint the hidden panel
-      return;
-    }
-    const select = Utils.el("select", { class: "select", onchange: function (ev) { loadChangelogFor(Number(ev.target.value)); } },
-      d.files.map(function (f) { return Utils.el("option", { value: f.id }, [f.displayName || f.version || f.fileName]); }));
-    panel.appendChild(Utils.el("div", { class: "changelog-select-row" }, [Utils.el("span", { class: "muted-text" }, ["Version:"]), select]));
-    const body = Utils.el("div", { class: "rich-content", id: "changelog-body" }, ["Select a version to view its changelog."]);
-    panel.appendChild(body);
-    if (d.files.length) {
-      const startId = d.changelogFileId || d.files[0].id;
-      select.value = String(startId);
-      loadChangelogFor(Number(startId));
-    }
+    renderKeylessChangelog();
   }
 
-  async function loadChangelogFor(fileId) {
-    const pid = projectId();
-    const d = Store.state.drawer;
-    d.changelogFileId = fileId;
-    const body = Utils.qs("#changelog-body");
-    if (body) body.textContent = "Loading changelog…";
-    try {
-      const res = await Api.cfChangelog(pid, fileId);
-      if (projectId() !== pid || d.changelogFileId !== fileId) return;
-      const target = Utils.qs("#changelog-body");
-      if (!target) return;
-      target.textContent = "";
-      Sanitize.render(target, res.data);
-    } catch (err) {
-      if (projectId() !== pid || d.changelogFileId !== fileId) return;
-      const target = Utils.qs("#changelog-body");
-      if (target) target.textContent = "Couldn't load the changelog (" + describeError(err) + ").";
-    }
-  }
-
-  // E16: Changelog for a 'cf-keyless' drawer. wago-match reuses E12's
-  // existing Wago changelog tab exactly (per-release markdown changelog) -
-  // renderWagoChangelog only reads d.wagoReleases/d.changelogFileId, never
-  // d.slug, so pre-populating d.wagoReleases via loadCfKeylessWagoReleases
-  // (keyed by d.enrich.wagoSlug) and then calling it directly is enough.
-  // Every other case (addon-radar, catalogue-only, no match at all) shows a
-  // dedicated empty state - SPEC's own investigation found no keyless
-  // source anywhere that exposes CurseForge changelog text, so this is a
-  // permanent gap, never a blank tab or a stuck spinner.
+  // E16: Changelog for the drawer's (only, since Round 16's key removal)
+  // CurseForge fetch path. wago-match reuses E12's existing Wago changelog
+  // tab exactly (per-release markdown changelog) - renderWagoChangelog only
+  // reads d.wagoReleases/d.changelogFileId, never d.slug, so pre-populating
+  // d.wagoReleases via loadCfKeylessWagoReleases (keyed by
+  // d.enrich.wagoSlug) and then calling it directly is enough. Every other
+  // case (addon-radar, catalogue-only, no match at all) shows a plain empty
+  // state with a link to CurseForge's own page - SPEC's own investigation
+  // found no keyless source anywhere that exposes CurseForge changelog
+  // text, and the old key-gated per-file changelog endpoint is gone with
+  // the key feature (Round 16, E22), so this is a permanent gap, never a
+  // blank tab or a stuck spinner.
   function renderKeylessChangelog() {
     const panel = Utils.qs("#drawer-panel-changelog");
     const d = Store.state.drawer;
@@ -3330,12 +2968,8 @@ Components.Drawer = (function () {
     }
 
     panel.textContent = "";
-    panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [
-      Utils.icon("warning"),
-      Utils.el("span", {}, ["Add a free API key to see changelogs."])
-    ]));
+    panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["No changelog available."]));
     panel.appendChild(Utils.el("div", { class: "btn-row" }, [
-      Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { App.switchView("settings"); } }, ["Go to Settings"]),
       Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, (d.enrich && d.enrich.slug) || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"])
     ]));
   }
@@ -3419,26 +3053,8 @@ Components.Drawer = (function () {
   }
 
   function renderScreenshots() {
-    const panel = Utils.qs("#drawer-panel-screenshots");
     if (Store.state.drawer.source === "wago") { renderWagoScreenshots(); return; }
-    if (Store.state.drawer.source === "cf-keyless") { renderKeylessScreenshots(); return; }
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    panel.textContent = "";
-    if (!hasKey) {
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see screenshots."])]));
-      return;
-    }
-    const mod = Store.state.drawer.mod;
-    if (!mod) {
-      panel.appendChild(Utils.el("p", { class: "rich-content" }, ["Loading…"]));
-      if (!Store.state.drawer.modLoading) loadMod();
-      return;
-    }
-    const shots = mod.screenshots || [];
-    if (!shots.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No screenshots provided."])); return; }
-    panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, shots.map(function (s) {
-      return Utils.el("img", { class: "screenshot-thumb", src: s.thumbnailUrl || s.url, alt: s.title || "", loading: "lazy", onclick: function () { Components.Lightbox.open(s.url || s.thumbnailUrl); } });
-    })));
+    renderKeylessScreenshots();
   }
 
   return { open: open, close: close, isOpen: isOpen, selectTab: selectTab, refresh: refresh };
@@ -4172,17 +3788,15 @@ const Actions = (function () {
     }, [label + " — reinstall from there"]);
   }
 
-  // E5: a job result row's "What changed" control. With a key, jumps straight
-  // to the Changelog tab pinned to the file that was just installed (the only
-  // source of changelog text, so this is where "what changed" actually lives);
-  // without one, Changelog is itself key-gated, so falls back to Versions,
-  // which already tags the installed/pinned file without any CurseForge call.
+  // E5: a job result row's "What changed" control. Wago's changelog needs no
+  // key and supports jumping straight to the release that was just
+  // installed. CurseForge's per-file changelog was key-gated and was
+  // removed along with the key feature (Round 16, E22) - falls back to
+  // Versions, which already tags the installed/pinned file without any
+  // CurseForge call.
   function whatChanged(projectId, fileId) {
-    // E12: Wago's changelog needs no key at all (unlike CurseForge's, which
-    // is key-gated) - a Wago row's key always goes straight to Changelog.
     const isWago = typeof projectId === "string" && projectId.toLowerCase().indexOf("wago:") === 0;
-    const hasKey = isWago || !!(Store.state.settings && Store.state.settings.hasApiKey);
-    if (hasKey) Components.Drawer.open(projectId, { tab: "changelog", changelogFileId: fileId });
+    if (isWago) Components.Drawer.open(projectId, { tab: "changelog", changelogFileId: fileId });
     else Components.Drawer.open(projectId, { tab: "versions" });
   }
 
@@ -4248,17 +3862,12 @@ const Actions = (function () {
   // the last one settles rather than after every individual call.
   let saveToastTimer = null;
   // Round 6 fix: optional `toastMessage` overrides the generic "Settings
-  // saved." for callers with something more specific to say (the API key
-  // save button reports "API key saved (…last4)" instead) - existing callers
-  // that pass nothing are unaffected.
+  // saved." for callers with something more specific to say; existing
+  // callers that pass nothing are unaffected.
   async function saveSettings(patch, toastMessage) {
     try {
       const res = await Api.putSettings(patch);
       Store.state.settings = res;
-      // Round 6 fix: any settings save clears a stale "key was rejected"
-      // signal - the user may just have fixed it, and even if not, the next
-      // /api/cf/* call will re-detect the rejection and set it right back.
-      Store.state.cfKeyRejected = false;
       App.renderChrome();
       if (Store.state.view === "settings") Views.settings.render();
       if (Store.state.view === "browse") Views.browse.render();
@@ -4269,11 +3878,6 @@ const Actions = (function () {
       Components.Toast.show("Couldn't save settings: " + describeError(err), "error");
       throw err;
     }
-  }
-
-  async function testKey(key) {
-    try { return await Api.testKey(key); }
-    catch (err) { return { ok: false, message: describeError(err) }; }
   }
 
   async function openWhat(what, extra) {
@@ -4345,10 +3949,9 @@ const Actions = (function () {
   async function submitAddInput(raw) {
     const value = (raw || "").trim();
     const errorBox = Utils.qs("#add-addon-error");
-    const submitBtn = Utils.qs("#add-addon-submit");
     function fail(msg) { errorBox.textContent = msg; errorBox.hidden = false; errorBox.className = "form-msg is-error"; }
 
-    if (!value) { fail("Paste an addon link, or type its ID number."); return; }
+    if (!value) { fail("Paste a wago.io addon link, or type a CurseForge ID number."); return; }
 
     if (/^\d+$/.test(value)) {
       Components.Dialogs.closeAdd();
@@ -4356,9 +3959,9 @@ const Actions = (function () {
       return;
     }
 
-    // E12: a "wago:<slug-or-id>" token or a full wago URL needs no API key
-    // (unlike a CurseForge URL below) and no server round-trip to resolve -
-    // a Wago addon's identity already IS its slug/id.
+    // E12: a "wago:<slug-or-id>" token or a full wago URL needs no server
+    // round-trip to resolve - a Wago addon's identity already IS its
+    // slug/id.
     const wagoMatch = value.match(/^wago:(.+)$/i) || value.match(/^https?:\/\/addons\.wago\.io\/addons\/([a-z0-9-]+)/i);
     if (wagoMatch) {
       const ref = wagoMatch[1].trim();
@@ -4368,24 +3971,13 @@ const Actions = (function () {
       return;
     }
 
-    if (value.toLowerCase().indexOf("curseforge.com") === -1) {
-      fail("Type a numeric ID, or paste a curseforge.com or wago.io addon link.");
-      return;
-    }
-    if (!Store.state.settings || !Store.state.settings.hasApiKey) {
-      fail("CurseForge links need an API key — type the ID number instead, or add a key in Settings.");
-      return;
-    }
-    submitBtn.disabled = true;
-    try {
-      const res = await Api.cfResolve(value);
-      Components.Dialogs.closeAdd();
-      await startJob("add", { projectId: res.projectId }, "Installing " + (res.name || "addon"));
-    } catch (err) {
-      submitBtn.disabled = false;
-      if (err.status === 404) fail("Couldn't find that addon on CurseForge.");
-      else fail("Couldn't resolve that URL: " + describeError(err));
-    }
+    // Round 16 (E22, CurseForge key removal): resolving a curseforge.com
+    // page URL to its project id was always a key-gated CurseForge Core API
+    // call (/api/cf/resolve, now deleted along with the key feature) - a
+    // CurseForge addon can still be added by its numeric ID (shown on its
+    // CurseForge page) or, better, by clicking Install on that page inside
+    // Furphy's own CurseForge pane.
+    fail("Type a numeric CurseForge ID, or paste a wago.io addon link.");
   }
 
   // E4: posts an imported addons-export.json body to /api/import (job kind
@@ -4467,7 +4059,7 @@ const Actions = (function () {
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
-    deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings, testKey: testKey,
+    deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
     whatChanged: whatChanged, importAddons: importAddons,
     updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
@@ -4781,8 +4373,6 @@ Views.myAddons = (function () {
     // here is "N of M shown", and only while a search/filter narrows the list.
     const total = Store.state.addons.length;
     summary.textContent = list.length !== total ? (list.length + " of " + total + (total === 1 ? " addon" : " addons") + " shown") : "";
-
-    LogoCache.ensure(list.map(function (a) { return a.projectId; }), render);
   }
 
   // E12: a tiny source badge (CF/Wago) next to each row's name, so a mixed
@@ -4862,8 +4452,9 @@ Views.myAddons = (function () {
       items.push({ label: "Roll back to " + (a.previousVersion || "previous version"), icon: "history", disabled: busy, onSelect: function () { Actions.rollback(key); } });
     }
     items.push(
-      // Round 4 fix: reuses the existing eye-off sprite icon (already defined
-      // for the Settings API-key show/hide toggle) so this is the only kebab
+      // Round 4 fix: uses the eye-off sprite icon (restored to the sprite
+      // sheet in Round 16 after the API-key removal pass deleted it - this
+      // menu item was its only remaining consumer) so this is the only kebab
       // item that isn't the sole entry with no leading icon - without one, its
       // label sat flush-left while every sibling item's label is indented past
       // an icon column, breaking the menu's alignment.
@@ -5389,56 +4980,12 @@ Views.settings = (function () {
   // nothing" - both used to render the identical "click Scan to look" copy,
   // so a real zero-result scan gave no visible confirmation it had run at all.
   let untrackedScanned = false;
-  let apikeyVisible = false;
   // E10: Diagnostics panel state - null diagChecks means "never run yet"
   // (distinct from an empty array, which /api/diagnostics never actually
   // returns, but is handled the same as "never run" either way).
   let diagLoading = false;
   let diagError = null;
   let diagChecks = null;
-
-  // Round 6 fix: the masked placeholder this app itself writes into
-  // #input-apikey when a key is configured - eight bullet dots plus the
-  // last-4-chars hint, e.g. "••••••••edf0". Centralised so render(), the
-  // focus/blur handlers, and extractTypedKey() all agree on exactly what
-  // "still showing the mask, unedited" looks like.
-  function apikeyMask(hint) { return "••••••••" + (hint || ""); }
-
-  // Round 6 fix: what the user actually typed/pasted, with the masked
-  // placeholder stripped back off if it's still leading the value (defends
-  // against a paste landing inside the mask instead of replacing it, which
-  // is the live defect this whole helper exists to fix) and whitespace
-  // trimmed. Returns "" for "nothing real here" - an empty field, the mask
-  // alone, or the mask followed by only whitespace - which every caller
-  // below treats as "no change".
-  function extractTypedApiKey(raw) {
-    if (!raw) return "";
-    let v = raw;
-    const s = Store.state.settings;
-    if (s && s.hasApiKey) {
-      const mask = apikeyMask(s.apiKeyHint);
-      if (v.indexOf(mask) === 0) {
-        v = v.slice(mask.length);
-      } else {
-        // Defensive fallback: the hint may be stale (e.g. changed elsewhere
-        // this session) - still strip a leading run of the mask character.
-        const m = v.match(/^•+/);
-        if (m) v = v.slice(m[0].length);
-      }
-    }
-    return v.trim();
-  }
-
-  function showApikeyHint(text) {
-    const hint = Utils.qs("#apikey-hint");
-    hint.textContent = text;
-    hint.hidden = false;
-  }
-  function hideApikeyHint() {
-    const hint = Utils.qs("#apikey-hint");
-    hint.hidden = true;
-    hint.textContent = "";
-  }
 
   function render() {
     const s = Store.state.settings;
@@ -5460,11 +5007,6 @@ Views.settings = (function () {
     Utils.qs("#toggle-alpha").checked = Number(s.releaseType) === 3;
     Utils.qs("#toggle-autoupdate").checked = !!s.autoUpdateOnLaunch;
 
-    const apikeyInput = Utils.qs("#input-apikey");
-    if (document.activeElement !== apikeyInput) apikeyInput.value = s.hasApiKey ? (apikeyMask(s.apiKeyHint)) : "";
-    Utils.qs("#apikey-status").textContent = s.hasApiKey ? ("Key configured (…" + s.apiKeyHint + ")") : "No key configured";
-    Utils.qs("#btn-clear-apikey").disabled = !s.hasApiKey;
-
     Utils.qs("#about-version").textContent = App.getServerVersion() || "—";
     // UX-SPEC.md §7/§8: "Client build number" was removed from My Addons and
     // relocated here, matching the "kept, just relocated" pattern used for
@@ -5480,7 +5022,6 @@ Views.settings = (function () {
     renderBrowsing(s);
     Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
-    renderApikeyCollapse();
     renderUntracked();
     renderDiagnostics();
     const busy = Store.isBusy();
@@ -5498,18 +5039,6 @@ Views.settings = (function () {
     if (value === "0") return "Off (they'll load anyway)";
     if (value === "1") return "On (WoW warns about them at character select)";
     return "Unknown";
-  }
-
-  // CS4: the collapsed-by-default "Add a CurseForge key" row. Local module
-  // state (not Store) so it survives repeated render() passes the same way
-  // apikeyVisible (show/hide password) already does, and so a settings
-  // re-render triggered elsewhere in the app never silently re-collapses a
-  // field the player is mid-edit on.
-  let apikeyExpanded = false;
-  function renderApikeyCollapse() {
-    Utils.qs("#apikey-expand").hidden = !apikeyExpanded;
-    Utils.qs("#btn-apikey-toggle").setAttribute("aria-expanded", String(apikeyExpanded));
-    Utils.qs("#apikey-toggle-chevron use").setAttribute("href", apikeyExpanded ? "#icon-chevron-down" : "#icon-chevron-right");
   }
 
   function formatUptime(seconds) {
@@ -5545,6 +5074,11 @@ Views.settings = (function () {
     Utils.qs("#browsing-adfilter-row").hidden = !isHost;
     Utils.qs("#browsing-adfilter-unavailable").hidden = isHost;
     if (isHost) Utils.qs("#toggle-adfilter").checked = !!s.adFilter;
+    // Round 16 (E22): cfFocus, unlike adFilter, is meaningful (and saved)
+    // even in the plain Edge window - it just doesn't take effect until the
+    // desktop window is used next, since only the native host has a
+    // CurseForge pane to trim. So this row is never hidden.
+    Utils.qs("#toggle-cf-focus").checked = !!s.cfFocus;
   }
 
   // E7: reflects the persisted density/theme choice (Prefs, already applied
@@ -5775,120 +5309,20 @@ Views.settings = (function () {
     // E19: only visible/enabled while renderBrowsing() has shown the row
     // (the native host is running) - see that function's comment.
     Utils.qs("#toggle-adfilter").addEventListener("change", function (ev) { Actions.saveSettings({ adFilter: ev.target.checked }); });
+    // Round 16 (E22): saves like any other setting, and - only when actually
+    // running inside the native host - also applies live to the CurseForge
+    // pane already open, no restart needed (Host.cfFocus is a no-op outside
+    // the host).
+    Utils.qs("#toggle-cf-focus").addEventListener("change", function (ev) {
+      Actions.saveSettings({ cfFocus: ev.target.checked });
+      Host.cfFocus(ev.target.checked);
+    });
 
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setDensity(btn.dataset.densityValue); renderAppearance(); });
     });
     Utils.qsa("#theme-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setTheme(btn.dataset.themeValue); renderAppearance(); });
-    });
-
-    // CS4: the collapsed-by-default "Add a CurseForge key" row - toggles
-    // apikeyExpanded (see render()/renderApikeyCollapse() above) and, when
-    // opening, focuses the field for immediate typing/pasting.
-    Utils.qs("#btn-apikey-toggle").addEventListener("click", function () {
-      apikeyExpanded = !apikeyExpanded;
-      renderApikeyCollapse();
-      if (apikeyExpanded) Utils.qs("#input-apikey").focus();
-    });
-
-    Utils.qs("#btn-toggle-apikey-visibility").addEventListener("click", function () {
-      apikeyVisible = !apikeyVisible;
-      const input = Utils.qs("#input-apikey");
-      input.type = apikeyVisible ? "text" : "password";
-      const btn = Utils.qs("#btn-toggle-apikey-visibility");
-      btn.setAttribute("aria-label", apikeyVisible ? "Hide key" : "Show key");
-      btn.title = apikeyVisible ? "Hide key" : "Show key";
-      Utils.qs("#btn-toggle-apikey-visibility svg use").setAttribute("href", apikeyVisible ? "#icon-eye-off" : "#icon-eye");
-    });
-
-    // Round 6 fix: clicking into the masked field used to leave the mask
-    // sitting there - a paste with no prior select-all landed the new key
-    // in the middle of the dots/hint instead of replacing them. Clearing on
-    // focus means a paste (or fresh typing) always replaces the whole value;
-    // the hint line explains the old key is untouched until Save.
-    Utils.qs("#input-apikey").addEventListener("focus", function () {
-      const input = Utils.qs("#input-apikey");
-      const s = Store.state.settings;
-      if (s && s.hasApiKey && input.value === apikeyMask(s.apiKeyHint)) {
-        input.value = "";
-        showApikeyHint("Paste your new key — the current key ends in …" + (s.apiKeyHint || "") + " and stays until you Save.");
-      }
-    });
-    // Blurring a field the user cleared-by-focusing but never actually typed
-    // into restores the masked display (render() only repaints #input-apikey
-    // while it isn't focused). Only when the field is genuinely EMPTY though:
-    // clicking Save/Test blurs this field first (blur fires before the
-    // button's own click handler), so unconditionally calling render() here
-    // would wipe out real just-typed/pasted content before Save/Test ever
-    // gets to read it.
-    Utils.qs("#input-apikey").addEventListener("blur", function () {
-      hideApikeyHint();
-      const input = Utils.qs("#input-apikey");
-      if (!input.value) render();
-    });
-
-    Utils.qs("#btn-save-apikey").addEventListener("click", function () {
-      const input = Utils.qs("#input-apikey");
-      const raw = input.value;
-      const typed = extractTypedApiKey(raw);
-      if (!typed) {
-        // Round 6 fix: both of these used to silently do nothing at all - no
-        // toast, no saved change, no indication the click was even seen.
-        Components.Toast.show(raw ? "No change." : "No key entered — current key kept.", "info");
-        return;
-      }
-      Actions.saveSettings({ cfApiKey: typed }, "API key saved (…" + typed.slice(-4) + ").")
-        .then(function () { input.value = ""; apikeyVisible = false; input.type = "password"; hideApikeyHint(); })
-        .catch(function () { /* error already toasted by saveSettings; keep the typed key in the field so the user can retry */ });
-    });
-
-    Utils.qs("#btn-clear-apikey").addEventListener("click", async function () {
-      const ok = await Components.Dialogs.confirm({
-        title: "Clear CurseForge API key?",
-        // Round 15: "Browse" dropped from this warning - Get new addons no
-        // longer depends on the key at all (Wago search never did; the
-        // CurseForge segment is now the real website, not a keyed search).
-        message: "Logos, descriptions, and changelogs from CurseForge will stop working until a new key is saved.",
-        confirmLabel: "Clear key"
-      });
-      if (!ok) return;
-      try {
-        await Actions.saveSettings({ cfApiKey: "" }, "API key cleared.");
-        Utils.qs("#input-apikey").value = "";
-        hideApikeyHint();
-      } catch (e) { /* error already toasted by saveSettings */ }
-    });
-
-    // Round 4 fix: a Test result describing the previously-typed key must not
-    // linger once the user starts editing it again - it would go on describing
-    // a value the field no longer holds.
-    Utils.qs("#input-apikey").addEventListener("input", function () {
-      const msg = Utils.qs("#apikey-test-result");
-      msg.hidden = true;
-      msg.className = "form-msg";
-      msg.textContent = "";
-    });
-
-    Utils.qs("#btn-test-apikey").addEventListener("click", async function () {
-      const input = Utils.qs("#input-apikey");
-      const raw = input.value;
-      // Round 6 fix: unambiguous about WHICH key is being tested - a pasted
-      // value that still starts with the mask (defensive - focus already
-      // clears it in the normal flow) is now correctly recognised as "real
-      // content", instead of being treated as "using the saved key" and
-      // testing the wrong one while blaming the freshly-pasted key.
-      const typed = extractTypedApiKey(raw);
-      const usingSaved = !typed;
-      const s = Store.state.settings;
-      const label = usingSaved
-        ? (s && s.hasApiKey ? ("Saved key (…" + s.apiKeyHint + ")") : "No saved key")
-        : "Pasted key";
-      const msg = Utils.qs("#apikey-test-result");
-      msg.hidden = false; msg.className = "form-msg is-info"; msg.textContent = "Testing — " + label + "…";
-      const res = await Actions.testKey(usingSaved ? undefined : typed);
-      msg.className = "form-msg " + (res.ok ? "is-success" : "is-error");
-      msg.textContent = label + ": " + (res.ok ? "valid" : (res.message || "rejected"));
     });
 
     Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("folder"); });
@@ -6196,6 +5630,13 @@ const Host = (function () {
   }
   function cfRect(rect) { return post({ type: "cf-rect", rect: rect, dpr: window.devicePixelRatio || 1 }); }
   function cfHide() { return post({ type: "cf-hide" }); }
+  // Round 16 (E22): applies (or un-applies) the CurseForge listing/search
+  // focus-view trim to the pane already open, live, without a reload -
+  // Settings' toggle calls this alongside Actions.saveSettings so the
+  // setting persists AND takes effect immediately. No-op (false) outside the
+  // native host, same as every other Host.* call - the setting still saved
+  // via Actions.saveSettings applies next time the desktop window is used.
+  function cfFocus(enabled) { return post({ type: "cf-focus", enabled: !!enabled }); }
   function cfNav(action, url) {
     const msg = { type: "cf-nav", action: action };
     if (url) msg.url = url;
@@ -6206,7 +5647,7 @@ const Host = (function () {
     isNative: isNative, post: post, openCurseForge: openCurseForge, reportTheme: reportTheme,
     init: init, hasCfPane: hasCfPane, hostVersion: hostVersion,
     getCfState: getCfState, onCfState: onCfState, onCfJob: onCfJob, onHostReady: onHostReady,
-    cfShow: cfShow, cfRect: cfRect, cfHide: cfHide, cfNav: cfNav
+    cfShow: cfShow, cfRect: cfRect, cfHide: cfHide, cfNav: cfNav, cfFocus: cfFocus
   };
 })();
 

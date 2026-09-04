@@ -1,10 +1,10 @@
 # Furphy Addon Manager
 
-A self-contained World of Warcraft (retail) addon manager for Windows: silent updates when you launch the game, plus a CurseForge-style desktop app to browse, install, pin, roll back and manage addons - from both CurseForge and Wago Addons. No Electron, no accounts, no ads, **no API key required**. One PowerShell CLI, one local server, one static web UI opened as an Edge app window.
+A self-contained World of Warcraft (retail) addon manager for Windows: silent updates when you launch the game, plus a CurseForge-style desktop app to browse, install, pin, roll back and manage addons - from both CurseForge and Wago Addons. No Electron, **no accounts, no API keys, no sign-up of any kind**, no ads. One PowerShell CLI, one local server, one static web UI opened as an Edge app window.
 
-## No API key needed
+## No accounts, no API keys
 
-Everything works out of the box, with no sign-up: installing and updating addons from CurseForge and Wago Addons, searching Wago and browsing the real CurseForge.com from inside the app, versions, pin/ignore/rollback, dependency and compatibility checks. An optional free CurseForge API key (paste it in Settings) adds official CurseForge metadata - descriptions, changelogs and screenshots straight from CurseForge itself. Nothing is gated behind it.
+Everything works out of the box, with nothing to sign up for and nothing to configure: installing and updating addons from CurseForge and Wago Addons, searching Wago and browsing the real CurseForge.com from inside the app, versions, pin/ignore/rollback, dependency and compatibility checks, descriptions/changelogs/screenshots. There used to be an optional CurseForge API key that added a little extra official metadata - it was removed entirely (2026-09-04), since every one of those flows already worked just as well without it.
 
 ## Requirements
 
@@ -33,13 +33,9 @@ Command-line options: `-WowPath <path>`, `-NoShortcuts`, `-NoProtocol`, `-SkipAd
 
 Run `install.ps1 -Uninstall` (or `Install Furphy.cmd -Uninstall` from a console) from the unzipped folder. It removes the app files, both desktop shortcuts, and the `curseforge://` registration. Your `AddOns` folder and this tool's own addon list/settings/logs (`addons.json`, `settings.json`, `state.json`, `sync.log`, `server.log`) are left in place, in case you reinstall later; the console output tells you exactly where they are.
 
-## The optional CurseForge API key
-
-Everything installs and updates without one. Adding a free key from <https://console.curseforge.com> (Settings > API key) additionally gets you: CurseForge's own official search, sorting and category browsing; addon descriptions, changelogs and screenshots sourced directly from CurseForge; and slightly fresher metadata than the keyless community mirrors this app otherwise falls back to. Wago Addons never needs a key, keyed or not.
-
 ## Privacy
 
-The app only listens on `http://localhost:<port>/` (default 47831) - nothing outside this PC can reach it. It talks to the internet only to do what you asked: `curseforge.com`'s public file-list/download endpoints, `api.curseforge.com` (only if you configured a key), `addons.wago.io` and its `cdn.wago.io` downloads, `addon-radar.com` (a keyless CurseForge metadata mirror, used only when no key is configured), and `raw.githubusercontent.com` (the offline CurseForge id catalogue, refreshed at most once a day). Nothing else. No accounts, no telemetry, no ads.
+The app only listens on `http://localhost:<port>/` (default 47831) - nothing outside this PC can reach it. It talks to the internet only to do what you asked: `curseforge.com`'s public file-list/download/browsing endpoints, `addons.wago.io` and its `cdn.wago.io` downloads, `addon-radar.com` (a community CurseForge metadata mirror), and `raw.githubusercontent.com` (the offline CurseForge id catalogue, refreshed at most once a day). Nothing else - never `api.curseforge.com`, since the app never had, and no longer even has a way to hold, a CurseForge API key. No accounts, no telemetry, no ads.
 
 ## Troubleshooting
 
@@ -51,7 +47,7 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 ## What it does
 
 - **Update on launch** - the "WoW (auto-update addons)" shortcut runs the updater hidden, then starts WoW through Battle.net. No console flash.
-- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; four themes (Lofi Night default, Dark, Light, Vaporwave); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics, the optional API key's Advanced options) one click away; "Update & Play".
+- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required), trimmed by default to just its search results - no CurseForge header, filter sidebar, cookie banner, or footer clutter (toggle it off in Settings > Advanced if you want the page as-is) - with ads and trackers on that page also filtered by default (same Settings > Advanced toggle to turn off); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; four themes (Lofi Night default, Dark, Light, Vaporwave); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics) one click away; "Update & Play".
 - **Two sources** - CurseForge and Wago Addons, side by side: install, pin, ignore, roll back and check dependencies/compatibility on either, no key needed for either. Wago is searched in-app; CurseForge is the real website, embedded in the app window itself (or a side window on an older install).
 - **Safety** - a failed download never touches the installed copy; only folders that came from a package are ever deleted; every update keeps the previous zip for rollback.
 
@@ -61,8 +57,8 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 |---|---|
 | `install.ps1` / `Install Furphy.cmd` | The installer described above. |
 | `package.ps1` | Builds `dist\FurphyAddonManager-<version>.zip` for a Release, from the `VERSION` file. |
-| `addon-sync.ps1` | The updater/CLI. Talks to CurseForge's and Wago's public website endpoints directly (no key needed to install or update); an official-API proxy is used for extra metadata only when a key is configured. State in `addons.json`, settings in `settings.json`. |
-| `addon-server.ps1` | Local HTTP server (`System.Net.HttpListener`, localhost only). Serves `ui/`, exposes a JSON API, runs the CLI as hidden child processes for jobs, proxies the official CurseForge API and Wago/keyless-metadata sources, persists check results and job history in `state.json`. Exits after idle. |
+| `addon-sync.ps1` | The updater/CLI. Talks to CurseForge's and Wago's public website endpoints directly - no key, no account, ever. State in `addons.json`, settings in `settings.json`. |
+| `addon-server.ps1` | Local HTTP server (`System.Net.HttpListener`, localhost only). Serves `ui/`, exposes a JSON API, runs the CLI as hidden child processes for jobs, proxies Wago and CurseForge's keyless metadata sources, persists check results and job history in `state.json`. Exits after idle. |
 | `ui/` | Vanilla HTML/CSS/JS single-page app. No frameworks, no CDN, works offline except the addon sources themselves. |
 | `Addon Manager.vbs` | Starts the server hidden if it is not running and opens the UI as an Edge `--app` window. |
 | `curseforge-handler.vbs` / `register-protocol.ps1` | The `curseforge://` install-link handler and its (per-user, reversible) registration. |

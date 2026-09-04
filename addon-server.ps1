@@ -224,16 +224,31 @@ function Get-DefaultSettings {
     return [PSCustomObject]@{
         releaseType        = 1
         autoUpdateOnLaunch = $true
-        cfApiKey           = ''
         port               = 47831
         # E19: adFilter is the native host's (host\FurphyHost.exe) CurseForge-
-        # tab ad/tracker filter toggle - OFF by default per Eric's explicit
-        # decision (SPEC E19). hostWindow is the host's last saved window
-        # bounds ({x,y,w,h}), written by FurphyHost.cs itself via a direct
-        # read-modify-write of settings.json (HostFiles.UpdateJsonObject) -
-        # this server only needs to round-trip it through GET/PUT so a
-        # Settings PUT from the web UI (releaseType, etc.) never clobbers it.
-        adFilter           = $false
+        # tab ad/tracker filter toggle. Originally OFF by default per Eric's
+        # explicit decision (SPEC E19); that decision was SUPERSEDED
+        # 2026-09-04 by a later explicit Eric request (SPEC E22's "get rid of
+        # cookie banner, and the other banner that appears on top, and
+        # anything else other than the content, turn on ad block by default")
+        # - the default is now ON. Existing installs are unaffected: this
+        # only changes what a FRESH settings.json (or one missing the key)
+        # gets - Get-Settings only ever falls back to this default when
+        # $obj.adFilter is $null, so anyone who already has adFilter written
+        # to disk (true or false) keeps that value untouched. hostWindow is
+        # the host's last saved window bounds ({x,y,w,h}), written by
+        # FurphyHost.cs itself via a direct read-modify-write of
+        # settings.json (HostFiles.UpdateJsonObject) - this server only
+        # needs to round-trip it through GET/PUT so a Settings PUT from the
+        # web UI (releaseType, etc.) never clobbers it.
+        adFilter           = $true
+        # Round 16 (E22): cfFocus is the native host's CurseForge listing/
+        # search "focus view" trim (hide site chrome + the left filter
+        # sidebar, keep only the results column) - ON by default per Eric's
+        # explicit ask (SPEC E22). Same round-trip pattern as adFilter:
+        # read/validated/written the same way, and (as of 2026-09-04) both
+        # default ON now.
+        cfFocus            = $true
         hostWindow         = $null
         # Round 12 (E19b): the native host's LAST SAVED chrome/title-bar
         # palette - {name, colors:{bg0,bg1,...}} - same round-trip pattern as
@@ -282,12 +297,13 @@ function Get-Settings {
         $result = Get-DefaultSettings
         if ($null -ne $obj.releaseType) { $result.releaseType = [int]$obj.releaseType }
         if ($null -ne $obj.autoUpdateOnLaunch) { $result.autoUpdateOnLaunch = [bool]$obj.autoUpdateOnLaunch }
-        if ($null -ne $obj.cfApiKey) { $result.cfApiKey = [string]$obj.cfApiKey }
         if ($null -ne $obj.port) { $result.port = [int]$obj.port }
         # E19: adFilter/hostWindow - see Get-DefaultSettings. hostWindow is
         # copied through as whatever object shape is on disk (the host owns
         # its contents); this server never inspects x/y/w/h itself.
         if ($null -ne $obj.adFilter) { $result.adFilter = [bool]$obj.adFilter }
+        # Round 16 (E22): cfFocus - see Get-DefaultSettings.
+        if ($null -ne $obj.cfFocus) { $result.cfFocus = [bool]$obj.cfFocus }
         if ($null -ne $obj.hostWindow) { $result.hostWindow = $obj.hostWindow }
         # Round 12 (E19b): hostTheme is copied through unvalidated on READ,
         # same as hostWindow just above - whatever shape is already on disk
@@ -296,6 +312,23 @@ function Get-Settings {
         # the WRITE path (Handle-SettingsPut/Test-HostTheme) where it can
         # actually stop a bad value from being saved in the first place.
         if ($null -ne $obj.hostTheme) { $result.hostTheme = $obj.hostTheme }
+        # Round 16 (E22, 2026-09-04, at Eric's explicit request): the
+        # CurseForge API key feature is removed entirely. An existing
+        # settings.json from before this round may still carry a stored
+        # cfApiKey value - $result (built from Get-DefaultSettings, which no
+        # longer has that property) never copies it over, so it is already
+        # dropped from every in-memory settings object; this just also
+        # rewrites the file on disk so it stops sitting there once and for
+        # all. The key's value itself is never logged.
+        $legacyKeyProp = Get-Member -InputObject $obj -Name 'cfApiKey' -MemberType NoteProperty -ErrorAction SilentlyContinue
+        if ($null -ne $legacyKeyProp) {
+            try {
+                Save-Settings -Settings $result
+                Write-ServerLog 'Removed legacy cfApiKey from settings.json (CurseForge key feature removed 2026-09-04).'
+            } catch {
+                Write-ServerLog "Failed to rewrite settings.json while dropping legacy cfApiKey: $($_.Exception.Message)"
+            }
+        }
         return $result
     } catch {
         Write-ServerLog "Failed to read settings.json, using defaults: $($_.Exception.Message)"
@@ -304,21 +337,15 @@ function Get-Settings {
 }
 
 function Get-SettingsView {
-    <# settings.json with cfApiKey masked down to hasApiKey/apiKeyHint. #>
+    <# settings.json, as returned by the settings API - no cfApiKey field
+       exists any more (Round 16, E22: the CurseForge key feature was
+       removed 2026-09-04 at Eric's explicit request). #>
     param($Settings)
-
-    $hasKey = [bool]($Settings.cfApiKey -and $Settings.cfApiKey.Length -gt 0)
-    $hint = ''
-    if ($hasKey -and $Settings.cfApiKey.Length -ge 4) {
-        $hint = $Settings.cfApiKey.Substring($Settings.cfApiKey.Length - 4)
-    }
 
     return [PSCustomObject]@{
         releaseType        = $Settings.releaseType
         autoUpdateOnLaunch = $Settings.autoUpdateOnLaunch
         port               = $Script:Port
-        hasApiKey          = $hasKey
-        apiKeyHint         = $hint
         addonsPath         = (Resolve-EffectiveAddonsPath)
         wowRoot            = (Get-WowRootPath)
         # E13: read-only info, not a manager setting - WoW's own
@@ -328,6 +355,9 @@ function Get-SettingsView {
         # E19: pass through unmasked (neither is a secret) - see
         # Get-DefaultSettings.
         adFilter          = $Settings.adFilter
+        # Round 16 (E22): pass through unmasked, same as adFilter - not a
+        # secret.
+        cfFocus           = $Settings.cfFocus
         hostWindow        = $Settings.hostWindow
         # Round 12 (E19b): pass through unmasked, same as hostWindow - not a
         # secret, and the UI never displays it (only the native host reads
@@ -2468,177 +2498,6 @@ function Invoke-ProtocolScript {
 }
 
 # =====================================================================
-# Invoke-CfApi: CurseForge Core API proxy (key-gated, cached, timed out)
-# =====================================================================
-
-function Invoke-CfApi {
-    <#
-      Proxies one CurseForge Core API call. Returns a hashtable:
-        NoKey = $true                          -> no cfApiKey configured
-        NoKey = $false; StatusCode; Body(text)  -> upstream response (as-is)
-      GET responses are cached in-memory by full URL for 5 minutes.
-    #>
-    param(
-        [string]$Path,
-        [hashtable]$Query,
-        [string]$Method = 'GET',
-        $BodyObject
-    )
-
-    $settings = Get-Settings
-    if (-not $settings.cfApiKey -or $settings.cfApiKey.Trim().Length -eq 0) {
-        return @{ NoKey = $true }
-    }
-
-    $base = 'https://api.curseforge.com'
-    $qs = ''
-    if ($Query -and $Query.Count -gt 0) {
-        $parts = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($k in $Query.Keys) {
-            $v = $Query[$k]
-            if ($null -ne $v -and [string]$v -ne '') {
-                $parts.Add([System.Uri]::EscapeDataString($k) + '=' + [System.Uri]::EscapeDataString([string]$v))
-            }
-        }
-        if ($parts.Count -gt 0) { $qs = '?' + ($parts -join '&') }
-    }
-    $uri = $base + $Path + $qs
-    $cacheKey = $Method + ' ' + $uri
-
-    if ($Method -eq 'GET' -and $Script:CfCache.ContainsKey($cacheKey)) {
-        $entry = $Script:CfCache[$cacheKey]
-        $age = (Get-Date) - $entry.Time
-        if ($age.TotalSeconds -lt 300) {
-            return @{ NoKey = $false; StatusCode = $entry.StatusCode; Body = $entry.Body }
-        } else {
-            $Script:CfCache.Remove($cacheKey)
-        }
-    }
-
-    $headers = @{ 'x-api-key' = $settings.cfApiKey; 'Accept' = 'application/json' }
-    $statusCode = 0
-    $bodyText = ''
-
-    try {
-        if ($Method -eq 'POST') {
-            $jsonBody = ConvertTo-Json -InputObject $BodyObject -Depth 10 -Compress
-            $resp = Invoke-WebRequest -Uri $uri -Headers $headers -Method Post -Body $jsonBody -ContentType 'application/json' -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
-        } else {
-            $resp = Invoke-WebRequest -Uri $uri -Headers $headers -Method Get -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
-        }
-        $statusCode = [int]$resp.StatusCode
-        $bodyText = $resp.Content
-    } catch {
-        $errResp = $null
-        try { $errResp = $_.Exception.Response } catch { $errResp = $null }
-        if ($errResp) {
-            try { $statusCode = [int]$errResp.StatusCode } catch { $statusCode = 502 }
-            try {
-                $stream = $errResp.GetResponseStream()
-                $sr = New-Object System.IO.StreamReader($stream)
-                try {
-                    $bodyText = $sr.ReadToEnd()
-                } finally {
-                    # Closes $stream too (StreamReader owns it by default);
-                    # in a finally so a ReadToEnd() failure still releases it
-                    # instead of leaking the response stream.
-                    $sr.Close()
-                }
-            } catch {
-                $bodyText = ConvertTo-Json -InputObject @{ error = $_.Exception.Message } -Compress
-            }
-        } else {
-            $statusCode = 502
-            $bodyText = ConvertTo-Json -InputObject @{ error = $_.Exception.Message } -Compress
-        }
-    }
-
-    if ($Method -eq 'GET' -and $statusCode -ge 200 -and $statusCode -lt 300) {
-        # Round 5: bound the cache's growth. An entry is only ever evicted
-        # lazily, on a re-request of that SAME key, once its 5-minute TTL has
-        # passed (see the read path above) - a long browsing session hitting
-        # many distinct search/mod/category URLs would otherwise accumulate
-        # entries with no upper bound at all. Before adding a new entry, once
-        # the cache is large enough to be worth the scan, drop every already-
-        # expired entry (same TTL the read path already enforces); if that
-        # still leaves it oversized (many distinct URLs all still fresh),
-        # clear it outright rather than add a more complex LRU scheme for
-        # what is, worst case, one extra upstream re-fetch per key afterward.
-        if ($Script:CfCache.Count -ge 200) {
-            $now = Get-Date
-            $staleKeys = New-Object 'System.Collections.Generic.List[object]'
-            foreach ($k in $Script:CfCache.Keys) {
-                $age = $now - $Script:CfCache[$k].Time
-                if ($age.TotalSeconds -ge 300) { $staleKeys.Add($k) }
-            }
-            foreach ($k in $staleKeys) { $Script:CfCache.Remove($k) }
-            if ($Script:CfCache.Count -ge 200) {
-                $Script:CfCache.Clear()
-            }
-        }
-        $Script:CfCache[$cacheKey] = @{ Time = (Get-Date); StatusCode = $statusCode; Body = $bodyText }
-    }
-
-    return @{ NoKey = $false; StatusCode = $statusCode; Body = $bodyText }
-}
-
-function Send-CfApiResult {
-    <# Relays an Invoke-CfApi result to the HTTP response, verbatim status/body, or 409 no-key. #>
-    param($Context, $Result)
-
-    if ($Result.NoKey) {
-        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
-        return
-    }
-
-    $response = $Context.Response
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Result.Body)
-        $response.StatusCode = $Result.StatusCode
-        $response.ContentType = 'application/json; charset=utf-8'
-        $response.Headers.Set('Cache-Control', 'no-store')
-        $response.ContentLength64 = $bytes.Length
-        $response.OutputStream.Write($bytes, 0, $bytes.Length)
-        $Script:LastResponseStatus = $Result.StatusCode
-    } finally {
-        try { $response.OutputStream.Close() } catch { }
-        try { $response.Close() } catch { }
-    }
-}
-
-function Test-CfApiKey {
-    <#
-      Tests one CurseForge Core API key via GET /v1/games/1 (SPEC.md's "key
-      test" endpoint). Returns @{ ok; message } and never throws - every
-      failure path already resolves to a message string. E10: shared by
-      Handle-SettingsTestKey (Settings > API key > Test) and Handle-Diagnostics's
-      "CurseForge API key" check, so the two report identically instead of
-      drifting apart.
-    #>
-    param([string]$Key)
-
-    if (-not $Key -or $Key.Trim().Length -eq 0) {
-        return @{ ok = $false; message = 'No API key provided' }
-    }
-
-    $headers = @{ 'x-api-key' = $Key; 'Accept' = 'application/json' }
-    try {
-        $resp = Invoke-WebRequest -Uri 'https://api.curseforge.com/v1/games/1' -Headers $headers -Method Get -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
-        if ([int]$resp.StatusCode -eq 200) {
-            return @{ ok = $true; message = 'Key is valid' }
-        }
-        return @{ ok = $false; message = "CurseForge returned status $([int]$resp.StatusCode)" }
-    } catch {
-        $statusCode = 0
-        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
-        if ($statusCode -eq 401 -or $statusCode -eq 403) {
-            return @{ ok = $false; message = 'Key rejected by CurseForge' }
-        }
-        return @{ ok = $false; message = $_.Exception.Message }
-    }
-}
-
-# =====================================================================
 # Wago Addons proxy (E12) - keyless. Mirrors addon-sync.ps1's own Wago
 # functions closely (same Inertia handshake/pacing/retry shape), duplicated
 # here rather than dot-sourced - this script is always launched standalone
@@ -2769,10 +2628,9 @@ function Invoke-WagoInertiaJson {
 function Get-WagoCached {
     <#
       5-minute in-memory cache around Invoke-WagoInertiaJson, keyed by the
-      full page URI - mirrors Invoke-CfApi's $Script:CfCache cache/cleanup
-      shape (kept as its own separate hashtable/function rather than sharing
-      CfCache, so a bug in one proxy's cache handling can't reach the
-      other's).
+      full page URI - its own separate hashtable/cleanup logic, distinct
+      from the other on-disk/in-memory caches this server keeps (e.g.
+      $Script:CfCatalogueIndex), so a bug in one can't reach another's.
     #>
     param([Parameter(Mandatory = $true)][string]$PageUri)
 
@@ -3660,12 +3518,14 @@ function Get-WagoAutoMatch {
 
 function Get-CfEnrichmentNoKey {
     <#
-      The keyless fallback chain behind GET /api/cf/enrich/{projectId} when
-      no CurseForge API key is configured: (1) a Wago match - the tracked
-      record's own toc-derived wagoId first, else (only when there is none
-      at all) a conservative Get-WagoAutoMatch probe; (2) addon-radar.com,
-      via the catalogue-resolved slug; (3) catalogue-only (or nothing at
-      all, for an id neither catalogue has and no Wago match). Never
+      The keyless fallback chain behind GET /api/cf/enrich/{projectId} -
+      the only chain there is, now that Round 16 (E22) removed the
+      key-gated official-API path this used to try first: (1) a Wago
+      match - the tracked record's own toc-derived wagoId first, else
+      (only when there is none at all) a conservative Get-WagoAutoMatch
+      probe; (2) addon-radar.com, via the catalogue-resolved slug; (3)
+      catalogue-only (or nothing at all, for an id neither catalogue has
+      and no Wago match). Never
       throws - every branch already degrades to the next on its own
       failure, and this function's own try/catch around the Wago path
       guards against a live network hiccup there specifically.
@@ -3753,70 +3613,25 @@ function Get-CfEnrichmentNoKey {
 
 function Handle-CfEnrich {
     <#
-      GET /api/cf/enrich/{projectId} - always keyless-capable, no 409
-      no-key gate. With a key configured, simply proxies the existing
-      key-gated mod/description calls (source:'official-api') and touches
-      none of the new sources at all - the key path is unchanged and
-      always wins. Without one, walks Get-CfEnrichmentNoKey's fallback
-      chain. Response shape: {source,name,slug,summary,descriptionHtml?,
-      descriptionMarkdown?,logoUrl?,screenshots?[],downloadCount?,
-      lastUpdated?,gameVersions?[],wagoSlug?}.
+      GET /api/cf/enrich/{projectId} - keyless (the only CurseForge fetch
+      path there is now, Round 16/E22 having removed the key-gated official-
+      API mod/description proxy this used to try first). Walks
+      Get-CfEnrichmentNoKey's fallback chain. Response shape:
+      {source,name,slug,summary,descriptionHtml?,descriptionMarkdown?,
+      logoUrl?,screenshots?[],downloadCount?,lastUpdated?,gameVersions?[],
+      wagoSlug?}.
     #>
     param($Context, $RouteMatch)
 
     $id = $RouteMatch['id']
-    $settings = Get-Settings
-
-    if ($settings.cfApiKey -and $settings.cfApiKey.Trim().Length -gt 0) {
-        $modResult = Invoke-CfApi -Path "/v1/mods/$id" -Query $null -Method 'GET'
-        if ($modResult.NoKey) {
-            Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
-            return
-        }
-        if ($modResult.StatusCode -lt 200 -or $modResult.StatusCode -ge 300) {
-            Send-Json -Context $Context -StatusCode $modResult.StatusCode -Body @{ error = "CurseForge returned status $($modResult.StatusCode)" }
-            return
-        }
-        $mod = $null
-        try {
-            $mod = ($modResult.Body | ConvertFrom-Json -ErrorAction Stop).data
-        } catch {
-            Send-Json -Context $Context -StatusCode 502 -Body @{ error = 'Invalid JSON from CurseForge' }
-            return
-        }
-        $descHtml = $null
-        $descResult = Invoke-CfApi -Path "/v1/mods/$id/description" -Query $null -Method 'GET'
-        if (-not $descResult.NoKey -and $descResult.StatusCode -ge 200 -and $descResult.StatusCode -lt 300) {
-            try { $descHtml = ($descResult.Body | ConvertFrom-Json -ErrorAction Stop).data } catch { $descHtml = $null }
-        }
-        $logoUrl = $null
-        if ($mod.logo) { $logoUrl = $mod.logo.thumbnailUrl; if (-not $logoUrl) { $logoUrl = $mod.logo.url } }
-        $body = [PSCustomObject]@{
-            source          = 'official-api'
-            name            = $mod.name
-            slug            = $mod.slug
-            summary         = $mod.summary
-            descriptionHtml = $descHtml
-            logoUrl         = $logoUrl
-            screenshots     = $(if ($mod.screenshots) { $mod.screenshots } else { @() })
-            downloadCount   = $mod.downloadCount
-            lastUpdated     = $mod.dateModified
-            gameVersions    = @()
-        }
-        Send-Json -Context $Context -StatusCode 200 -Body $body
-        return
-    }
-
     $body = Get-CfEnrichmentNoKey -ProjectId $id
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
 
 function Handle-CfBrowse {
     <#
-      GET /api/cf/browse?q=&limit= - always keyless-capable. The UI only
-      ever calls this when no key is configured (a keyed session keeps
-      using the official /api/cf/search entirely unchanged); Search-CfCatalogue
-      runs first, and Search-AddonRadar is additionally consulted only when
+      GET /api/cf/browse?q=&limit= - keyless. Search-CfCatalogue runs
+      first, and Search-AddonRadar is additionally consulted only when
       that returns fewer than 5 hits, merging in anything not already
       present by id (SPEC's own documented threshold).
     #>
@@ -4638,9 +4453,6 @@ function Handle-SettingsPut {
     if ($null -ne $body.autoUpdateOnLaunch) {
         $settings.autoUpdateOnLaunch = [bool]$body.autoUpdateOnLaunch
     }
-    if ($null -ne $body.cfApiKey) {
-        $settings.cfApiKey = [string]$body.cfApiKey
-    }
     if ($null -ne $body.port) {
         $settings.port = [int]$body.port
     }
@@ -4653,6 +4465,15 @@ function Handle-SettingsPut {
     # round-trip through the API never loses it.
     if ($null -ne $body.adFilter) {
         $settings.adFilter = [bool]$body.adFilter
+    }
+    # Round 16 (E22): cfFocus (the CurseForge listing/search focus-view
+    # trim toggle) - see Get-DefaultSettings. Settings > Advanced's
+    # "Show only search results on CurseForge" toggle is the normal caller,
+    # in both the native host and the plain Edge window (unlike adFilter,
+    # which only does anything inside the host - cfFocus still saves here so
+    # it applies next time the desktop window is used).
+    if ($null -ne $body.cfFocus) {
+        $settings.cfFocus = [bool]$body.cfFocus
     }
     if ($null -ne $body.hostWindow) {
         $settings.hostWindow = $body.hostWindow
@@ -4680,31 +4501,6 @@ function Handle-SettingsPut {
         return
     }
     Send-Json -Context $Context -StatusCode 200 -Body (Get-SettingsView -Settings $settings)
-}
-
-function Handle-SettingsTestKey {
-    param($Context, $RouteMatch)
-
-    $body = $null
-    try {
-        $body = Read-Body -Context $Context
-    } catch {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
-        return
-    }
-    $key = $null
-    if ($body -and $body.cfApiKey) { $key = [string]$body.cfApiKey }
-    if (-not $key) {
-        $settings = Get-Settings
-        $key = $settings.cfApiKey
-    }
-
-    # E10: the actual key-test call (GET /v1/games/1 + status interpretation)
-    # now lives in the shared Test-CfApiKey, also used by Handle-Diagnostics's
-    # "CurseForge API key" check - this handler just supplies the key and
-    # relays the result unchanged (always 200, ok/message in the body, exactly
-    # as before this refactor).
-    Send-Json -Context $Context -StatusCode 200 -Body (Test-CfApiKey -Key $key)
 }
 
 # =====================================================================
@@ -4761,18 +4557,6 @@ function Handle-Diagnostics {
     $checks.Add((New-DiagCheckRow -Name 'settings.json' -Result (Test-DiagSettingsJson)))
     $checks.Add((New-DiagCheckRow -Name 'addons.json' -Result (Test-DiagAddonsJson)))
     $checks.Add((New-DiagCheckRow -Name 'CurseForge reachability' -Result (Test-DiagCfReachability)))
-
-    # "official API key valid (only if key configured)" - an unconfigured key
-    # is not itself a failure, so this reports ok:true with an explanatory
-    # detail rather than being omitted (every /api/diagnostics call always
-    # returns the same fixed set of check names).
-    $settings = Get-Settings
-    if ($settings.cfApiKey -and $settings.cfApiKey.Trim().Length -gt 0) {
-        $checks.Add((New-DiagCheckRow -Name 'CurseForge API key' -Result (Test-CfApiKey -Key $settings.cfApiKey)))
-    } else {
-        $checks.Add((New-DiagCheckRow -Name 'CurseForge API key' -Result @{ ok = $true; detail = 'No API key configured (optional)' }))
-    }
-
     $checks.Add((New-DiagCheckRow -Name 'Disk space' -Result (Test-DiagDiskSpace)))
     $checks.Add((New-DiagCheckRow -Name 'PowerShell version' -Result (Test-DiagPowerShellVersion)))
     $checks.Add((New-DiagCheckRow -Name 'Server uptime' -Result (Test-DiagServerUptime -UptimeSeconds ((Get-Date) - $Script:StartTime).TotalSeconds)))
@@ -4785,170 +4569,6 @@ function Handle-Diagnostics {
     $checks.Add((New-DiagCheckRow -Name 'addon-radar reachability' -Result (Test-DiagAddonRadar)))
 
     Send-Json -Context $Context -StatusCode 200 -Body @{ checks = $checks.ToArray() }
-}
-
-function Handle-CfSearch {
-    param($Context, $RouteMatch)
-
-    $q = $Context.Request.QueryString
-    $query = @{
-        gameId            = 1
-        classId           = 1
-        gameVersionTypeId = 517
-        searchFilter      = $q['q']
-        categoryId        = $q['categoryId']
-        sortField         = (Get-QueryOrDefault -QueryString $q -Name 'sortField' -Default '2')
-        sortOrder         = (Get-QueryOrDefault -QueryString $q -Name 'sortOrder' -Default 'desc')
-        index             = (Get-QueryOrDefault -QueryString $q -Name 'index' -Default '0')
-        pageSize          = (Get-QueryOrDefault -QueryString $q -Name 'pageSize' -Default '20')
-    }
-    $result = Invoke-CfApi -Path '/v1/mods/search' -Query $query -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfCategories {
-    param($Context, $RouteMatch)
-
-    $result = Invoke-CfApi -Path '/v1/categories' -Query @{ gameId = 1; classId = 1 } -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfModGet {
-    param($Context, $RouteMatch)
-
-    $id = $RouteMatch['id']
-    $result = Invoke-CfApi -Path "/v1/mods/$id" -Query $null -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfModsPost {
-    param($Context, $RouteMatch)
-
-    $body = $null
-    try {
-        $body = Read-Body -Context $Context
-    } catch {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
-        return
-    }
-    if (-not $body -or -not $body.ids) {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'ids required' }
-        return
-    }
-
-    $settings = Get-Settings
-    if (-not $settings.cfApiKey -or $settings.cfApiKey.Trim().Length -eq 0) {
-        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
-        return
-    }
-
-    $allIds = @($body.ids)
-    $combined = New-Object 'System.Collections.Generic.List[object]'
-    $chunk = New-Object 'System.Collections.Generic.List[object]'
-
-    for ($i = 0; $i -lt $allIds.Count; $i++) {
-        $chunk.Add([int64]$allIds[$i])
-        $isLast = ($i -eq ($allIds.Count - 1))
-        if ($chunk.Count -eq 50 -or $isLast) {
-            $bodyObj = @{ modIds = $chunk.ToArray() }
-            $result = Invoke-CfApi -Path '/v1/mods' -Method 'POST' -BodyObject $bodyObj
-            if ($result.NoKey) {
-                Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
-                return
-            }
-            if ($result.StatusCode -ge 200 -and $result.StatusCode -lt 300) {
-                try {
-                    $parsed = $result.Body | ConvertFrom-Json -ErrorAction Stop
-                    if ($parsed.data) {
-                        foreach ($m in @($parsed.data)) { $combined.Add($m) }
-                    }
-                } catch {
-                    Send-Json -Context $Context -StatusCode 502 -Body @{ error = 'Invalid JSON from CurseForge' }
-                    return
-                }
-            } else {
-                Send-Json -Context $Context -StatusCode $result.StatusCode -Body @{ error = "CurseForge returned status $($result.StatusCode)" }
-                return
-            }
-            $chunk = New-Object 'System.Collections.Generic.List[object]'
-        }
-    }
-
-    Send-Json -Context $Context -StatusCode 200 -Body @{ data = $combined.ToArray() }
-}
-
-function Handle-CfModDescription {
-    param($Context, $RouteMatch)
-
-    $id = $RouteMatch['id']
-    $result = Invoke-CfApi -Path "/v1/mods/$id/description" -Query $null -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfModFiles {
-    param($Context, $RouteMatch)
-
-    $id = $RouteMatch['id']
-    $q = $Context.Request.QueryString
-    $query = @{
-        gameVersionTypeId = 517
-        index             = $q['index']
-        pageSize          = $q['pageSize']
-    }
-    $result = Invoke-CfApi -Path "/v1/mods/$id/files" -Query $query -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfModChangelog {
-    param($Context, $RouteMatch)
-
-    $id = $RouteMatch['id']
-    $fileId = $RouteMatch['fileId']
-    $result = Invoke-CfApi -Path "/v1/mods/$id/files/$fileId/changelog" -Query $null -Method 'GET'
-    Send-CfApiResult -Context $Context -Result $result
-}
-
-function Handle-CfResolve {
-    param($Context, $RouteMatch)
-
-    $q = $Context.Request.QueryString
-    $urlOrSlug = $q['url']
-    if ([string]::IsNullOrWhiteSpace($urlOrSlug)) {
-        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url required' }
-        return
-    }
-
-    $slug = $urlOrSlug.Trim()
-    if ($slug -match '/wow/addons/([^/?#]+)') {
-        $slug = $Matches[1]
-    }
-
-    $result = Invoke-CfApi -Path '/v1/mods/search' -Query @{ gameId = 1; classId = 1; slug = $slug } -Method 'GET'
-    if ($result.NoKey) {
-        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'no-key' }
-        return
-    }
-    if ($result.StatusCode -lt 200 -or $result.StatusCode -ge 300) {
-        Send-Json -Context $Context -StatusCode $result.StatusCode -Body @{ error = "CurseForge returned status $($result.StatusCode)" }
-        return
-    }
-
-    try {
-        $parsed = $result.Body | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        Send-Json -Context $Context -StatusCode 502 -Body @{ error = 'Invalid JSON from CurseForge' }
-        return
-    }
-
-    $items = @()
-    if ($parsed.data) { $items = @($parsed.data) }
-    if ($items.Count -eq 0) {
-        Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'not found' }
-        return
-    }
-
-    $first = $items[0]
-    Send-Json -Context $Context -StatusCode 200 -Body @{ projectId = $first.id; name = $first.name }
 }
 
 function Handle-Open {
@@ -5009,9 +4629,8 @@ function Handle-Open {
                 # -ArgumentList as ONE unquoted string - a slug containing a
                 # literal quote+space could break out of that single argument
                 # and inject extra msedge.exe command-line switches, not just
-                # "break URL parsing". EscapeDataString (the same encoder
-                # Invoke-CfApi already uses for its own query values) percent-
-                # encodes quotes/spaces/slashes/etc., closing that off for what
+                # "break URL parsing". EscapeDataString percent-encodes
+                # quotes/spaces/slashes/etc., closing that off for what
                 # is meant to be a single opaque path segment; well-formed
                 # slugs/ids (lowercase-alnum-hyphen / digits) round-trip
                 # unchanged.
@@ -5176,22 +4795,14 @@ $Script:Routes = @(
     @{ Method = 'POST'; Pattern = '^/api/import$'; Handler = 'Handle-Import' }
     @{ Method = 'GET'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsGet' }
     @{ Method = 'PUT'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsPut' }
-    @{ Method = 'POST'; Pattern = '^/api/settings/test-key$'; Handler = 'Handle-SettingsTestKey' }
     # E19 (script itself is E17's, unchanged)
     @{ Method = 'GET'; Pattern = '^/api/protocol/status$'; Handler = 'Handle-ProtocolStatus' }
     @{ Method = 'POST'; Pattern = '^/api/protocol/register$'; Handler = 'Handle-ProtocolRegister' }
     @{ Method = 'POST'; Pattern = '^/api/protocol/unregister$'; Handler = 'Handle-ProtocolUnregister' }
     @{ Method = 'GET'; Pattern = '^/api/diagnostics$'; Handler = 'Handle-Diagnostics' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/search$'; Handler = 'Handle-CfSearch' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/categories$'; Handler = 'Handle-CfCategories' }
-    @{ Method = 'POST'; Pattern = '^/api/cf/mods$'; Handler = 'Handle-CfModsPost' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)/description$'; Handler = 'Handle-CfModDescription' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)/files/(?<fileId>[^/]+)/changelog$'; Handler = 'Handle-CfModChangelog' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)/files$'; Handler = 'Handle-CfModFiles' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/mods/(?<id>[^/]+)$'; Handler = 'Handle-CfModGet' }
-    @{ Method = 'GET'; Pattern = '^/api/cf/resolve$'; Handler = 'Handle-CfResolve' }
-    # E16: always keyless-capable - no 409 no-key gate, unlike every /api/cf/*
-    # route above this one.
+    # Round 16 (E22): the only CurseForge routes left, both keyless - every
+    # key-gated /api/cf/* route (search/categories/mods/description/files/
+    # changelog/resolve) was removed with the key feature itself.
     @{ Method = 'GET'; Pattern = '^/api/cf/browse$'; Handler = 'Handle-CfBrowse' }
     @{ Method = 'GET'; Pattern = '^/api/cf/enrich/(?<id>[^/]+)$'; Handler = 'Handle-CfEnrich' }
     @{ Method = 'POST'; Pattern = '^/api/cf/catalogue/refresh$'; Handler = 'Handle-CfCatalogueRefresh' }
@@ -5304,7 +4915,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.2.0'
+$Script:Version = '1.3.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -5321,7 +4932,6 @@ $Script:LastResponseStatus = $null
 $Script:Jobs = New-Object 'System.Collections.Generic.List[object]'
 $Script:JobIdSeq = 0
 $Script:CurrentJob = $null
-$Script:CfCache = @{}
 $Script:UpdateAvailable = @{}
 $Script:LastRun = $null
 $Script:UpdatesCheckedAt = $null
@@ -5336,8 +4946,8 @@ $Script:LastRequestTime = Get-Date
 # E19: see Invoke-Route's static-file branch / Handle-Ping - flips to
 # 'webview2' the first time the native host's Furphy tab loads.
 $Script:HostKind = 'edge-app'
-# E12: Wago Addons proxy state - WagoCache mirrors CfCache (5-minute
-# response cache, same size-gated cleanup pattern); WagoInertiaVersion
+# E12: Wago Addons proxy state - WagoCache is a 5-minute response cache
+# with a size-gated cleanup pattern; WagoInertiaVersion
 # caches the site's Inertia asset version for the life of the process (and
 # is persisted to/reloaded from state.json per SPEC's "cache the version in
 # state.json" instruction, since this server, unlike the per-run CLI, stays

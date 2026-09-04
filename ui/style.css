@@ -928,13 +928,6 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .browse-card-footer .btn { width: 100%; }
 
 .nokey-icon { width: 28px; height: 28px; stroke: var(--accent); margin-bottom: 8px; }
-/* E16: the "Install by Project ID" card now lives inside #browse-content
-   (keyless CurseForge mode only) rather than inside .nokey-panel's flex
-   row, so it needs its own top margin to separate it from the results
-   grid/empty-state above it. */
-#browse-installbyid { margin-top: 20px; }
-.nokey-steps { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 16px; color: var(--text-muted); font-size: 13px; }
-.nokey-steps li { padding-left: 4px; }
 .muted-text { color: var(--text-faint); font-size: 12.5px; }
 
 .form-msg { font-size: 12.5px; margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm); }
@@ -1124,30 +1117,6 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .segmented-btn:hover { color: var(--text); }
 .segmented-btn.is-active { background: var(--bg-3); color: var(--text); }
 .segmented-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-
-.apikey-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-.password-field { position: relative; flex: 1; }
-.password-field input { width: 100%; padding-right: 40px; }
-.password-field .icon-btn { position: absolute; right: 3px; top: 2px; }
-
-/* CS4 (UX-SPEC.md 6.1/6.2): the "Add a CurseForge key" collapsed row and the
-   single Advanced disclosure wrapping every non-Essentials settings group. */
-.settings-collapse-row {
-  cursor: pointer;
-  background: none;
-  border: none;
-  border-top: 1px solid var(--border-soft);
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-}
-.settings-collapse-row:first-of-type { border-top: none; padding-top: 4px; }
-.settings-collapse-row:hover .settings-row-label { color: var(--accent); }
-.settings-collapse-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.settings-collapse-chevron { color: var(--text-faint); flex: none; transition: color var(--fast); }
-.settings-collapse-row:hover .settings-collapse-chevron { color: var(--text-muted); }
-#apikey-expand { padding-bottom: 4px; }
 
 .settings-advanced { margin-top: 2px; }
 .settings-advanced > summary {

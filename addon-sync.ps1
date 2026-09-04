@@ -2087,7 +2087,6 @@ function Get-Settings {
     $defaults = [PSCustomObject]@{
         releaseType        = 1
         autoUpdateOnLaunch = $true
-        cfApiKey           = ''
         port               = 47831
     }
 
@@ -2112,7 +2111,6 @@ function Get-Settings {
         $result = [PSCustomObject]@{
             releaseType        = $defaults.releaseType
             autoUpdateOnLaunch = $defaults.autoUpdateOnLaunch
-            cfApiKey           = $defaults.cfApiKey
             port               = $defaults.port
         }
         if ($null -ne $parsed.releaseType) {
@@ -2120,9 +2118,6 @@ function Get-Settings {
         }
         if ($null -ne $parsed.autoUpdateOnLaunch) {
             $result.autoUpdateOnLaunch = [bool]$parsed.autoUpdateOnLaunch
-        }
-        if ($null -ne $parsed.cfApiKey) {
-            $result.cfApiKey = [string]$parsed.cfApiKey
         }
         if ($null -ne $parsed.port) {
             $result.port = [int]$parsed.port

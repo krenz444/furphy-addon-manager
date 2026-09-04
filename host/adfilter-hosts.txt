@@ -180,3 +180,21 @@ marketo.net
 hubspot.net
 hs-analytics.net
 hsleadflows.net
+
+# --- Observed live in the CurseForge tab's own network requests (Round
+# 16 / E22 recon, 2026-09-04): CurseForge's ad/CMP vendor chain (Nitro
+# Ads and its partners) - not previously covered by any entry above.
+# ats-wrapper.privacymanager.io/privacymanager.io serves the CMP script
+# itself; the CSS/JS cf-focus overlay hiding hides the resulting
+# #cookiebar banner on its own regardless of this list, per spec.
+nitropay.com
+nitrocnct.com
+scalibur.io
+geoedge.be
+btloader.com
+nit.ro
+cpx.to
+id5-sync.com
+ad-delivery.net
+dns-finder.com
+privacymanager.io
