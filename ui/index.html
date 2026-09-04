@@ -44,6 +44,10 @@
   <symbol id="icon-spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" opacity="0.25"/><path d="M21 12a9 9 0 0 0-9-9"/></symbol>
   <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M16 7l3 3"/><path d="M13 10l2.5 2.5"/></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <!-- Round 15: CurseForge pane toolbar icons (back/forward/home). -->
+  <symbol id="icon-arrow-left" viewBox="0 0 24 24"><polyline points="14,4 6,12 14,20"/><line x1="6" y1="12" x2="21" y2="12"/></symbol>
+  <symbol id="icon-arrow-right" viewBox="0 0 24 24"><polyline points="10,4 18,12 10,20"/><line x1="3" y1="12" x2="18" y2="12"/></symbol>
+  <symbol id="icon-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/><path d="M10 20v-6h4v6"/></symbol>
 </svg>
 
 <div id="app">
@@ -78,7 +82,7 @@
       </button>
       <button type="button" class="nav-item" data-view="browse">
         <svg class="icon nav-icon"><use href="#icon-compass"></use></svg>
-        <span class="nav-label">Browse</span>
+        <span class="nav-label">Get new addons</span>
       </button>
       <button type="button" class="nav-item" data-view="settings">
         <svg class="icon nav-icon"><use href="#icon-gear"></use></svg>
@@ -328,7 +332,7 @@
                  says only that one button is ever accent-colored. -->
             <div class="empty-actions">
               <button type="button" class="btn btn-outline" id="myaddons-empty-add">Add addon</button>
-              <button type="button" class="btn btn-outline" id="myaddons-empty-browse">Browse addons</button>
+              <button type="button" class="btn btn-outline" id="myaddons-empty-browse">Get new addons</button>
             </div>
           </div>
 
@@ -351,44 +355,38 @@
         </div>
       </section>
 
-      <!-- ===================== Browse ===================== -->
-      <!-- CS3 (UX-SPEC.md section 5): one search box, no source-tab switch -
-           CurseForge (keyless catalogue+addon-radar merge, or the official
-           API when a key is set) and Wago are searched concurrently and
-           rendered into one interleaved, source-badged grid as each arrives.
-           No category filter, sort dropdown, or pagination on this default
-           view (see section 5.1's own "not hidden-and-still-there" note). -->
+      <!-- ===================== Get new addons ===================== -->
+      <!-- Round 15: replaces CS3's single merged CurseForge+Wago search
+           (round 14) with a segmented [Wago | CurseForge] switch (Eric: "let
+           user switch between wago in app search, and curseforge, which
+           browses the site... one unified experience"). Wago keeps its own
+           in-app search box + results grid (searching Wago only now); the
+           CurseForge segment is the real curseforge.com site, either an
+           embedded WebView2 overlay the native host positions over
+           #cf-placeholder (see ui/app.js Host/Views.browse - the
+           cf-show/cf-rect/cf-hide/cf-nav page->host messages and the
+           host-ready/cf-state/cf-job host->page ones), or - outside the
+           native host, or against an older host without the cf-pane
+           capability - a compact fallback panel pointing at the existing
+           chromeless side window (the 'cf-window' /api/open target). The
+           CurseForge server-side endpoints (/api/cf/*) are unchanged and
+           still back add-by-link resolution and drawer enrichment; they are
+           simply no longer used for in-app search on this screen. -->
       <section id="view-browse" class="view" data-view-root="browse" hidden>
 
-        <!-- Round 6 fix: shown when a key IS configured but CurseForge is
-             rejecting it (401/403), so the copy points at fixing the saved
-             key rather than adding one. CS3: kept as-is per UX-SPEC.md 5.1
-             ("already plain, no change") - still fully blocks #browse-content
-             below, since a rejected key also breaks the merged grid's
-             CurseForge half on every request. -->
-        <div class="nokey-panel" id="browse-keyrejected" hidden>
-          <div class="nokey-card">
-            <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
-            <h2>Your CurseForge API key was rejected</h2>
-            <p class="muted-text">CurseForge is rejecting the key currently saved in Settings, so Browse, logos, descriptions, and changelogs can&rsquo;t load. Paste a working key to fix this.</p>
-            <!-- Review fix: was btn-accent, colliding with the sidebar's
-                 persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
-            <button type="button" class="btn btn-outline" id="btn-keyrejected-settings">Go to Settings</button>
-          </div>
+        <div class="source-switch" id="get-new-tabs" role="tablist" aria-label="Addon source">
+          <button type="button" class="source-switch-btn is-active" id="tab-wago" data-tab="wago" role="tab" aria-selected="true">Wago</button>
+          <button type="button" class="source-switch-btn" id="tab-curseforge" data-tab="curseforge" role="tab" aria-selected="false">CurseForge</button>
         </div>
 
-        <div id="browse-content">
+        <!-- ---------- Wago (in-app search) ---------- -->
+        <div id="browse-wago-panel">
           <header class="topbar">
             <label class="search-field">
               <svg class="icon search-icon"><use href="#icon-search"></use></svg>
-              <input type="search" id="browse-search" placeholder="Search addon name..." autocomplete="off">
+              <input type="search" id="browse-search" placeholder="Search Wago addons..." autocomplete="off">
             </label>
           </header>
-
-          <!-- CS3: one quiet line when exactly one of the two sources
-               couldn't be reached - the other source's cards still render
-               in the grid below regardless. -->
-          <p class="muted-text browse-note" id="browse-source-note" hidden></p>
 
           <div class="list-summary" id="browse-summary" aria-live="polite"></div>
 
@@ -409,31 +407,63 @@
             <p>Try a different search term.</p>
           </div>
 
-          <!-- Both CurseForge and Wago failed - the one case with nothing
-               left to show in the grid at all. -->
           <div class="error-state" id="browse-error" hidden>
             <svg class="icon empty-icon error-icon"><use href="#icon-alert-circle"></use></svg>
             <h3>Couldn&rsquo;t load results</h3>
             <p id="browse-error-msg"></p>
           </div>
 
-          <!-- CS3: replaces the old permanent keyless banner - shown only
-               when a search returns thin/zero results, keyless-CurseForge
-               mode only (a keyed session already has the richer search this
-               is nudging toward). -->
-          <p class="muted-text browse-note" id="browse-nudge" hidden>Search results are limited without a CurseForge key. <button type="button" class="link-btn" id="btn-browse-nudge-settings">Add one in Settings</button></p>
-
-          <!-- CS3: single fallback area under the grid (not a second
-               competing search box) - "Search CurseForge.com directly" and
-               "Install by Project ID" both demoted into one place here. -->
+          <!-- Single fallback area under the grid, not a second competing
+               search box - switching to CurseForge, and pasting a link/ID,
+               both demoted into one place here. -->
           <div class="browse-fallback">
-            <p class="muted-text"><button type="button" class="link-btn" id="btn-cf-web-search">Not finding it? Search CurseForge.com directly</button></p>
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-cf-web-search">Not on Wago? Try CurseForge</button></p>
             <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link">Or paste an addon&rsquo;s CurseForge page link or number</button></p>
-            <!-- One-time note: only shown right after "Search CurseForge.com
-                 directly" is used while Furphy's own curseforge:// handler
-                 is off, since that's when a CurseForge.com Install click
-                 would get intercepted by the OS/browser instead of coming
-                 back here. -->
+          </div>
+        </div>
+
+        <!-- ---------- CurseForge: native host with the cf-pane capability -
+             the toolbar/title below are drawn in HTML; the actual site
+             renders in a WebView2 overlay the host positions over
+             #cf-placeholder (never covered by other HTML - dialogs/drawers/
+             popovers post cf-hide while open, toasts move to the sidebar,
+             see ui/app.js). ---------- -->
+        <div id="browse-cf-panel" hidden>
+          <div class="cfpane">
+            <div class="cfpane-toolbar">
+              <button type="button" class="icon-btn" id="cf-nav-back" aria-label="Back" title="Back" disabled><svg class="icon"><use href="#icon-arrow-left"></use></svg></button>
+              <button type="button" class="icon-btn" id="cf-nav-forward" aria-label="Forward" title="Forward" disabled><svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+              <button type="button" class="icon-btn" id="cf-nav-reload" aria-label="Reload" title="Reload"><svg class="icon"><use href="#icon-refresh"></use></svg></button>
+              <button type="button" class="icon-btn" id="cf-nav-home" aria-label="Home" title="Home"><svg class="icon"><use href="#icon-home"></use></svg></button>
+              <label class="search-field cfpane-search">
+                <svg class="icon search-icon"><use href="#icon-search"></use></svg>
+                <input type="search" id="cf-pane-search" placeholder="Search CurseForge..." autocomplete="off">
+              </label>
+              <span class="cfpane-title muted-text" id="cf-pane-title"></span>
+            </div>
+            <!-- Round 15: while this segment is active, the job progress
+                 panel renders here (moved in place by ui/app.js) instead of
+                 floating, so an Install click on CurseForge.com shows
+                 progress right above the site - the placeholder shrinks and
+                 a cf-rect follows automatically (ResizeObserver). -->
+            <div class="cfpane-job-mount" id="cfpane-job-mount"></div>
+            <div class="cfpane-placeholder" id="cf-placeholder"></div>
+          </div>
+        </div>
+
+        <!-- ---------- CurseForge: plain Edge window / an older host without
+             cf-pane ---------- -->
+        <div id="browse-cf-fallback" hidden>
+          <div class="cfpane-fallback-card">
+            <svg class="icon nokey-icon"><use href="#icon-compass"></use></svg>
+            <p class="muted-text">CurseForge browsing happens inside the Furphy desktop window.</p>
+            <button type="button" class="btn btn-outline" id="btn-cf-open-window">Open CurseForge in a window</button>
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link-fallback">Or paste an addon&rsquo;s CurseForge page link or number</button></p>
+            <!-- One-time note: shown only right after "Open CurseForge in a
+                 window" is used while Furphy's own curseforge:// handler is
+                 off, since that's when a CurseForge.com Install click would
+                 get intercepted by the OS/browser instead of coming back
+                 here. -->
             <p class="muted-text browse-note is-warning" id="browse-install-note" hidden>Install links aren&rsquo;t set up to open in Furphy &mdash; <button type="button" class="link-btn" id="btn-browse-install-note-settings">fix in Settings</button>.</p>
           </div>
         </div>
@@ -492,7 +522,7 @@
 
           <section class="settings-group" id="settings-apikey">
             <h3>CurseForge key (optional)</h3>
-            <p class="muted-text">Not required &mdash; everything works without it. A free key adds CurseForge&rsquo;s own search and addon descriptions.</p>
+            <p class="muted-text">Not required &mdash; everything works without it. A free key adds CurseForge&rsquo;s own addon descriptions.</p>
             <!-- CS4: collapsed by default to one clickable row; expands the
                  field + Show/Hide + Test + Save + Clear in place. The status
                  line stays visible even collapsed, as this row's own subtitle. -->
@@ -695,6 +725,12 @@
 </aside>
 
 <!-- ===================== Job progress panel ===================== -->
+<!-- Round 15: while the CurseForge segment (native host, cf-pane) is active,
+     ui/app.js moves the #job-panel node itself into #cfpane-job-mount and
+     back out to right after this anchor on leaving - same node, same
+     listeners, just relocated in the DOM (see Views.browse's placeInline/
+     placeFloating). -->
+<div id="job-panel-anchor" hidden></div>
 <div class="job-panel" id="job-panel" hidden>
   <div class="job-panel-bar" id="job-panel-bar">
     <svg class="icon job-spinner" id="job-spinner"><use href="#icon-spinner"></use></svg>
@@ -768,7 +804,7 @@
   <ul class="welcome-list" id="welcome-list"></ul>
   <div class="nokey-inline welcome-nokey-note">
     <svg class="icon"><use href="#icon-info"></use></svg>
-    <span>Looking for something else? <button type="button" class="link-btn" id="welcome-browse-link">See Browse</button></span>
+    <span>Looking for something else? <button type="button" class="link-btn" id="welcome-browse-link">See Get new addons</button></span>
   </div>
   <div class="dialog-footer">
     <button type="button" class="btn btn-ghost" id="welcome-skip">Skip</button>

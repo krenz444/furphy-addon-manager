@@ -110,6 +110,12 @@ namespace Furphy
         public bool SelftestActive;
         public string SelftestMarkerPath;
         public string SelftestTestPageUrl;
+        // Optional deep-link params (E20/G): appended to the SPA URL as
+        // ?view=..&tab=.. when given. Used for verification and future
+        // deep linking; absent (null) means "let the page use its own
+        // default", matching every existing launch.
+        public string View;
+        public string Tab;
 
         public static HostOptions Parse(string[] args)
         {
@@ -133,6 +139,16 @@ namespace Furphy
                     o.SelftestMarkerPath = args[i + 1];
                     o.SelftestTestPageUrl = args[i + 2];
                     i += 2;
+                }
+                else if (string.Equals(a, "--view", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    o.View = args[i + 1];
+                    i++;
+                }
+                else if (string.Equals(a, "--tab", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    o.Tab = args[i + 1];
+                    i++;
                 }
             }
             return o;
@@ -649,11 +665,9 @@ namespace Furphy
         private int _lastTextHresult;
         private int _lastBorderHresult;
 
-        private enum HostTab
-        {
-            Furphy,
-            CurseForge
-        }
+        // Home URL for the embedded CurseForge pane (contract E's cf-nav
+        // "home" action and the pane's initial cf-show fallback).
+        private const string CfHomeUrl = "https://www.curseforge.com/wow/addons";
 
         private readonly HostOptions _options;
         private readonly string _settingsPath;
@@ -663,29 +677,52 @@ namespace Furphy
         private readonly bool _dpiAware;
         private int _effectiveDpi;
 
-        private Panel _navPanel;
-        private Button _btnFurphy;
-        private Button _btnCf;
+        // Round 15 (E20 - embedded CurseForge pane): the left nav strip /
+        // WinForms tab layout and the WinForms CurseForge toolbar are gone.
+        // _contentPanel fills the whole form; _furphyWebView (the SPA,
+        // always the only thing the player sees chrome-wise) docks Fill
+        // inside it, and _cfWebView is a second, independently positioned
+        // child of the SAME panel - invisible until the page tells the
+        // host to show it (cf-show), moved/resized on cf-rect, and drawn
+        // over the SPA's own placeholder element via BringToFront. The
+        // page now draws its own CurseForge toolbar (back/forward/home/
+        // search) in HTML; the host only executes cf-nav actions.
         private Panel _contentPanel;
-        private Panel _cfContainer;
-        private HostTab _activeTab;
         private WebView2 _furphyWebView;
         private WebView2 _cfWebView;
-        private Panel _cfToolbar;
-        private TextBox _cfSearchBox;
-        private Button _cfBtnBack;
-        private Button _cfBtnForward;
-        private Button _cfBtnHome;
-        private Button _cfBtnGo;
 
         private bool _furphyReady;
         private bool _cfReady;
         private bool _cfFilterInfraRegistered;
         private bool _cfAdCssInjected;
+        private bool _cfSelftestDeepLinkInjected;
         private bool _adFilterEnabled;
         private List<string> _adFilterHosts;
 
+        // cf-pane state (contract E/F): whether the CF view has ever been
+        // navigated (cf-show only auto-navigates the FIRST time, or when
+        // the message explicitly carries navigate:true), whether its most
+        // recent NavigationStarting/NavigationCompleted pair is still
+        // in flight (for cf-state's "loading" field), the last URL the
+        // host actually navigated it to, and counters/last-applied-bounds
+        // surfaced on the --selftest marker.
+        private bool _cfHasNavigated;
+        private bool _cfLoading;
+        private string _cfLastUrl;
+        private int _cfShowCount;
+        private int _cfHideCount;
+        private int _cfStateMessageCount;
+        private Rectangle _cfPaneBoundsDevicePx;
+
+        // host-ready (contract F): sent once after the Furphy webview's
+        // CoreWebView2 finishes initializing, and again on every
+        // page-sent {type:"hello"} so a reloaded page can re-discover the
+        // host and its capabilities.
+        private bool _hostReadySent;
+        private string _hostVersion;
+
         private System.Windows.Forms.Timer _selftestTimer;
+        private System.Windows.Forms.Timer _selftestCaptureTimer;
         private bool _selftestMarkerWritten;
         private readonly List<string> _selftestBlocked = new List<string>();
         private readonly List<string> _selftestAllowed = new List<string>();
@@ -694,7 +731,7 @@ namespace Furphy
         private string _webviewVersion;
         private int _selftestThemeMessageCount;
         private string _selftestOpenCurseforgeUrl;
-        private bool _selftestCfTabActiveAfterMessage;
+        private string _selftestCapturePath;
 
         public int ExitCode;
 
@@ -715,6 +752,7 @@ namespace Furphy
             _hostLogPath = Path.Combine(logDir, "host.log");
 
             _port = ResolvePort();
+            _hostVersion = ResolveHostVersion(exeDir);
 
             // Seed the chrome palette with Lofi Night, then overlay any
             // persisted settings.json hostTheme - BEFORE BuildUi() below so
@@ -779,6 +817,28 @@ namespace Furphy
             return 47831;
         }
 
+        // host-ready's "version" field (contract F) is the app's own
+        // VERSION file (E18's single source of truth - see SPEC.md), NOT
+        // the WebView2 runtime version (that is _webviewVersion, reported
+        // separately on the --selftest marker). Located the same way
+        // settings.json/adfilter-hosts.txt already are; falls back to a
+        // placeholder rather than blocking startup on a dev checkout with
+        // no VERSION file.
+        private static string ResolveHostVersion(string exeDir)
+        {
+            string path = HostFiles.FindUpward(exeDir, "VERSION", 4);
+            if (path != null)
+            {
+                try
+                {
+                    string text = File.ReadAllText(path, Encoding.UTF8).Trim();
+                    if (text.Length > 0) return text;
+                }
+                catch { }
+            }
+            return "0.0.0-dev";
+        }
+
         private static int ToInt(object o, int fallback)
         {
             if (o is long) return (int)(long)o;
@@ -799,6 +859,25 @@ namespace Furphy
                 if (s == "false") return false;
             }
             return fallback;
+        }
+
+        // Used for cf-show/cf-rect's rect{x,y,w,h}/dpr fields, which the
+        // page sends as JSON numbers (MiniJson parses them as double or
+        // long depending on whether a decimal point was present).
+        private static double ToDouble(object o, double fallback)
+        {
+            if (o is double) return (double)o;
+            if (o is long) return (long)o;
+            if (o is int) return (int)o;
+            double parsed;
+            if (o is string && double.TryParse((string)o, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)) return parsed;
+            return fallback;
+        }
+
+        private static object DictGet(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return (d != null && d.TryGetValue(key, out v)) ? v : null;
         }
 
         private bool ReadAdFilterSetting()
@@ -987,40 +1066,21 @@ namespace Furphy
         // ApplyTheme is only expected to reach live controls after the
         // window is up; the initial palette is picked up by BuildUi
         // constructing controls directly from the fields instead.
+        // Round 15 (E20 - embedded CurseForge pane): there is no more
+        // WinForms nav strip or CurseForge toolbar to recolor - the page
+        // draws its own CurseForge toolbar in HTML now - so this is just
+        // the form background, the one content panel, and both WebView2s'
+        // DefaultBackgroundColor (the CF pane's own page content paints
+        // itself; this only affects the color visible before/around it).
         private void RecolorChrome()
         {
-            if (_navPanel == null) return;
+            if (_contentPanel == null) return;
 
             BackColor = ChromeBg;
-            _navPanel.BackColor = ChromeBg;
             _contentPanel.BackColor = ChromeBg;
-            _cfContainer.BackColor = ChromeBg;
-            _cfToolbar.BackColor = ChromeBgAlt;
 
             try { _furphyWebView.DefaultBackgroundColor = ChromeBg; } catch { }
             try { _cfWebView.DefaultBackgroundColor = ChromeBg; } catch { }
-
-            ApplyNavButtonColors(_btnFurphy, _activeTab == HostTab.Furphy);
-            ApplyNavButtonColors(_btnCf, _activeTab == HostTab.CurseForge);
-            _btnFurphy.Invalidate();
-            _btnCf.Invalidate();
-
-            RecolorToolbarButton(_cfBtnBack);
-            RecolorToolbarButton(_cfBtnForward);
-            RecolorToolbarButton(_cfBtnHome);
-            RecolorToolbarButton(_cfBtnGo);
-
-            _cfSearchBox.BackColor = ChromeBgActive;
-            _cfSearchBox.ForeColor = ChromeText;
-        }
-
-        private void RecolorToolbarButton(Button b)
-        {
-            if (b == null) return;
-            b.BackColor = ChromeBgAlt;
-            b.ForeColor = ChromeText;
-            b.FlatAppearance.MouseOverBackColor = ChromeHover;
-            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
         }
 
         // Windows title bar (DWM). Attribute 20 (dark mode) is applied
@@ -1173,20 +1233,21 @@ namespace Furphy
 
         // ---------------------------------------------- page -> host messages
 
-        // Attached to _furphyWebView always (FurphyWebView_InitCompleted -
-        // the trusted app SPA, gated page-side by
-        // App.getServerHost() === "webview2") and to _cfWebView ONLY during
-        // --selftest (CfWebView_InitCompleted): --selftest's
-        // host\selftest.html is the CurseForge tab's *test page*
-        // (_cfWebView.Source, per MainForm_Load - it exercises the
-        // curseforge:// deep-link interception that only _cfWebView's
-        // NavigationStarting handles), so it needs this same listener there
-        // to post the theme/open-curseforge test messages contract F asks
-        // for. In production _cfWebView loads live, untrusted
-        // curseforge.com content and is deliberately left unwired - see
-        // CfWebView_InitCompleted's comment (adversarial-review fix: an
-        // untrusted CF-tab page must not be able to drive host chrome/theme
-        // or force CurseForge-tab navigation via postMessage).
+        // Contract E: attached to _furphyWebView ONLY (FurphyWebView_InitCompleted)
+        // - the trusted app SPA, gated page-side by
+        // App.getServerHost() === "webview2". Round 15 (E20) simplifies this
+        // from earlier rounds: --selftest's host\selftest.html now loads AS
+        // _furphyWebView's own page during --selftest (see MainForm_Load),
+        // in place of the real server-hosted SPA, specifically so it can
+        // exercise this same contract (hello/theme/cf-show/cf-rect/cf-hide/
+        // cf-nav) from the one webview these messages are ever honored
+        // from - so there is no longer a second, --selftest-only listener
+        // on _cfWebView, and no dual-source race to guard against.
+        // _cfWebView loads live, untrusted curseforge.com content in
+        // production and is deliberately left unwired for this event
+        // entirely (adversarial-review precedent from Round 13: an
+        // untrusted CF-pane page must not be able to drive host chrome,
+        // theme, or the pane's own position/navigation via postMessage).
         private void HostWebView_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             try
@@ -1199,11 +1260,31 @@ namespace Furphy
                 string type = msg.TryGetValue("type", out typeObj) ? typeObj as string : null;
                 if (string.IsNullOrEmpty(type)) return;
 
-                if (type == "open-curseforge")
+                if (type == "hello")
+                {
+                    SendHostReady();
+                }
+                else if (type == "open-curseforge")
                 {
                     object urlObj;
                     string url = msg.TryGetValue("url", out urlObj) ? urlObj as string : null;
                     HandleOpenCurseforgeMessage(url);
+                }
+                else if (type == "cf-show")
+                {
+                    HandleCfShow(msg);
+                }
+                else if (type == "cf-rect")
+                {
+                    ApplyCfRect(msg);
+                }
+                else if (type == "cf-hide")
+                {
+                    HideCfPane();
+                }
+                else if (type == "cf-nav")
+                {
+                    HandleCfNav(msg);
                 }
                 else if (type == "theme")
                 {
@@ -1225,37 +1306,7 @@ namespace Furphy
                     // -> HostFiles.UpdateJsonObject, the same file a real,
                     // non-selftest launch reads on startup.
                     bool persist = !_options.SelftestActive;
-
-                    // Adversarial-review fix (finding: selftest theme-message
-                    // ordering is a live race): during --selftest, both
-                    // _furphyWebView (the real SPA's own startup
-                    // Host.reportTheme(), per contract E - it is genuinely
-                    // running there and its report isn't the thing under
-                    // test) and _cfWebView (selftest.html's synthetic test
-                    // palette, gated on SelftestActive - see
-                    // CfWebView_InitCompleted) are wired to this handler, so
-                    // a --selftest run always receives at least two theme
-                    // messages with no ordering guarantee between them. Make
-                    // the race moot instead of relying on selftest.html's
-                    // 1s head start beating the SPA's startup report: while
-                    // SelftestActive, only apply theme messages that did NOT
-                    // arrive via _furphyWebView, so the marker's
-                    // themeBg0/tabBarPixel/toolbarPixel can only ever reflect
-                    // selftest.html's message, deterministically. The message
-                    // is still counted above either way.
-                    bool fromProductionAppDuringSelftest =
-                        _options.SelftestActive &&
-                        _furphyWebView.CoreWebView2 != null &&
-                        sender == (object)_furphyWebView.CoreWebView2;
-
-                    if (fromProductionAppDuringSelftest)
-                    {
-                        LogHost("theme message from _furphyWebView ignored during --selftest (production SPA report, not under test)");
-                    }
-                    else
-                    {
-                        ApplyTheme(name, colors, persist);
-                    }
+                    ApplyTheme(name, colors, persist);
                 }
                 else
                 {
@@ -1268,57 +1319,283 @@ namespace Furphy
             }
         }
 
+        private static bool IsAllowedCfUrl(string url)
+        {
+            return !string.IsNullOrEmpty(url) &&
+                url.StartsWith("https://www.curseforge.com/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Contract E's {type:"open-curseforge", url} - kept for backward
+        // compatibility with a page that hasn't adopted cf-show yet: just
+        // navigates the CF pane and reports its new state, WITHOUT
+        // changing visibility/bounds (the page is expected to have already
+        // shown the pane itself via cf-show if it wants it visible).
         private void HandleOpenCurseforgeMessage(string url)
         {
-            if (string.IsNullOrEmpty(url) ||
-                !url.StartsWith("https://www.curseforge.com/", StringComparison.OrdinalIgnoreCase))
+            if (!IsAllowedCfUrl(url))
             {
                 LogHost("open-curseforge ignored, bad url: " + (url == null ? "(null)" : url));
                 return;
             }
 
-            ActivateTab(HostTab.CurseForge);
             NavigateCf(url);
-
+            _cfHasNavigated = true;
+            _cfLastUrl = url;
             _selftestOpenCurseforgeUrl = url;
-            _selftestCfTabActiveAfterMessage = (_activeTab == HostTab.CurseForge);
+            SendCfState();
         }
 
-        // ---------------------------------------------------------- DPI
-
-        private float DpiScale()
+        // {type:"cf-show", rect:{x,y,w,h}, dpr, url?, navigate?}: position/
+        // size the pane (ApplyCfRect), navigate it when it has never had a
+        // page yet (about:blank) or the message explicitly asks to
+        // (navigate:true), then make it visible and report its state.
+        private void HandleCfShow(Dictionary<string, object> msg)
         {
-            return _effectiveDpi / 96f;
+            ApplyCfRect(msg);
+
+            object urlObj;
+            string url = msg.TryGetValue("url", out urlObj) ? urlObj as string : null;
+            object navObj;
+            bool navigate = msg.TryGetValue("navigate", out navObj) && ToBool(navObj, false);
+
+            if (!string.IsNullOrEmpty(url) && (!_cfHasNavigated || navigate))
+            {
+                if (IsAllowedCfUrl(url))
+                {
+                    NavigateCf(url);
+                    _cfHasNavigated = true;
+                    _cfLastUrl = url;
+                }
+                else
+                {
+                    LogHost("cf-show url rejected (not allow-listed): " + url);
+                }
+            }
+
+            ShowCfPane();
+            SendCfState();
+
+            LogHost("cf-show rect=" + _cfPaneBoundsDevicePx.X.ToString(CultureInfo.InvariantCulture) +
+                "," + _cfPaneBoundsDevicePx.Y.ToString(CultureInfo.InvariantCulture) +
+                " " + _cfPaneBoundsDevicePx.Width.ToString(CultureInfo.InvariantCulture) +
+                "x" + _cfPaneBoundsDevicePx.Height.ToString(CultureInfo.InvariantCulture) +
+                " url=" + (string.IsNullOrEmpty(url) ? (_cfLastUrl == null ? "(unchanged)" : _cfLastUrl) : url));
         }
 
-        private int Scaled(int baseValue)
+        // {type:"cf-rect", rect, dpr}: move/resize only, sent rAF-throttled
+        // by the page on ResizeObserver/window-resize/scroll/layout
+        // changes. Shared with cf-show above, which also repositions
+        // before showing.
+        private void ApplyCfRect(Dictionary<string, object> msg)
         {
-            return (int)Math.Round(baseValue * DpiScale());
+            object rectObj;
+            if (!msg.TryGetValue("rect", out rectObj)) return;
+            Dictionary<string, object> rect = rectObj as Dictionary<string, object>;
+            if (rect == null) return;
+
+            double dpr = ToDouble(DictGet(msg, "dpr"), 1.0);
+            if (dpr <= 0) dpr = 1.0;
+
+            double x = ToDouble(DictGet(rect, "x"), 0);
+            double y = ToDouble(DictGet(rect, "y"), 0);
+            double w = ToDouble(DictGet(rect, "w"), 0);
+            double h = ToDouble(DictGet(rect, "h"), 0);
+
+            int dx = (int)Math.Round(x * dpr);
+            int dy = (int)Math.Round(y * dpr);
+            int dw = Math.Max(0, (int)Math.Round(w * dpr));
+            int dh = Math.Max(0, (int)Math.Round(h * dpr));
+
+            // Bounds are relative to _contentPanel - _furphyWebView also
+            // docks Fill inside that same panel, so its client origin IS
+            // the panel origin the page's getBoundingClientRect() values
+            // are measured against.
+            _cfWebView.Bounds = new Rectangle(dx, dy, dw, dh);
+            _cfPaneBoundsDevicePx = _cfWebView.Bounds;
+
+            LogHost("cf-rect applied x=" + dx.ToString(CultureInfo.InvariantCulture) +
+                " y=" + dy.ToString(CultureInfo.InvariantCulture) +
+                " w=" + dw.ToString(CultureInfo.InvariantCulture) +
+                " h=" + dh.ToString(CultureInfo.InvariantCulture) +
+                " dpr=" + dpr.ToString(CultureInfo.InvariantCulture));
         }
+
+        private void ShowCfPane()
+        {
+            _cfWebView.Visible = true;
+            _cfWebView.BringToFront();
+            _cfShowCount++;
+        }
+
+        private void HideCfPane()
+        {
+            // Keeps the page loaded (Source untouched) so back/forward
+            // state survives, per contract E.
+            _cfWebView.Visible = false;
+            _cfHideCount++;
+        }
+
+        // {type:"cf-nav", action:"back"|"forward"|"reload"|"home"|"go", url?}
+        private void HandleCfNav(Dictionary<string, object> msg)
+        {
+            object actionObj;
+            string action = msg.TryGetValue("action", out actionObj) ? actionObj as string : null;
+            if (string.IsNullOrEmpty(action)) return;
+            action = action.Trim().ToLowerInvariant();
+
+            if (action == "back")
+            {
+                if (_cfWebView.CoreWebView2 != null && _cfWebView.CoreWebView2.CanGoBack)
+                {
+                    _cfWebView.CoreWebView2.GoBack();
+                }
+            }
+            else if (action == "forward")
+            {
+                if (_cfWebView.CoreWebView2 != null && _cfWebView.CoreWebView2.CanGoForward)
+                {
+                    _cfWebView.CoreWebView2.GoForward();
+                }
+            }
+            else if (action == "reload")
+            {
+                if (_cfWebView.CoreWebView2 != null)
+                {
+                    _cfWebView.CoreWebView2.Reload();
+                }
+            }
+            else if (action == "home")
+            {
+                NavigateCf(CfHomeUrl);
+                _cfHasNavigated = true;
+                _cfLastUrl = CfHomeUrl;
+            }
+            else if (action == "go")
+            {
+                object urlObj;
+                string url = msg.TryGetValue("url", out urlObj) ? urlObj as string : null;
+                if (IsAllowedCfUrl(url))
+                {
+                    NavigateCf(url);
+                    _cfHasNavigated = true;
+                    _cfLastUrl = url;
+                }
+                else
+                {
+                    LogHost("cf-nav go url rejected (not allow-listed): " + (url == null ? "(null)" : url));
+                }
+            }
+            else
+            {
+                LogHost("unknown cf-nav action: " + action);
+                return;
+            }
+
+            SendCfState();
+        }
+
+        // ---------------------------------------------- host -> page messages
+
+        private void PostToFurphy(Dictionary<string, object> msg)
+        {
+            try
+            {
+                if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
+                {
+                    _furphyWebView.CoreWebView2.PostWebMessageAsJson(MiniJson.Write(msg));
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHost("PostToFurphy failed: " + ex.Message);
+            }
+        }
+
+        // Contract F: sent once the Furphy webview's CoreWebView2 is ready
+        // (FurphyWebView_InitCompleted), and again on every page-sent
+        // {type:"hello"} so a reloaded page can re-discover the host and
+        // its capabilities. This host always supports the CF pane, so
+        // capabilities is always exactly ["cf-pane"].
+        private void SendHostReady()
+        {
+            Dictionary<string, object> msg = new Dictionary<string, object>();
+            msg["type"] = "host-ready";
+            msg["version"] = _hostVersion;
+            List<string> caps = new List<string>();
+            caps.Add("cf-pane");
+            msg["capabilities"] = caps;
+            PostToFurphy(msg);
+            _hostReadySent = true;
+        }
+
+        // Contract F: sent on the CF pane's NavigationStarting (loading
+        // true), NavigationCompleted (loading false), HistoryChanged,
+        // DocumentTitleChanged, and right after cf-show/cf-nav (called
+        // directly from HandleCfShow/HandleCfNav above).
+        private void SendCfState()
+        {
+            string url = null;
+            string title = null;
+            bool canGoBack = false;
+            bool canGoForward = false;
+            try
+            {
+                if (_cfWebView.CoreWebView2 != null)
+                {
+                    url = _cfWebView.CoreWebView2.Source;
+                    title = _cfWebView.CoreWebView2.DocumentTitle;
+                    canGoBack = _cfWebView.CoreWebView2.CanGoBack;
+                    canGoForward = _cfWebView.CoreWebView2.CanGoForward;
+                }
+            }
+            catch { }
+
+            Dictionary<string, object> msg = new Dictionary<string, object>();
+            msg["type"] = "cf-state";
+            msg["url"] = url;
+            msg["title"] = title;
+            msg["canGoBack"] = canGoBack;
+            msg["canGoForward"] = canGoForward;
+            msg["loading"] = _cfLoading;
+            PostToFurphy(msg);
+            _cfStateMessageCount++;
+        }
+
+        // Contract F: {type:"cf-job", jobId, status} - posted the instant
+        // the host itself intercepts an install link and posts /api/jobs
+        // (HandleCurseforgeProtocol/HandleSlugInstall below), so the SPA
+        // can open its job panel immediately instead of waiting for the
+        // next poll.
+        private void SendCfJob(string jobId, string status)
+        {
+            if (string.IsNullOrEmpty(jobId)) return;
+            Dictionary<string, object> msg = new Dictionary<string, object>();
+            msg["type"] = "cf-job";
+            msg["jobId"] = jobId;
+            msg["status"] = status;
+            PostToFurphy(msg);
+        }
+
+        // Round 15 (E20): the DPI-derived Scaled()/DpiScale() pixel-math
+        // helpers that used to size the hand-built WinForms nav strip and
+        // CurseForge toolbar are gone along with that chrome - the page
+        // draws its own (CSS-driven, already DPI-correct) toolbar in HTML
+        // now. _effectiveDpi/_dpiAware themselves are kept (DpiAwareness,
+        // OnHandleCreated's DPI-aware window placement, and the
+        // dpi/dpiAware --selftest marker fields all still need them).
 
         // -------------------------------------------------------- layout
 
+        // Round 15 (E20): no more left nav strip / WinForms tab layout and
+        // no more WinForms CurseForge toolbar - the page draws its own
+        // toolbar in HTML now (contract C). _contentPanel fills the whole
+        // form; _furphyWebView (the SPA) docks Fill inside it; _cfWebView
+        // is a second child of the SAME panel, invisible and unpositioned
+        // (no Source set - see MainForm_Load) until the page's first
+        // cf-show message.
         private void BuildUi()
         {
             BackColor = ChromeBg;
-
-            _navPanel = new Panel();
-            _navPanel.Dock = DockStyle.Left;
-            _navPanel.Width = Scaled(64);
-            _navPanel.BackColor = ChromeBg;
-
-            int navBtnHeight = Scaled(64);
-
-            _btnFurphy = BuildNavButton("Furphy");
-            _btnFurphy.SetBounds(0, 0, _navPanel.Width, navBtnHeight);
-            _btnFurphy.Click += new EventHandler(NavFurphy_Click);
-
-            _btnCf = BuildNavButton("CurseForge");
-            _btnCf.SetBounds(0, navBtnHeight, _navPanel.Width, navBtnHeight);
-            _btnCf.Click += new EventHandler(NavCf_Click);
-
-            _navPanel.Controls.Add(_btnFurphy);
-            _navPanel.Controls.Add(_btnCf);
 
             _contentPanel = new Panel();
             _contentPanel.Dock = DockStyle.Fill;
@@ -1328,213 +1605,20 @@ namespace Furphy
             _furphyWebView.Dock = DockStyle.Fill;
             try { _furphyWebView.DefaultBackgroundColor = ChromeBg; } catch { }
 
-            _cfContainer = new Panel();
-            _cfContainer.Dock = DockStyle.Fill;
-            _cfContainer.BackColor = ChromeBg;
-
             _cfWebView = new WebView2();
-            _cfWebView.Dock = DockStyle.Fill;
+            _cfWebView.Visible = false;
             try { _cfWebView.DefaultBackgroundColor = ChromeBg; } catch { }
 
-            _cfToolbar = BuildCfToolbar();
-
-            _cfContainer.Controls.Add(_cfWebView);
-            _cfContainer.Controls.Add(_cfToolbar);
-
+            // _furphyWebView added first (Dock=Fill claims the whole
+            // panel), _cfWebView added second so it sits above it in
+            // z-order once ShowCfPane calls BringToFront - its own Bounds
+            // (set by ApplyCfRect) are what actually position it; Dock is
+            // deliberately left at its default (None) since it is
+            // explicitly, independently positioned by the page.
             _contentPanel.Controls.Add(_furphyWebView);
-            _contentPanel.Controls.Add(_cfContainer);
+            _contentPanel.Controls.Add(_cfWebView);
 
-            // Fill-docked content added first, Left-docked nav strip
-            // added second - WinForms docks in that add order, so the
-            // nav strip correctly claims the left edge and the content
-            // panel fills whatever remains instead of being squeezed out.
             Controls.Add(_contentPanel);
-            Controls.Add(_navPanel);
-
-            ActivateTab(HostTab.Furphy);
-        }
-
-        private Button BuildNavButton(string text)
-        {
-            Button b = new Button();
-            b.Text = text;
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.FlatAppearance.MouseOverBackColor = ChromeHover;
-            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
-            b.TabStop = false;
-            b.TextAlign = ContentAlignment.MiddleCenter;
-            // The active-tab accent bar is drawn here rather than via a
-            // child control, since Button does not host children reliably.
-            b.Paint += new PaintEventHandler(NavButton_Paint);
-            return b;
-        }
-
-        private void ApplyNavButtonColors(Button b, bool active)
-        {
-            b.Tag = active;
-            if (active)
-            {
-                b.BackColor = ChromeBgActive;
-                b.ForeColor = ChromeAccent;
-            }
-            else
-            {
-                b.BackColor = ChromeBg;
-                b.ForeColor = ChromeMuted;
-            }
-        }
-
-        private void NavButton_Paint(object sender, PaintEventArgs e)
-        {
-            Button b = (Button)sender;
-            bool active = (b.Tag is bool) && (bool)b.Tag;
-            if (!active) return;
-            int barWidth = Math.Max(Scaled(3), 1);
-            using (SolidBrush brush = new SolidBrush(ChromeAccent))
-            {
-                e.Graphics.FillRectangle(brush, 0, 0, barWidth, b.Height);
-            }
-        }
-
-        private void NavFurphy_Click(object sender, EventArgs e)
-        {
-            ActivateTab(HostTab.Furphy);
-        }
-
-        private void NavCf_Click(object sender, EventArgs e)
-        {
-            ActivateTab(HostTab.CurseForge);
-        }
-
-        private void ActivateTab(HostTab tab)
-        {
-            _activeTab = tab;
-            bool furphyActive = tab == HostTab.Furphy;
-
-            ApplyNavButtonColors(_btnFurphy, furphyActive);
-            ApplyNavButtonColors(_btnCf, !furphyActive);
-            _btnFurphy.Invalidate();
-            _btnCf.Invalidate();
-
-            _furphyWebView.Visible = furphyActive;
-            _cfContainer.Visible = !furphyActive;
-            if (furphyActive)
-            {
-                _furphyWebView.BringToFront();
-            }
-            else
-            {
-                _cfContainer.BringToFront();
-            }
-        }
-
-        private Panel BuildCfToolbar()
-        {
-            Panel bar = new Panel();
-            bar.Dock = DockStyle.Top;
-            bar.Height = Scaled(36);
-            bar.BackColor = ChromeBgAlt;
-            bar.Padding = new Padding(Scaled(4));
-
-            int y = Scaled(4);
-            int btnH = Scaled(26);
-
-            _cfBtnBack = BuildToolbarButton("<", Scaled(30));
-            _cfBtnBack.Location = new Point(Scaled(4), y);
-            _cfBtnBack.Height = btnH;
-            _cfBtnBack.Click += new EventHandler(CfBack_Click);
-
-            _cfBtnForward = BuildToolbarButton(">", Scaled(30));
-            _cfBtnForward.Location = new Point(Scaled(38), y);
-            _cfBtnForward.Height = btnH;
-            _cfBtnForward.Click += new EventHandler(CfForward_Click);
-
-            _cfBtnHome = BuildToolbarButton("Home", Scaled(50));
-            _cfBtnHome.Location = new Point(Scaled(72), y);
-            _cfBtnHome.Height = btnH;
-            _cfBtnHome.Click += new EventHandler(CfHome_Click);
-
-            _cfSearchBox = new TextBox();
-            _cfSearchBox.Location = new Point(Scaled(130), Scaled(6));
-            _cfSearchBox.Width = Scaled(220);
-            _cfSearchBox.BackColor = ChromeBgActive;
-            _cfSearchBox.ForeColor = ChromeText;
-            _cfSearchBox.BorderStyle = BorderStyle.FixedSingle;
-            _cfSearchBox.KeyDown += new KeyEventHandler(CfSearchBox_KeyDown);
-
-            _cfBtnGo = BuildToolbarButton("Go", Scaled(40));
-            _cfBtnGo.Location = new Point(Scaled(356), y);
-            _cfBtnGo.Height = btnH;
-            _cfBtnGo.Click += new EventHandler(CfGo_Click);
-
-            bar.Controls.Add(_cfBtnBack);
-            bar.Controls.Add(_cfBtnForward);
-            bar.Controls.Add(_cfBtnHome);
-            bar.Controls.Add(_cfSearchBox);
-            bar.Controls.Add(_cfBtnGo);
-            return bar;
-        }
-
-        private Button BuildToolbarButton(string text, int width)
-        {
-            Button b = new Button();
-            b.Text = text;
-            b.Width = width;
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.FlatAppearance.MouseOverBackColor = ChromeHover;
-            b.FlatAppearance.MouseDownBackColor = ChromeBgActive;
-            b.BackColor = ChromeBgAlt;
-            b.ForeColor = ChromeText;
-            b.TabStop = false;
-            return b;
-        }
-
-        // ------------------------------------------------------ toolbar
-
-        private void CfBack_Click(object sender, EventArgs e)
-        {
-            if (_cfWebView.CoreWebView2 != null && _cfWebView.CoreWebView2.CanGoBack)
-            {
-                _cfWebView.CoreWebView2.GoBack();
-            }
-        }
-
-        private void CfForward_Click(object sender, EventArgs e)
-        {
-            if (_cfWebView.CoreWebView2 != null && _cfWebView.CoreWebView2.CanGoForward)
-            {
-                _cfWebView.CoreWebView2.GoForward();
-            }
-        }
-
-        private void CfHome_Click(object sender, EventArgs e)
-        {
-            NavigateCf("https://www.curseforge.com/wow/addons");
-        }
-
-        private void CfGo_Click(object sender, EventArgs e)
-        {
-            RunCfSearch();
-        }
-
-        private void CfSearchBox_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
-            {
-                RunCfSearch();
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-            }
-        }
-
-        private void RunCfSearch()
-        {
-            string term = _cfSearchBox.Text == null ? string.Empty : _cfSearchBox.Text.Trim();
-            if (term.Length == 0) return;
-            string encoded = Uri.EscapeDataString(term);
-            NavigateCf("https://www.curseforge.com/wow/search?search=" + encoded + "&class=addons");
         }
 
         private void NavigateCf(string url)
@@ -1563,13 +1647,44 @@ namespace Furphy
 
             try
             {
-                string furphyUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/?host=webview2";
-                _furphyWebView.Source = new Uri(furphyUrl);
+                // Round 15 (E20): --selftest's host\selftest.html now loads
+                // AS the Furphy webview's own page, replacing the real
+                // server-hosted SPA for the duration of the test - it is
+                // exercising the page->host messages (hello/theme/cf-show/
+                // cf-rect/cf-hide/cf-nav) that contract E says are ONLY
+                // ever honored from that webview, so it has to actually be
+                // that webview's content to reach HostWebView_WebMessageReceived
+                // at all (see that method's own comment). In production
+                // this is the real app, with --view/--tab (G) appended
+                // when given.
+                if (_options.SelftestActive)
+                {
+                    _furphyWebView.Source = new Uri(_options.SelftestTestPageUrl);
+                }
+                else
+                {
+                    string furphyUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/?host=webview2";
+                    if (!string.IsNullOrEmpty(_options.View))
+                    {
+                        furphyUrl += "&view=" + Uri.EscapeDataString(_options.View);
+                    }
+                    if (!string.IsNullOrEmpty(_options.Tab))
+                    {
+                        furphyUrl += "&tab=" + Uri.EscapeDataString(_options.Tab);
+                    }
+                    _furphyWebView.Source = new Uri(furphyUrl);
+                }
 
-                string cfInitialUrl = _options.SelftestActive
-                    ? _options.SelftestTestPageUrl
-                    : "https://www.curseforge.com/wow/addons";
-                _cfWebView.Source = new Uri(cfInitialUrl);
+                // The CF pane (contract A) starts with no page at all - it
+                // is navigated/shown entirely by cf-show/cf-nav messages
+                // from the Furphy webview, never pre-navigated here. Kick
+                // off its CoreWebView2 initialization now (rather than
+                // waiting for the first such message) so
+                // CfWebView_InitCompleted's ad-filter/interception wiring
+                // is already in place the first time the player switches
+                // to the CurseForge segment.
+                System.Threading.Tasks.Task cfInitTask = _cfWebView.EnsureCoreWebView2Async(null);
+                GC.KeepAlive(cfInitTask);
             }
             catch (Exception ex)
             {
@@ -1583,6 +1698,17 @@ namespace Furphy
                 _selftestTimer.Interval = 8000;
                 _selftestTimer.Tick += new EventHandler(SelftestTimer_Tick);
                 _selftestTimer.Start();
+
+                // capturePath's screenshot (WriteSelftestMarker) is taken
+                // ~1s before the marker is written, while the pane is
+                // visible - by 7s in, selftest.html's own timeline (hello/
+                // theme/cf-show around t=1s, cf-nav+cf-hide at t~3s,
+                // cf-show again shortly after) has already left the pane
+                // visible again.
+                _selftestCaptureTimer = new System.Windows.Forms.Timer();
+                _selftestCaptureTimer.Interval = 7000;
+                _selftestCaptureTimer.Tick += new EventHandler(SelftestCaptureTimer_Tick);
+                _selftestCaptureTimer.Start();
             }
         }
 
@@ -1601,11 +1727,20 @@ namespace Furphy
             _furphyReady = true;
             CaptureVersionIfNeeded();
 
-            // Contract A/B: the app SPA (always loaded here) posts
-            // "open-curseforge"/"theme" messages via
-            // window.chrome.webview.postMessage; see HostWebView_WebMessageReceived.
+            // Contract E: the app SPA (always loaded here, except during
+            // --selftest when host\selftest.html loads here instead - see
+            // MainForm_Load) posts hello/theme/open-curseforge/cf-show/
+            // cf-rect/cf-hide/cf-nav messages via
+            // window.chrome.webview.postMessage; see
+            // HostWebView_WebMessageReceived. This is the ONLY webview
+            // that handler is ever wired to.
             _furphyWebView.CoreWebView2.WebMessageReceived +=
                 new EventHandler<CoreWebView2WebMessageReceivedEventArgs>(HostWebView_WebMessageReceived);
+
+            // Contract F: sent once the moment this webview is ready, and
+            // again on every page-sent {type:"hello"} (handled inline in
+            // HostWebView_WebMessageReceived above).
+            SendHostReady();
         }
 
         private void CfWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -1623,32 +1758,85 @@ namespace Furphy
 
             _cfWebView.CoreWebView2.NavigationStarting +=
                 new EventHandler<CoreWebView2NavigationStartingEventArgs>(CfWebView_NavigationStarting);
+            _cfWebView.CoreWebView2.NavigationCompleted +=
+                new EventHandler<CoreWebView2NavigationCompletedEventArgs>(CfWebView_NavigationCompleted);
+            _cfWebView.CoreWebView2.HistoryChanged +=
+                new EventHandler<object>(CfWebView_HistoryChanged);
+            _cfWebView.CoreWebView2.DocumentTitleChanged +=
+                new EventHandler<object>(CfWebView_DocumentTitleChanged);
             _cfWebView.CoreWebView2.NewWindowRequested +=
                 new EventHandler<CoreWebView2NewWindowRequestedEventArgs>(CfWebView_NewWindowRequested);
             _cfWebView.CoreWebView2.WebResourceRequested +=
                 new EventHandler<CoreWebView2WebResourceRequestedEventArgs>(CfWebView_WebResourceRequested);
-            // Adversarial-review fix: _cfWebView loads live curseforge.com
-            // pages in production and, via CfWebView_NewWindowRequested's
-            // catch-all (NavigateCf(uri) for anything that is not a
-            // curseforge:// link or an install link), can be navigated to
-            // essentially any URL a page on curseforge.com links to.
-            // WebMessageReceived was previously wired here unconditionally,
-            // which let ANY such untrusted page post {type:"theme", ...} or
-            // {type:"open-curseforge", ...} and have it processed exactly
-            // like a message from the trusted SPA - defeating contract A's
-            // App.getServerHost()==='webview2' gate for this tab. Only
-            // --selftest's host\selftest.html (see MainForm_Load - it loads
-            // as _cfWebView.Source during --selftest, to exercise the same
-            // curseforge:// deep-link interception the real CF tab uses)
-            // has any legitimate reason to post these here, so gate the
-            // listener on that mode instead of attaching it unconditionally.
-            if (_options.SelftestActive)
-            {
-                _cfWebView.CoreWebView2.WebMessageReceived +=
-                    new EventHandler<CoreWebView2WebMessageReceivedEventArgs>(HostWebView_WebMessageReceived);
-            }
+            // Deliberately NOT wired here (adversarial-review precedent,
+            // see HostWebView_WebMessageReceived's own comment): _cfWebView
+            // loads live, untrusted curseforge.com pages in production and,
+            // via CfWebView_NewWindowRequested's catch-all (NavigateCf(uri)
+            // for anything that is not a curseforge:// link or an install
+            // link), can be navigated to essentially any URL a page on
+            // curseforge.com links to. An untrusted page there must not be
+            // able to drive host chrome, theme, or the CF pane's own
+            // position/navigation via postMessage.
 
             EnsureAdFilterInfra();
+
+            if (_options.SelftestActive)
+            {
+                EnsureSelftestDeepLinkInjection();
+            }
+        }
+
+        // Selftest-only (never registered outside --selftest): the
+        // Round-15 CF pane is navigated by the page's own cf-show/cf-nav
+        // messages instead of by curseforge:// or /install/<fileId>
+        // links directly, so nothing exercises
+        // CfWebView_NavigationStarting's interception path
+        // (HandleCurseforgeProtocol/HandleSlugInstall -> POST /api/jobs)
+        // during a --selftest run any more. This injects a tiny script
+        // into whatever document the CF pane loads (mirroring
+        // EnsureAdFilterInfra's ad-hiding CSS injection above) that
+        // fires a test curseforge:// deep link a couple of seconds after
+        // that document is created - the navigation gets cancelled by
+        // CfWebView_NavigationStarting exactly like a real "Install"
+        // click's would, so the marker's `intercepted`/`jobPostStatus`
+        // fields end up populated by a live run of this same
+        // interception code, not by a special-cased test path.
+        private void EnsureSelftestDeepLinkInjection()
+        {
+            if (_cfSelftestDeepLinkInjected) return;
+            if (_cfWebView.CoreWebView2 == null) return;
+            try
+            {
+                string script =
+                    "(function(){try{setTimeout(function(){try{" +
+                    "location.href='curseforge://install?addonId=999999001&fileId=999999002';" +
+                    "}catch(e){}}, 2000);}catch(e){}})();";
+                System.Threading.Tasks.Task<string> scriptTask =
+                    _cfWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(script);
+                GC.KeepAlive(scriptTask);
+                _cfSelftestDeepLinkInjected = true;
+                LogHost("selftest deep-link injection registered");
+            }
+            catch (Exception ex)
+            {
+                LogHost("selftest deep-link injection failed: " + ex.Message);
+            }
+        }
+
+        private void CfWebView_NavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            _cfLoading = false;
+            SendCfState();
+        }
+
+        private void CfWebView_HistoryChanged(object sender, object e)
+        {
+            SendCfState();
+        }
+
+        private void CfWebView_DocumentTitleChanged(object sender, object e)
+        {
+            SendCfState();
         }
 
         private void CaptureVersionIfNeeded()
@@ -1704,6 +1892,12 @@ namespace Furphy
                 HandleSlugInstall(uri, slug, fileId);
                 return;
             }
+
+            // A real navigation the CF pane will actually perform (not
+            // cancelled above) - report it per contract F ("loading true");
+            // CfWebView_NavigationCompleted flips it back to false.
+            _cfLoading = true;
+            SendCfState();
         }
 
         private void CfWebView_NewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
@@ -1774,7 +1968,6 @@ namespace Furphy
             if (tracked && string.IsNullOrEmpty(fileId))
             {
                 LogHost("projectId " + projectId + " already tracked, no fileId - nothing to do");
-                SwitchToFurphyTab();
                 return;
             }
 
@@ -1791,7 +1984,17 @@ namespace Furphy
             _selftestJobPostStatus = result.StatusCode;
             LogHost("POST /api/jobs " + json + " -> " + result.StatusCode.ToString(CultureInfo.InvariantCulture));
 
-            SwitchToFurphyTab();
+            // Contract F: push the new job id to the SPA immediately
+            // (instead of it waiting for the next poll) so it can open its
+            // job panel right away - it renders inline over the CF pane's
+            // own placeholder while this segment is active, per contract C.
+            // Guarded on a real 2xx success (matching HandleSlugInstall
+            // below) rather than relying on the incidental fact that
+            // addon-server.ps1's error bodies happen to omit jobId.
+            if (!result.NetworkError && result.StatusCode >= 200 && result.StatusCode < 300)
+            {
+                PostJobIdIfAny(result);
+            }
         }
 
         private void HandleSlugInstall(string uri, string slug, string fileId)
@@ -1811,7 +2014,9 @@ namespace Furphy
 
             if (!result.NetworkError && result.StatusCode >= 200 && result.StatusCode < 300)
             {
-                SwitchToFurphyTab();
+                // Contract F: push the new job id to the SPA immediately -
+                // see HandleCurseforgeProtocol's own comment.
+                PostJobIdIfAny(result);
             }
             else
             {
@@ -1821,6 +2026,30 @@ namespace Furphy
                 // navigation with nothing happening.
                 LogHost("add-by-slug not accepted, falling back to addon page for " + slug);
                 NavigateCf("https://www.curseforge.com/wow/addons/" + slug);
+            }
+        }
+
+        // Parses {jobId} out of a successful POST /api/jobs response body
+        // and forwards it as {type:"cf-job", jobId, status:"running"}
+        // (contract F) - addon-server.ps1's jobs are created directly in
+        // the "running" state (Handle-JobsPost's Start-Job, no separate
+        // "queued" state exists server-side), so that is always accurate
+        // for a job this call just successfully created.
+        private void PostJobIdIfAny(HttpResult result)
+        {
+            if (result == null || result.NetworkError || string.IsNullOrEmpty(result.Body)) return;
+            try
+            {
+                Dictionary<string, object> body = MiniJson.Parse(result.Body) as Dictionary<string, object>;
+                if (body == null) return;
+                object jobIdObj;
+                string jobId = body.TryGetValue("jobId", out jobIdObj) ? Convert.ToString(jobIdObj, CultureInfo.InvariantCulture) : null;
+                if (string.IsNullOrEmpty(jobId)) return;
+                SendCfJob(jobId, "running");
+            }
+            catch (Exception ex)
+            {
+                LogHost("PostJobIdIfAny failed to parse /api/jobs response: " + ex.Message);
             }
         }
 
@@ -1865,16 +2094,6 @@ namespace Furphy
             if (!double.TryParse(sa, NumberStyles.Float, CultureInfo.InvariantCulture, out a)) return false;
             if (!double.TryParse(other, NumberStyles.Float, CultureInfo.InvariantCulture, out b)) return false;
             return Math.Abs(a - b) < 0.5;
-        }
-
-        private void SwitchToFurphyTab()
-        {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new MethodInvoker(SwitchToFurphyTab));
-                return;
-            }
-            ActivateTab(HostTab.Furphy);
         }
 
         private string BaseUrl()
@@ -2036,83 +2255,107 @@ namespace Furphy
             Close();
         }
 
+        // Fires ~1s before the marker is written (see MainForm_Load) -
+        // captures a PNG of the host's own on-screen window while the CF
+        // pane should still be visible, per the --selftest sequence
+        // selftest.html now drives (hello/theme/cf-show, then cf-nav
+        // back + cf-hide, then cf-show again - the final cf-show is what
+        // is expected to still be showing by the time this fires).
+        private void SelftestCaptureTimer_Tick(object sender, EventArgs e)
+        {
+            _selftestCaptureTimer.Stop();
+            CaptureSelftestScreenshot();
+        }
+
+        private void CaptureSelftestScreenshot()
+        {
+            if (string.IsNullOrEmpty(_options.SelftestMarkerPath)) return;
+            try
+            {
+                string dir = Path.GetDirectoryName(_options.SelftestMarkerPath);
+                string baseName = Path.GetFileNameWithoutExtension(_options.SelftestMarkerPath);
+                string path = Path.Combine(string.IsNullOrEmpty(dir) ? "." : dir, baseName + ".png");
+
+                // Bounds is already screen-relative for a top-level Form -
+                // this captures the whole on-screen window (title bar
+                // included), per spec ("Graphics.CopyFromScreen of the
+                // form's screen rectangle").
+                Rectangle formRect = Bounds;
+                if (formRect.Width <= 0 || formRect.Height <= 0) return;
+
+                // CopyFromScreen grabs whatever is actually composited at
+                // those screen pixels, regardless of which window logically
+                // owns them - force this window to the top of the z-order
+                // first so the capture is actually evidence of what this
+                // window shows (otherwise an unrelated foreground window
+                // covering the same screen rectangle gets captured instead).
+                bool wasTopMost = TopMost;
+                TopMost = true;
+                Activate();
+                BringToFront();
+                Application.DoEvents();
+
+                using (Bitmap bmp = new Bitmap(formRect.Width, formRect.Height))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                    {
+                        g.CopyFromScreen(formRect.Location, Point.Empty, formRect.Size);
+                    }
+                    bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+
+                TopMost = wasTopMost;
+
+                _selftestCapturePath = path;
+                LogHost("selftest capture written: " + path);
+            }
+            catch (Exception ex)
+            {
+                LogHost("selftest capture failed: " + ex.Message);
+            }
+        }
+
         private void WriteSelftestMarker(bool initSucceeded)
         {
             if (_selftestMarkerWritten) return;
             _selftestMarkerWritten = true;
 
-            string cfTitle = null;
-            try
+            // Belt-and-suspenders: normally SelftestCaptureTimer_Tick has
+            // already run by the time this fires (7s vs. 8s - see
+            // MainForm_Load), but if the marker is being written early
+            // (e.g. WriteSelftestMarker(false) from HandleRuntimeMissing)
+            // take the screenshot now instead of shipping capturePath=null.
+            if (_selftestCapturePath == null && _options.SelftestActive)
             {
-                if (_cfWebView != null && _cfWebView.CoreWebView2 != null)
-                {
-                    cfTitle = _cfWebView.CoreWebView2.DocumentTitle;
-                }
-            }
-            catch { }
-
-            // Switch to the CurseForge tab so its toolbar is actually
-            // visible/rendered for the pixel sample below. Snapshot the
-            // nav bar and the toolbar via DrawToBitmap called DIRECTLY ON
-            // EACH PANEL (not on the whole Form): a whole-Form snapshot
-            // composites in the CurseForge WebView2, a real child HWND
-            // sitting immediately below the toolbar in the same
-            // container, and its WM_PRINT response can bleed into
-            // neighboring siblings' printed pixels even where the toolbar
-            // itself is logically drawn on top - printing just the
-            // Panel/Button subtree in isolation sidesteps that entirely.
-            // The WebView2 content itself still never renders into this
-            // (expected; it lives in a separate child HWND).
-            string tabBarPixelHex = null;
-            string toolbarPixelHex = null;
-            try
-            {
-                ActivateTab(HostTab.CurseForge);
-                Application.DoEvents();
-
-                if (_navPanel.Width > 0 && _navPanel.Height > 0)
-                {
-                    using (Bitmap navBmp = new Bitmap(_navPanel.Width, _navPanel.Height))
-                    {
-                        _navPanel.DrawToBitmap(navBmp, new Rectangle(0, 0, navBmp.Width, navBmp.Height));
-                        tabBarPixelHex = SamplePixelHex(navBmp, 10, 200);
-                    }
-                }
-
-                if (_cfToolbar.Width > 0 && _cfToolbar.Height > 0)
-                {
-                    using (Bitmap toolbarBmp = new Bitmap(_cfToolbar.Width, _cfToolbar.Height))
-                    {
-                        _cfToolbar.DrawToBitmap(toolbarBmp, new Rectangle(0, 0, toolbarBmp.Width, toolbarBmp.Height));
-                        // The back/forward/home buttons and the search box
-                        // all sit in the top ~30 of the bar's Scaled(36)
-                        // height, so a y just under that (proportionally,
-                        // at any DPI) lands on plain toolbar background
-                        // instead of a control face.
-                        toolbarPixelHex = SamplePixelHex(toolbarBmp, 10, Scaled(33));
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHost("selftest DrawToBitmap failed: " + ex.Message);
+                CaptureSelftestScreenshot();
             }
 
             Dictionary<string, object> marker = new Dictionary<string, object>();
             marker["init"] = initSucceeded && _furphyReady && _cfReady;
             marker["version"] = _webviewVersion;
-            marker["cfTabTitle"] = cfTitle;
             marker["dpi"] = (long)_effectiveDpi;
             marker["dpiAware"] = _dpiAware;
-            marker["tabBarPixel"] = tabBarPixelHex;
-            marker["toolbarPixel"] = toolbarPixelHex;
 
             marker["themeMessages"] = (long)_selftestThemeMessageCount;
             marker["themeBg0"] = ColorToHex(ChromeBg);
             marker["captionHresult"] = (long)_lastCaptionHresult;
             marker["darkModeHresult"] = (long)_lastDarkModeHresult;
             marker["openCurseforgeUrl"] = _selftestOpenCurseforgeUrl;
-            marker["cfTabActiveAfterMessage"] = _selftestCfTabActiveAfterMessage;
+
+            // Round 15 (E20 - embedded CurseForge pane) additions.
+            marker["hostReadySent"] = _hostReadySent;
+            marker["cfShowCount"] = (long)_cfShowCount;
+            marker["cfHideCount"] = (long)_cfHideCount;
+            marker["cfPaneVisible"] = _cfWebView != null && _cfWebView.Visible;
+            Dictionary<string, object> bounds = new Dictionary<string, object>();
+            bounds["x"] = (long)_cfPaneBoundsDevicePx.X;
+            bounds["y"] = (long)_cfPaneBoundsDevicePx.Y;
+            bounds["w"] = (long)_cfPaneBoundsDevicePx.Width;
+            bounds["h"] = (long)_cfPaneBoundsDevicePx.Height;
+            marker["cfPaneBounds"] = bounds;
+            marker["cfStateMessages"] = (long)_cfStateMessageCount;
+            marker["cfLastUrl"] = _cfLastUrl;
+            marker["capturePath"] = _selftestCapturePath;
 
             List<string> blockedCopy;
             List<string> allowedCopy;
@@ -2139,14 +2382,6 @@ namespace Furphy
             {
                 LogHost("failed to write selftest marker: " + ex.Message);
             }
-        }
-
-        private static string SamplePixelHex(Bitmap bmp, int x, int y)
-        {
-            if (bmp == null) return null;
-            if (x < 0 || y < 0 || x >= bmp.Width || y >= bmp.Height) return null;
-            Color c = bmp.GetPixel(x, y);
-            return string.Format(CultureInfo.InvariantCulture, "#{0:x2}{1:x2}{2:x2}", c.R, c.G, c.B);
         }
     }
 }

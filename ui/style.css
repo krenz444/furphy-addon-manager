@@ -927,15 +927,6 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .browse-card-footer { margin-top: auto; padding-top: 4px; }
 .browse-card-footer .btn { width: 100%; }
 
-.nokey-panel { display: flex; gap: 16px; align-items: flex-start; padding-top: 24px; flex-wrap: wrap; }
-.nokey-card {
-  background: var(--bg-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  flex: 1;
-  min-width: 320px;
-}
 .nokey-icon { width: 28px; height: 28px; stroke: var(--accent); margin-bottom: 8px; }
 /* E16: the "Install by Project ID" card now lives inside #browse-content
    (keyless CurseForge mode only) rather than inside .nokey-panel's flex
@@ -950,6 +941,123 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .form-msg.is-error { background: var(--danger-tint); color: var(--form-error-text); }
 .form-msg.is-success { background: var(--success-tint); color: var(--success); }
 .form-msg.is-info { background: var(--info-tint); color: var(--info); }
+
+/* ==========================================================================
+   Round 15: Get new addons - segmented Wago/CurseForge switch + the
+   embedded CurseForge pane (native host)/fallback panel
+   ========================================================================== */
+
+.source-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  align-self: flex-start;
+}
+.source-switch-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 7px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--fast), color var(--fast);
+}
+.source-switch-btn:hover { color: var(--text); }
+.source-switch-btn.is-active { background: var(--accent-tint); color: var(--text); }
+.source-switch-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* The toolbar the page draws; the site itself is a WebView2 overlay the
+   native host positions over #cf-placeholder's screen rect (see
+   ui/app.js's Host.cfShow/cfRect - the host always paints above this DOM,
+   regardless of CSS z-index, so nothing here needs to be "on top"). */
+.cfpane { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: calc(100vh - 232px); min-height: 420px; }
+.cfpane-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  flex: none;
+}
+.cfpane-search { flex: 1; max-width: 340px; }
+.cfpane-title {
+  flex: 1;
+  min-width: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 12px;
+}
+.cfpane-job-mount:empty { display: none; }
+.cfpane-placeholder {
+  flex: 1;
+  min-height: 280px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  position: relative;
+}
+/* The real host's WebView2 overlay paints directly over this element's
+   screen rect and physically covers this text - it only ever shows when
+   nothing is actually docked there yet (a fresh mock/dev session before
+   the host reports it has navigated anywhere). */
+.cfpane-placeholder::after {
+  content: "CurseForge site renders here in the desktop window";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 24px;
+  color: var(--text-faint); font-size: 13px;
+}
+
+.cfpane-fallback-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 24px;
+  max-width: 420px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.cfpane-fallback-card .nokey-icon { stroke: var(--accent); }
+
+/* Round 15: the job panel is relocated (same DOM node, moved by
+   Views.browse) into .cfpane-job-mount while the CurseForge segment is
+   active, rendering inline between the toolbar and the placeholder instead
+   of floating fixed at the bottom of the window. */
+.job-panel.is-inline {
+  position: static;
+  left: auto; right: auto; bottom: auto;
+  max-width: none;
+  width: 100%;
+  box-shadow: none;
+  margin: 0;
+}
+
+/* Toasts move over the sidebar (bottom-left) while the CurseForge pane is
+   showing, since the host's WebView2 overlay always paints above ordinary
+   HTML regardless of z-index - the toast container is relocated on screen
+   instead so a toast is never covered by it. */
+.toast-container.is-cf-pane {
+  top: auto;
+  right: auto;
+  left: 16px;
+  bottom: 16px;
+  max-width: calc(var(--sidebar-w) - 32px);
+}
 
 /* ==========================================================================
    Settings

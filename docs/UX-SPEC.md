@@ -200,36 +200,42 @@ Only **All** and **Updates** are permanent. Every other status (Pinned, Ignored,
 
 ---
 
-## 5. Search (Browse)
+## 5. Get new addons (was "Browse")
 
-### 5.1 Layout — one box, one merged grid, source badges, no tabs
+Rewritten round 15 at Eric's request, verbatim: *"i dont like the weird tab thing on the left with furphy and curseforge - get rid of that. rename browse to get new addons. at the top of get new addons screen, let user switch between wago in app search, and curseforge, which browses the site contained in the area that the wago search was in, one unified experience."*
+
+This supersedes §5.1's CS3-era merged CurseForge+Wago grid entirely. Two changes, together: (1) the native host's left tab strip (Furphy/CurseForge WinForms panel) is deleted outright — the native window is the SPA, edge to edge, and the CurseForge site is instead an embedded pane the *page* places inside this screen; (2) "Browse" is renamed "Get new addons" everywhere visible (nav item, headings, empty-state buttons, dialogs, hints — internal identifiers, `?view=browse`, and the `Views.browse` module name are all unchanged, per principle 3's demote-don't-delete spirit applied to code, not just UI).
+
+### 5.1 Layout — a segmented switch, not a merged grid
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  🔍 Search addon name...                                    │
+│  [ Wago | CurseForge ]                                     │
 │                                                              │
-│  [logo] Auctionator      [logo] Auc Advanced    [logo] ...  │
-│  CurseForge               Wago                   CurseForge │
-│  [Install]                [Install]               [Installed]│
+│  🔍 Search Wago addons...                                   │
 │                                                              │
-│  Not finding it? Search CurseForge.com directly →           │
+│  [logo] Auc Advanced      [logo] Tidy Bags     [logo] ...   │
+│  Wago                      Wago                  Wago       │
+│  [Install]                 [Install]              [Installed]│
+│                                                              │
+│  Not on Wago? Try CurseForge                                │
+│  Or paste an addon's CurseForge page link or number         │
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **One search box.** The CurseForge/Wago source-tab switch is removed as a thing the player must choose before searching. Typing a query fires the CurseForge search (keyless catalogue+addon-radar merge, or the official API when a key is set) and the Wago search concurrently; each source's cards render into one interleaved grid as they arrive — never block the faster source on the slower one (Wago is always a live scrape; CF-keyless is near-instant except the rare addon-radar fallback).
-- **Ranking**: interleave by relevance tier (exact → starts-with → contains, already computed server-side) then downloads-where-available. No visible sort control.
-- **Dedupe rule: none, by design.** There is no reliable cross-source id link between CurseForge and Wago (only `name`+`slug` are shared fields across all three search-result shapes; Wago cards carry no author, so the app's own existing matcher `Get-WagoAutoMatch` — which requires name **and** author corroboration — can't safely run at result-list time). A same addon appearing on both sources shows as two cards, each with its own source badge. This is treated as an acceptable, honest redundancy — safer than a wrong merge that drops or mis-badges a card.
-- **Result card fields — render only what the source actually supplied, never reserve blank space:**
-  - Name + logo (may be absent) + **source badge** ("CurseForge"/"Wago", the existing Wago badge style extended to CF cards too) + Install button — always present.
-  - One-line summary, author, downloads — shown only for keyed-CF results that have them; omitted entirely (not blanked) for keyless-CF and Wago rows.
-  - The old "Indexed"/"Live match" provenance badge is **deleted outright** — internal plumbing (offline catalogue vs. a live addon-radar hit) that gave a player no decision to make.
-- **Install button** — reuses the existing state machine unchanged: Install → Installing… (disabled) → Installed (disabled).
-- **Keyless nudge** — the old permanent banner ("Showing a keyless index via community mirrors (instawow-data, addon-radar.com)…") is deleted. Replaced with nothing by default; only when a search returns thin/zero results does one line appear: **"Search results are limited without a CurseForge key."** linking to Settings.
-- **Key-rejected state** (key saved but CurseForge rejects it) — kept as-is, already plain, no change.
-- **No category filter, no sort dropdown, no pagination** on this default view — neither generalizes across two sources with mismatched capabilities (keyless CF has no categories at all; Wago's sort is constrained by a live upstream defect to two usable values). Not hidden-and-still-there — simply not built into the default path. A future CF-keyed-only Advanced refinement is explicitly out of scope for this pass, not silently dropped forever.
-- **Fallback** (single low-key line under the results grid, not a second competing search box): **"Not finding it? Search CurseForge.com directly"** — opens curseforge.com in the existing side window (`Actions.searchCurseForgeWebsite`, unchanged plumbing, still gated server-side to `www.curseforge.com` only).
-- **Install by ID** — demoted from a permanent card into that same fallback area: **"Or paste an addon's CurseForge page link/number"** — one dialog, reuses the existing Add-addon dialog's ID-parsing logic, no new server code.
-- **`curseforge://` protocol toggle** — removed from Browse entirely. Its one remaining home is Settings > Advanced (§6). If an Install click fails because the browser intercepted it, a one-time inline note appears right there instead of a permanent always-visible toggle: "Install links aren't set up to open in Furphy — fix in Settings."
+- **One segmented switch, two segments, top of screen.** Replaces both CS3's single merged search box *and* the native host's own left-side Furphy/CurseForge tab strip — there is now exactly one place in the whole app where the player chooses a source, and it lives inside the content area, not the window chrome. The choice persists across reloads (`localStorage`, default **Wago**) and is deep-linkable (`?view=get-new-addons&tab=wago|curseforge`; `?view=browse` keeps working as an alias, `?tab=` alongside it too).
+- **Wago segment** — the pre-existing in-app search box + results grid, unchanged in mechanics (debounced input, relevance-tiered results, the existing Install → Installing… → Installed state machine, the existing Wago source badge on every card) but **Wago-only now** — the CurseForge half of CS3's merged search is gone from this screen. CurseForge's `/api/cf/*` endpoints are untouched server-side and keep backing add-by-link resolution and the detail drawer's keyless enrichment (§3.5/§6.1) — they're simply not queried for in-app search results here any more.
+  - Fallback area under the results grid (unchanged placement, reworded): **"Not on Wago? Try CurseForge"** replaces the old "Not finding it? Search CurseForge.com directly" — in the native host it switches to the CurseForge segment; everywhere else it opens the existing chromeless side window directly (the `'cf-window'` `/api/open` target), since switching segments there would only land on that segment's own "browsing happens in the desktop window" panel. **"Or paste an addon's CurseForge page link or number"** is unchanged, reusing the existing Add-addon dialog.
+  - The old keyless-CurseForge nudge ("Search results are limited without a CurseForge key") is deleted outright — Wago search never needed a key, so nothing about this segment is affected by one being missing.
+- **CurseForge segment (native host, `cf-pane` capability)** — the real curseforge.com website, rendered by a WebView2 overlay the *native host* positions over this segment's content area (where the Wago results used to sit), edge-to-edge. The page draws an HTML toolbar above it — Back, Forward, Reload, Home (curseforge.com/wow/addons), a "Search CurseForge..." field (Enter navigates to CurseForge's own search results page), and the current page title, muted, sourced from the host. Toasts, while this segment is showing, render over the sidebar (bottom-left) instead of their usual top-right spot, since a native child window always paints above ordinary HTML regardless of z-index and would otherwise cover them there; any dialog/drawer/popover opening on top of the pane tells the host to hide it (re-shown, page still loaded, once the last one closes) for the same reason. The job progress panel (§4), while this segment is active, renders **inline** between the toolbar and the site instead of floating — a CurseForge Install click shows progress right above the page it was clicked on, and the site area shrinks to make room automatically.
+- **CurseForge segment (plain Edge-window install, or an older host without `cf-pane`)** — a compact panel: "CurseForge browsing happens inside the Furphy desktop window.", a button "Open CurseForge in a window" (the existing chromeless side window, `'cf-window'` target), and the same "Or paste an addon's CurseForge page link or number" fallback. The one-time "Install links aren't set up to open in Furphy" note (unchanged copy) can still appear here after that window is opened, same as before — the embedded pane has no such OS-level protocol handoff to fail.
+- **Result card fields (Wago segment)** — unchanged from CS3: name + logo (may be absent) + source badge + Install button always present; summary/author/downloads omitted entirely (never blanked) since Wago cards never carry them.
+- **No category filter, no sort dropdown, no pagination** on the Wago segment — unchanged reasoning from CS3 (Wago's own sort is constrained upstream to two usable values); the CurseForge segment needs none of this either, since it's the real site with its own full search/sort/categories.
+- **`curseforge://` protocol toggle** — still not on this screen at all. Its one home stays Settings > Advanced (§6).
+
+### 5.2 Native host chrome — what round 15 removes
+
+The native host (`host\FurphyHost.cs`) previously showed a left-side WinForms panel with two tabs ("Furphy"/"CurseForge") and its own toolbar (back/forward/home/search) for the CurseForge `WebView2`. Round 15 deletes all of it: the native window becomes the SPA only, edge to edge — no tab strip, no WinForms toolbar. The CurseForge `WebView2` still exists inside the host, but it is now a plain positioned child control the *page* controls entirely (SPEC.md's new "E21" section has the full page↔host message contract: `cf-show`/`cf-rect`/`cf-hide`/`cf-nav` from the page, `host-ready`/`cf-state`/`cf-job` from the host). Everything else about the host — the ad filter, `curseforge://` link interception, theme/title-bar sync, DPI awareness, window-bounds persistence — is unchanged, just no longer anchored to a tab strip that no longer exists.
 
 ---
 

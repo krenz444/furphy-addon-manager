@@ -4,7 +4,7 @@ A self-contained World of Warcraft (retail) addon manager for Windows: silent up
 
 ## No API key needed
 
-Everything works out of the box, with no sign-up: installing and updating addons from CurseForge and Wago Addons, browsing/searching both, versions, pin/ignore/rollback, dependency and compatibility checks. An optional free CurseForge API key (paste it in Settings) adds official CurseForge metadata - descriptions, changelogs and screenshots straight from CurseForge itself, plus its own search/sort/categories. Nothing is gated behind it.
+Everything works out of the box, with no sign-up: installing and updating addons from CurseForge and Wago Addons, searching Wago and browsing the real CurseForge.com from inside the app, versions, pin/ignore/rollback, dependency and compatibility checks. An optional free CurseForge API key (paste it in Settings) adds official CurseForge metadata - descriptions, changelogs and screenshots straight from CurseForge itself. Nothing is gated behind it.
 
 ## Requirements
 
@@ -51,8 +51,8 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 ## What it does
 
 - **Update on launch** - the "WoW (auto-update addons)" shortcut runs the updater hidden, then starts WoW through Battle.net. No console flash.
-- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; search CurseForge and Wago together in one box, no key required; per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; four themes (Lofi Night default, Dark, Light, Vaporwave); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics, the optional API key's Advanced options) one click away; "Update & Play".
-- **Two sources** - CurseForge and Wago Addons, side by side: browse, install, pin, ignore, roll back and check dependencies/compatibility on either, no key needed for either.
+- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; four themes (Lofi Night default, Dark, Light, Vaporwave); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics, the optional API key's Advanced options) one click away; "Update & Play".
+- **Two sources** - CurseForge and Wago Addons, side by side: install, pin, ignore, roll back and check dependencies/compatibility on either, no key needed for either. Wago is searched in-app; CurseForge is the real website, embedded in the app window itself (or a side window on an older install).
 - **Safety** - a failed download never touches the installed copy; only folders that came from a package are ever deleted; every update keeps the previous zip for rollback.
 
 ## How it works
