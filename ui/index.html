@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="lofi">
+<html lang="en" data-theme="vaporwave">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -388,15 +388,17 @@
 
           <div class="list-summary" id="browse-summary" aria-live="polite"></div>
 
-          <div class="browse-grid" id="browse-grid"></div>
+          <!-- Round 17: full-width CurseForge-style rows instead of tiles
+               (Eric: "they go the whole distance horizontally instead of
+               little tiles") - see .browse-row/.browse-list, ui/style.css. -->
+          <div class="browse-list" id="browse-grid"></div>
 
-          <div class="skeleton-grid" id="browse-skeleton">
-            <div class="skeleton-card"></div>
-            <div class="skeleton-card"></div>
-            <div class="skeleton-card"></div>
-            <div class="skeleton-card"></div>
-            <div class="skeleton-card"></div>
-            <div class="skeleton-card"></div>
+          <div class="skeleton-list" id="browse-skeleton">
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
           </div>
 
           <div class="empty-state" id="browse-empty" hidden>
@@ -487,9 +489,20 @@
                 <span class="switch-track"><span class="switch-thumb"></span></span>
               </label>
             </div>
+            <!-- Round 17, Eric: "explain in the app how auto-update when
+                 launching wow works, note if it works or not by running wow
+                 without using the app at all" - a deliberate, requested
+                 exception to this group's zero-prose rule (UX-SPEC.md 6.1).
+                 Verified fact: this setting only gates the updater run
+                 Furphy's own launch chain performs (the "WoW (auto-update
+                 addons)" shortcut and Update & Play); Battle.net, WoW's own
+                 shortcut and Wow.exe itself run nothing - no hook, watcher
+                 or scheduled task exists outside Furphy's launch chain. -->
             <div class="settings-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Auto-update when launching WoW</div>
+                <div class="settings-row-label">Update addons before WoW starts</div>
+                <p class="muted-text">Runs when you start the game with the WoW (auto-update addons) shortcut or Update &amp; Play.</p>
+                <p class="muted-text">Starting WoW from Battle.net or its own shortcut skips the update.</p>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-autoupdate">
@@ -510,10 +523,10 @@
             <div class="settings-row settings-row-col">
               <div class="settings-row-label">Theme</div>
               <div class="segmented" id="theme-toggle" role="group" aria-label="Color theme">
+                <button type="button" class="segmented-btn" data-theme-value="vaporwave">Vaporwave</button>
                 <button type="button" class="segmented-btn" data-theme-value="lofi">Lofi Night</button>
                 <button type="button" class="segmented-btn" data-theme-value="dark">Dark</button>
                 <button type="button" class="segmented-btn" data-theme-value="light">Light</button>
-                <button type="button" class="segmented-btn" data-theme-value="vaporwave">Vaporwave</button>
               </div>
             </div>
           </section>
@@ -542,17 +555,6 @@
                     <input type="checkbox" id="toggle-alpha">
                     <span class="switch-track"><span class="switch-thumb"></span></span>
                   </label>
-                </div>
-              </section>
-
-              <!-- E13: read-only info, not a manager setting - WoW's own
-                   checkAddonVersion cvar (WTF\Config.wtf). -->
-              <section class="settings-group" id="settings-outofdate">
-                <h3>WoW&rsquo;s out-of-date warning</h3>
-                <div class="settings-row-col">
-                  <div class="settings-row-label">Load out-of-date addons at character select</div>
-                  <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
-                  <p class="muted-text">This is a WoW setting &mdash; change it in-game, not here.</p>
                 </div>
               </section>
 
@@ -634,14 +636,6 @@
                 <div class="btn-row">
                   <button type="button" class="btn btn-outline" id="btn-open-logs">Open logs folder</button>
                 </div>
-                <!-- E16: forces a fresh fetch+merge of the offline CurseForge
-                     catalogue index (instawow-data + strongbox-catalogue) that
-                     Browse/the detail drawer are always built from -
-                     otherwise refreshed automatically at most once/24h. -->
-                <div class="btn-row">
-                  <button type="button" class="btn btn-outline" id="btn-refresh-cf-catalogue">Refresh the addon list from CurseForge</button>
-                </div>
-                <p class="muted-text" id="cf-catalogue-status"></p>
                 <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
               </section>
 

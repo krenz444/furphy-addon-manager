@@ -25,21 +25,22 @@ const Prefs = (function () {
   const DENSITY_KEY = "addonSync.density.v1";
 
   // E15/E15b: four theme values total - "light", "vaporwave" and "dark" (E15),
-  // joined by "lofi" (E15b, round 11) which is now the DEFAULT (replacing
-  // Vaporwave-default; see SPEC.md section 3). Anything else read back
-  // (missing key, corrupt value, an older/newer build's value) falls
-  // through to "lofi".
+  // joined by "lofi" (E15b, round 11). Round 17 (Eric: "make vaporwave the
+  // main theme again"): "vaporwave" is the DEFAULT once more, superseding
+  // round 11's flip to "lofi" - see SPEC.md section 3. Anything else read
+  // back (missing key, corrupt value, an older/newer build's value) falls
+  // through to "vaporwave".
   function isKnownTheme(v) { return v === "light" || v === "vaporwave" || v === "dark" || v === "lofi"; }
 
   function readTheme() {
-    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "lofi"; } catch (e) { return "lofi"; }
+    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "vaporwave"; } catch (e) { return "vaporwave"; }
   }
   function readDensity() {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
   function applyTheme(value) {
-    document.documentElement.dataset.theme = isKnownTheme(value) ? value : "lofi";
+    document.documentElement.dataset.theme = isKnownTheme(value) ? value : "vaporwave";
     // Round 12 (E19b): relay the just-applied theme to the native host (the
     // Host module, defined later in this file, near App) so it can recolor
     // its own chrome/title bar to match - see SPEC.md's E19b. Guarded: this
@@ -54,7 +55,7 @@ const Prefs = (function () {
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
-    const v = isKnownTheme(value) ? value : "lofi";
+    const v = isKnownTheme(value) ? value : "vaporwave";
     applyTheme(v);
     try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* storage unavailable - theme still applies for this load */ }
   }
@@ -876,11 +877,13 @@ const Mock = (function () {
         protocolRegistered = false;
         return { registered: false, currentHandler: "", handlerPath: "...\\curseforge-handler.vbs", handlerExists: true };
       }
-      // Round 16 (E22, CurseForge key removal): /api/cf/enrich/*,
-      // /api/cf/browse and /api/cf/catalogue/refresh are the only CurseForge
-      // routes left - always keyless, matching the real server
-      // (Handle-CfEnrich/Handle-CfBrowse/Handle-CfCatalogueRefresh never
-      // needed a key even before the key feature was removed).
+      // Round 16 (E22, CurseForge key removal): /api/cf/enrich/* and
+      // /api/cf/browse are the only CurseForge routes left - always keyless,
+      // matching the real server (Handle-CfEnrich/Handle-CfBrowse never
+      // needed a key even before the key feature was removed). Round 17
+      // removed the third route, /api/cf/catalogue/refresh, along with the
+      // manual "Refresh the addon list from CurseForge" button that was its
+      // only caller - the catalogue itself still refreshes automatically.
       const enrichMatch = p.match(/^\/api\/cf\/enrich\/(\d+)$/);
       if (enrichMatch) return mockCfEnrich(Number(enrichMatch[1]));
       if (p === "/api/cf/browse") {
@@ -889,10 +892,6 @@ const Mock = (function () {
           return { id: e.id, name: e.name, slug: e.slug, downloadCount: e.downloadCount, lastUpdated: e.lastUpdated, source: "catalogue", logoUrl: e.logoUrl };
         });
         return { items: items, catalogueAge: cfCatalogueMockFetchedAt, total: items.length };
-      }
-      if (p === "/api/cf/catalogue/refresh" && method === "POST") {
-        cfCatalogueMockFetchedAt = new Date().toISOString();
-        return { ok: true, fetchedAt: cfCatalogueMockFetchedAt, count: cfCatalogueMock.length, source: "instawow-data+strongbox" };
       }
       // E12 (Wago second source) - keyless, mirrors the real server's
       // /api/wago/* shapes closely enough to exercise Browse's Wago tab and
@@ -934,9 +933,10 @@ const Mock = (function () {
   };
 
   function currentSettings() {
-    // E13: checkAddonVersion is fixed mock data (read-only info, WTF\Config.wtf
-    // - never set via PUT /api/settings, real or mock).
-    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", checkAddonVersion: "0", adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow };
+    // Round 17: checkAddonVersion (E13's read-only WTF\Config.wtf display)
+    // is gone - Eric: "WoW's out-of-date warning... get rid of this it
+    // doesn't do anything."
+    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow };
   }
 })();
 
@@ -1358,10 +1358,12 @@ const Api = (function () {
 
     // E16: keyless CurseForge enrichment (Round 16, E22: the only
     // CurseForge fetch path left, now that the key-gated search/mod/
-    // description/files/changelog/resolve endpoints are gone).
+    // description/files/changelog/resolve endpoints are gone). Round 17
+    // removed the manual "Refresh the addon list from CurseForge" button and
+    // its cfCatalogueRefresh call - the catalogue still refreshes itself
+    // automatically (Load/Save-CfCatalogueIndex, once/24h) with no UI action.
     cfEnrich: function (id) { return request("GET", "/api/cf/enrich/" + id); },
     cfBrowse: function (params) { return request("GET", "/api/cf/browse" + qs(params)); },
-    cfCatalogueRefresh: function () { return request("POST", "/api/cf/catalogue/refresh", {}); },
 
     // E12 (Wago second source): keyless, no NoKey/409 handling needed -
     // Wago never requires an API key.
@@ -4657,6 +4659,13 @@ Views.browse = (function () {
     }
   }
 
+  // Round 17 (Eric: "change the wago results to a curseforge style
+  // listing... they go the whole distance horizontally instead of little
+  // tiles"): logo left, name+badge/author/summary/meta stacked in the
+  // middle, Install right-aligned and vertically centered (see
+  // .browse-row/style.css). Wago cards only ever carry name/slug/thumbnail
+  // (E12) - every other field below renders only when the source actually
+  // supplied it, never a blank slot.
   function resultCard(entry) {
     const tracked = !!Store.addonByProjectId(entry.key);
     const busy = Store.jobActingOn(entry.key);
@@ -4671,31 +4680,44 @@ Views.browse = (function () {
           else Actions.installLatest(entry.id, entry.name);
         } }, [busy ? "Installing…" : "Install"]);
 
-    // UX-SPEC.md 5.1: source badge on every card, CF or Wago - the existing
-    // Wago badge style (source-badge.is-wago) extended to CurseForge cards
-    // (source-badge.is-cf) too. Every other meta field renders only when
-    // the source actually supplied it - no reserved blank slots.
-    const meta = [Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : "is-cf") }, [entry.source === "wago" ? "Wago" : "CurseForge"])];
-    if (entry.author) meta.push(Utils.el("span", {}, [entry.author]));
+    // UX-SPEC.md 5.1: source badge on every row, CF or Wago - the existing
+    // Wago badge style (source-badge.is-wago) extended to CurseForge rows
+    // (source-badge.is-cf) too.
+    const heading = [
+      Utils.el("span", { class: "browse-row-title" }, [entry.name]),
+      Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : "is-cf") }, [entry.source === "wago" ? "Wago" : "CurseForge"])
+    ];
+    const main = [Utils.el("div", { class: "browse-row-heading" }, heading)];
+    if (entry.author) main.push(Utils.el("div", { class: "browse-row-author" }, [entry.author]));
+    if (entry.summary) main.push(Utils.el("div", { class: "browse-row-summary" }, [entry.summary]));
+
+    const meta = [];
     if (entry.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(entry.downloadCount) + " downloads"]));
     if (entry.updatedAt) meta.push(Utils.el("span", { title: Utils.fullDate(entry.updatedAt) }, ["updated " + Utils.relativeTime(entry.updatedAt)]));
+    if (meta.length) main.push(Utils.el("div", { class: "browse-row-meta" }, meta));
 
-    const children = [
-      Utils.el("div", { class: "browse-card-top" }, [
-        Components.Logo.build({ projectId: entry.source === "cf" ? entry.id : null, name: entry.name, thumbnailUrl: entry.logoUrl }, 44),
-        Utils.el("div", {}, [Utils.el("div", { class: "browse-card-title" }, [entry.name])])
-      ])
-    ];
-    if (entry.summary) children.push(Utils.el("div", { class: "browse-card-summary" }, [entry.summary]));
-    children.push(Utils.el("div", { class: "browse-card-meta" }, meta));
-    children.push(Utils.el("div", { class: "browse-card-footer" }, [btn]));
-
-    const node = Utils.el("div", { class: "browse-card" }, children);
-    node.addEventListener("click", function () {
+    function open() {
       const opts = { tab: "overview", slug: entry.slug };
       if (entry.source === "wago") opts.source = "wago";
       Components.Drawer.open(entry.key, opts);
-    });
+    }
+
+    const node = Utils.el("div", {
+      class: "browse-row", tabindex: "0", role: "button", "aria-label": "View " + entry.name,
+      onkeydown: function (ev) {
+        if (ev.target !== node) return; // let Enter/Space on the Install button do its own thing
+        if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); }
+      }
+    }, [
+      // Logo.build sets width/height as inline styles, which beat the
+      // [data-density="compact"] .browse-row .addon-logo CSS override - so
+      // the size has to be picked here, not left to that CSS rule (Round 17
+      // review fix).
+      Components.Logo.build({ projectId: entry.source === "cf" ? entry.id : null, name: entry.name, thumbnailUrl: entry.logoUrl }, Prefs.getDensity() === "compact" ? 44 : 56),
+      Utils.el("div", { class: "browse-row-main" }, main),
+      Utils.el("div", { class: "browse-row-action" }, [btn])
+    ]);
+    node.addEventListener("click", open);
     return node;
   }
 
@@ -4804,8 +4826,19 @@ Views.browse = (function () {
   function setupCfPane(opts) {
     opts = opts || {};
     if (!cfActive) {
+      const main = Utils.qs("#main");
+      // Round 17: #main stops scrolling and stretches #view-browse/.cfpane
+      // to fill the content area exactly (style.css's .main.is-cf-pane-
+      // active) while the pane is up - removed in teardownCfPane below so
+      // My Addons/Settings/the Wago segment are never affected. This class
+      // must go on BEFORE the first measureRect() below: the placeholder
+      // only joins the flex-fill chain once it's present, and reading
+      // getBoundingClientRect() right after the classList change forces a
+      // synchronous layout, so the very first rect sent to the host already
+      // reflects the final filled height instead of the pre-class sliver.
+      main.classList.add("is-cf-pane-active");
       const rect = measureRect();
-      if (!rect) return;
+      if (!rect) { main.classList.remove("is-cf-pane-active"); return; }
       const showOpts = {};
       if (opts.url) { showOpts.url = opts.url; if (opts.navigate) showOpts.navigate = true; }
       else if (!Host.getCfState().url) { showOpts.url = CF_HOME; }
@@ -4829,6 +4862,7 @@ Views.browse = (function () {
       Host.cfHide();
       teardownCfObservers();
       Utils.qs("#toast-container").classList.remove("is-cf-pane");
+      Utils.qs("#main").classList.remove("is-cf-pane-active");
     }
     placeFloating();
   }
@@ -4993,9 +5027,6 @@ Views.settings = (function () {
 
     Utils.qs("#settings-wow-root").textContent = s.wowRoot || "—";
     Utils.qs("#settings-addons-path").textContent = s.addonsPath || "—";
-    // E13: read-only info sourced from WTF\Config.wtf, not a manager setting
-    // - see index.html's one-sentence clarifier next to this row.
-    Utils.qs("#settings-checkaddonversion").textContent = checkAddonVersionText(s.checkAddonVersion);
 
     // CS4 (UX-SPEC.md 6.1): the old 3-way release-channel radio is now two
     // independent toggles driven off the same releaseType value - "Include
@@ -5028,17 +5059,6 @@ Views.settings = (function () {
     const reinstall = Utils.qs("#btn-force-reinstall");
     reinstall.disabled = busy;
     if (busy) reinstall.title = "Another task is running"; else reinstall.removeAttribute("title");
-  }
-
-  // E13: WoW's own checkAddonVersion cvar - display text for the value
-  // settings.checkAddonVersion carries (a raw string, whatever's actually in
-  // WTF\Config.wtf, or null when the file/setting isn't there yet). CS4
-  // (UX-SPEC.md 6.2/§7): plain "Off (they'll load anyway)"/"On (...)" text,
-  // no raw cvar digit or config-file path shown.
-  function checkAddonVersionText(value) {
-    if (value === "0") return "Off (they'll load anyway)";
-    if (value === "1") return "On (WoW warns about them at character select)";
-    return "Unknown";
   }
 
   function formatUptime(seconds) {
@@ -5339,30 +5359,11 @@ Views.settings = (function () {
     // their own individual buttons here.
     Utils.qs("#btn-open-logs").addEventListener("click", function () { Actions.openWhat("logs"); });
 
-    // E16: forces a fresh fetch+merge of the offline CurseForge catalogue
-    // index (Search-CfCatalogue/Get-CfCatalogueEntry's backing store) -
-    // a plain fetch, not a job (mirrors Diagnostics' own "Run" button,
-    // which is likewise never busy-gated - see the comment on Diagnostics'
-    // Run binding above).
-    Utils.qs("#btn-refresh-cf-catalogue").addEventListener("click", async function () {
-      const btn = Utils.qs("#btn-refresh-cf-catalogue");
-      const status = Utils.qs("#cf-catalogue-status");
-      btn.disabled = true;
-      status.textContent = "Refreshing…";
-      try {
-        const res = await Api.cfCatalogueRefresh();
-        // CS5: no raw internal source name (e.g. "instawow-data+strongbox")
-        // on screen, and "indexed" dropped too (the Browse card-badge term
-        // it echoed is itself banned) - a plain count is all a player needs.
-        status.textContent = res.count + " addons in the list, just now.";
-        Components.Toast.show("Addon list refreshed (" + res.count + " addons).", "success");
-      } catch (err) {
-        status.textContent = "Refresh failed: " + describeError(err);
-        Components.Toast.show("Couldn't refresh the CurseForge catalogue: " + describeError(err), "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
+    // Round 17: the manual "Refresh the addon list from CurseForge" button
+    // (and its Api.cfCatalogueRefresh call) is gone - the catalogue still
+    // refreshes itself automatically at most once/24h
+    // (Load/Save-CfCatalogueIndex, addon-server.ps1), and its age is still
+    // reported by the "CurseForge catalogue cache" diagnostics row below.
 
     // E4: Export downloads a Blob built from the parsed /api/export response
     // (rather than a plain `<a href="/api/export" download>`) so it works
@@ -5541,7 +5542,7 @@ const Host = (function () {
   // the native host.
   function reportTheme() {
     if (!isNative()) return false;
-    const name = document.documentElement.dataset.theme || "lofi";
+    const name = document.documentElement.dataset.theme || "vaporwave";
     const cs = getComputedStyle(document.documentElement);
     const propByKey = { bg0: "--bg-0", bg1: "--bg-1", bg2: "--bg-2", bg3: "--bg-3", border: "--border", text: "--text", muted: "--text-muted", accent: "--accent" };
     const colors = {};

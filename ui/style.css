@@ -225,7 +225,7 @@
   --text-muted: #b3b1c9;
   /* Lightened from the brief's literal muted-purple midpoint (#7d7b9c, which
      only clears 4.18:1 on --bg-1 and less on --bg-2/--bg-3 - real surfaces
-     this token sits on, e.g. .addon-author/.browse-card-author on a bg-1
+     this token sits on, e.g. .addon-author/.browse-row-author on a bg-1
      row/card, .source-pill's own bg-3 fill) up to a value that clears
      4.5:1 against every surface it actually appears on (5.2-6.4:1 measured
      against bg-0 through bg-3) while staying visibly dimmer than
@@ -559,9 +559,23 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   min-width: 260px;
   transition: border-color var(--fast);
 }
-.search-field:focus-within { border-color: var(--accent); }
+.search-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-tint); }
 .search-field .search-icon { stroke: var(--text-faint); }
 .search-field input { background: transparent; border: none; padding: 0; height: auto; flex: 1; }
+/* The nested <input> is still a real input[type=search] and would otherwise
+   pick up the global focus repaint/ring rules above (bg-3 fill +
+   --focus-ring outline), drawing a second box inside this pill. The pill
+   itself is the focus indicator (border-color + box-shadow above), so
+   suppress both here without touching the global rules other inputs rely
+   on. */
+.search-field input:focus { background: transparent; }
+.search-field input:focus-visible { outline: none; }
+/* My Addons filter and the Wago search sit alone (or with a spacer) in a
+   .topbar row with room to spare - let them grow past the 260px floor
+   instead of leaving the row half-empty. The CurseForge toolbar's search
+   (.cfpane-search below) is sized separately since it shares its row with
+   nav buttons and a title. */
+.topbar > .search-field { flex: 1 1 260px; max-width: 480px; }
 
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .inline-form { display: flex; gap: 8px; }
@@ -866,9 +880,6 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .skeleton-list { display: flex; flex-direction: column; gap: 6px; }
 .skeleton-row { height: 60px; border-radius: var(--radius); background: linear-gradient(90deg, var(--bg-1) 0%, var(--bg-2) 50%, var(--bg-1) 100%); background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; }
 
-.skeleton-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
-.skeleton-card { height: 168px; border-radius: var(--radius-lg); background: linear-gradient(90deg, var(--bg-1) 0%, var(--bg-2) 50%, var(--bg-1) 100%); background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; }
-
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
 .empty-state, .error-state {
@@ -891,41 +902,42 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .empty-actions .btn { margin-top: 0; }
 
 /* ==========================================================================
-   Browse view
+   Get new addons - Wago results (Round 17, Eric: "change the wago results
+   to a curseforge style listing... they go the whole distance horizontally
+   instead of little tiles"). Full-width rows, CurseForge's own listing
+   shape: logo left, name+badge/author/summary/meta in the middle, the
+   Install button right-aligned and vertically centered. `.browse-card-cat`
+   (singular - the category pill style) is unrelated to this block and stays
+   as-is; it's shared with the detail drawer's category chips
+   (Components.Drawer, ui/app.js ~2533), which never used tile cards.
    ========================================================================== */
 
-.browse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.browse-list { display: flex; flex-direction: column; gap: 8px; }
 
-.browse-card {
+.browse-row {
   background: var(--bg-1);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
-  padding: 14px;
+  padding: 10px 14px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 14px;
   cursor: pointer;
-  transition: border-color var(--fast), transform var(--fast), background var(--fast);
+  transition: border-color var(--fast), background var(--fast);
 }
-.browse-card:hover { border-color: var(--border-hover); background: var(--bg-2); }
-.browse-card-top { display: flex; gap: 10px; align-items: center; }
-.browse-card .addon-logo, .browse-card .addon-logo-fallback { width: 44px; height: 44px; border-radius: var(--radius); font-size: 16px; }
-.browse-card-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.browse-card-author { font-size: 12px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.browse-card-summary {
-  font-size: 12.5px;
-  color: var(--text-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  min-height: 32px;
-}
-.browse-card-meta { display: flex; gap: 12px; font-size: 11.5px; color: var(--text-faint); }
-.browse-card-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+.browse-row:hover { border-color: var(--border-hover); background: var(--bg-2); }
+.browse-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.browse-row .addon-logo, .browse-row .addon-logo-fallback { width: 56px; height: 56px; border-radius: var(--radius); font-size: 18px; flex: none; }
+.browse-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.browse-row-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.browse-row-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browse-row-author { font-size: 12px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browse-row-summary { font-size: 12.5px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browse-row-meta { display: flex; gap: 12px; font-size: 11.5px; color: var(--text-faint); }
+.browse-row-action { flex: none; margin-left: auto; }
+.browse-row-action .btn { min-width: 92px; }
+
 .browse-card-cat { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--bg-2); color: var(--text-faint); }
-.browse-card-footer { margin-top: auto; padding-top: 4px; }
-.browse-card-footer .btn { width: 100%; }
 
 .nokey-icon { width: 28px; height: 28px; stroke: var(--accent); margin-bottom: 8px; }
 .muted-text { color: var(--text-faint); font-size: 12.5px; }
@@ -969,8 +981,30 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 /* The toolbar the page draws; the site itself is a WebView2 overlay the
    native host positions over #cf-placeholder's screen rect (see
    ui/app.js's Host.cfShow/cfRect - the host always paints above this DOM,
-   regardless of CSS z-index, so nothing here needs to be "on top"). */
-.cfpane { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: calc(100vh - 232px); min-height: 420px; }
+   regardless of CSS z-index, so nothing here needs to be "on top").
+   Round 17 (Eric: "make the curseforge search... go to the bottom of the
+   window content"): the old fixed `height: calc(100vh - 232px)` was a
+   magic-number guess that left a gap (or overshot) depending on window
+   size. Instead .cfpane now flex:1's into whatever height #view-browse
+   actually gives it - see #main.is-cf-pane-active below, toggled by
+   Views.browse.setupCfPane/teardownCfPane, which turns #main into a
+   non-scrolling flex column exactly while this segment is showing (My
+   Addons/Settings/the Wago segment never get that class, so they keep
+   ordinary page scrolling). #browse-cf-panel is `display:contents` so
+   .cfpane sits directly in #view-browse's flex flow. */
+.cfpane { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; }
+#browse-cf-panel { display: contents; }
+.main.is-cf-pane-active {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Symmetric top/bottom padding while this segment fills the content
+     area - the normal 96px bottom padding exists to leave scroll room
+     under other views' content, which doesn't apply when nothing here
+     scrolls. */
+  padding-bottom: 20px;
+}
+.main.is-cf-pane-active > .view { flex: 1; min-height: 0; }
 .cfpane-toolbar {
   display: flex;
   align-items: center;
@@ -981,7 +1015,7 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   border-radius: var(--radius-lg);
   flex: none;
 }
-.cfpane-search { flex: 1; max-width: 340px; }
+.cfpane-search { flex: 1; max-width: 520px; }
 .cfpane-title {
   flex: 1;
   min-width: 40px;
@@ -994,7 +1028,7 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .cfpane-job-mount:empty { display: none; }
 .cfpane-placeholder {
   flex: 1;
-  min-height: 280px;
+  min-height: 0;
   border: 1px dashed var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-1);
@@ -1078,10 +1112,6 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .settings-row-text { min-width: 0; }
 .settings-row-label { font-size: 13px; color: var(--text); }
 .settings-row-value { font-size: 12.5px; color: var(--text-faint); word-break: break-all; margin-top: 2px; }
-/* E13: the checkAddonVersion read-only row's explanatory paragraph - tightens
-   a plain <p class="muted-text">'s default browser margin to match the rest
-   of this settings-row's compact vertical rhythm. */
-.settings-row-col > .muted-text { margin: 6px 0 0; }
 
 .radio-group { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .radio-option { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -1521,7 +1551,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 [data-density="compact"] .search-field { height: 28px; }
 [data-density="compact"] .settings-group { padding: 12px 14px; }
 [data-density="compact"] .settings-row { padding: 6px 0; }
-[data-density="compact"] .browse-card { padding: 10px; gap: 6px; }
+[data-density="compact"] .browse-row { padding: 6px 10px; gap: 10px; }
+[data-density="compact"] .browse-row .addon-logo, [data-density="compact"] .browse-row .addon-logo-fallback { width: 44px; height: 44px; }
 [data-density="compact"] .list-summary { padding: 1px 2px 2px; }
 [data-density="compact"] .myaddons-freshness { padding: 1px 2px 3px; }
 [data-density="compact"] .filter-chips { padding-bottom: 2px; }
@@ -1665,13 +1696,13 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    containers (Settings groups, Browse cards); overflow:hidden clips the
    dither strip cleanly to the (now larger) rounded top corners. */
 :root[data-theme="lofi"] .settings-group,
-:root[data-theme="lofi"] .browse-card {
+:root[data-theme="lofi"] .browse-row {
   position: relative;
   overflow: hidden;
   box-shadow: 0 3px 12px rgba(10, 13, 30, 0.4);
 }
 :root[data-theme="lofi"] .settings-group::before,
-:root[data-theme="lofi"] .browse-card::before {
+:root[data-theme="lofi"] .browse-row::before {
   content: "";
   position: absolute;
   top: 0;
