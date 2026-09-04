@@ -222,6 +222,13 @@
         <span>Update &amp; Play</span>
       </button>
       <button type="button" id="btn-launch-wow" class="btn btn-ghost btn-block">Launch WoW</button>
+      <!-- CS2 (UX-SPEC.md sections 1.1/2.1): the freshness headline (one of
+           its two mounts - the other is atop My Addons) and the connectivity
+           dot are two SEPARATE facts, no longer folded into one status-line
+           sentence. Components.Freshness.render() paints the first; the dot
+           stays silent (data-state="ok", empty #status-text) whenever the
+           server is reachable and nothing else is wrong. -->
+      <div class="freshness-line" id="sidebar-freshness"></div>
       <div class="status-line" id="status-line">
         <span class="status-dot" id="status-dot" data-state="connecting"></span>
         <span id="status-text">Connecting&hellip;</span>
@@ -247,21 +254,24 @@
           <div class="topbar-spacer"></div>
           <button type="button" id="btn-check-updates" class="btn btn-ghost">
             <svg class="icon"><use href="#icon-refresh"></use></svg>
-            <span>Check for updates</span>
+            <span>Check now</span>
           </button>
-          <button type="button" id="btn-update-all" class="btn btn-accent">Update all</button>
+          <!-- CS2 (UX-SPEC.md sections 1.4/2.3): outline-styled, not accent -
+               "Update & Play" (sidebar) is the only accent button in the app. -->
+          <button type="button" id="btn-update-all" class="btn btn-outline">Update all</button>
           <button type="button" id="btn-add-addon" class="btn btn-outline">
             <svg class="icon"><use href="#icon-plus"></use></svg>
             <span>Add addon</span>
           </button>
         </header>
 
+        <!-- CS2 (UX-SPEC.md sections 1.1/2.2): the one freshness headline -
+             replaces the old multi-clause summary sentence AND the separate
+             "Last run" line (both deleted, per the spec's "one fact, one
+             place" rule). #myaddons-summary now only ever carries the short
+             "N of M shown" text while a search/filter narrows the list. -->
+        <div class="myaddons-freshness" id="myaddons-freshness"></div>
         <div class="list-summary" id="myaddons-summary" aria-live="polite"></div>
-
-        <div class="lastrun-line" id="myaddons-lastrun" hidden>
-          <span id="myaddons-lastrun-text"></span>
-          <button type="button" class="link-btn" id="myaddons-lastrun-details">Details</button>
-        </div>
 
         <div class="filter-chips" id="myaddons-filters" role="group" aria-label="Filter addons by status"></div>
 
@@ -287,12 +297,13 @@
             <thead>
               <tr>
                 <th class="col-checkbox"><input type="checkbox" class="chk" id="myaddons-select-all" aria-label="Select all addons"></th>
+                <!-- CS2 (UX-SPEC.md section 3.1): 7 columns -> 5. Installed/
+                     Latest merge into one Version column; Compat and Updated
+                     are gone (folded into the Status pill and the kebab menu's
+                     "Installed [date]" info line, respectively). -->
                 <th class="col-addon" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="name" title="Sort by Addon name">Addon<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="installed" title="Sort by Installed version">Installed<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="latest" title="Sort by Latest available version">Latest<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                <th class="col-version" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="version" title="Sort by Version">Version<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-status" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="status" title="Sort by Status">Status<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                <th class="col-compat">Compat</th>
-                <th class="col-updated" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="updated" title="Sort by when it was last updated">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th>
                 <th class="col-menu"></th>
               </tr>
             </thead>
@@ -309,9 +320,16 @@
 
           <div class="empty-state" id="myaddons-empty" hidden>
             <svg class="icon empty-icon"><use href="#icon-inbox"></use></svg>
-            <h3>No addons tracked yet</h3>
-            <p>Add your first addon by CurseForge Project ID or link.</p>
-            <button type="button" class="btn btn-accent" id="myaddons-empty-add">Add addon</button>
+            <h3>No addons yet</h3>
+            <p>Add one by name, link, or ID.</p>
+            <!-- Review fix: was btn-accent, colliding with the persistent
+                 sidebar "Update & Play" CTA (#btn-update-play, itself never
+                 hidden at zero addons) - principle 4 (UX-SPEC.md section 1)
+                 says only that one button is ever accent-colored. -->
+            <div class="empty-actions">
+              <button type="button" class="btn btn-outline" id="myaddons-empty-add">Add addon</button>
+              <button type="button" class="btn btn-outline" id="myaddons-empty-browse">Browse addons</button>
+            </div>
           </div>
 
           <!-- Round 4 fix: distinct from #myaddons-empty above - shown when the
@@ -334,68 +352,28 @@
       </section>
 
       <!-- ===================== Browse ===================== -->
+      <!-- CS3 (UX-SPEC.md section 5): one search box, no source-tab switch -
+           CurseForge (keyless catalogue+addon-radar merge, or the official
+           API when a key is set) and Wago are searched concurrently and
+           rendered into one interleaved, source-badged grid as each arrives.
+           No category filter, sort dropdown, or pagination on this default
+           view (see section 5.1's own "not hidden-and-still-there" note). -->
       <section id="view-browse" class="view" data-view-root="browse" hidden>
 
-        <!-- E12 (Wago second source): visible regardless of key status, since
-             Wago never needs one - switching to it must work even while a
-             CurseForge-side panel below (keyless banner / key-rejected) is
-             showing. -->
-        <div class="browse-source-row">
-          <div class="segmented" id="browse-source-switch" role="group" aria-label="Addon source">
-            <button type="button" class="segmented-btn is-active" data-source-value="curseforge">CurseForge</button>
-            <button type="button" class="segmented-btn" data-source-value="wago">Wago Addons</button>
-          </div>
-        </div>
-
-        <!-- Round 9: jumps out to CurseForge's own website search (its full
-             catalogue, official ranking) - shown for the CurseForge side of
-             the source switch in both keyless and keyed mode, since this
-             app's in-app search never covers everything CurseForge's own
-             site does. Opens as a separate window (server-side allowlisted
-             to curseforge.com) rather than a normal browser tab, so it sits
-             beside this app instead of replacing it. -->
-        <div class="cf-web-search" id="cf-web-search">
-          <label class="search-field cf-web-search-field">
-            <svg class="icon search-icon"><use href="#icon-search"></use></svg>
-            <input type="search" id="cf-web-search-input" placeholder="Search CurseForge.com" autocomplete="off">
-          </label>
-          <button type="button" class="btn btn-outline" id="btn-cf-web-search">
-            <svg class="icon"><use href="#icon-external"></use></svg>
-            Search on CurseForge.com
-          </button>
-          <p class="muted-text cf-web-search-hint" id="cf-web-search-hint">Opens CurseForge in a side window; installs still happen here by Project ID for now.</p>
-          <!-- E19 (script/registration itself is E17's, unchanged): the
-               status pill from E17, now backed by the same
-               Components.ProtocolControl the Settings > Game row above
-               uses - a shared toggle, not two buttons. -->
-          <div id="browse-protocol-control" class="cf-web-search-protocol"></div>
-        </div>
-
-        <!-- E16: replaces the old fully-blocking key-required panel that
-             used to sit here for the CurseForge side of the source switch -
-             a keyless partial search (community mirrors: the offline
-             instawow-data/strongbox catalogue index, supplemented live by
-             addon-radar.com when that index comes up short) now works in
-             #browse-content below instead, so this is a non-blocking notice
-             rather than a wall. Wago Addons never needed a key and is
-             unaffected. E18: no CurseForge path in this app requires a key
-             any more (see SPEC's "Keyless enrichment sources"), so this
-             banner exists purely to explain the difference from an official-
-             API search, never to gate anything. -->
-        <div class="banner is-info" id="browse-keyless-banner" hidden>
-          <svg class="icon"><use href="#icon-info"></use></svg>
-          <span>Showing a keyless index via community mirrors (instawow-data, addon-radar.com), not CurseForge&rsquo;s own search. <button type="button" class="link-btn" id="btn-keyless-settings">Add a free API key in Settings</button> for full official search, sorting and categories.</span>
-        </div>
-
-        <!-- Round 6 fix: shown when a key
-             IS configured but CurseForge is rejecting it (401/403), so the
-             copy points at fixing the saved key rather than adding one. -->
+        <!-- Round 6 fix: shown when a key IS configured but CurseForge is
+             rejecting it (401/403), so the copy points at fixing the saved
+             key rather than adding one. CS3: kept as-is per UX-SPEC.md 5.1
+             ("already plain, no change") - still fully blocks #browse-content
+             below, since a rejected key also breaks the merged grid's
+             CurseForge half on every request. -->
         <div class="nokey-panel" id="browse-keyrejected" hidden>
           <div class="nokey-card">
             <svg class="icon nokey-icon"><use href="#icon-key"></use></svg>
             <h2>Your CurseForge API key was rejected</h2>
             <p class="muted-text">CurseForge is rejecting the key currently saved in Settings, so Browse, logos, descriptions, and changelogs can&rsquo;t load. Paste a working key to fix this.</p>
-            <button type="button" class="btn btn-accent" id="btn-keyrejected-settings">Go to Settings</button>
+            <!-- Review fix: was btn-accent, colliding with the sidebar's
+                 persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+            <button type="button" class="btn btn-outline" id="btn-keyrejected-settings">Go to Settings</button>
           </div>
         </div>
 
@@ -403,18 +381,14 @@
           <header class="topbar">
             <label class="search-field">
               <svg class="icon search-icon"><use href="#icon-search"></use></svg>
-              <input type="search" id="browse-search" placeholder="Search CurseForge addons" autocomplete="off">
+              <input type="search" id="browse-search" placeholder="Search addon name..." autocomplete="off">
             </label>
-            <select id="browse-category" class="select" aria-label="Category">
-              <option value="">All categories</option>
-            </select>
-            <select id="browse-sort" class="select" aria-label="Sort">
-              <option value="2">Sort: Popularity</option>
-              <option value="3">Sort: Last updated</option>
-              <option value="4">Sort: Name</option>
-              <option value="6">Sort: Total downloads</option>
-            </select>
           </header>
+
+          <!-- CS3: one quiet line when exactly one of the two sources
+               couldn't be reached - the other source's cards still render
+               in the grid below regardless. -->
+          <p class="muted-text browse-note" id="browse-source-note" hidden></p>
 
           <div class="list-summary" id="browse-summary" aria-live="polite"></div>
 
@@ -432,30 +406,35 @@
           <div class="empty-state" id="browse-empty" hidden>
             <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
             <h3>No results</h3>
-            <p>Try a different search term or category.</p>
+            <p>Try a different search term.</p>
           </div>
 
+          <!-- Both CurseForge and Wago failed - the one case with nothing
+               left to show in the grid at all. -->
           <div class="error-state" id="browse-error" hidden>
             <svg class="icon empty-icon error-icon"><use href="#icon-alert-circle"></use></svg>
             <h3>Couldn&rsquo;t load results</h3>
             <p id="browse-error-msg"></p>
           </div>
 
-          <div class="loadmore-wrap" id="browse-loadmore-wrap" hidden>
-            <button type="button" class="btn btn-outline" id="btn-load-more">Load more</button>
-          </div>
+          <!-- CS3: replaces the old permanent keyless banner - shown only
+               when a search returns thin/zero results, keyless-CurseForge
+               mode only (a keyed session already has the richer search this
+               is nudging toward). -->
+          <p class="muted-text browse-note" id="browse-nudge" hidden>Search results are limited without a CurseForge key. <button type="button" class="link-btn" id="btn-browse-nudge-settings">Add one in Settings</button></p>
 
-          <!-- E16: "Install by Project ID" - works without a key, shown only
-               in keyless CurseForge mode (previously part of the old
-               fully-blocking no-key panel this replaces). -->
-          <div class="nokey-card" id="browse-installbyid" hidden>
-            <h3>Install by Project ID</h3>
-            <p class="muted-text">Works without a key. Find the Project ID in the right-hand &ldquo;About Project&rdquo; box on any CurseForge addon page.</p>
-            <form id="install-by-id-form" class="inline-form">
-              <input type="text" id="install-by-id-input" placeholder="e.g. 1521253" inputmode="numeric" autocomplete="off">
-              <button type="submit" class="btn btn-accent" id="install-by-id-submit">Install</button>
-            </form>
-            <p class="form-msg" id="install-by-id-msg" hidden></p>
+          <!-- CS3: single fallback area under the grid (not a second
+               competing search box) - "Search CurseForge.com directly" and
+               "Install by Project ID" both demoted into one place here. -->
+          <div class="browse-fallback">
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-cf-web-search">Not finding it? Search CurseForge.com directly</button></p>
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link">Or paste an addon&rsquo;s CurseForge page link or number</button></p>
+            <!-- One-time note: only shown right after "Search CurseForge.com
+                 directly" is used while Furphy's own curseforge:// handler
+                 is off, since that's when a CurseForge.com Install click
+                 would get intercepted by the OS/browser instead of coming
+                 back here. -->
+            <p class="muted-text browse-note is-warning" id="browse-install-note" hidden>Install links aren&rsquo;t set up to open in Furphy &mdash; <button type="button" class="link-btn" id="btn-browse-install-note-settings">fix in Settings</button>.</p>
           </div>
         </div>
       </section>
@@ -466,101 +445,29 @@
 
         <div class="settings-scroll">
 
-          <section class="settings-group" id="settings-game">
-            <h3>Game</h3>
-            <div class="settings-row">
-              <div class="settings-row-text">
-                <div class="settings-row-label">World of Warcraft folder</div>
-                <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
-              </div>
-              <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-text">
-                <div class="settings-row-label">AddOns folder</div>
-                <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
-              </div>
-              <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
-            </div>
-            <!-- E13: read-only info, not a manager setting - WoW's own
-                 checkAddonVersion cvar (WTF\Config.wtf). -->
-            <div class="settings-row settings-row-col">
-              <div class="settings-row-label">Out-of-date addon loading (checkAddonVersion)</div>
-              <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
-              <p class="muted-text">This is WoW&rsquo;s own setting, not a Furphy Addon Manager setting &mdash; it controls whether the character-select screen blocks addons the client thinks are out of date. &ldquo;0&rdquo; (disabled) lets them load anyway, which pairs well with this manager keeping them updated; &ldquo;1&rdquo; (enabled) is the game&rsquo;s default warning/block. Change it in-game via the AddOns list, not here.</p>
-            </div>
-            <!-- E19 (script/registration itself is E17's, unchanged): the
-                 curseforge:// install-link handler toggle. Painted by
-                 Components.ProtocolControl.render() - the same component
-                 also renders into the Browse > CurseForge pane below. -->
-            <div class="settings-row settings-row-col">
-              <div class="settings-row-label">CurseForge install links (curseforge://)</div>
-              <div id="settings-protocol-control"></div>
-            </div>
-          </section>
+          <!-- ===================== Essentials (CS4, UX-SPEC.md 6.1) =====================
+               Always expanded, 3 groups, <=60 words of running prose total. -->
 
           <section class="settings-group" id="settings-updates">
             <h3>Updates</h3>
-            <div class="settings-row settings-row-col">
-              <div class="settings-row-label">Release channel</div>
-              <div class="radio-group" id="release-radio-group">
-                <label class="radio-option"><input type="radio" name="releaseType" value="1" id="radio-release-1"><span>Release only</span></label>
-                <label class="radio-option"><input type="radio" name="releaseType" value="2" id="radio-release-2"><span>Release + Beta</span></label>
-                <label class="radio-option"><input type="radio" name="releaseType" value="3" id="radio-release-3"><span>Everything (incl. Alpha)</span></label>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Include beta versions</div>
               </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-beta">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
             </div>
             <div class="settings-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Update addons automatically when launching WoW from the shortcut</div>
+                <div class="settings-row-label">Auto-update when launching WoW</div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-autoupdate">
                 <span class="switch-track"><span class="switch-thumb"></span></span>
               </label>
             </div>
-          </section>
-
-          <section class="settings-group" id="settings-apikey">
-            <h3>Optional: CurseForge API key (adds official CurseForge metadata)</h3>
-            <p class="muted-text">Installing, updating, pinning and rolling back addons already work fully without a key. Adding one unlocks CurseForge&rsquo;s own search/sort/categories, plus descriptions, changelogs and screenshots for CurseForge-sourced addons.</p>
-            <div class="apikey-row">
-              <div class="password-field">
-                <input type="password" id="input-apikey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
-                <button type="button" class="icon-btn" id="btn-toggle-apikey-visibility" aria-label="Show key" title="Show key">
-                  <svg class="icon"><use href="#icon-eye"></use></svg>
-                </button>
-              </div>
-              <button type="button" class="btn btn-outline" id="btn-test-apikey">Test</button>
-              <button type="button" class="btn btn-accent" id="btn-save-apikey">Save</button>
-              <button type="button" class="btn btn-danger-outline" id="btn-clear-apikey">Clear key</button>
-            </div>
-            <!-- Round 6 fix: shown only while the masked field is focused for
-                 editing - reminds the user the old key stays saved until they
-                 click Save, since the field is cleared (not pre-filled) the
-                 moment they click into it. -->
-            <p class="form-msg is-info" id="apikey-hint" hidden></p>
-            <p class="apikey-status" id="apikey-status">No key configured</p>
-            <p class="form-msg" id="apikey-test-result" hidden></p>
-          </section>
-
-          <!-- E19: OFF by default (Eric's explicit decision) - only
-               meaningful in the native FurphyHost.exe window (host\), which
-               has a real embedded CurseForge tab; the plain Edge app window
-               has no such tab to filter, so this shows a muted explainer
-               there instead of a toggle that would do nothing. -->
-          <section class="settings-group" id="settings-browsing">
-            <h3>Browsing</h3>
-            <div class="settings-row" id="browsing-adfilter-row">
-              <div class="settings-row-text">
-                <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
-                <p class="muted-text">Off by default. CurseForge is ad-funded and pays addon authors from that revenue; enabling this is your choice.</p>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="toggle-adfilter">
-                <span class="switch-track"><span class="switch-thumb"></span></span>
-              </label>
-            </div>
-            <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.</p>
           </section>
 
           <section class="settings-group" id="settings-appearance">
@@ -583,67 +490,179 @@
             </div>
           </section>
 
-          <section class="settings-group" id="settings-untracked">
-            <h3>Untracked folders</h3>
-            <p class="muted-text">Folders in AddOns that aren&rsquo;t tracked by the manager.</p>
-            <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
-            <div id="untracked-list" class="untracked-list"></div>
+          <section class="settings-group" id="settings-apikey">
+            <h3>CurseForge key (optional)</h3>
+            <p class="muted-text">Not required &mdash; everything works without it. A free key adds CurseForge&rsquo;s own search and addon descriptions.</p>
+            <!-- CS4: collapsed by default to one clickable row; expands the
+                 field + Show/Hide + Test + Save + Clear in place. The status
+                 line stays visible even collapsed, as this row's own subtitle. -->
+            <button type="button" class="settings-row settings-collapse-row" id="btn-apikey-toggle" aria-expanded="false" aria-controls="apikey-expand">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Add a CurseForge key</div>
+                <div class="settings-row-value" id="apikey-status">No key configured</div>
+              </div>
+              <svg class="icon settings-collapse-chevron" id="apikey-toggle-chevron"><use href="#icon-chevron-right"></use></svg>
+            </button>
+            <div id="apikey-expand" hidden>
+              <div class="apikey-row">
+                <div class="password-field">
+                  <input type="password" id="input-apikey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
+                  <button type="button" class="icon-btn" id="btn-toggle-apikey-visibility" aria-label="Show key" title="Show key">
+                    <svg class="icon"><use href="#icon-eye"></use></svg>
+                  </button>
+                </div>
+                <button type="button" class="btn btn-outline" id="btn-test-apikey">Test</button>
+                <!-- Review fix: was btn-accent, colliding with the sidebar's
+                     persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+                <button type="button" class="btn btn-outline" id="btn-save-apikey">Save</button>
+                <button type="button" class="btn btn-danger-outline" id="btn-clear-apikey">Clear key</button>
+              </div>
+              <!-- Round 6 fix: shown only while the masked field is focused for
+                   editing - reminds the user the old key stays saved until they
+                   click Save, since the field is cleared (not pre-filled) the
+                   moment they click into it. -->
+              <p class="form-msg is-info" id="apikey-hint" hidden></p>
+              <p class="form-msg" id="apikey-test-result" hidden></p>
+            </div>
           </section>
 
-          <section class="settings-group" id="settings-backup">
-            <h3>Backup &amp; restore</h3>
-            <p class="muted-text">Export your addon list (pins, ignored updates, release channel) to a file, or restore one you exported earlier.</p>
-            <div class="btn-row">
-              <button type="button" class="btn btn-outline" id="btn-export">
-                <svg class="icon"><use href="#icon-download"></use></svg>
-                <span>Export addon list</span>
-              </button>
-              <button type="button" class="btn btn-outline" id="btn-import">Import addon list</button>
-              <input type="file" id="import-file-input" accept="application/json,.json" hidden>
-            </div>
-            <p class="form-msg" id="backup-msg" hidden></p>
-          </section>
+          <!-- ===================== Advanced (CS4, UX-SPEC.md 6.2) =====================
+               One collapsed disclosure, closed by default, holding everything else. -->
+          <details class="settings-advanced" id="settings-advanced">
+            <summary>Advanced</summary>
+            <div class="settings-advanced-body">
 
-          <section class="settings-group" id="settings-maintenance">
-            <h3>Maintenance</h3>
-            <div class="btn-row">
-              <button type="button" class="btn btn-outline" id="btn-open-synclog">Open sync log</button>
-              <button type="button" class="btn btn-outline" id="btn-open-lastrun">Open last run report</button>
-              <button type="button" class="btn btn-outline" id="btn-open-serverlog">Open server log</button>
-              <button type="button" class="btn btn-outline" id="btn-open-backups">Open backups folder</button>
-            </div>
-            <!-- E16: forces a fresh fetch+merge of the offline CurseForge
-                 catalogue index (instawow-data + strongbox-catalogue) that
-                 Browse/the detail drawer fall back to with no API key -
-                 otherwise refreshed automatically at most once/24h. -->
-            <div class="btn-row">
-              <button type="button" class="btn btn-outline" id="btn-refresh-cf-catalogue">Refresh CurseForge catalogue now</button>
-            </div>
-            <p class="muted-text" id="cf-catalogue-status"></p>
-            <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
-          </section>
+              <!-- E19 (script/registration itself is E17's, unchanged): the
+                   curseforge:// install-link handler toggle - its one
+                   remaining home in the whole app (removed from Browse by
+                   CS3). Painted by Components.ProtocolControl.render(). -->
+              <section class="settings-group" id="settings-protocol">
+                <h3>CurseForge install links</h3>
+                <div id="settings-protocol-control"></div>
+              </section>
 
-          <section class="settings-group" id="settings-diagnostics">
-            <h3>Diagnostics</h3>
-            <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, API key, disk space.</p>
-            <div class="btn-row">
-              <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
-                <svg class="icon"><use href="#icon-shield"></use></svg>
-                <span>Run</span>
-              </button>
-              <button type="button" class="btn btn-outline" id="btn-copy-diagnostics" hidden>Copy report</button>
-            </div>
-            <div class="diag-list" id="diagnostics-list"></div>
-          </section>
+              <section class="settings-group" id="settings-alpha">
+                <div class="settings-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Also include alpha/experimental versions</div>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-alpha">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
+              </section>
 
-          <section class="settings-group" id="settings-about">
-            <h3>About</h3>
-            <dl class="about-list">
-              <div><dt>Version</dt><dd id="about-version">&mdash;</dd></div>
-              <div><dt>Server uptime</dt><dd id="about-uptime">&mdash;</dd></div>
-              <div><dt>Port</dt><dd id="about-port">&mdash;</dd></div>
-            </dl>
-          </section>
+              <!-- E13: read-only info, not a manager setting - WoW's own
+                   checkAddonVersion cvar (WTF\Config.wtf). -->
+              <section class="settings-group" id="settings-outofdate">
+                <h3>WoW&rsquo;s out-of-date warning</h3>
+                <div class="settings-row-col">
+                  <div class="settings-row-label">Load out-of-date addons at character select</div>
+                  <div class="settings-row-value" id="settings-checkaddonversion">&mdash;</div>
+                  <p class="muted-text">This is a WoW setting &mdash; change it in-game, not here.</p>
+                </div>
+              </section>
+
+              <section class="settings-group" id="settings-game">
+                <h3>Game folders</h3>
+                <div class="settings-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">World of Warcraft folder</div>
+                    <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
+                  </div>
+                  <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">AddOns folder</div>
+                    <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
+                  </div>
+                  <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
+                </div>
+              </section>
+
+              <!-- E19: OFF by default (Eric's explicit decision) - only
+                   meaningful in the native FurphyHost.exe window (host\), which
+                   has a real embedded CurseForge tab; the plain Edge app window
+                   has no such tab to filter, so this shows a muted explainer
+                   there instead of a toggle that would do nothing. -->
+              <section class="settings-group" id="settings-browsing">
+                <h3>Browsing</h3>
+                <div class="settings-row" id="browsing-adfilter-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
+                    <p class="muted-text">Off by default. CurseForge is ad-funded and pays addon authors from that revenue; enabling this is your choice.</p>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-adfilter">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
+                <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.</p>
+              </section>
+
+              <section class="settings-group" id="settings-untracked">
+                <h3>Folders Furphy doesn&rsquo;t manage yet</h3>
+                <p class="muted-text">Folders in your AddOns folder that Furphy doesn&rsquo;t manage yet.</p>
+                <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
+                <div id="untracked-list" class="untracked-list"></div>
+              </section>
+
+              <section class="settings-group" id="settings-backup">
+                <h3>Save / load your addon list</h3>
+                <p class="muted-text">Save your addon list to a file, or load one you saved before.</p>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline" id="btn-export">
+                    <svg class="icon"><use href="#icon-download"></use></svg>
+                    <span>Save addon list</span>
+                  </button>
+                  <button type="button" class="btn btn-outline" id="btn-import">Load addon list</button>
+                  <input type="file" id="import-file-input" accept="application/json,.json" hidden>
+                </div>
+                <p class="form-msg" id="backup-msg" hidden></p>
+              </section>
+
+              <section class="settings-group" id="settings-maintenance">
+                <h3>Troubleshooting</h3>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline" id="btn-open-logs">Open logs folder</button>
+                </div>
+                <!-- E16: forces a fresh fetch+merge of the offline CurseForge
+                     catalogue index (instawow-data + strongbox-catalogue) that
+                     Browse/the detail drawer fall back to with no API key -
+                     otherwise refreshed automatically at most once/24h. -->
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline" id="btn-refresh-cf-catalogue">Refresh the addon list from CurseForge</button>
+                </div>
+                <p class="muted-text" id="cf-catalogue-status"></p>
+                <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
+              </section>
+
+              <section class="settings-group" id="settings-diagnostics">
+                <h3>Diagnostics</h3>
+                <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, API key, disk space.</p>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
+                    <svg class="icon"><use href="#icon-shield"></use></svg>
+                    <span>Run</span>
+                  </button>
+                  <button type="button" class="btn btn-outline" id="btn-copy-diagnostics" hidden>Copy report</button>
+                </div>
+                <div class="diag-list" id="diagnostics-list"></div>
+              </section>
+
+              <section class="settings-group" id="settings-about">
+                <h3>About</h3>
+                <dl class="about-list">
+                  <div><dt>Version</dt><dd id="about-version">&mdash;</dd></div>
+                  <div><dt>Client build</dt><dd id="about-client-build">&mdash;</dd></div>
+                  <div><dt>Server uptime</dt><dd id="about-uptime">&mdash;</dd></div>
+                </dl>
+              </section>
+
+            </div>
+          </details>
 
         </div>
       </section>
@@ -689,8 +708,23 @@
     </button>
   </div>
   <div class="job-panel-body" id="job-panel-body">
-    <pre class="job-log" id="job-log"></pre>
+    <!-- CS2 (UX-SPEC.md section 4.3): the primary view for a running progress-
+         tracked job (sync/check/add/install) - a determinate n-of-N bar plus
+         a plain current-item phase line, driven by job.progress. Every other
+         job kind has no progress object, so this stays hidden and the panel
+         falls back to just its title bar. -->
+    <div class="job-progress-wrap" id="job-progress-wrap" hidden>
+      <div class="job-progress-label" id="job-progress-label"></div>
+      <progress class="job-progress-bar" id="job-progress-bar" max="1" value="0"></progress>
+      <div class="job-progress-current" id="job-progress-current"></div>
+    </div>
     <div class="job-results" id="job-results" hidden></div>
+    <!-- CS2: the raw log, moved behind a closed-by-default disclosure - never
+         deleted, never the default view. -->
+    <details class="job-details" id="job-details">
+      <summary>Details</summary>
+      <pre class="job-log" id="job-log"></pre>
+    </details>
   </div>
 </div>
 
@@ -702,13 +736,15 @@
 
 <div class="dialog" id="dialog-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-add-title">
   <h3 id="dialog-add-title">Add addon</h3>
-  <p class="muted-text">Enter a numeric CurseForge Project ID, a CurseForge addon URL (needs an API key), or a Wago addon URL / wago:&lt;slug&gt; (no key needed).</p>
+  <p class="muted-text">Paste an addon link (CurseForge or Wago), or type its ID number.</p>
   <form id="add-addon-form">
     <input type="text" id="add-addon-input" placeholder="1521253, a curseforge.com URL, or a wago.io URL" autocomplete="off">
     <p class="form-msg" id="add-addon-error" hidden></p>
     <div class="dialog-footer">
       <button type="button" class="btn btn-ghost" id="add-addon-cancel">Cancel</button>
-      <button type="submit" class="btn btn-accent" id="add-addon-submit">Add</button>
+      <!-- Review fix: was btn-accent, colliding with the sidebar's
+           persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+      <button type="submit" class="btn btn-outline" id="add-addon-submit">Add</button>
     </div>
   </form>
 </div>
@@ -727,16 +763,18 @@
      in AddOns (e.g. right after install.ps1 adoption was skipped, or a fresh
      AddOns folder the user populated by hand before ever opening the app). -->
 <div class="dialog dialog-welcome" id="dialog-welcome" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-welcome-title">
-  <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found addons in your AddOns folder</h3>
-  <p class="muted-text">Furphy found <strong id="welcome-count">0</strong> addon(s) it can manage. Adopting reinstalls each one from its source (CurseForge or Wago) so Furphy can keep it updated from here on.</p>
+  <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found <span id="welcome-count">0</span> addons in your AddOns folder</h3>
+  <p class="muted-text">Furphy can start managing these — it re-downloads each one so it can keep them updated from now on. No CurseForge key needed.</p>
   <ul class="welcome-list" id="welcome-list"></ul>
   <div class="nokey-inline welcome-nokey-note">
     <svg class="icon"><use href="#icon-info"></use></svg>
-    <span>No CurseForge API key needed for this, or for anything else here. <button type="button" class="link-btn" id="welcome-browse-link">See Browse</button></span>
+    <span>Looking for something else? <button type="button" class="link-btn" id="welcome-browse-link">See Browse</button></span>
   </div>
   <div class="dialog-footer">
     <button type="button" class="btn btn-ghost" id="welcome-skip">Skip</button>
-    <button type="button" class="btn btn-accent" id="welcome-adopt">Adopt all</button>
+    <!-- Review fix: was btn-accent, colliding with the sidebar's
+         persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+    <button type="button" class="btn btn-outline" id="welcome-adopt">Take over all</button>
   </div>
 </div>
 

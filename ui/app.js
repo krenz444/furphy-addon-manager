@@ -161,6 +161,20 @@ const Mock = (function () {
     ]
   };
   let updatesCheckedAt = new Date(Date.now() - 5 * 60e3).toISOString();
+  // CS1 (UX-SPEC.md sections 2.1/4.2): mirrors addon-server.ps1's
+  // $Script:LastCheckFailed/$Script:LastCheckError - in-memory-only mock
+  // state, never persisted, feeding /api/state's computed "freshness" enum
+  // the same way the real server's Get-ComputedFreshness reads them.
+  let lastCheckFailed = false;
+  let lastCheckError = null;
+
+  function mockFreshness() {
+    if (currentJob && currentJob.state === "running" && ["sync", "check", "add", "install"].indexOf(currentJob.kind) !== -1) return "checking";
+    if (lastCheckFailed) return "check_failed";
+    if (!updatesCheckedAt) return "not_checked";
+    if (addons.some(function (a) { return !!a.updateAvailable; })) return "updates_available";
+    return "up_to_date";
+  }
 
   const untracked = [
     { folder: "OldClique", title: "Clique", version: "60300-1", hasToc: true },
@@ -241,6 +255,28 @@ const Mock = (function () {
 
   function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
 
+  // E12: an addon's Mock-side key, matching Store.addonKey exactly - a
+  // "sync"/"install"/"rollback" job's params always carry this form (never
+  // a numeric-only id for a Wago row), so every id-matching branch below
+  // compares against it rather than bare a.projectId. Hoisted to module
+  // scope (CS1) so both finalizeJobResults and the progress-step builder
+  // below share one definition.
+  function mockKey(a) { return a.source === "wago" ? "wago:" + a.slug : a.projectId; }
+
+  // CS1 (UX-SPEC.md section 4.1/4.3): job kinds whose progress the real CLI
+  // reports via progress.json - the same job kinds addon-server.ps1 threads
+  // -ProgressPath for. Every other kind (remove/rollback/import/switch-
+  // source) keeps the plain line-by-line log animation below, same as
+  // before this pass.
+  // Review fix: "launch" belongs here too when updateFirst is true (Update
+  // & Play) - the real server always runs that as a full progress-tracked
+  // sync before launching (see addon-server.ps1's Start-Job $cliKind
+  // mapping); see buildProgressPlan's own "launch" branch below for how
+  // updateFirst:false (Launch WoW, no update) still ends up with zero
+  // targets and skips straight to the plain 300ms finish, matching the real
+  // server's synchronous no-CLI-process path for that case.
+  const PROGRESS_KINDS = ["sync", "check", "add", "install", "launch"];
+
   function jobLines(kind) {
     if (kind === "check") return ["Checking 5 addons against CurseForge...", "Auctionator: update available (5.21.0)", "Bagnon: update available (10.9)", "Check complete."];
     if (kind === "sync") return ["Syncing addons...", "Auctionator: downloading 5.21.0...", "Auctionator: installed.", "Sync complete."];
@@ -253,37 +289,14 @@ const Mock = (function () {
     return ["Working..."];
   }
 
-  function runJob(kind, params) {
-    if (currentJob && currentJob.state === "running") return null;
-    const id = String(nextJobId++);
-    const job = {
-      id: id, kind: kind, params: params || {}, state: "running",
-      startedAt: new Date().toISOString(), finishedAt: null, exitCode: null,
-      log: [], results: [], error: null
-    };
-    currentJob = job;
-    jobs.unshift(job);
-    if (jobs.length > 20) jobs.length = 20;
-
-    const lines = jobLines(kind);
-    let i = 0;
-    const timer = setInterval(function () {
-      if (i < lines.length) {
-        job.log.push(lines[i]);
-        i++;
-        return;
-      }
-      clearInterval(timer);
-      job.state = "done";
-      job.finishedAt = new Date().toISOString();
-      job.exitCode = 0;
-
-      // E12: an addon's Mock-side key, matching Store.addonKey exactly - a
-      // "sync"/"install"/"rollback" job's params always carry this form
-      // (never a numeric-only id for a Wago row), so every id-matching
-      // branch below compares against it rather than bare a.projectId.
-      function mockKey(a) { return a.source === "wago" ? "wago:" + a.slug : a.projectId; }
-
+  function finalizeJobResults(job, kind, params, forcedFailMockKey) {
+      // CS1: forcedFailMockKey (the "sync" kind only - see
+      // buildProgressPlan) makes exactly one otherwise-would-update addon
+      // report Failed instead, so a mock "Update all" run reliably
+      // exercises the done-with-failures panel without needing real
+      // network flakiness. Every other kind ignores this parameter
+      // entirely (nothing in this fixture set has a realistic per-addon
+      // failure to force for them).
       if (kind === "check") {
         updatesCheckedAt = new Date().toISOString();
         job.results = [
@@ -293,8 +306,31 @@ const Mock = (function () {
       } else if (kind === "sync") {
         const ids = params && params.ids;
         addons.forEach(function (a) {
-          if (a.ignoreUpdates && !(params && params.force)) return;
+          // Review-fix follow-up: mirrors addon-sync.ps1's own
+          // ExplicitTarget semantics (line ~2243/2528 - "-ExplicitTarget
+          // means this record was named directly via -Only... which
+          // (together with -Force) overrides ignoreUpdates") - an addon
+          // named directly in `ids` (e.g. Actions.updateAll's now-scoped
+          // sync job) is processed even if ignoreUpdates is set, same as
+          // the real CLI; only an UNTARGETED ignoreUpdates addon in a
+          // scope-less sync is skipped. Keeps the mock's own job.progress
+          // total in step with the ids list the job panel's title is
+          // built from.
+          const explicit = !!(ids && ids.indexOf(mockKey(a)) !== -1);
+          if (a.ignoreUpdates && !(params && params.force) && !explicit) return;
           if (ids && ids.indexOf(mockKey(a)) === -1) return;
+          // CS2: every push here now also carries wagoSlug (null for a
+          // CurseForge row) - the "add"/"install"/"switch-source" branches
+          // already did this; a Wago row's sync result was previously the
+          // one shape with no stable key at all (projectId is always null
+          // for Wago), which silently broke both "What changed" (pre-
+          // existing, see whatChangedButton's own null-key guard) and this
+          // round's per-row Retry for a failed Wago sync result.
+          const wagoSlug = a.source === "wago" ? a.slug : null;
+          if (forcedFailMockKey && mockKey(a) === forcedFailMockKey) {
+            job.results.push({ status: "Failed", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId, wagoSlug: wagoSlug });
+            return;
+          }
           if (a.updateAvailable) {
             a.previousFileId = a.fileId;
             a.previousVersion = a.version;
@@ -302,12 +338,17 @@ const Mock = (function () {
             a.fileId = a.updateAvailable.fileId;
             a.installedAt = new Date().toISOString();
             a.updateAvailable = null;
-            job.results.push({ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
+            job.results.push({ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId, wagoSlug: wagoSlug });
           } else {
-            job.results.push({ status: "Up-to-date", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
+            job.results.push({ status: "Up-to-date", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId, wagoSlug: wagoSlug });
           }
         });
-        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+        // Review fix: carry projectId/wagoSlug through into lastRun.rows too
+        // (job.results already had them) - Store.lastRunStatusFor now keys
+        // off the addon's stable key rather than its display name, and
+        // mirrors the real server's rows (a literal passthrough of the CLI's
+        // -Json rows, which always include these fields).
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
       } else if (kind === "add") {
         // E12: a Wago add posts {source:'wago', slug, fileId?} instead of a
         // projectId (see Actions.installLatestWago/addByWagoSlug) - mirrors
@@ -346,7 +387,7 @@ const Mock = (function () {
           addons.push(rec);
           job.results = [{ status: "Installed", name: oldName, version: "1.0.0", projectId: pid, fileId: rec.fileId, wagoSlug: null }];
         }
-        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
       } else if (kind === "remove") {
         // E11: bulk uninstall posts projectIds (array); the single per-row
         // kebab "Uninstall" still posts a single projectId - normalize both
@@ -380,6 +421,17 @@ const Mock = (function () {
         if (updateFirst) {
           addons.forEach(function (a) {
             if (a.ignoreUpdates) { job.results.push({ status: "Ignored", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }); return; }
+            // Review fix: mirrors "sync"'s own forcedFailMockKey handling
+            // (see buildProgressPlan's "launch" branch) - without this, an
+            // Update & Play run's forced-fail target reported "Updated" here
+            // while job.progress's final write for it said "failed", which
+            // both broke the done-with-failures panel for this kind and
+            // disagreed with mapFinalPhase's own comment that job.results
+            // and job.progress must always agree on a target's outcome.
+            if (forcedFailMockKey && mockKey(a) === forcedFailMockKey) {
+              job.results.push({ status: "Failed", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
+              return;
+            }
             if (a.updateAvailable) {
               a.previousFileId = a.fileId;
               a.previousVersion = a.version;
@@ -392,7 +444,7 @@ const Mock = (function () {
               job.results.push({ status: "Up-to-date", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
             }
           });
-          lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed, then launched", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+          lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed, then launched", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
         }
         job.results.push({ status: "Launched", name: "World of Warcraft" });
       } else if (kind === "rollback") {
@@ -413,7 +465,7 @@ const Mock = (function () {
         // refreshes $Script:LastRun for every job action except
         // check/files/scan - needed so the Pinned chip's rollback tooltip
         // (driven by Store.lastRunStatusFor) is exercisable under ?mock=1.
-        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
       } else if (kind === "import") {
         // E4: mirrors the real server's Build-ImportPlan/Start-ImportJob at a
         // simplified level - add whatever isn't already present, apply
@@ -435,8 +487,199 @@ const Mock = (function () {
             job.results.push({ status: "Skipped", name: existing.name, version: existing.version, projectId: existing.projectId, fileId: existing.fileId });
           }
         });
-        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version }; }) };
+        lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
       }
+  }
+
+  function finishJob(job, kind, params, forcedFailMockKey) {
+    job.state = "done";
+    job.finishedAt = new Date().toISOString();
+    job.exitCode = 0;
+    finalizeJobResults(job, kind, params, forcedFailMockKey);
+  }
+
+  // CS1 (UX-SPEC.md section 4.1): builds the ordered list of addons a
+  // progress-tracked job kind will step through, plus - for "sync" only -
+  // which one (if any) should end Failed instead of Updated, so
+  // runProgressJob and finalizeJobResults agree on the very same target.
+  // Mirrors, at fixture-simulation fidelity, the filtering
+  // Sync-SingleAddon's own caller (addon-sync.ps1's main loop) applies.
+  // CS1: the final per-addon progress phase (UX-SPEC.md section 4.1 point
+  // 5) is mapped from the SAME status word finalizeJobResults is about to
+  // report for that addon - see mapFinalPhase below - so job.progress's
+  // very last entry for a target always agrees with its row in job.results.
+  function mapFinalPhase(status) {
+    if (status === "Up-to-date") return "up_to_date";
+    if (status === "Failed") return "failed";
+    if (status === "Installed" || status === "Updated") return "done";
+    return "done";
+  }
+
+  function buildProgressPlan(kind, params) {
+    let targets = [];
+    let forcedFailMockKey = null;
+    if (kind === "sync") {
+      const ids = params && params.ids;
+      const force = params && params.force;
+      // Review-fix follow-up: same ExplicitTarget-overrides-ignoreUpdates
+      // rule as finalizeJobResults' own sync branch above (mirrors
+      // addon-sync.ps1) - keeps this plan's own `total` (what the job
+      // panel's live "Updating i of N" line reads) in step with the ids
+      // list the panel's static title is built from.
+      targets = addons.filter(function (a) {
+        const explicit = !!(ids && ids.indexOf(mockKey(a)) !== -1);
+        if (a.ignoreUpdates && !force && !explicit) return false;
+        if (ids && ids.indexOf(mockKey(a)) === -1) return false;
+        return true;
+      }).map(function (a) { return { label: a.name, ref: a, status: a.updateAvailable ? "Updated" : "Up-to-date" }; });
+      // The LAST target that would actually update is the one forced to
+      // fail (see the CS1 note on finalizeJobResults) - picking the last
+      // rather than the first keeps the earlier addons in a run showing
+      // their ordinary Updated/Up-to-date progression before the one
+      // failure, closer to how a real flaky-network run tends to land.
+      for (let i = targets.length - 1; i >= 0; i--) {
+        if (targets[i].ref.updateAvailable) { forcedFailMockKey = mockKey(targets[i].ref); targets[i].status = "Failed"; break; }
+      }
+    } else if (kind === "check") {
+      targets = addons.map(function (a) { return { label: a.name, ref: a, status: "Up-to-date" }; });
+    } else if (kind === "add") {
+      const label = (params && params.source === "wago" && params.slug) ? ("New Wago Addon (" + params.slug + ")") : ("New Addon " + (params && params.projectId));
+      targets = [{ label: label, ref: null, status: "Installed" }];
+    } else if (kind === "install") {
+      const a = addons.find(function (x) { return mockKey(x) === (params && params.projectId); });
+      targets = [{ label: a ? a.name : ("project " + (params && params.projectId)), ref: a || null, status: "Installed" }];
+    } else if (kind === "launch") {
+      // Review fix: mirrors finalizeJobResults' own "launch" branch above -
+      // updateFirst:false (Launch WoW, no update) leaves targets empty, so
+      // runProgressJob's total===0 fast path fires and this job finishes in
+      // ~300ms with no progress bar at all, matching the real server's
+      // synchronous no-CLI-process path for that case. updateFirst:true
+      // (Update & Play) walks every addon (not filtered by an `ids` list -
+      // launch has none), mapping an ignored addon straight to "Ignored" so
+      // it never becomes forced-fail bait.
+      const updateFirst = params && params.updateFirst;
+      if (updateFirst) {
+        targets = addons.map(function (a) {
+          if (a.ignoreUpdates) return { label: a.name, ref: a, status: "Ignored" };
+          return { label: a.name, ref: a, status: a.updateAvailable ? "Updated" : "Up-to-date" };
+        });
+        for (let i = targets.length - 1; i >= 0; i--) {
+          if (targets[i].status === "Updated") { forcedFailMockKey = mockKey(targets[i].ref); targets[i].status = "Failed"; break; }
+        }
+      }
+    }
+    return { targets: targets, forcedFailMockKey: forcedFailMockKey };
+  }
+
+  // CS1 (UX-SPEC.md section 4.1/4.3): drives job.progress through the same
+  // {total,index,addon,phase} shape Write-ProgressStep writes CLI-side -
+  // "checking" for every target, plus "downloading"/"installing" for the
+  // kinds that actually install something ("check" is read-only, so it
+  // only ever reaches "checking" per addon, exactly like a real -DryRun
+  // never reaching Sync-SingleAddon's own downloading/installing writes).
+  // Total run length is spread to land close to 6 seconds regardless of
+  // how many targets this job has, and job.log still gets a line per step
+  // so the Details disclosure has something to show.
+  function runProgressJob(job, kind, params) {
+    const plan = buildProgressPlan(kind, params);
+    const targets = plan.targets;
+    const total = targets.length;
+    job.progress = { total: total, index: 0, addon: null, phase: "queued" };
+
+    if (total === 0) {
+      setTimeout(function () { finishJob(job, kind, params, null); }, 300);
+      return;
+    }
+
+    const hasInstallPhases = kind === "sync" || kind === "add" || kind === "install" || kind === "launch";
+    const phaseSeq = hasInstallPhases ? ["checking", "downloading", "installing"] : ["checking"];
+    // +1 per target: phaseSeq's own steps, plus the one final mapped-phase
+    // write after them (see nextPhase below) - both cost one setTimeout
+    // tick each, so both must count toward spreading ~6 seconds evenly.
+    const totalSteps = total * (phaseSeq.length + 1);
+    const stepMs = Math.max(150, Math.round(6000 / Math.max(totalSteps, 1)));
+
+    let t = 0;
+    function nextTarget() {
+      if (t >= total) {
+        finishJob(job, kind, params, plan.forcedFailMockKey);
+        return;
+      }
+      const target = targets[t];
+      let p = 0;
+      function nextPhase() {
+        if (p >= phaseSeq.length) {
+          // CS1: final per-addon write (UX-SPEC.md section 4.1 point 5) -
+          // bump index NOW (this target is finished) and report the phase
+          // mapped from its planned outcome, same as the real CLI's main
+          // loop does right after Sync-SingleAddon returns.
+          t++;
+          const finalPhase = mapFinalPhase(target.status);
+          const finalWrite = { total: total, index: t, addon: target.label, phase: finalPhase };
+          // CS2: a forced-fail target also carries failPhase (UX-SPEC.md
+          // section 4.1's CS1 addendum) - "downloading" exercises the
+          // JobPanel's "Couldn't download the update" plain-language mapping
+          // under ?mock=1 (CS1 left this unset, so the mock never actually
+          // reached that branch).
+          if (finalPhase === "failed") finalWrite.failPhase = "downloading";
+          job.progress = finalWrite;
+          job.log.push(target.label + ": " + target.status.toLowerCase() + ".");
+          setTimeout(nextTarget, stepMs);
+          return;
+        }
+        const phase = phaseSeq[p];
+        const write = { total: total, index: t, addon: target.label, phase: phase };
+        // Review fix (UX-SPEC.md 4.3/4.4): fake a partial byte count on the
+        // "downloading" tick so ?mock=1 can exercise the client's new
+        // "(NN%)" rendering - CS6's real writes are many throttled
+        // sub-steps climbing to 100%, but this mock only gets one
+        // "downloading" tick per target, so it fakes one plausible partial
+        // value (not 0%, not 100%) rather than a real multi-step climb.
+        if (phase === "downloading") {
+          const fakeTotal = 400000 + ((target.label.length * 97531) % 9600000);
+          write.bytesTotal = fakeTotal;
+          write.bytesDone = Math.round(fakeTotal * 0.62);
+        }
+        job.progress = write;
+        job.log.push(target.label + ": " + phase + "...");
+        p++;
+        setTimeout(nextPhase, stepMs);
+      }
+      nextPhase();
+    }
+    nextTarget();
+  }
+
+  function runJob(kind, params) {
+    if (currentJob && currentJob.state === "running") return null;
+    const id = String(nextJobId++);
+    const job = {
+      id: id, kind: kind, params: params || {}, state: "running",
+      startedAt: new Date().toISOString(), finishedAt: null, exitCode: null,
+      log: [], results: [], error: null, progress: null
+    };
+    currentJob = job;
+    jobs.unshift(job);
+    if (jobs.length > 20) jobs.length = 20;
+
+    if (PROGRESS_KINDS.indexOf(kind) !== -1) {
+      runProgressJob(job, kind, params);
+      return job;
+    }
+
+    // Every other kind (remove/rollback/import/switch-source/launch) keeps
+    // the plain line-by-line log animation - unchanged from before CS1,
+    // and never gets a -ProgressPath server-side either (see Start-Job).
+    const lines = jobLines(kind);
+    let i = 0;
+    const timer = setInterval(function () {
+      if (i < lines.length) {
+        job.log.push(lines[i]);
+        i++;
+        return;
+      }
+      clearInterval(timer);
+      finishJob(job, kind, params, null);
     }, 420);
 
     return job;
@@ -453,7 +696,10 @@ const Mock = (function () {
       if (p === "/api/state") {
         // E13: fixed mock client build - matches the "ok" Auctionator/
         // "stale-minor" BigWigs fixtures seeded above.
-        return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, clientBuild: "12.1.0.69587", clientInterface: 120100 };
+        // CS1 (UX-SPEC.md sections 2.1/4.2): freshness/lastCheckFailed/
+        // lastCheckError mirror the real server's Handle-State additions -
+        // see mockFreshness above for how the enum is derived here.
+        return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, freshness: mockFreshness(), lastCheckFailed: lastCheckFailed, lastCheckError: lastCheckError, clientBuild: "12.1.0.69587", clientInterface: 120100 };
       }
       // E19: ?mock=1&host=webview2 previews the native-host-only ad-filter
       // toggle branch without a real FurphyHost.exe - mirrors the real
@@ -474,15 +720,30 @@ const Mock = (function () {
         if (!job) return { __status: 409, error: "busy" };
         return { __status: 202, jobId: job.id };
       }
-      const ignoreMatch = p.match(/^\/api\/addons\/(\d+)\/ignore$/);
+      // Review fix: these used to match `\d+` only, so a Wago-tracked
+      // addon's key ("wago:<slug>", per Store.addonKey - the same key
+      // Actions.toggleIgnore/unpin/ignoreSelected actually POST) never
+      // matched here and fell through to the 404 catch-all. The real
+      // server's own route (`[^/]+`, addon-server.ps1) already accepts
+      // both shapes; mirror that here and look the addon up the same way
+      // Store.addonKey resolves it instead of a numeric-only projectId.
+      function findByKey(rawKey) {
+        const key = decodeURIComponent(rawKey);
+        if (key.indexOf("wago:") === 0) {
+          const slug = key.slice(5);
+          return addons.find(function (x) { return x.source === "wago" && x.slug === slug; });
+        }
+        return addons.find(function (x) { return x.projectId === Number(key); });
+      }
+      const ignoreMatch = p.match(/^\/api\/addons\/([^/]+)\/ignore$/);
       if (ignoreMatch && method === "POST") {
-        const a = addons.find(function (x) { return x.projectId === Number(ignoreMatch[1]); });
+        const a = findByKey(ignoreMatch[1]);
         if (a) a.ignoreUpdates = !!body.ignore;
         return { addons: addons };
       }
-      const unpinMatch = p.match(/^\/api\/addons\/(\d+)\/unpin$/);
+      const unpinMatch = p.match(/^\/api\/addons\/([^/]+)\/unpin$/);
       if (unpinMatch && method === "POST") {
-        const a = addons.find(function (x) { return x.projectId === Number(unpinMatch[1]); });
+        const a = findByKey(unpinMatch[1]);
         if (a) a.pinnedFileId = null;
         return { addons: addons };
       }
@@ -847,55 +1108,42 @@ const Utils = (function () {
     return major + "." + minor + "." + patch;
   }
 
-  // E13: turns one addon's compat/tocInterfaces/latestGameVersions/
-  // latestFileDate (all from /api/state, computed server-side) into a
-  // {label, cls, title} triple - the chip text/color/tooltip shared by the
-  // My Addons Compatibility column and the drawer Overview's compat section.
-  // clientInterface comes from Store.state.clientInterface, passed in rather
-  // than read directly so this stays a pure function like the rest of Utils.
+  // E13: turns one addon's compat (from /api/state, computed server-side)
+  // into a {label, cls} pair. CS5 (UX-SPEC.md 3.5/§7): rewritten to use the
+  // exact same plain words as the table's Status pill ("Built for 12.1" /
+  // "Old patch" / "Won't work this patch") - "the same plain words... no
+  // separate restatement, no raw interface-version numbers." The old
+  // {title} field (a raw "Toc Interface: 120100 (12.1.0) ..." tooltip
+  // string) is deleted outright along with its only caller - that was the
+  // hidden hover tooltip the spec already deletes from the table, now also
+  // removed from here rather than left as a second, differently-worded
+  // restatement in the drawer. clientInterface comes from
+  // Store.state.clientInterface, passed in rather than read directly so
+  // this stays a pure function like the rest of Utils.
   function compatDisplay(addon, clientInterface) {
     const compat = addon && addon.compat;
-    const tocIfaces = (addon && addon.tocInterfaces) || [];
-    const latestVersions = (addon && addon.latestGameVersions) || [];
-    const bestOwnVersion = tocIfaces.length ? interfaceToVersion(tocIfaces[0]) : (latestVersions[0] || null);
     const clientVersion = interfaceToVersion(clientInterface);
     const clientMajorMinor = clientVersion ? clientVersion.split(".").slice(0, 2).join(".") : null;
 
-    let label, cls;
-    if (compat === "ok") {
-      cls = "chip-success";
-      label = "Built for " + (clientMajorMinor || "current patch");
-    } else if (compat === "stale-minor") {
-      cls = "chip-warning";
-      label = "Older patch" + (bestOwnVersion ? " (" + bestOwnVersion + ")" : "");
-    } else if (compat === "stale") {
-      cls = "chip-danger";
-      label = "Not for Midnight";
-    } else {
-      cls = "chip-muted";
-      label = "Unknown";
-    }
+    if (compat === "ok") return { label: "Built for " + (clientMajorMinor || "current patch"), cls: "chip-success" };
+    if (compat === "stale-minor") return { label: "Old patch", cls: "chip-warning" };
+    if (compat === "stale") return { label: "Won't work this patch", cls: "chip-danger" };
+    return { label: "Unknown", cls: "chip-muted" };
+  }
 
-    const detailBits = [];
-    detailBits.push(tocIfaces.length
-      ? "Toc Interface: " + tocIfaces.map(function (n) { return interfaceToVersion(n) + " (" + n + ")"; }).join(", ")
-      : "Toc Interface: none declared");
-    if (latestVersions.length) {
-      let s = "Newest known file supports: " + latestVersions.join(", ");
-      // Round 9 fix: this is the FILE's own upload date (latestFileDate ==
-      // the selected file's dateCreated, captured at sync time - see SPEC's
-      // Sync-SingleAddon/Sync-SingleWagoAddon notes), not a timestamp of when
-      // this app last polled CurseForge/Wago - "checked" implied the latter
-      // and could read as claiming fresher data than it actually has.
-      if (addon.latestFileDate) s += " (released " + fullDate(addon.latestFileDate) + ")";
-      detailBits.push(s);
-    }
-    return { label: label, cls: cls, title: detailBits.join(" · ") };
+  // Review fix: factored out of Components.JobPanel (which had the only
+  // copy) so Components.Chip.forStatus can render a row's own live phase
+  // with the exact same word the JobPanel's current-item line uses for that
+  // same addon at that same instant (UX-SPEC.md 4.3: "same wording, same
+  // source data, intentionally kept").
+  function phaseWord(phase) {
+    const map = { queued: "Queued", checking: "Checking", downloading: "Downloading", installing: "Installing", up_to_date: "Up to date", done: "Done", failed: "Failed" };
+    return map[phase] || (phase || "");
   }
 
   return {
     qs: qs, qsa: qsa, el: el, icon: icon, escapeHtml: escapeHtml, debounce: debounce, relativeTime: relativeTime, fullDate: fullDate, formatBytes: formatBytes, formatNumber: formatNumber, releaseLabel: releaseLabel, releaseChipClass: releaseChipClass, colorForName: colorForName, firstLetter: firstLetter, normalizeId: normalizeId,
-    interfaceToVersion: interfaceToVersion, compatDisplay: compatDisplay
+    interfaceToVersion: interfaceToVersion, compatDisplay: compatDisplay, phaseWord: phaseWord
   };
 })();
 
@@ -1238,6 +1486,14 @@ const Store = (function () {
     job: null,
     jobLabel: null,        // client-chosen human title for the job panel, set by Actions.startJob
     updatesCheckedAt: null,
+    // CS2 (UX-SPEC.md sections 2.1/4.2): the one server-computed freshness
+    // enum ('not_checked'|'checking'|'up_to_date'|'updates_available'|
+    // 'check_failed') plus the two failure-detail fields CS1 added to
+    // /api/state - read by Components.Freshness, never derived client-side
+    // from other fields (per the spec's own rule).
+    freshness: null,
+    lastCheckFailed: false,
+    lastCheckError: null,
     // E13 (compatibility audit): the WoW client's own build string/Interface
     // number, from /api/state (server reads .build.info once at startup).
     clientBuild: null,
@@ -1248,26 +1504,15 @@ const Store = (function () {
     myaddonsSort: loadSortPref(),   // {column: 'name'|'installed'|'latest'|'status'|'updated', dir: 'asc'|'desc'}
     myaddonsSelection: [],   // E11: array of checked projectIds, driving the checkbox column/selection bar. Not persisted - resets on reload like search/filter.
 
+    // CS3 (UX-SPEC.md section 5): one merged search, no per-source switch -
+    // CurseForge and Wago are independent async fetches (each with its own
+    // loading/loaded/error/results) that Views.browse.renderResults()
+    // interleaves into one grid, rendering whichever has arrived so far
+    // without waiting on the slower one.
     browse: {
-      // E12: which marketplace Browse is currently showing - a top-level
-      // switch, not per-view state, since switching sources resets the
-      // whole result set/pagination the same way changing the query would.
-      source: "curseforge",   // 'curseforge' | 'wago'
-      loaded: false,
-      loading: false,
-      error: null,
       query: "",
-      categoryId: "",
-      sortField: 2,
-      sort: "popular",         // Wago's own sort param (SPEC: e.g. popular/updated/downloads/name)
-      index: 0,
-      page: 1,                 // Wago pagination is page-based, not index/pageSize
-      pageSize: 20,
-      results: [],
-      totalCount: 0,
-      lastPage: 1,
-      categories: [],
-      categoriesLoading: false
+      cf: { loading: false, loaded: false, error: null, results: [], keyless: true, catalogueAge: null },
+      wago: { loading: false, loaded: false, error: null, results: [] }
     },
 
     drawer: {
@@ -1376,10 +1621,30 @@ const Store = (function () {
     return state.addons.reduce(function (n, a) { return n + (a.updateAvailable ? 1 : 0); }, 0);
   }
 
-  function lastRunStatusFor(name) {
+  // Review fix: was keyed by display name alone, so two tracked addons that
+  // happen to share a name (a CurseForge addon and an unrelated/forked Wago
+  // addon with an identical title, or the same addon tracked from both
+  // sources via "Also on CurseForge/Wago") could misattribute one addon's
+  // failure onto the other's Status pill/filter/sort. Now takes the addon
+  // itself and matches by its stable key (projectId, or "wago:<slug>") the
+  // same way Store.addonKey does - both the real server's rows (a literal
+  // passthrough of the CLI's -Json rows, which always carry projectId/
+  // wagoSlug) and the mock's now carry that data on every row. Falls back to
+  // a name match only against rows with no key data at all (e.g. the
+  // synthetic "Launched" row), matching the old behavior for those.
+  function lastRunStatusFor(addon) {
     if (!state.lastRun || !state.lastRun.rows) return null;
-    const row = state.lastRun.rows.filter(function (r) { return r.name === name; }).pop();
-    return row ? row.status : null;
+    const rows = state.lastRun.rows;
+    const key = Utils.normalizeId(addonKey(addon));
+    function rowKey(r) {
+      if (r.wagoSlug) return "wago:" + r.wagoSlug;
+      if (r.projectId !== null && r.projectId !== undefined) return Utils.normalizeId(r.projectId);
+      return null;
+    }
+    const keyed = rows.filter(function (r) { const rk = rowKey(r); return rk !== null && rk === key; }).pop();
+    if (keyed) return keyed.status;
+    const byName = rows.filter(function (r) { return rowKey(r) === null && r.name === (addon && addon.name); }).pop();
+    return byName ? byName.status : null;
   }
 
   // Session-lifetime cache of CurseForge mod details, populated by any
@@ -1632,7 +1897,10 @@ Components.Dialogs = (function () {
     Utils.qs("#confirm-message").textContent = opts.message || "";
     const okBtn = Utils.qs("#confirm-ok");
     okBtn.textContent = opts.confirmLabel || "Confirm";
-    okBtn.className = "btn " + (opts.danger === false ? "btn-accent" : "btn-danger");
+    // Review fix: was btn-accent for the non-destructive case, colliding
+    // with the sidebar's "Update & Play" - the only accent button the app
+    // is allowed to have on screen at once (UX-SPEC.md section 1/2.3).
+    okBtn.className = "btn " + (opts.danger === false ? "btn-outline" : "btn-danger");
     show("confirm");
     return new Promise(function (resolve) { confirmResolve = resolve; });
   }
@@ -1690,7 +1958,7 @@ Components.Welcome = (function () {
     items.forEach(function (u) { list.appendChild(itemRow(u)); });
     Utils.qs("#welcome-count").textContent = items.length;
     const adoptBtn = Utils.qs("#welcome-adopt");
-    adoptBtn.textContent = "Adopt all (" + items.length + ")";
+    adoptBtn.textContent = "Take over all (" + items.length + ")";
     adoptBtn.onclick = function () { Actions.adoptAll(items.map(targetFor)); };
     Components.Dialogs.openWelcome();
   }
@@ -1709,9 +1977,42 @@ Components.Dropdown = (function () {
   let currentAnchor = null;
 
   function close() {
+    // Review fix: whichever trigger opened this popover (e.g. the "More"
+    // filter chip, which ships aria-haspopup="true") gets aria-expanded
+    // flipped back to "false" here so assistive tech sees the disclosure
+    // state change - previously this attribute was never set at all.
+    if (currentAnchor) currentAnchor.setAttribute("aria-expanded", "false");
+    // Review fix (low severity, keyboard focus management): only steal
+    // focus back to the trigger if focus was actually inside the menu
+    // being closed (e.g. Escape, or a menu item's own click) - a close
+    // triggered by clicking some unrelated element shouldn't yank focus
+    // away from wherever the user actually clicked.
+    const anchor = currentAnchor;
+    const hadFocusInMenu = !!(currentMenu && currentMenu.contains(document.activeElement));
     if (currentMenu) { currentMenu.remove(); currentMenu = null; currentAnchor = null; }
     window.removeEventListener("scroll", reposition, true);
     window.removeEventListener("resize", reposition);
+    if (hadFocusInMenu && anchor) anchor.focus();
+  }
+
+  // Review fix (low severity): keyboard navigation among the menu's own
+  // items - the menu is appended to document.body (not adjacent to its
+  // trigger in the DOM), so native Tab order never reaches it; this gives
+  // a keyboard-only user Arrow/Home/End traversal once the menu is open.
+  function menuItems() {
+    return currentMenu ? Array.prototype.slice.call(currentMenu.querySelectorAll(".dropdown-item:not([disabled])")) : [];
+  }
+  function focusMenuItem(index) {
+    const items = menuItems();
+    if (!items.length) return;
+    const i = ((index % items.length) + items.length) % items.length;
+    items[i].focus();
+  }
+  function onMenuKeydown(ev) {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); focusMenuItem(menuItems().indexOf(document.activeElement) + 1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); focusMenuItem(menuItems().indexOf(document.activeElement) - 1); }
+    else if (ev.key === "Home") { ev.preventDefault(); focusMenuItem(0); }
+    else if (ev.key === "End") { ev.preventDefault(); focusMenuItem(menuItems().length - 1); }
   }
 
   function reposition() {
@@ -1727,12 +2028,15 @@ Components.Dropdown = (function () {
     currentMenu.style.top = top + "px";
   }
 
-  // items: [{label, icon, danger, disabled, title, onSelect}] | null for a separator
+  // items: [{label, icon, danger, disabled, title, onSelect}] | null for a
+  // separator | {info: true, label, title} for a non-interactive info line
+  // (CS2: "Installed [date]" in the addon row kebab menu, UX-SPEC.md 3.3).
   function open(anchorEl, items) {
     if (currentAnchor === anchorEl) { close(); return; }
     close();
     const menu = Utils.el("div", { class: "dropdown-menu", role: "menu" }, items.map(function (item) {
       if (item === null) return Utils.el("div", { class: "dropdown-sep" });
+      if (item.info) return Utils.el("div", { class: "dropdown-info", title: item.title || null }, [item.label]);
       return Utils.el("button", {
         type: "button",
         class: "dropdown-item" + (item.danger ? " is-danger" : ""),
@@ -1745,9 +2049,14 @@ Components.Dropdown = (function () {
     document.body.appendChild(menu);
     currentMenu = menu;
     currentAnchor = anchorEl;
+    currentAnchor.setAttribute("aria-expanded", "true");
     reposition();
     window.addEventListener("scroll", reposition, true);
     window.addEventListener("resize", reposition);
+    // Review fix (low severity): move focus into the menu on open (first
+    // enabled item) and wire Arrow/Home/End navigation within it.
+    menu.addEventListener("keydown", onMenuKeydown);
+    focusMenuItem(0);
   }
 
   document.addEventListener("click", function (ev) {
@@ -1761,54 +2070,90 @@ Components.Dropdown = (function () {
 
 /* ---------- Status chip for an addon row/card ---------- */
 Components.Chip = (function () {
-  function forAddon(addon) {
-    if (Store.jobActingOn(addon.projectId)) return build("Installing…", "chip-busy");
+  function build(label, cls, title) {
+    return Utils.el("span", { class: "chip " + cls, title: title || null }, [Utils.el("span", { class: "chip-dot" }), label]);
+  }
+
+  // CS2 (UX-SPEC.md section 3.2): the single-pill Status vocabulary - a row
+  // shows EXACTLY one pill, chosen by this priority order, replacing the old
+  // separate Status chip + "Missing: N" chip + Compat column chip (three
+  // colored badges a row could previously carry at once). An actionable pill
+  // (Update / Couldn't update - Retry) renders as a real <button> via
+  // buildAction below so clicking it starts that one addon's job directly,
+  // per the spec's "actionable pills act as buttons" rule.
+  // Review fix: was a single hardcoded "Installing..." for every row a
+  // running job might touch, contradicting the JobPanel's own live phase
+  // word for the exact same addon at the same instant (UX-SPEC.md 4.3 says
+  // the two must match). job.progress is a single overwritten snapshot (no
+  // per-addon history), so only the one addon it currently names can show a
+  // real phase; every other row still in the batch (not yet reached, or
+  // already past the moment progress moved on) falls back to a neutral
+  // "Queued..." placeholder rather than a wrong or stale phase word.
+  const LIVE_PHASES = { queued: true, checking: true, downloading: true, installing: true };
+  function forStatus(addon) {
+    const key = Store.addonKey(addon);
+    if (Store.jobActingOn(key)) {
+      const p = Store.state.job && Store.state.job.progress;
+      if (p && p.addon === addon.name && LIVE_PHASES[p.phase]) {
+        return build(Utils.phaseWord(p.phase) + "…", "chip-busy");
+      }
+      return build("Queued…", "chip-busy");
+    }
+    // Priority 1: last attempt for this addon failed.
+    if (Store.lastRunStatusFor(addon) === "Failed") {
+      return buildAction("Couldn't update — Retry", "chip-danger", function () { Actions.updateNow(key); });
+    }
+    // Priority 2: a required dependency isn't installed - named directly,
+    // no hover needed (the old hidden "Missing dependencies: ..." tooltip
+    // is gone, per the spec's deleted-tooltip rule).
+    const missing = addon.missingDeps || [];
+    if (missing.length) return build("Needs: " + missing.join(", "), "chip-danger");
+    // Priority 3: a newer version exists - the pill itself is the one-click
+    // fix (the Version cell next to it already shows the installed->latest
+    // diff, so this pill only needs the verb).
+    if (addon.updateAvailable) {
+      return buildAction("Update", "chip-warning", function () { Actions.updateNow(key); });
+    }
+    // Priorities 4/5: the compat check found real evidence the installed
+    // file predates (stale-minor) or can't run on (stale) the current
+    // patch, and priority 3 above already ruled out "a newer file exists to
+    // fix it". Utils.compatDisplay's own tooltip text (raw Toc Interface
+    // numbers) is deliberately NOT used here - that hidden hover tooltip is
+    // deleted outright per the spec, not carried into the merged pill.
+    if (addon.compat === "stale-minor") return build("Old patch", "chip-warning");
+    if (addon.compat === "stale") return build("Won't work this patch", "chip-danger");
+    // Priority 6: pinned - version shown inline, no second pill.
     if (addon.pinnedFileId !== null && addon.pinnedFileId !== undefined) {
-      // E1 (round 2 fix): a pin left behind by a rollback gets a tooltip
-      // explaining why it stopped updating, instead of reading like an
-      // ordinary manual pin. This can NOT be detected from pinnedFileId vs.
-      // previousFileId: Invoke-RollbackForRecord SWAPS fileId<->previousFileId
-      // (so a second rollback can undo the first), which means right after a
-      // real rollback pinnedFileId (the just-restored file) and previousFileId
-      // (the file rolled back FROM) are two DIFFERENT values by construction -
-      // the old `pinnedFileId === previousFileId` check could never be true.
-      // Worse, the {pinnedFileId, previousFileId} shape left by a rollback is
-      // indistinguishable from a plain "Install this older version" from the
-      // Versions tab (both pin to a fileId that differs from previousFileId),
-      // so no combination of those two fields can serve as the signal. The
-      // last completed job's status for this addon is the only rollback-only
-      // signal available client-side - same precedent as the "Failed" chip
-      // below, which is also derived from lastRunStatusFor rather than a
-      // stored record field.
-      const rolledBack = Store.lastRunStatusFor(addon.name) === "Rolled-back";
-      // Round 5 fix: an addon can be pinned AND have ignoreUpdates set at the
-      // same time (e.g. "Pin current version" on an already-ignored addon) -
-      // this branch returns before the Ignored check below ever runs, so that
-      // second state had no chip of its own and was otherwise only visible via
-      // the kebab menu wording or the Ignored filter-chip count. Folded into
-      // the same tooltip the rollback signal above already uses rather than
-      // adding a second chip/DOM element for one more boolean.
+      // E1 (round 2 fix, carried over): a pin left behind by a rollback gets
+      // a tooltip explaining why it stopped updating (see the original
+      // comment on this signal, preserved below); a pin+ignore combo notes
+      // both rather than growing a second pill for one more boolean.
+      const rolledBack = Store.lastRunStatusFor(addon) === "Rolled-back";
       const notes = [];
       if (rolledBack) notes.push("Rolled back — unpin to resume updates.");
       if (addon.ignoreUpdates) notes.push("Updates are also ignored for this addon.");
       return build("Pinned · " + addon.version, "chip-info", notes.length ? notes.join(" ") : null);
     }
-    if (addon.ignoreUpdates) return build("Ignored", "chip-muted");
-    if (addon.updateAvailable) return build("Update available", "chip-warning");
-    if (Store.lastRunStatusFor(addon.name) === "Failed") return build("Failed", "chip-danger");
-    return build("Up to date", "chip-success");
+    // Priority 7: update exists (implicitly none here, or ignored regardless)
+    // but the player chose to skip it.
+    if (addon.ignoreUpdates) return build("Ignoring updates", "chip-muted");
+    // Priority 8 (default): nothing to do - low-weight, not a fully blank
+    // cell (a truly empty cell reads as a rendering bug per the spec).
+    return build("Up to date", "chip-muted");
   }
 
-  function build(label, cls, title) {
-    return Utils.el("span", { class: "chip " + cls, title: title || null }, [Utils.el("span", { class: "chip-dot" }), label]);
-  }
-
-  // E13 (compatibility audit): the My Addons Compatibility column's chip -
-  // Utils.compatDisplay does the actual label/color/tooltip computation
-  // (shared with the drawer Overview's compat section), this just builds it.
-  function forCompat(addon) {
-    const info = Utils.compatDisplay(addon, Store.state.clientInterface);
-    return build(info.label, info.cls, info.title);
+  // CS2: an actionable pill - same look as a plain chip, but a real <button>
+  // so "Update"/"Couldn't update — Retry" double as the one-click fix
+  // (UX-SPEC.md section 3.2). stopPropagation keeps the click from also
+  // bubbling to the row's own click handler, which would otherwise open the
+  // detail drawer right after starting the job.
+  function buildAction(label, cls, onClick) {
+    const busy = Store.isBusy();
+    return Utils.el("button", {
+      type: "button", class: "chip chip-action " + cls, disabled: busy,
+      title: busy ? "Another task is running" : null,
+      onclick: function (ev) { ev.stopPropagation(); if (!Store.isBusy()) onClick(); }
+    }, [Utils.el("span", { class: "chip-dot" }), label]);
   }
 
   function forJobStatus(status) {
@@ -1821,7 +2166,90 @@ Components.Chip = (function () {
     return build(status, map[status] || "chip-muted");
   }
 
-  return { forAddon: forAddon, build: build, forCompat: forCompat, forJobStatus: forJobStatus };
+  return { forStatus: forStatus, build: build, forJobStatus: forJobStatus };
+})();
+
+/* ---------- Freshness headline (UX-SPEC.md sections 1.1/2.1) ----------
+   The one "is anything out of date" fact, computed once server-side
+   (Store.state.freshness, plus updatesCheckedAt/lastCheckError) and
+   rendered here by exactly one component, mounted in exactly two spots:
+   the sidebar (compact) and the top of My Addons (full). Never derives its
+   own opinion from any other field - a container with no matching state
+   just renders nothing, so a stale/unknown enum value fails silently
+   rather than showing a wrong headline. */
+Components.Freshness = (function () {
+  function describe() {
+    const freshness = Store.state.freshness;
+    const checkedAt = Store.state.updatesCheckedAt;
+    const n = Store.updatesCount();
+    if (freshness === "checking") {
+      return { dot: "is-checking", headline: "Checking…", clause: null };
+    }
+    if (freshness === "check_failed") {
+      return {
+        dot: "is-danger", retry: true, headline: "Couldn't check — Retry",
+        clause: checkedAt ? ("last success " + Utils.relativeTime(checkedAt)) : null
+      };
+    }
+    if (freshness === "updates_available") {
+      return {
+        dot: "is-warning", headline: n + " update" + (n === 1 ? "" : "s") + " ready",
+        clause: checkedAt ? ("checked " + Utils.relativeTime(checkedAt)) : null
+      };
+    }
+    if (freshness === "up_to_date") {
+      return {
+        dot: "is-success", headline: "Everything's up to date",
+        clause: checkedAt ? ("checked " + Utils.relativeTime(checkedAt)) : null
+      };
+    }
+    // "not_checked", or freshness not yet known (still loading /api/state).
+    return { dot: "is-muted", headline: "Not checked yet", clause: null };
+  }
+
+  // Review fix (acceptance checklist item 1 - "sidebar shows a connectivity
+  // dot only"): the sidebar mount used to still render the full headline
+  // text ("3 updates ready" etc, just minus the clause), which is a SECOND
+  // on-screen rendering of the freshness fact next to the My Addons header's
+  // own full headline - exactly the duplication the checklist bullet rules
+  // out, not just the "checked X ago" clause specifically. dotOnly (sidebar
+  // mount only) now renders just the colored dot - the fact still reaches
+  // the sidebar (color/animation), but the words live in exactly one place
+  // on screen. The dot keeps a title tooltip so the state is still
+  // discoverable on hover/for assistive tech, and stays a real <button>
+  // (not a <span>) whenever a Retry is available, so the sidebar's own
+  // click-to-retry affordance survives losing its label.
+  function render(containerId, opts) {
+    const box = Utils.qs("#" + containerId);
+    if (!box) return;
+    const dotOnly = !!(opts && opts.dotOnly);
+    box.textContent = "";
+    const d = describe();
+    if (dotOnly) {
+      const dotEl = d.retry
+        ? Utils.el("button", {
+          type: "button", class: "freshness-dot freshness-dot-btn " + d.dot, title: d.headline,
+          "aria-label": d.headline,
+          onclick: function () { if (!Store.isBusy()) Actions.checkForUpdates(); }
+        }, [])
+        : Utils.el("span", { class: "freshness-dot " + d.dot, title: d.headline, "aria-label": d.headline }, []);
+      box.appendChild(Utils.el("div", { class: "freshness-row" }, [dotEl]));
+      return;
+    }
+    const parts = [Utils.el("span", { class: "freshness-dot " + d.dot })];
+    if (d.retry) {
+      parts.push(Utils.el("button", {
+        type: "button", class: "link-btn freshness-headline",
+        onclick: function () { if (!Store.isBusy()) Actions.checkForUpdates(); }
+      }, [d.headline]));
+    } else {
+      parts.push(Utils.el("span", { class: "freshness-headline" }, [d.headline]));
+    }
+    if (d.clause) parts.push(Utils.el("span", { class: "freshness-clause" }, [" · " + d.clause]));
+    box.appendChild(Utils.el("div", { class: "freshness-row" }, parts));
+  }
+
+  return { render: render };
 })();
 
 /* ---------- Addon/mod logo (image if known, else an initial on a coloured tile) ---------- */
@@ -2144,10 +2572,20 @@ Components.Drawer = (function () {
     // instead. Never set for a keyed 'curseforge' drawer (d.enrich stays
     // null there), so this changes nothing about the pre-E16 keyed path.
     const enrich = d.enrich;
-    const name = mod ? mod.name : ((enrich && enrich.name) ? enrich.name : (addon ? addon.name : ("Project " + d.projectId)));
+    // CS2 bug fix (UX-SPEC.md section 3.5, flagged by every judge as the
+    // app's worst functional defect): a TRACKED addon's real name/author is
+    // already known locally the instant a row is clicked (Store.state.addons),
+    // so it must win over mod/enrich - both of which start out null and, for
+    // enrich, can themselves resolve to a literal "Project <id>" placeholder
+    // (the keyless catalogue-only fallback - see Mock's mockCfEnrich) that
+    // used to silently override the real tracked name once it loaded. mod/
+    // enrich still supply the name for an UNTRACKED drawer (opened from
+    // Browse, where no local addon record exists at all).
+    const name = (addon && addon.name) ? addon.name : (mod ? mod.name : ((enrich && enrich.name) ? enrich.name : ("Project " + d.projectId)));
     // Round 4 fix: list every author CurseForge returns ("by A, B"), not just
     // the first - mod.authors is commonly more than one name.
-    const author = (mod && mod.authors && mod.authors.length ? mod.authors.map(function (a) { return a.name; }).join(", ") : null) || (addon ? addon.author : null);
+    // CS2: same tracked-first priority as name above.
+    const author = (addon && addon.author) ? addon.author : ((mod && mod.authors && mod.authors.length) ? mod.authors.map(function (a) { return a.name; }).join(", ") : null);
     const logoUrl = mod && mod.logo ? (mod.logo.thumbnailUrl || mod.logo.url) : (enrich ? enrich.logoUrl : null);
 
     const children = [
@@ -2174,16 +2612,24 @@ Components.Drawer = (function () {
       if (mod.categories && mod.categories.length) {
         children.push(Utils.el("div", { class: "drawer-cats" }, mod.categories.map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.name]); })));
       }
+      // Review fix: parity with the keyless/enrich-only branch below, which
+      // gained a plain "CurseForge" source-badge as part of CS5's provenance-
+      // pill removal - this keyed (has-API-key, real `mod` data) branch never
+      // got the equivalent, so a drawer opened with a CurseForge key showed
+      // no source indicator at all while the keyless path did.
+      children.push(Utils.el("span", { class: "source-badge is-cf" }, ["CurseForge"]));
     } else if (enrich) {
       const meta = [];
       if (enrich.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(enrich.downloadCount) + " downloads"]));
       if (enrich.lastUpdated) meta.push(Utils.el("span", { title: Utils.fullDate(enrich.lastUpdated) }, ["updated " + Utils.relativeTime(enrich.lastUpdated)]));
       if (meta.length) children.push(Utils.el("div", { class: "drawer-meta" }, meta));
-      // E16: a small provenance pill so it's always visually clear whether
-      // this is CurseForge's own data (official-api - no pill needed) or a
-      // third party's best-effort mirror.
-      const pillText = enrich.source === "addon-radar" ? "via addon-radar" : (enrich.source === "wago-match" ? "via Wago Addons" : (enrich.source === "catalogue-only" ? "via catalogue" : null));
-      if (pillText) children.push(Utils.el("span", { class: "source-pill" }, [pillText]));
+      // CS5 (UX-SPEC.md 3.5/§7, "Drawer badge | via catalogue | DELETE"):
+      // the old provenance pill ("via catalogue"/"via addon-radar"/"via
+      // Wago Addons" - internal plumbing naming which mirror answered the
+      // request) is gone; this branch is always a CurseForge-sourced entry
+      // (Wago has its own renderWagoHeader above), so it gets the same
+      // plain source badge every other CurseForge card in the app uses.
+      children.push(Utils.el("span", { class: "source-badge is-cf" }, ["CurseForge"]));
     } else if (d.enrichLoading) {
       children.push(Utils.el("div", { class: "muted-text" }, ["Loading…"]));
     } else if (d.enrichError) {
@@ -2267,18 +2713,24 @@ Components.Drawer = (function () {
     children.forEach(function (c) { if (c) container.appendChild(c); });
   }
 
+  // Review fix: these were all btn-accent, which meant the drawer's own
+  // primary action rendered in the exact same accent color as the sidebar's
+  // persistent "Update & Play" button whenever the drawer was open - two
+  // accent buttons on screen at once. UX-SPEC.md section 1/2.3 are explicit
+  // that Update & Play is the ONLY accent button in the app; everything
+  // else (including this drawer action) is outline/ghost/menu.
   function primaryActionButton(addon, mod) {
     const d = Store.state.drawer;
     const pid = d.projectId;
-    if (Store.jobActingOn(pid)) return Utils.el("button", { type: "button", class: "btn btn-accent", disabled: true }, ["Installing…"]);
+    if (Store.jobActingOn(pid)) return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, ["Installing…"]);
     if (addon) {
-      if (addon.updateAvailable) return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.updateNow(pid); } }, ["Update now"]);
+      if (addon.updateAvailable) return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.updateNow(pid); } }, ["Update now"]);
       return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"]);
     }
     if (d.source === "wago") {
-      return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.installLatestWago(d.slug, (d.wagoAddon && d.wagoAddon.addon) ? d.wagoAddon.addon.display_name : null); } }, ["Install"]);
+      return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatestWago(d.slug, (d.wagoAddon && d.wagoAddon.addon) ? d.wagoAddon.addon.display_name : null); } }, ["Install"]);
     }
-    return Utils.el("button", { type: "button", class: "btn btn-accent", onclick: function () { Actions.installLatest(pid, mod ? mod.name : null); } }, ["Install"]);
+    return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatest(pid, mod ? mod.name : null); } }, ["Install"]);
   }
 
   // E12: Wago's Overview - always available, no key ever needed. props.description
@@ -2314,7 +2766,7 @@ Components.Drawer = (function () {
     if (!hasKey) {
       const cached = Store.getCachedMod(projectId());
       if (cached && cached.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [cached.summary]));
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see descriptions, changelogs and screenshots."])]));
+      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see descriptions, changelogs and screenshots."])]));
       renderCompat(panel);
       renderDependencies(panel);
       return;
@@ -2386,11 +2838,22 @@ Components.Drawer = (function () {
       } else {
         holder.appendChild(Utils.el("p", { class: "muted-text" }, ["No description provided."]));
       }
-      panel.appendChild(Utils.el("p", { class: "muted-text source-note" }, ["(via addon-radar.com, an independent WoW addon index)"]));
+      // Review fix (principle 2 - "no visible sentence explains a WoW/
+      // CurseForge/PowerShell internal the player didn't ask about"): this
+      // used to append "(from a community addon index)" here, naming which
+      // offline mirror served the description - an internal plumbing detail
+      // with no action for the player to take on it. The header's own
+      // source badge already says where the addon itself comes from;
+      // dropped this line rather than reword it.
     } else {
       if (d.enrich.summary) panel.appendChild(Utils.el("p", { class: "rich-content" }, [d.enrich.summary]));
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see descriptions, changelogs and screenshots."])]));
-      panel.appendChild(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, d.enrich.slug || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"]));
+      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see descriptions, changelogs and screenshots."])]));
+      // Review fix: this used to duplicate the header's own "CurseForge"
+      // link (renderHeader's drawer-links button a few pixels above, same
+      // Actions.openOnCurseForge call) with a differently-worded second
+      // button doing the identical thing - dropped in favor of the one
+      // header link, so at most one "open externally" control shows per
+      // drawer state.
     }
     renderCompat(panel);
     renderDependencies(panel);
@@ -2433,12 +2896,17 @@ Components.Drawer = (function () {
     if (!d.tracked) return;
     const addon = Store.addonByProjectId(d.projectId);
     if (!addon || !addon.compat) return;
+    // CS5 (UX-SPEC.md 3.5): "shown once, in the same plain words as the
+    // table Status pill... no separate restatement" - just the one chip now,
+    // the old raw-detail line (compat-detail, Toc Interface numbers) is gone.
+    // Review fix: also drop the standalone "Compatibility" heading/label -
+    // section 3.5's own wireframe shows the pill alone with no label above
+    // it, and a bare heading fails the banned-term list's "'compat' as a
+    // header/label" rule (the carve-out there is for plain sentences only).
     const info = Utils.compatDisplay(addon, Store.state.clientInterface);
     const section = Utils.el("div", { class: "compat-section" }, [
-      Utils.el("div", { class: "deps-heading" }, ["Compatibility"]),
       Utils.el("div", { class: "compat-row" }, [
-        Components.Chip.build(info.label, info.cls),
-        Utils.el("span", { class: "muted-text compat-detail" }, [info.title])
+        Components.Chip.build(info.label, info.cls)
       ])
     ]);
     panel.appendChild(section);
@@ -2661,7 +3129,7 @@ Components.Drawer = (function () {
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see changelogs."])]));
+      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key to see changelogs."])]));
       return;
     }
     const d = Store.state.drawer;
@@ -2724,7 +3192,7 @@ Components.Drawer = (function () {
     panel.textContent = "";
     panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [
       Utils.icon("warning"),
-      Utils.el("span", {}, ["Changelogs for CurseForge addons need a free API key (or a matching Wago Addons listing, which this one doesn't have)."])
+      Utils.el("span", {}, ["Add a free API key to see changelogs."])
     ]));
     panel.appendChild(Utils.el("div", { class: "btn-row" }, [
       Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { App.switchView("settings"); } }, ["Go to Settings"]),
@@ -2817,7 +3285,7 @@ Components.Drawer = (function () {
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     panel.textContent = "";
     if (!hasKey) {
-      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free CurseForge API key in Settings to see screenshots."])]));
+      panel.appendChild(Utils.el("div", { class: "nokey-inline" }, [Utils.icon("warning"), Utils.el("span", {}, ["Add a free API key in Settings to see screenshots."])]));
       return;
     }
     const mod = Store.state.drawer.mod;
@@ -2838,6 +3306,128 @@ Components.Drawer = (function () {
 
 /* ---------- Bottom job progress panel ---------- */
 Components.JobPanel = (function () {
+  // CS2 (UX-SPEC.md section 4.1/4.3): job kinds whose job.progress the CLI/
+  // server actually populate (see addon-sync.ps1's Write-ProgressStep call
+  // sites) - every other kind (remove/rollback/import/switch-source) has no
+  // progress object at all, and keeps the plain title-bar-only view this
+  // panel always had.
+  // Review fix: "launch" belongs here too - addon-server.ps1's Start-Job
+  // (see the $cliKind mapping right above the Job object literal) always
+  // runs a "launch" job's CLI process as $cliKind='sync' when updateFirst is
+  // true (Update & Play), so -ProgressPath is threaded and job.progress is
+  // populated exactly like a real "sync" job; a launchOnly (updateFirst:
+  // false) job never reaches a CLI process at all (see the synchronous
+  // no-CLI branch in Start-Job) and finishes before job.progress.total is
+  // ever > 0, so showProgress below still correctly stays false for it.
+  const PROGRESS_KINDS = ["sync", "check", "add", "install", "launch"];
+
+  // CS2: job.progress is a single overwritten snapshot (the server's
+  // best-effort read of one progress.json file), not a per-addon history -
+  // once the run moves on to its next target, a `failed` addon's own
+  // failPhase is gone from job.progress. This module-scoped map catches
+  // every failPhase this panel actually SAW while polling (best-effort,
+  // same as the server's own read of progress.json) and keys it by addon
+  // name so the done-state failure list (built after the job finishes,
+  // when job.progress may already point at a different/no addon) can still
+  // look each failed row's phase up. Cleared whenever a new job starts.
+  let failPhaseByName = {};
+  let trackedJobId = null;
+
+  // Review fix (UX-SPEC.md 2.3 / 7): "Done, all succeeded - panel collapses
+  // to 'Updated N (dot) checked just now' for ~4 seconds then reverts to the
+  // 'Up to date' headline. No permanent 'last run' line survives." This was
+  // never implemented (CS2's own notesForNext flagged the gap) - the panel
+  // just sat open indefinitely after every finished job. successHandledJobId
+  // guards so a job id is only ever collapsed once (pollJob's final "not
+  // running" tick is normally the only trigger, but show() can also re-fire
+  // update() for an already-finished job on a page reload/reconnect).
+  let successHandledJobId = null;
+  let successCollapseTimer = null;
+
+  function scheduleSuccessCollapse(job) {
+    if (job.id === successHandledJobId) return;
+    successHandledJobId = job.id;
+    const updatedCount = job.results.filter(function (r) { return r.status === "Updated" || r.status === "Installed"; }).length;
+    const titleEl = Utils.qs("#job-title");
+    if (titleEl) {
+      titleEl.textContent = updatedCount > 0
+        ? ("Updated " + updatedCount + " · checked just now")
+        : ("Everything's up to date · checked just now");
+    }
+    const panel = Utils.qs("#job-panel");
+    if (panel && !panel.classList.contains("is-collapsed")) toggleCollapse();
+    clearTimeout(successCollapseTimer);
+    successCollapseTimer = setTimeout(function () { hide(); }, 4000);
+  }
+
+  function trackProgress(job) {
+    if (job.id !== trackedJobId) { failPhaseByName = {}; trackedJobId = job.id; }
+    const p = job.progress;
+    if (p && p.phase === "failed" && p.addon) failPhaseByName[p.addon] = p.failPhase || null;
+  }
+
+  // CS2 (UX-SPEC.md section 4.3): maps a failed row's last-seen failPhase to
+  // one of the spec's plain-language reasons. Only three failPhase values
+  // ever reach the wire (checking/downloading/installing - see addon-sync.ps1's
+  // Write-ProgressStep), one short of the spec's five-bucket list - "checking"
+  // is mapped to "No matching version found" (the most common reason a sync
+  // fails during its own check step, before any download/install ever
+  // starts); "no compatible file found" isn't a separate signal available
+  // client-side. A failure this panel never actually polled a failPhase for
+  // (missed by the 500ms cadence, or a whole-job failure with no per-addon
+  // progress at all) falls back to a connectivity guess (offline right now)
+  // or the generic catch-all, per the spec's own last-resort bucket.
+  function failureReason(r) {
+    const failPhase = failPhaseByName[r.name];
+    if (failPhase === "downloading") return "Couldn't download the update";
+    if (failPhase === "installing") return "Couldn't install the update";
+    if (failPhase === "checking") return "No matching version found";
+    if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
+    return "Something went wrong";
+  }
+
+  // Review fix (UX-SPEC.md 4.3 / acceptance checklist item 8): the same
+  // plain-language treatment as failureReason(), but for a WHOLE-JOB
+  // failure (job.state === "failed", no per-addon progress to key off of -
+  // e.g. a corrupted addons.json causing CLI exit code 2, a JSON-parse
+  // failure of the CLI's own output, or any uncaught server-side
+  // exception). job.error in these cases is raw stderr/exception text and
+  // must never be the default on-screen string; it stays available only
+  // via #job-log/Details (see update() below). Exported so pollJob's own
+  // terminal-poll toast (ui/app.js, App module) can show the identical
+  // plain sentence instead of concatenating raw job.error itself.
+  function wholeJobFailureReason(job) {
+    if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
+    const err = ((job && job.error) || "").toLowerCase();
+    if (err.indexOf("json") !== -1 || err.indexOf("parse") !== -1) return "Something went wrong reading the results";
+    if (err.indexOf("exit") !== -1 || err.indexOf("code") !== -1) return "Something went wrong running the update";
+    return "Something went wrong";
+  }
+
+  // Review fix: a 'done' job (job.state stays "done" even when one addon's
+  // OWN result was Failed - only a whole-job crash sets "failed") used to
+  // always show the blind past-tense scope label ("Done — Updated 3
+  // addons"), which overstates success right above a results list showing a
+  // red "Couldn't download the update" row for one of those three. Mirrors
+  // the count-aware wording scheduleSuccessCollapse already computes for its
+  // all-succeeded case, extended to cover the partial-failure case that was
+  // left using the generic label. Kind-independent ("succeeded"/"failed"
+  // reads correctly whether the job was a sync, a check, an add, or any
+  // other results-bearing kind) rather than reusing "Updated", which is
+  // wrong wording for e.g. a "check" job where nothing was updated at all.
+  function doneTitleWithFailures(job) {
+    if (!job.results || !job.results.length) return null;
+    const failedCount = job.results.filter(function (r) { return r.status === "Failed"; }).length;
+    if (failedCount === 0) return null;
+    const okCount = job.results.length - failedCount;
+    return "Done — " + okCount + " succeeded, " + failedCount + " failed";
+  }
+
+  // Review fix: moved to Utils.phaseWord so Components.Chip.forStatus can
+  // share the exact same mapping - kept as a thin alias here so every
+  // existing call site in this module still reads `phaseWord(...)`.
+  function phaseWord(phase) { return Utils.phaseWord(phase); }
+
   function summarize(results) {
     if (!results || !results.length) return "No changes.";
     const counts = {};
@@ -2863,11 +3453,45 @@ Components.JobPanel = (function () {
     return map[job.kind] || "Working…";
   }
 
+  // Review fix: the finished title used to reuse the running label verbatim
+  // ("Done — Updating 3 addons"), a tense collision that reads as unfinished
+  // text. titleFor()'s label is free-form (every Actions.startJob call site
+  // writes its own present-progressive sentence, ~25 of them), so rather
+  // than threading a second done-tense string through every call site, this
+  // rewrites the SAME label's leading gerund to its past-tense form via an
+  // ordered prefix list (longest/most-specific match first, since several
+  // share a leading word - e.g. "Updating & launching" vs plain "Updating").
+  // Any label that doesn't start with a known gerund (there is none today,
+  // but a future call site's wording could drift) is returned unchanged
+  // rather than risking a garbled rewrite.
+  const PAST_TENSE_PATTERNS = [
+    [/^Updating & launching/, "Updated & launched"],
+    [/^Checking for updates/, "Checked for updates"],
+    [/^Force reinstalling/, "Force reinstalled"],
+    [/^Rolling back/, "Rolled back"],
+    [/^Taking over/, "Took over"],
+    [/^Retrying/, "Retried"],
+    [/^Updating/, "Updated"],
+    [/^Installing/, "Installed"],
+    [/^Adding/, "Added"],
+    [/^Removing/, "Removed"],
+    [/^Reinstalling/, "Reinstalled"],
+    [/^Importing/, "Imported"],
+    [/^Launching/, "Launched"],
+    [/^Syncing/, "Synced"]
+  ];
+  function pastTenseLabel(label) {
+    if (!label) return label;
+    for (let i = 0; i < PAST_TENSE_PATTERNS.length; i++) {
+      const pair = PAST_TENSE_PATTERNS[i];
+      if (pair[0].test(label)) return label.replace(pair[0], pair[1]);
+    }
+    return label;
+  }
+
   // E5: a per-row "What changed" control for a just-Updated/Installed addon.
   // Guarded on r.projectId being present (every real sync/add/install/launch
-  // result row carries one per SPEC's documented results shape; a synthesized
-  // "last run" pseudo-job built from lastRun.rows - see Actions.showLastRunDetails -
-  // does not, so this quietly omits the button there rather than throwing).
+  // result row carries one per SPEC's documented results shape).
   function whatChangedButton(r) {
     if (r.status !== "Updated" && r.status !== "Installed") return null;
     // E12: a Wago row's projectId is always null (it has none) - its
@@ -2879,11 +3503,58 @@ Components.JobPanel = (function () {
     return Utils.el("button", { type: "button", class: "link-btn job-result-whatchanged", onclick: function () { Actions.whatChanged(key, r.fileId); } }, ["What changed"]);
   }
 
+  // CS2: a per-row Retry for a failed job result - re-posts the SAME job
+  // kind, scoped to just this one addon, reusing the server's existing
+  // single-target params (no new server logic needed, per the spec). A
+  // "sync"/"check" job (Update all / Update now / Update selected / Check
+  // now all post one of these kinds) retries with `ids:[key]`; "add"/
+  // "install" jobs are already single-target, so retrying just re-posts the
+  // same params.
+  // Review fix: "rollback" and "switch-source" were falling through to the
+  // generic sync-retry branch below, which is wrong for both - a failed
+  // rollback (no previousFileId, or its backup zip missing/corrupt) got
+  // silently retried as a plain sync, which installs the LATEST version
+  // instead of retrying the rollback (the opposite of what was asked); a
+  // failed switch-source got retried as a sync against the OLD source key,
+  // which by then may already be gone (the switch's own -Remove phase can
+  // have already dropped it), making the "retry" a confusing no-op. Both
+  // now re-post their own job kind instead.
+  function retryFailedResult(job, r) {
+    const key = (r.projectId !== undefined && r.projectId !== null) ? r.projectId : (r.wagoSlug ? "wago:" + r.wagoSlug : null);
+    const label = "Retrying " + (r.name || "addon");
+    if (job.kind === "add" || job.kind === "install") return Actions.startJob(job.kind, job.params, label);
+    if (job.kind === "rollback") {
+      if (key !== null) return Actions.startJob("rollback", { projectId: Utils.normalizeId(key) }, label);
+    } else if (job.kind === "switch-source") {
+      // job.params already carries the full {projectId, toSource, toTarget}
+      // this job kind needs - re-post it verbatim rather than deriving a
+      // new one from the result row, which only carries the OLD source's key.
+      return Actions.startJob("switch-source", job.params, label);
+    } else if (key !== null) {
+      return Actions.startJob("sync", { ids: [Utils.normalizeId(key)] }, label);
+    }
+    // Defensive fallback - every real result row carries either projectId or
+    // wagoSlug (see SPEC's -Json contract), so this should be unreachable;
+    // still better than a silently do-nothing Retry click.
+    Components.Toast.show("Couldn't identify " + (r.name || "that addon") + " to retry it.", "error");
+    return null;
+  }
+
   function show(job) {
     const panel = Utils.qs("#job-panel");
     panel.hidden = false;
     panel.classList.remove("is-collapsed");
     Utils.qs("#job-panel-collapse .icon use").setAttribute("href", "#icon-chevron-down");
+    // CS2: the raw log disclosure starts closed for every new job, even if
+    // a curious click left it open during a previous one (UX-SPEC.md 4.3 -
+    // "closed-by-default", not just closed-once-ever).
+    const details = Utils.qs("#job-details");
+    if (details) details.open = false;
+    // Review fix: a brand-new job means any pending success-collapse from a
+    // previous finished job is no longer relevant - clear it so its 4s
+    // timer can never call hide() out from under the job that's now showing.
+    clearTimeout(successCollapseTimer);
+    successHandledJobId = null;
     update(job);
   }
 
@@ -2892,38 +3563,139 @@ Components.JobPanel = (function () {
     const panel = Utils.qs("#job-panel");
     if (panel.hidden) panel.hidden = false;
     const running = job.state === "running";
-    Utils.qs("#job-title").textContent = running ? titleFor(job) : ((job.state === "failed" ? "Failed — " : "Done — ") + titleFor(job));
+    // Review fix: the finished title is now tense-correct in both the Done
+    // and Failed states ("Done — Updated 3 addons" / "Failed — Updated 3
+    // addons") instead of reusing the present-progressive running label
+    // verbatim, which read as unfinished/broken text.
+    const doneWithFailuresTitle = (!running && job.state === "done") ? doneTitleWithFailures(job) : null;
+    Utils.qs("#job-title").textContent = running
+      ? titleFor(job)
+      : (doneWithFailuresTitle || ((job.state === "failed" ? "Failed — " : "Done — ") + pastTenseLabel(titleFor(job))));
     Utils.qs("#job-spinner").classList.toggle("is-done", !running);
     Utils.qs("#job-panel-close").hidden = running;
 
+    if (PROGRESS_KINDS.indexOf(job.kind) !== -1) trackProgress(job);
+
+    // CS2 (UX-SPEC.md section 4.3): determinate n-of-N bar + current-item
+    // phase line, driven directly by job.progress - the primary view for
+    // any job kind the CLI reports progress for, replacing the old
+    // log-only panel. Every other kind (remove/rollback/import/switch-
+    // source, and a launchOnly launch job) has no job.progress at all, so
+    // this whole block just stays hidden and the panel falls back to its
+    // title bar + Details, same as always.
+    const progressWrap = Utils.qs("#job-progress-wrap");
+    const showProgress = running && PROGRESS_KINDS.indexOf(job.kind) !== -1 && job.progress && job.progress.total > 0;
+    progressWrap.hidden = !showProgress;
+    if (showProgress) {
+      const p = job.progress;
+      const bar = Utils.qs("#job-progress-bar");
+      const label = Utils.qs("#job-progress-label");
+      const current = Utils.qs("#job-progress-current");
+      if (job.kind === "check") {
+        bar.removeAttribute("value"); // indeterminate
+        // Review fix: -webkit-appearance:none (needed for the determinate
+        // bar's themed fill/track colors) also strips the browser's own
+        // indeterminate animation, leaving a flat, static track with no
+        // value-less native rendering to fall back on. .is-indeterminate
+        // (style.css) drives a themed sweep animation instead so this state
+        // reads as active, not stalled.
+        bar.classList.add("is-indeterminate");
+        label.textContent = "Checking…";
+      } else {
+        bar.classList.remove("is-indeterminate");
+        bar.max = p.total; bar.value = p.index;
+        label.textContent = "Updating " + p.index + " of " + p.total + " addons…";
+      }
+      // Review fix (UX-SPEC.md 4.3): "Downloading (+ % from bytesDone/
+      // bytesTotal when present)" - CS6 (addon-sync.ps1) now populates real
+      // byte counts during the downloading phase and addon-server.ps1 passes
+      // them through on job.progress untouched, but nothing here ever read
+      // them. Only appended when phase is actually "downloading" and a
+      // nonzero bytesTotal came through (a job/kind that never reports
+      // bytes - or a target too small to hit CS6's throttle before moving
+      // on - just shows the plain phase word, same as before).
+      let currentText = (p.addon && p.phase && p.phase !== "queued") ? (phaseWord(p.phase) + " " + p.addon) : "";
+      if (p.phase === "downloading" && p.bytesTotal) {
+        currentText += " (" + Math.round((p.bytesDone / p.bytesTotal) * 100) + "%)";
+      }
+      current.textContent = currentText;
+    }
+
     const log = Utils.qs("#job-log");
-    log.textContent = (job.log || []).join("\n");
-    const body = Utils.qs("#job-panel-body");
-    body.scrollTop = body.scrollHeight;
+    let logText = (job.log || []).join("\n");
+    // Review fix (UX-SPEC.md 4.3 / acceptance checklist item 8): a whole-job
+    // failure's raw job.error (stderr/exception text) belongs behind this
+    // Details disclosure, never in the always-visible results box - see the
+    // plain-language row below instead.
+    if (job.state === "failed" && job.error) {
+      logText = (logText ? logText + "\n\n" : "") + job.error;
+    }
+    log.textContent = logText;
 
     const resultsBox = Utils.qs("#job-results");
     resultsBox.textContent = "";
     let any = false;
     if (job.state === "failed" && job.error) {
-      resultsBox.appendChild(Utils.el("div", { class: "job-result-row" }, [Utils.el("span", {}, [job.error])]));
+      resultsBox.appendChild(Utils.el("div", { class: "job-result-row is-failed" }, [
+        Utils.el("span", { class: "job-result-reason" }, [wholeJobFailureReason(job)])
+      ]));
       any = true;
     }
+    // CS2: one clean per-addon list, done state only - a failed row gets a
+    // plain-language reason (never raw exception text) plus an inline
+    // Retry scoped to just that addon; the raw log stays reachable behind
+    // Details regardless.
     if (!running && job.results && job.results.length) {
       job.results.forEach(function (r) {
-        resultsBox.appendChild(Utils.el("div", { class: "job-result-row" }, [
-          Utils.el("div", { class: "job-result-name" }, [Utils.el("span", {}, [r.name || ""]), whatChangedButton(r)]),
-          Components.Chip.forJobStatus(r.status)
-        ]));
+        const failed = r.status === "Failed";
+        const row = [Utils.el("div", { class: "job-result-name" }, [Utils.el("span", {}, [r.name || ""]), whatChangedButton(r)])];
+        if (failed) {
+          row.push(Utils.el("div", { class: "job-result-fail" }, [
+            Utils.el("span", { class: "job-result-reason" }, [failureReason(r)]),
+            Utils.el("button", { type: "button", class: "link-btn", onclick: function () { retryFailedResult(job, r); } }, ["Retry"])
+          ]));
+        } else {
+          row.push(Components.Chip.forJobStatus(r.status));
+        }
+        resultsBox.appendChild(Utils.el("div", { class: "job-result-row" + (failed ? " is-failed" : "") }, row));
       });
       any = true;
     }
     resultsBox.hidden = !any;
+
+    // Review fix (UX-SPEC.md 2.3): done, zero Failed rows -> transient
+    // collapse (see scheduleSuccessCollapse above). A whole-job failure
+    // (job.state === "failed", no per-addon results at all) and a
+    // done-with-failures run both skip this and stay open, per spec.
+    if (!running && job.state === "done" && job.results && job.results.length
+      && !job.results.some(function (r) { return r.status === "Failed"; })) {
+      scheduleSuccessCollapse(job);
+    }
+
+    const body = Utils.qs("#job-panel-body");
+    body.scrollTop = body.scrollHeight;
   }
 
   function toggleCollapse() {
+    // Review fix: any toggle (manual click or the auto-collapse call inside
+    // scheduleSuccessCollapse) cancels a pending success-auto-hide timer.
+    // Without this, a user who clicks the chevron to re-expand a
+    // just-auto-collapsed panel would still have it yanked away by hide()
+    // a few seconds later, mid-review, with no way to get the results back.
+    clearTimeout(successCollapseTimer);
     const panel = Utils.qs("#job-panel");
     const collapsed = panel.classList.toggle("is-collapsed");
     Utils.qs("#job-panel-collapse .icon use").setAttribute("href", collapsed ? "#icon-chevron-right" : "#icon-chevron-down");
+    // Low-severity polish fix: keep the collapse button's aria-label/title in
+    // sync with its actual effect (was static "Collapse" even once already
+    // collapsed, so a screen-reader user always heard "Collapse" even when
+    // clicking it would expand).
+    const btn = Utils.qs("#job-panel-collapse");
+    if (btn) {
+      const label = collapsed ? "Expand" : "Collapse";
+      btn.setAttribute("aria-label", label);
+      btn.setAttribute("title", label);
+    }
   }
 
   // Collapses the panel (if visible and not already collapsed) to just its slim
@@ -2942,7 +3714,7 @@ Components.JobPanel = (function () {
     Store.state.jobLabel = null;
   }
 
-  return { show: show, update: update, toggleCollapse: toggleCollapse, collapseIfOpen: collapseIfOpen, hide: hide, summarize: summarize };
+  return { show: show, update: update, toggleCollapse: toggleCollapse, collapseIfOpen: collapseIfOpen, hide: hide, summarize: summarize, wholeJobFailureReason: wholeJobFailureReason };
 })();
 
 /* ---------- E19 (script itself is E17's, unchanged): curseforge:// handler
@@ -2950,6 +3722,15 @@ Components.JobPanel = (function () {
    once into Settings > Game's row, once into the Browse > CurseForge pane -
    by two calls to the one render(containerId) function below, so the two
    places can never drift out of sync with each other. ---------- */
+// CS4 (UX-SPEC.md 6.2 + copy table): its one remaining home is Settings >
+// Advanced, and the label states its own status - "Let CurseForge.com's
+// Install buttons open here - On/Off" - with no separate explainer sentence
+// underneath. The old chip + always-shown explanatory paragraph (still
+// correct for the pre-CS4 Settings > Game placement and the now-removed
+// Browse mount) is folded into that one label line; the "handled by another
+// program" fact - functionally useful, not generic filler - stays reachable
+// as a short parenthetical on the same line rather than a whole sentence of
+// its own, per demote-don't-delete (UX-SPEC.md 1.3).
 Components.ProtocolControl = (function () {
   function render(containerId) {
     const box = Utils.qs("#" + containerId);
@@ -2958,43 +3739,45 @@ Components.ProtocolControl = (function () {
 
     const p = Store.state.protocol;
     const busy = Store.state.protocolBusy;
-    let pillLabel, pillCls, note, registered;
-    if (Store.state.protocolLoading && !p) {
-      pillLabel = "Checking…"; pillCls = "chip-muted";
-      note = "Looking up whether Furphy handles CurseForge install links.";
+    const loading = Store.state.protocolLoading && !p;
+    let label, registered;
+    if (loading) {
+      label = "Checking whether CurseForge's Install buttons open here…";
       registered = false;
     } else if (!p) {
-      pillLabel = "Unknown"; pillCls = "chip-muted";
-      note = "Couldn't check the install-link handler.";
+      label = "Couldn't check CurseForge install-link handling.";
       registered = false;
     } else if (p.registered) {
-      pillLabel = "Handled by Furphy"; pillCls = "chip-success";
-      note = "Clicking Install on a curseforge.com addon page installs it here.";
+      label = "Let CurseForge.com's Install buttons open here — On";
       registered = true;
     } else if (p.currentHandler) {
-      pillLabel = "Handled by another program"; pillCls = "chip-warning";
-      note = "Another program currently opens curseforge:// links. Turning this on switches them to Furphy.";
+      label = "Let CurseForge.com's Install buttons open here — Off (currently handled by another program)";
       registered = false;
     } else {
-      pillLabel = "Not registered"; pillCls = "chip-muted";
-      note = "CurseForge.com's own Install buttons open its own picker instead of Furphy.";
+      label = "Let CurseForge.com's Install buttons open here — Off";
       registered = false;
     }
 
-    const toggle = Utils.el("input", { type: "checkbox", disabled: busy || (Store.state.protocolLoading && !p) });
+    const toggle = Utils.el("input", { type: "checkbox", disabled: busy || loading });
     toggle.checked = registered;
     toggle.addEventListener("change", function () {
       Actions.setProtocolRegistered(toggle.checked);
     });
 
-    box.appendChild(Utils.el("div", { class: "protocol-control-row" }, [
-      Components.Chip.build(pillLabel, pillCls),
-      Utils.el("label", { class: "switch", title: registered ? "Stop handling curseforge:// links" : "Handle curseforge:// links with Furphy" }, [
+    box.appendChild(Utils.el("div", { class: "settings-row" }, [
+      Utils.el("div", { class: "settings-row-text" }, [
+        Utils.el("div", { class: "settings-row-label" }, [label])
+      ]),
+      // Review fix: dropped the title tooltip - it both re-added an
+      // explainer sentence UX-SPEC.md 6.2 says the label alone should carry
+      // ("No explainer sentence; the label already says what matters.") and
+      // leaked the raw curseforge:// scheme name on hover, which the rest of
+      // this pass deliberately keeps off-screen elsewhere.
+      Utils.el("label", { class: "switch" }, [
         toggle,
         Utils.el("span", { class: "switch-track" }, [Utils.el("span", { class: "switch-thumb" })])
       ])
     ]));
-    box.appendChild(Utils.el("p", { class: "muted-text" }, [note]));
   }
 
   return { render: render };
@@ -3049,10 +3832,18 @@ const Actions = (function () {
     return started;
   }
 
+  // Review fix (post-CS6): scope this job to just the addons that need an
+  // update, so the panel title's own count matches the live "Updating i of
+  // N addons..." progress line the same job then shows (job.progress.total
+  // is however many ids the server actually received) - previously this
+  // posted a scope-less sync (every tracked addon) but labeled the panel
+  // with only the updates-needed count, so the two numbers could disagree
+  // mid-run whenever an already-up-to-date addon was also in the job.
   function updateAll() {
-    const n = Store.updatesCount();
+    const ids = Store.state.addons.filter(function (a) { return a.updateAvailable; }).map(Store.addonKey);
+    const n = ids.length;
     const label = n > 0 ? ("Updating " + n + " addon" + (n === 1 ? "" : "s")) : "Updating addons";
-    return startJob("sync", {}, label);
+    return startJob("sync", n > 0 ? { ids: ids } : {}, label);
   }
 
   function updateNow(projectId) {
@@ -3206,14 +3997,17 @@ const Actions = (function () {
   function addWagoWithVersion(slug, releaseId) { return startJob("add", { source: "wago", slug: slug, fileId: releaseId }, "Installing addon"); }
   function addByWagoSlug(slug) { return startJob("add", { source: "wago", slug: slug }, "Adding addon"); }
 
-  // E18: the first-run Welcome dialog's "Adopt all" - one job installing
+  // E18: the first-run Welcome dialog's "Take over all" - one job installing
   // every already-fully-formed target token (a bare numeric CurseForge id,
   // or "wago:<id>") at once, mirroring what install.ps1 itself does via the
   // CLI directly. See Build-CliArgs's 'add' case (addon-server.ps1) for the
   // server-side projectIds handling this relies on.
+  // CS5 (UX-SPEC.md 6.2/7): "Adopt"/"Adopting" -> "Take over"/"Taking over"
+  // in this display label too - the only other surviving caller besides
+  // Views.settings' untrackedRow (renamed by CS4).
   function adoptAll(targets) {
     Components.Dialogs.closeWelcome();
-    const label = "Adopting " + targets.length + " addon" + (targets.length === 1 ? "" : "s");
+    const label = "Taking over " + targets.length + " addon" + (targets.length === 1 ? "" : "s");
     return startJob("add", { projectIds: targets }, label);
   }
 
@@ -3250,26 +4044,6 @@ const Actions = (function () {
     const hasKey = isWago || !!(Store.state.settings && Store.state.settings.hasApiKey);
     if (hasKey) Components.Drawer.open(projectId, { tab: "changelog", changelogFileId: fileId });
     else Components.Drawer.open(projectId, { tab: "versions" });
-  }
-
-  // E5: "Details" next to the My Addons header's "Last run" line. Prefers the
-  // real last JobStatus (Store.state.job - the server's "current or most
-  // recent job", which survives a page reload and carries full projectId/
-  // fileId per result row, so "What changed" keeps working from here too)
-  // over lastRun.rows, which SPEC documents as bare {status,name,version}
-  // with no ids to route a "What changed" click on.
-  function showLastRunDetails() {
-    const lastRun = Store.state.lastRun;
-    if (!lastRun) return;
-    const job = Store.state.job;
-    if (job && job.state !== "running" && job.results && job.results.length) {
-      Store.state.jobLabel = null;
-      Components.JobPanel.show(job);
-      return;
-    }
-    const pseudo = { kind: null, state: "done", log: [], results: lastRun.rows || [], error: null, startedAt: lastRun.timestamp, finishedAt: lastRun.timestamp };
-    Store.state.jobLabel = "Last run";
-    Components.JobPanel.show(pseudo);
   }
 
   function updateAndPlay() { return startJob("launch", { updateFirst: true }, "Updating & launching World of Warcraft"); }
@@ -3313,11 +4087,18 @@ const Actions = (function () {
     }
   }
 
-  function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Adopting " + folder); }
+  // CS4 (UX-SPEC.md 6.2/§7): "Adopt"/"Adopting" -> "Take over"/"Taking
+  // over" in the job-panel title this label feeds - these two functions are
+  // called only from Views.settings' "Folders Furphy doesn't manage yet"
+  // row actions (grepped, no other caller), so this rename is fully scoped
+  // to that one section; Components.Welcome's own separate "Adopt all"
+  // first-run flow (Actions.adoptAll, untouched here) is CS5's own copy-
+  // sweep territory per UX-SPEC.md section 10.
+  function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Taking over " + folder); }
   // E12: one-click adoption from the Wago id/slug -Scan found in the
-  // untracked folder's own .toc (## X-Wago-ID) - same shape as
-  // installLatestWago, just with an "Adopting..." label to match `adopt`'s.
-  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Adopting " + folder); }
+  // folder's own .toc (## X-Wago-ID) - same shape as installLatestWago,
+  // just with a "Taking over..." label to match `adopt`'s.
+  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Taking over " + folder); }
 
   // Round 5 fix: each individual Settings control (a release-channel radio,
   // the auto-update toggle) calls saveSettings independently, so flipping
@@ -3401,30 +4182,22 @@ const Actions = (function () {
   // search page in the default browser (server-side allowlisted to the two
   // addon marketplaces this app ever links to).
   function searchDependency(name) {
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    if (hasKey) {
-      // Set the query before switching: switching to a not-yet-loaded Browse
-      // view auto-searches using whatever query is already in Store, so
-      // setting it first means that auto-search (when it fires) already
-      // uses the right term instead of an empty/stale one. When Browse was
-      // already loaded that auto-search is skipped (Views.browse.render()
-      // only searches when nothing has loaded yet), so an explicit search
-      // call is still needed to pick up the new query in that case.
-      Store.state.browse.query = name;
-      const alreadyLoaded = Store.state.browse.loaded;
-      App.switchView("browse");
-      const input = Utils.qs("#browse-search");
-      if (input) input.value = name;
-      if (alreadyLoaded) Views.browse.search(true);
-      return;
-    }
-    // Round 12: same Host.openCurseForge-first treatment as
-    // searchCurseForgeWebsite/openOnCurseForge above - in the native host
-    // this also goes to the embedded CurseForge tab instead of the default
-    // browser's 'url' target.
-    const depUrl = "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(name);
-    if (Host.openCurseForge(depUrl)) return;
-    return openWhat("url", { url: depUrl });
+    // CS3: Browse's merged search works fully without a key (keyless
+    // CurseForge catalogue + Wago, both concurrent), so this always switches
+    // there now rather than falling back to an external browser tab - set
+    // the query before switching: switching to a not-yet-loaded Browse view
+    // auto-searches using whatever query is already in Store, so setting it
+    // first means that auto-search (when it fires) already uses the right
+    // term instead of an empty/stale one. When Browse was already loaded
+    // that auto-search is skipped (Views.browse.render() only searches a
+    // given source when nothing has loaded yet), so an explicit search call
+    // is still needed to pick up the new query in that case.
+    Store.state.browse.query = name;
+    const alreadyLoaded = Store.state.browse.cf.loaded || Store.state.browse.wago.loaded;
+    App.switchView("browse");
+    const input = Utils.qs("#browse-search");
+    if (input) input.value = name;
+    if (alreadyLoaded) Views.browse.search(true);
   }
 
   // Validates+resolves the Add-addon dialog's free-text input, then starts the add job.
@@ -3434,7 +4207,7 @@ const Actions = (function () {
     const submitBtn = Utils.qs("#add-addon-submit");
     function fail(msg) { errorBox.textContent = msg; errorBox.hidden = false; errorBox.className = "form-msg is-error"; }
 
-    if (!value) { fail("Enter a Project ID, a CurseForge URL, or a Wago addon URL."); return; }
+    if (!value) { fail("Paste an addon link, or type its ID number."); return; }
 
     if (/^\d+$/.test(value)) {
       Components.Dialogs.closeAdd();
@@ -3455,11 +4228,11 @@ const Actions = (function () {
     }
 
     if (value.toLowerCase().indexOf("curseforge.com") === -1) {
-      fail("Enter a numeric Project ID, a curseforge.com addon URL, or a wago.io addon URL.");
+      fail("Type a numeric ID, or paste a curseforge.com or wago.io addon link.");
       return;
     }
     if (!Store.state.settings || !Store.state.settings.hasApiKey) {
-      fail("CurseForge URLs need an API key — use the numeric Project ID instead, or add a key in Settings.");
+      fail("CurseForge links need an API key — type the ID number instead, or add a key in Settings.");
       return;
     }
     submitBtn.disabled = true;
@@ -3555,7 +4328,7 @@ const Actions = (function () {
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings, testKey: testKey,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
-    whatChanged: whatChanged, showLastRunDetails: showLastRunDetails, importAddons: importAddons,
+    whatChanged: whatChanged, importAddons: importAddons,
     updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
     // E12 (Wago second source)
     installLatestWago: installLatestWago, addWagoWithVersion: addWagoWithVersion, addByWagoSlug: addByWagoSlug,
@@ -3575,67 +4348,72 @@ const Views = {};
 
 /* ---------- My Addons ---------- */
 Views.myAddons = (function () {
-  // E7: status filter chips shown above the table. "missingdeps" reads
-  // addon.missingDeps - populated by /api/state since the E3 dependency
-  // expansion landed (requiredDeps not present as a folder in AddOns,
-  // computed live server-side).
+  // CS2 (UX-SPEC.md section 3.4): only All/Updates are permanent chips now.
+  // Every other status is demoted into a single "More" popover, shown only
+  // once at least one of them has a count > 0 (see renderFilters below).
   const FILTER_DEFS = [
     { key: "all", label: "All" },
-    { key: "updates", label: "Updates" },
-    { key: "pinned", label: "Pinned" },
-    { key: "ignored", label: "Ignored" },
-    { key: "failed", label: "Failed" },
-    { key: "missingdeps", label: "Missing deps" },
-    // E13: covers both "Older patch" and "Not for Midnight" - anything the
-    // Compatibility column would flag as needing a look, not just the worst
-    // case; "unknown" (no evidence either way) is deliberately excluded, same
-    // as the header's "N addons need attention" count below.
-    { key: "stale", label: "Stale" }
+    { key: "updates", label: "Updates" }
   ];
+  // E7 (kept, demoted): "missingdeps" reads addon.missingDeps - populated by
+  // /api/state since the E3 dependency expansion landed (requiredDeps not
+  // present as a folder in AddOns, computed live server-side). Labels match
+  // the Status pill vocabulary's own wording (UX-SPEC.md section 3.2/§7
+  // copy table) rather than the old raw filter names.
+  // CS5 fix (UX-SPEC.md 3.4 + §7 copy table row "Filter chip | 'Stale N' |
+  // DELETE as a separate chip"): this list previously also carried a fifth
+  // "stale" entry ("Old patch / won't work") CS2 added on its own - section
+  // 3.4's own extras list names exactly four (Pinned, Ignored, "Couldn't
+  // update", "Needs another addon"), and the copy table is explicit that a
+  // patch-staleness filter chip is deleted outright, folded only into the
+  // Status pill (§3.2), never kept as its own filter. Removed here, along
+  // with its only caller (isStale()) and matchesFilter's "stale" branch.
+  const EXTRA_FILTER_DEFS = [
+    { key: "failed", label: "Couldn't update" },
+    { key: "missingdeps", label: "Needs another addon" },
+    { key: "pinned", label: "Pinned" },
+    { key: "ignored", label: "Ignoring updates" }
+  ];
+  const ALL_FILTER_DEFS = FILTER_DEFS.concat(EXTRA_FILTER_DEFS);
 
   function addonMissingDeps(a) { return (a && a.missingDeps) || []; }
-
-  // E3: an extra warning chip alongside the row's normal status chip (not a
-  // replacement for it - missing dependencies and update/pin/ignore status
-  // are orthogonal). Null when there is nothing missing; Utils.el drops a
-  // null child, so this is safe to include unconditionally in the cell.
-  function missingDepsChip(a) {
-    const missing = addonMissingDeps(a);
-    if (!missing.length) return null;
-    return Components.Chip.build("Missing: " + missing.length, "chip-warning", "Missing dependencies: " + missing.join(", "));
-  }
 
   function matchesFilter(a, filter) {
     if (filter === "updates") return !!a.updateAvailable;
     if (filter === "pinned") return a.pinnedFileId !== null && a.pinnedFileId !== undefined;
     if (filter === "ignored") return !!a.ignoreUpdates;
-    if (filter === "failed") return Store.lastRunStatusFor(a.name) === "Failed";
+    if (filter === "failed") return Store.lastRunStatusFor(a) === "Failed";
     if (filter === "missingdeps") return addonMissingDeps(a).length > 0;
-    if (filter === "stale") return isStale(a);
     return true; // "all"
   }
-
-  // E13: an addon "needs attention" when the compat check found real
-  // evidence it's behind (stale/stale-minor) - "unknown" (no evidence at
-  // all, e.g. no .build.info or no toc Interface/latestGameVersions yet)
-  // is not itself a red flag, so it's excluded from both this and the
-  // header's count below.
-  function isStale(a) { return a.compat === "stale" || a.compat === "stale-minor"; }
 
   function filterCounts() {
     const all = Store.state.addons;
     const counts = {};
-    FILTER_DEFS.forEach(function (def) { counts[def.key] = all.filter(function (a) { return matchesFilter(a, def.key); }).length; });
+    ALL_FILTER_DEFS.forEach(function (def) { counts[def.key] = all.filter(function (a) { return matchesFilter(a, def.key); }).length; });
     return counts;
   }
 
+  // CS2 (UX-SPEC.md section 3.4): All/Updates always shown; every other
+  // status only appears (grouped under one "More" popover) once its count
+  // is > 0 - "a clean install shows just All 6". When the active filter is
+  // one of those extras, the trigger chip itself takes on that filter's
+  // label/count so the current selection stays visible without the popover
+  // open, per the "not just clearer, but honest about the app's own current
+  // state" spirit that already runs through the rest of this spec.
   function renderFilters() {
     const box = Utils.qs("#myaddons-filters");
-    box.textContent = "";
     const counts = filterCounts();
+    // Safety: if the active filter is an extra whose count has since
+    // dropped to 0 (its last matching addon just got fixed/removed), fall
+    // back to "all" rather than leaving the table silently filtered to zero
+    // rows with no visible chip explaining why.
     const active = Store.state.myaddonsFilter;
+    if (active !== "all" && active !== "updates" && !counts[active]) Store.state.myaddonsFilter = "all";
+    box.textContent = "";
+    const activeNow = Store.state.myaddonsFilter;
     FILTER_DEFS.forEach(function (def) {
-      const isActive = active === def.key;
+      const isActive = activeNow === def.key;
       box.appendChild(Utils.el("button", {
         type: "button",
         class: "filter-chip" + (isActive ? " is-active" : ""),
@@ -3644,11 +4422,26 @@ Views.myAddons = (function () {
         onclick: function () { Store.state.myaddonsFilter = def.key; render(); }
       }, [def.label, Utils.el("span", { class: "filter-chip-count" }, [String(counts[def.key])])]));
     });
+    const extras = EXTRA_FILTER_DEFS.filter(function (def) { return counts[def.key] > 0; });
+    if (!extras.length) return;
+    const activeExtra = extras.find(function (def) { return def.key === activeNow; });
+    box.appendChild(Utils.el("button", {
+      type: "button",
+      class: "filter-chip filter-chip-more" + (activeExtra ? " is-active" : ""),
+      "aria-haspopup": "true",
+      "aria-expanded": "false",
+      title: "More filters",
+      onclick: function (ev) {
+        Components.Dropdown.open(ev.currentTarget, extras.map(function (def) {
+          return { label: def.label + " (" + counts[def.key] + ")", onSelect: function () { Store.state.myaddonsFilter = def.key; render(); } };
+        }));
+      }
+    }, [activeExtra ? activeExtra.label : "⋯ More", Utils.el("span", { class: "filter-chip-count" }, [String(activeExtra ? counts[activeExtra.key] : extras.length)])]));
   }
 
   function statusRank(a) {
     if (Store.jobActingOn(Store.addonKey(a))) return 0;
-    if (Store.lastRunStatusFor(a.name) === "Failed") return 1;
+    if (Store.lastRunStatusFor(a) === "Failed") return 1;
     if (a.updateAvailable) return 2;
     if (a.pinnedFileId !== null && a.pinnedFileId !== undefined) return 3;
     if (a.ignoreUpdates) return 4;
@@ -3697,18 +4490,15 @@ Views.myAddons = (function () {
     return 0;
   }
 
-  // One comparator per sortable column (Addon/Installed/Latest/Status/Updated
-  // headers); the click handler in bindOnce() flips `dir` to invert whichever
-  // one this returns.
+  // One comparator per sortable column (Addon/Version/Status headers); the
+  // click handler in bindOnce() flips `dir` to invert whichever one this
+  // returns. CS2: "installed"/"latest" merged into one "version" column -
+  // sorts by the installed version (what's actually on disk), same as the
+  // old "installed" column did; a row with an update available still shows
+  // both in its cell (see row() below), just no longer as a separate sort.
   function compareValues(a, b, column) {
-    if (column === "installed") return compareVersionStrings(a.version, b.version);
-    if (column === "latest") {
-      const av = a.updateAvailable ? a.updateAvailable.version : "";
-      const bv = b.updateAvailable ? b.updateAvailable.version : "";
-      return compareVersionStrings(av, bv);
-    }
+    if (column === "version") return compareVersionStrings(a.version, b.version);
     if (column === "status") return statusRank(a) - statusRank(b) || compareNames(a.name, b.name);
-    if (column === "updated") return new Date(a.installedAt || 0) - new Date(b.installedAt || 0);
     return compareNames(a.name, b.name); // "name"
   }
 
@@ -3745,21 +4535,6 @@ Views.myAddons = (function () {
     return list;
   }
 
-  // E5: the "Last run: <summary> · <relative time>" line above the filter
-  // chips, with a "Details" link that reopens the progress panel on the last
-  // job's results (Actions.showLastRunDetails). Shown whenever lastRun is
-  // known - including right after a page reload, since /api/state's lastRun
-  // is independent of loadingState/stateError - so it is rendered up front,
-  // ahead of render()'s early-return branches below, rather than folded into
-  // any one of them.
-  function renderLastRun() {
-    const line = Utils.qs("#myaddons-lastrun");
-    const lastRun = Store.state.lastRun;
-    if (!lastRun) { line.hidden = true; return; }
-    line.hidden = false;
-    Utils.qs("#myaddons-lastrun-text").textContent = "Last run: " + (lastRun.summary || "done") + " · " + Utils.relativeTime(lastRun.timestamp);
-  }
-
   // E11: hides the selection bar and, when a list is given, syncs the header
   // "select all" checkbox's checked/indeterminate state to it. Called with no
   // argument from every early-return branch below where the table itself is
@@ -3792,7 +4567,10 @@ Views.myAddons = (function () {
     // removed it) - keeps the selection-bar count and every bulk action
     // honest even when the row that changed wasn't part of this selection.
     Store.pruneSelection();
-    renderLastRun();
+    // CS2 (UX-SPEC.md sections 1.1/2.2): the one freshness headline, mounted
+    // here (and in the sidebar - see App.renderChrome) - replaces the old
+    // summary sentence AND the separate "Last run" line, both deleted below.
+    Components.Freshness.render("myaddons-freshness");
 
     const table = Utils.qs("#myaddons-table");
     const tbody = Utils.qs("#myaddons-tbody");
@@ -3853,23 +4631,15 @@ Views.myAddons = (function () {
     renderSortIndicators();
     renderSelectionBar(list);
 
+    // CS2 (UX-SPEC.md section 1.1 / word budget, §7 copy table): the old
+    // multi-clause sentence ("6 addons · 3 updates available · checked 5 min
+    // ago · Client ... · 1 addon needs attention") is deleted outright - every
+    // one of those facts now lives exactly once elsewhere (the freshness
+    // headline above, the nav's own addon count, the Status pill per row,
+    // client build in Settings > About). The only thing still worth a line
+    // here is "N of M shown", and only while a search/filter narrows the list.
     const total = Store.state.addons.length;
-    const updates = Store.updatesCount();
-    const checked = Store.state.updatesCheckedAt ? "checked " + Utils.relativeTime(Store.state.updatesCheckedAt) : "not checked yet";
-    let text = total + (total === 1 ? " addon" : " addons");
-    if (updates > 0) text += " · " + updates + " update" + (updates === 1 ? "" : "s") + " available";
-    text += " · " + checked;
-    // E13: "Client 12.1.0.69587 · N addons need attention" - only appended
-    // once the client build is actually known, and the attention clause only
-    // when there's something to flag (a spotless "0 need attention" clause
-    // on every load would just be noise).
-    if (Store.state.clientBuild) {
-      text += " · Client " + Store.state.clientBuild;
-      const staleCount = Store.state.addons.filter(isStale).length;
-      if (staleCount > 0) text += " · " + staleCount + (staleCount === 1 ? " addon needs" : " addons need") + " attention";
-    }
-    if (list.length !== total) text = list.length + " of " + text;
-    summary.textContent = text;
+    summary.textContent = list.length !== total ? (list.length + " of " + total + (total === 1 ? " addon" : " addons") + " shown") : "";
 
     LogoCache.ensure(list.map(function (a) { return a.projectId; }), render);
   }
@@ -3879,6 +4649,15 @@ Views.myAddons = (function () {
   function sourceBadge(a) {
     const isWago = a.source === "wago";
     return Utils.el("span", { class: "source-badge " + (isWago ? "is-wago" : "is-cf"), title: isWago ? "Wago Addons" : "CurseForge" }, [isWago ? "Wago" : "CF"]);
+  }
+
+  // CS2 (UX-SPEC.md section 3.1): the merged Version cell - "installed ->
+  // latest" when an update exists, just the installed version when current.
+  // Purely informational (what version); the Status pill next to it is the
+  // actionable one (what to do about it).
+  function versionCell(a) {
+    const text = a.updateAvailable ? (a.version + " → " + a.updateAvailable.version) : (a.version || "-");
+    return Utils.el("span", { class: "version-text" }, [text]);
   }
 
   function row(a) {
@@ -3898,24 +4677,12 @@ Views.myAddons = (function () {
           Utils.el("div", { class: "addon-author" }, [a.author || "Unknown author"])
         ])
       ])]),
-      Utils.el("td", {}, [Utils.el("span", { class: "version-text" }, [a.version || "-"])]),
-      Utils.el("td", {}, [Utils.el("span", { class: "version-text" + (a.updateAvailable ? "" : " is-empty") }, [a.updateAvailable ? a.updateAvailable.version : "-"])]),
-      Utils.el("td", {}, [Utils.el("div", { class: "status-cell" }, [
-        Components.Chip.forAddon(a),
-        missingDepsChip(a),
-        // Round 4 fix: the Updated <th>/<td> is dropped entirely below 1100px
-        // (see the media query in style.css) with nothing telling the reader
-        // it went away. This mirrors that same relative-time text into the
-        // status cell, hidden by default and shown only at the widths where
-        // the real column is hidden, so the information isn't simply lost.
-        Utils.el("span", { class: "updated-fallback", title: Utils.fullDate(a.installedAt) }, ["Updated " + Utils.relativeTime(a.installedAt)])
-      ])]),
-      Utils.el("td", {}, [Components.Chip.forCompat(a)]),
-      Utils.el("td", { class: "updated-cell", title: Utils.fullDate(a.installedAt) }, [Utils.relativeTime(a.installedAt)]),
+      Utils.el("td", {}, [versionCell(a)]),
+      Utils.el("td", {}, [Components.Chip.forStatus(a)]),
       Utils.el("td", {}, [kebab(a)])
     ]);
     tr.addEventListener("click", function (ev) {
-      if (ev.target.closest(".menu-wrap") || ev.target.closest(".checkbox-cell")) return;
+      if (ev.target.closest(".menu-wrap") || ev.target.closest(".checkbox-cell") || ev.target.closest(".chip-action")) return;
       Components.Drawer.open(key, { tab: "overview", source: a.source });
     });
     return tr;
@@ -3962,6 +4729,10 @@ Views.myAddons = (function () {
       a.ignoreUpdates
         ? { label: "Stop ignoring", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(key, false); } }
         : { label: "Ignore updates", icon: "eye-off", onSelect: function () { Actions.toggleIgnore(key, true); } },
+      // CS2 (UX-SPEC.md section 3.3): the old "Updated" table column's last-
+      // installed date, demoted here as a plain info line - not a daily-
+      // glance fact, but still one click away.
+      { info: true, label: "Installed " + Utils.relativeTime(a.installedAt), title: Utils.fullDate(a.installedAt) },
       // E12: source-aware "Open on ..." entry.
       isWago
         ? { label: "Open on Wago", icon: "external", onSelect: function () { Actions.openOnWago(a.slug); } }
@@ -4000,6 +4771,7 @@ Views.myAddons = (function () {
     Utils.qs("#btn-update-all").addEventListener("click", function () { Actions.updateAll(); });
     Utils.qs("#btn-add-addon").addEventListener("click", function () { Components.Dialogs.openAdd(); });
     Utils.qs("#myaddons-empty-add").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+    Utils.qs("#myaddons-empty-browse").addEventListener("click", function () { App.switchView("browse"); });
     Utils.qs("#myaddons-clear-filters").addEventListener("click", function () {
       Store.state.myaddonsSearch = "";
       Store.state.myaddonsFilter = "all";
@@ -4007,7 +4779,6 @@ Views.myAddons = (function () {
       render();
     });
     Utils.qs("#myaddons-retry").addEventListener("click", function () { App.reloadState(false); });
-    Utils.qs("#myaddons-lastrun-details").addEventListener("click", function () { Actions.showLastRunDetails(); });
 
     // E11: header checkbox toggles every currently visible/filtered row -
     // not the full underlying selection, so a search or status filter never
@@ -4027,414 +4798,345 @@ Views.myAddons = (function () {
 })();
 
 /* ---------- Browse ---------- */
+/* ---------- Browse ---------- */
+// CS3 (UX-SPEC.md section 5): one search box, no source-tab switch -
+// CurseForge (keyless catalogue+addon-radar merge, or the official API when
+// a key is set) and Wago are searched concurrently; each source keeps its
+// own loading/loaded/error/results in Store.state.browse.cf/.wago so the
+// merged grid can render whichever has arrived so far without ever
+// blocking on the slower one. No dedupe across sources (see UX-SPEC.md
+// 5.1's own note on why a cross-source id match can't safely run here) -
+// a same addon on both CurseForge and Wago shows as two source-badged
+// cards.
 Views.browse = (function () {
-  // E12 (Wago second source): a source switch above the CF no-key panel and
-  // the shared search/grid content - Wago never needs a key, so switching
-  // to it must work even when CurseForge's own no-key panel is showing.
-  function renderSourceSwitch() {
-    const source = Store.state.browse.source;
-    Utils.qsa("#browse-source-switch .segmented-btn").forEach(function (btn) {
-      btn.classList.toggle("is-active", btn.dataset.sourceValue === source);
-    });
-  }
-
-  // E16: whether Browse's CurseForge side is in keyless partial-search mode
-  // right now - true only for the source:"curseforge" panel with no API
-  // key configured (a rejected key is its own separate blocking state,
-  // unaffected by this expansion; Wago never reaches this function at all).
+  // Whether the CurseForge half of the merged search is running in
+  // keyless mode (no API key configured) right now - a rejected key is a
+  // separate, fully-blocking state (#browse-keyrejected below), unaffected
+  // by this.
   function isKeylessCf() {
-    return Store.state.browse.source !== "wago" && !(Store.state.settings && Store.state.settings.hasApiKey);
+    return !(Store.state.settings && Store.state.settings.hasApiKey);
   }
 
   function render() {
-    renderSourceSwitch();
     const b = Store.state.browse;
-    // Round 9: "Search on CurseForge.com" - shown for the CurseForge side of
-    // the source switch in both keyless and keyed mode (Wago never needed a
-    // separate website search box - Wago's own search IS the in-app one).
-    Utils.qs("#cf-web-search").hidden = b.source === "wago";
-    // Round 12 (E19b): the explainer copy depends on where a CurseForge.com
-    // open actually lands - the native host's embedded tab, or (everywhere
-    // else) a separate chromeless side window. Host may not exist yet on
-    // this module's very first render (see Host's own module comment) -
-    // guarded the same way Prefs.applyTheme guards its own early call.
-    let isNativeHost = false;
-    try { isNativeHost = Host.isNative(); } catch (e) { /* Host not initialized yet */ }
-    Utils.qs("#cf-web-search-hint").textContent = isNativeHost
-      ? "Opens in the CurseForge tab; installs still happen here by Project ID for now."
-      : "Opens CurseForge in a side window; installs still happen here by Project ID for now.";
-    // E19 (script/registration itself is E17's, unchanged): painted every
-    // render regardless of source - it's a no-op cost, and #cf-web-search's
-    // own hidden flag just above already keeps it out of sight on the Wago
-    // side, same as the search box/hint it lives alongside.
-    Components.ProtocolControl.render("browse-protocol-control");
-    Utils.qs("#browse-search").placeholder = b.source === "wago" ? "Search Wago addons" : "Search CurseForge addons";
-    if (b.source === "wago") {
-      Utils.qs("#browse-keyless-banner").hidden = true;
-      Utils.qs("#browse-keyrejected").hidden = true;
-      Utils.qs("#browse-installbyid").hidden = true;
-      Utils.qs("#browse-category").hidden = false;
-      Utils.qs("#browse-sort").hidden = false;
-      Utils.qs("#browse-content").hidden = false;
-      if (!b.categories.length && !b.categoriesLoading) loadWagoCategories();
-      if (!b.loaded && !b.loading) searchWago(true);
-      renderResults();
-      return;
-    }
-
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     // Round 6 fix: a configured-but-rejected key is a third state, distinct
     // from "no key at all" - shows its own panel (with its own fix-it copy)
-    // instead of either the no-key/keyless copy or a search UI that would
-    // just keep failing every request.
+    // instead of a search UI that would just keep failing every request.
+    // CS3 (UX-SPEC.md 5.1): kept as-is, still fully blocks #browse-content -
+    // a rejected key breaks the CurseForge half of every merged search.
     const rejected = hasKey && Store.state.cfKeyRejected;
     Utils.qs("#browse-keyrejected").hidden = !rejected;
     Utils.qs("#browse-content").hidden = rejected;
-    if (rejected) {
-      Utils.qs("#browse-keyless-banner").hidden = true;
-      Utils.qs("#browse-installbyid").hidden = true;
-      return;
-    }
+    if (rejected) return;
 
-    // E16: no key -> a keyless partial search takes over #browse-content
-    // instead of the old fully-blocking panel - the banner/Install-by-ID
-    // card show, category/CurseForge-specific sort stay hidden (neither
-    // keyless source carries CurseForge's category taxonomy).
-    const keyless = !hasKey;
-    Utils.qs("#browse-keyless-banner").hidden = !keyless;
-    Utils.qs("#browse-installbyid").hidden = !keyless;
-    Utils.qs("#browse-category").hidden = keyless;
-    Utils.qs("#browse-sort").hidden = keyless;
-
-    if (!keyless && !Store.state.browse.categories.length && !Store.state.browse.categoriesLoading) loadCfCategories();
-    if (!Store.state.browse.loaded && !Store.state.browse.loading) searchCf(true);
-
+    if (!b.cf.loaded && !b.cf.loading && !b.cf.error) searchCf(true);
+    if (!b.wago.loaded && !b.wago.loading && !b.wago.error) searchWago(true);
     renderResults();
   }
 
-  async function loadCfCategories() {
-    Store.state.browse.categoriesLoading = true;
-    try {
-      const res = await Api.cfCategories();
-      Store.state.browse.categories = res.data || [];
-      const sel = Utils.qs("#browse-category");
-      sel.textContent = "";
-      sel.appendChild(Utils.el("option", { value: "" }, ["All categories"]));
-      (res.data || []).forEach(function (c) { sel.appendChild(Utils.el("option", { value: c.id }, [c.name])); });
-    } catch (err) {
-      /* category filter degrades to "All categories" only */
-    } finally {
-      Store.state.browse.categoriesLoading = false;
-    }
-  }
-
-  async function loadWagoCategories() {
-    Store.state.browse.categoriesLoading = true;
-    try {
-      const res = await Api.wagoCategories();
-      Store.state.browse.categories = res.data || [];
-      const sel = Utils.qs("#browse-category");
-      sel.textContent = "";
-      sel.appendChild(Utils.el("option", { value: "" }, ["All categories"]));
-      (res.data || []).forEach(function (c) { sel.appendChild(Utils.el("option", { value: c.id }, [c.display_name || c.name])); });
-    } catch (err) {
-      /* category filter degrades to "All categories" only */
-    } finally {
-      Store.state.browse.categoriesLoading = false;
-    }
-  }
-
+  // The official keyed search branches to the keyless one internally so
+  // every other caller (search(), render()) can treat CurseForge as one
+  // source regardless of key state.
   async function searchCf(reset) {
     if (isKeylessCf()) { return searchCfKeyless(reset); }
     const b = Store.state.browse;
-    if (reset) { b.index = 0; b.results = []; }
-    b.loading = true;
-    b.error = null;
+    if (reset) { b.cf.results = []; }
+    b.cf.loading = true;
+    b.cf.error = null;
     renderResults();
     try {
-      const res = await Api.cfSearch({ q: b.query, categoryId: b.categoryId, sortField: b.sortField, sortOrder: "desc", index: b.index, pageSize: b.pageSize });
+      const res = await Api.cfSearch({ q: b.query, sortField: 2, sortOrder: "desc", index: 0, pageSize: 30 });
       Store.cacheMods(res.data || []);
-      b.results = reset ? (res.data || []) : b.results.concat(res.data || []);
-      b.totalCount = res.pagination ? res.pagination.totalCount : b.results.length;
-      b.loaded = true;
-      b.loading = false;
+      b.cf.results = res.data || [];
+      b.cf.keyless = false;
+      b.cf.loaded = true;
+      b.cf.loading = false;
       LogoCache.ensure((res.data || []).map(function (m) { return m.id; }), renderResults);
     } catch (err) {
-      b.loading = false;
-      b.error = err;
+      b.cf.loading = false;
+      b.cf.error = err;
     }
     renderResults();
   }
 
   // E16: the no-key CurseForge search - GET /api/cf/browse, always keyless-
-  // capable. No index/pageSize pagination on this endpoint (unlike the
-  // official search above), so there is no "Load more" here - see
-  // renderResults' loadMoreWrap.hidden logic.
+  // capable, already tier-then-downloads sorted server-side (Search-
+  // CfCatalogue). No index/pageSize pagination on this endpoint (unlike the
+  // official search above) - CS3 removed "Load more" from the default view
+  // anyway, so this always asks for one fixed-size batch.
   async function searchCfKeyless(reset) {
     const b = Store.state.browse;
-    if (reset) { b.results = []; }
-    b.loading = true;
-    b.error = null;
+    if (reset) { b.cf.results = []; }
+    b.cf.loading = true;
+    b.cf.error = null;
     renderResults();
     try {
       const res = await Api.cfBrowse({ q: b.query, limit: 30 });
-      const items = res.items || [];
-      b.results = reset ? items : b.results.concat(items);
-      b.totalCount = res.total != null ? res.total : b.results.length;
-      b.catalogueAge = res.catalogueAge || null;
-      b.loaded = true;
-      b.loading = false;
+      b.cf.results = res.items || [];
+      b.cf.catalogueAge = res.catalogueAge || null;
+      b.cf.keyless = true;
+      b.cf.loaded = true;
+      b.cf.loading = false;
     } catch (err) {
-      b.loading = false;
-      b.error = err;
+      b.cf.loading = false;
+      b.cf.error = err;
     }
     renderResults();
   }
 
+  // E12 (Wago second source): Wago's search is a live scrape, never
+  // key-gated. CS3: fetched concurrently with CurseForge (search() below
+  // fires both without awaiting either), one fixed-size page - "Load more"
+  // is gone from the default view along with the rest of the pagination UI.
   async function searchWago(reset) {
     const b = Store.state.browse;
-    if (reset) { b.page = 1; b.results = []; }
-    b.loading = true;
-    b.error = null;
+    if (reset) { b.wago.results = []; }
+    b.wago.loading = true;
+    b.wago.error = null;
     renderResults();
     try {
-      const res = await Api.wagoSearch({ q: b.query, categoryId: b.categoryId, sort: b.sort, page: b.page });
-      const items = res.items || [];
-      b.results = reset ? items : b.results.concat(items);
-      b.totalCount = res.total || b.results.length;
-      b.lastPage = res.lastPage || b.page;
-      b.loaded = true;
-      b.loading = false;
+      const res = await Api.wagoSearch({ q: b.query, page: 1 });
+      b.wago.results = res.items || [];
+      b.wago.loaded = true;
+      b.wago.loading = false;
     } catch (err) {
-      b.loading = false;
-      b.error = err;
+      b.wago.loading = false;
+      b.wago.error = err;
     }
     renderResults();
   }
 
-  // The one function bound to the search/category/sort/load-more controls -
-  // dispatches to whichever source is currently active so bindOnce() below
-  // needs no source-specific wiring of its own.
+  // Fires both sources without awaiting either - "never block the faster
+  // source on the slower one" (UX-SPEC.md 5.1). Each fetch's own
+  // renderResults() calls repaint the merged grid as results land.
   function search(reset) {
-    return Store.state.browse.source === "wago" ? searchWago(reset) : searchCf(reset);
+    searchCf(reset);
+    searchWago(reset);
+  }
+
+  // Case-insensitive exact/starts-with/contains tiering, mirroring the
+  // same three-tier scheme Search-CfCatalogue already applies server-side
+  // to the keyless CurseForge path (SPEC: exact -> starts-with -> contains)
+  // - applied uniformly here across both sources (and the official keyed
+  // CurseForge search, which has no tiering of its own) so the merged grid
+  // reads as one ranked list rather than two concatenated ones. An empty
+  // query (the default pre-typing view) gets one flat tier, ranked by
+  // downloads only.
+  function relevanceTier(name, needle) {
+    if (!needle) return 3;
+    const n = (name || "").toLowerCase();
+    if (n === needle) return 0;
+    if (n.indexOf(needle) === 0) return 1;
+    if (n.indexOf(needle) !== -1) return 2;
+    return 3;
+  }
+
+  // Normalizes a raw CurseForge search result (either shape - see the two
+  // branches of searchCf above) into the one card shape resultCard() reads,
+  // rendering only the fields that shape actually carries (UX-SPEC.md 5.1:
+  // "render only what the source actually supplied, never reserve blank
+  // space").
+  function normalizeCfEntry(m) {
+    if (Store.state.browse.cf.keyless) {
+      // /api/cf/browse item shape: id/name/slug/downloadCount/lastUpdated/
+      // logoUrl/source(catalogue|addon-radar) - no summary/author/category
+      // ever present here.
+      return {
+        source: "cf", id: m.id, key: m.id, name: m.name || ("Project " + m.id), slug: m.slug,
+        logoUrl: m.logoUrl, summary: null, author: null,
+        downloadCount: m.downloadCount, updatedAt: m.lastUpdated
+      };
+    }
+    // Official /v1/mods/search shape (Handle-CfSearch) - richer, but still
+    // guarded field-by-field below since summary/authors can be empty.
+    return {
+      source: "cf", id: m.id, key: m.id, name: m.name, slug: m.slug,
+      logoUrl: m.logo ? (m.logo.thumbnailUrl || m.logo.url) : null,
+      summary: m.summary || null,
+      author: (m.authors && m.authors[0]) ? m.authors[0].name : null,
+      downloadCount: m.downloadCount, updatedAt: m.dateModified
+    };
+  }
+
+  // E12: Wago's search results are parsed HTML card snippets (slug/name/
+  // thumbnail only - see SPEC's verified Wago facts), never author/summary/
+  // downloads - that detail only exists on the addon's own /addons/{slug}
+  // page, fetched once the drawer opens.
+  function normalizeWagoEntry(item) {
+    return {
+      source: "wago", id: null, key: "wago:" + item.slug, name: item.name || item.slug, slug: item.slug,
+      logoUrl: item.thumbnail || null, summary: null, author: null,
+      downloadCount: null, updatedAt: null
+    };
+  }
+
+  function mergeResults(b) {
+    const needle = (b.query || "").trim().toLowerCase();
+    const all = b.cf.results.map(normalizeCfEntry).concat(b.wago.results.map(normalizeWagoEntry));
+    all.forEach(function (e) { e.tier = relevanceTier(e.name, needle); });
+    all.sort(function (a, c) {
+      if (a.tier !== c.tier) return a.tier - c.tier;
+      const ad = a.downloadCount != null ? a.downloadCount : -1;
+      const cd = c.downloadCount != null ? c.downloadCount : -1;
+      return cd - ad;
+    });
+    return all;
   }
 
   function renderResults() {
     const b = Store.state.browse;
-    const isWago = b.source === "wago";
-    const keylessCf = !isWago && isKeylessCf();
     const grid = Utils.qs("#browse-grid");
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
     const errorBox = Utils.qs("#browse-error");
-    const loadMoreWrap = Utils.qs("#browse-loadmore-wrap");
     const summary = Utils.qs("#browse-summary");
+    const sourceNote = Utils.qs("#browse-source-note");
+    const nudge = Utils.qs("#browse-nudge");
+    const merged = mergeResults(b);
+    const bothDone = !b.cf.loading && !b.wago.loading;
 
-    if (b.loading && !b.results.length) {
-      grid.hidden = true; empty.hidden = true; errorBox.hidden = true; loadMoreWrap.hidden = true; skeleton.hidden = false;
-      summary.textContent = "";
+    // Neither source has anything yet and both are still in flight - the
+    // initial skeleton, same as the old single-source loading state.
+    if (!bothDone && !merged.length) {
+      grid.hidden = true; empty.hidden = true; errorBox.hidden = true; skeleton.hidden = false;
+      summary.textContent = ""; sourceNote.hidden = true; nudge.hidden = true;
       return;
     }
     skeleton.hidden = true;
 
-    if (b.error && !b.results.length) {
-      grid.hidden = true; empty.hidden = true; loadMoreWrap.hidden = true;
+    // Both sources failed - the one case with nothing left to show at all.
+    if (bothDone && b.cf.error && b.wago.error && !merged.length) {
+      grid.hidden = true; empty.hidden = true; sourceNote.hidden = true; nudge.hidden = true;
       errorBox.hidden = false;
-      Utils.qs("#browse-error-msg").textContent = describeError(b.error);
+      Utils.qs("#browse-error-msg").textContent = "Couldn't reach CurseForge or Wago right now.";
       summary.textContent = "";
       return;
     }
     errorBox.hidden = true;
 
-    if (b.loaded && !b.results.length) {
-      grid.hidden = true; loadMoreWrap.hidden = true; empty.hidden = false;
+    if (bothDone && !merged.length) {
+      grid.hidden = true; empty.hidden = false;
       summary.textContent = "";
-      return;
+    } else {
+      empty.hidden = true;
+      grid.hidden = false;
+      grid.textContent = "";
+      merged.forEach(function (entry) { grid.appendChild(resultCard(entry)); });
+      summary.textContent = merged.length + " result" + (merged.length === 1 ? "" : "s");
     }
-    empty.hidden = true;
 
-    grid.hidden = false;
-    grid.textContent = "";
-    b.results.forEach(function (m) { grid.appendChild(isWago ? wagoCard(m) : (keylessCf ? catalogueCard(m) : card(m))); });
+    // UX-SPEC.md 5.1: "if one source fails, the other still renders and a
+    // single quiet line says which source could not be reached" - only
+    // when exactly one source failed (both-failed is the errorBox case
+    // above, which already returned).
+    if (b.cf.error && !b.wago.error) {
+      sourceNote.hidden = false;
+      sourceNote.textContent = "Couldn't reach CurseForge search right now — showing Wago results only.";
+    } else if (b.wago.error && !b.cf.error) {
+      sourceNote.hidden = false;
+      sourceNote.textContent = "Couldn't reach Wago search right now — showing CurseForge results only.";
+    } else {
+      sourceNote.hidden = true;
+    }
 
-    summary.textContent = b.results.length + " of " + Utils.formatNumber(b.totalCount) + " results";
-    // E16: /api/cf/browse has no index/pageSize pagination of its own (it
-    // returns up to `limit` items in one shot) - "Load more" never applies
-    // in keyless CurseForge mode.
-    loadMoreWrap.hidden = b.loading || keylessCf || (isWago ? b.page >= b.lastPage : b.results.length >= b.totalCount);
+    // UX-SPEC.md 5.1: keyless nudge, thin (<3) or zero results, only once
+    // both sources have actually finished (never flickers on during load).
+    nudge.hidden = !(bothDone && isKeylessCf() && merged.length < 3);
   }
 
-  // E16: a keyless-CurseForge-browse card - sparser than the official
-  // card() below (only id/name/slug/downloadCount/lastUpdated/logoUrl/source
-  // are ever known - see /api/cf/browse's documented item shape), with a
-  // small "Indexed"/"Live match" provenance pill instead of category chips
-  // (neither keyless source carries CurseForge's category taxonomy).
-  function catalogueCard(item) {
-    const tracked = !!Store.addonByProjectId(item.id);
-    const busy = Store.jobActingOn(item.id);
+  function resultCard(entry) {
+    const tracked = !!Store.addonByProjectId(entry.key);
+    const busy = Store.jobActingOn(entry.key);
     const btn = tracked
       ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
-      : Utils.el("button", { type: "button", class: "btn btn-accent", disabled: busy, onclick: function (ev) { ev.stopPropagation(); Actions.installLatest(item.id, item.name); } }, [busy ? "Installing…" : "Install"]);
+      // Review fix: was btn-accent - Browse cards can render alongside the
+      // sidebar's own "Update & Play" accent button; only that one is ever
+      // accent-colored per UX-SPEC.md section 1/2.3.
+      : Utils.el("button", { type: "button", class: "btn btn-outline", disabled: busy, onclick: function (ev) {
+          ev.stopPropagation();
+          if (entry.source === "wago") Actions.installLatestWago(entry.slug, entry.name);
+          else Actions.installLatest(entry.id, entry.name);
+        } }, [busy ? "Installing…" : "Install"]);
 
-    const meta = [];
-    if (item.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(item.downloadCount) + " downloads"]));
-    if (item.lastUpdated) meta.push(Utils.el("span", { title: Utils.fullDate(item.lastUpdated) }, ["updated " + Utils.relativeTime(item.lastUpdated)]));
+    // UX-SPEC.md 5.1: source badge on every card, CF or Wago - the existing
+    // Wago badge style (source-badge.is-wago) extended to CurseForge cards
+    // (source-badge.is-cf) too. Every other meta field renders only when
+    // the source actually supplied it - no reserved blank slots.
+    const meta = [Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : "is-cf") }, [entry.source === "wago" ? "Wago" : "CurseForge"])];
+    if (entry.author) meta.push(Utils.el("span", {}, [entry.author]));
+    if (entry.downloadCount != null) meta.push(Utils.el("span", {}, [Utils.formatNumber(entry.downloadCount) + " downloads"]));
+    if (entry.updatedAt) meta.push(Utils.el("span", { title: Utils.fullDate(entry.updatedAt) }, ["updated " + Utils.relativeTime(entry.updatedAt)]));
 
-    const node = Utils.el("div", { class: "browse-card" }, [
+    const children = [
       Utils.el("div", { class: "browse-card-top" }, [
-        Components.Logo.build({ projectId: item.id, name: item.name, thumbnailUrl: item.logoUrl }, 44),
-        Utils.el("div", {}, [
-          Utils.el("div", { class: "browse-card-title" }, [item.name || ("Project " + item.id)]),
-          Utils.el("span", { class: "source-pill" }, [item.source === "addon-radar" ? "Live match" : "Indexed"])
-        ])
-      ]),
-      meta.length ? Utils.el("div", { class: "browse-card-meta" }, meta) : null,
-      Utils.el("div", { class: "browse-card-footer" }, [btn])
-    ]);
-    node.addEventListener("click", function () { Components.Drawer.open(item.id, { tab: "overview", slug: item.slug }); });
+        Components.Logo.build({ projectId: entry.source === "cf" ? entry.id : null, name: entry.name, thumbnailUrl: entry.logoUrl }, 44),
+        Utils.el("div", {}, [Utils.el("div", { class: "browse-card-title" }, [entry.name])])
+      ])
+    ];
+    if (entry.summary) children.push(Utils.el("div", { class: "browse-card-summary" }, [entry.summary]));
+    children.push(Utils.el("div", { class: "browse-card-meta" }, meta));
+    children.push(Utils.el("div", { class: "browse-card-footer" }, [btn]));
+
+    const node = Utils.el("div", { class: "browse-card" }, children);
+    node.addEventListener("click", function () {
+      const opts = { tab: "overview", slug: entry.slug };
+      if (entry.source === "wago") opts.source = "wago";
+      Components.Drawer.open(entry.key, opts);
+    });
     return node;
   }
 
-  function card(m) {
-    const tracked = !!Store.addonByProjectId(m.id);
-    const busy = Store.jobActingOn(m.id);
-    const btn = tracked
-      ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
-      : Utils.el("button", { type: "button", class: "btn btn-accent", disabled: busy, onclick: function (ev) { ev.stopPropagation(); Actions.installLatest(m.id, m.name); } }, [busy ? "Installing…" : "Install"]);
-
-    const node = Utils.el("div", { class: "browse-card" }, [
-      Utils.el("div", { class: "browse-card-top" }, [
-        Components.Logo.build({ projectId: m.id, name: m.name, thumbnailUrl: m.logo ? (m.logo.thumbnailUrl || m.logo.url) : null }, 44),
-        Utils.el("div", {}, [
-          Utils.el("div", { class: "browse-card-title" }, [m.name]),
-          Utils.el("div", { class: "browse-card-author" }, [m.authors && m.authors[0] ? m.authors[0].name : ""])
-        ])
-      ]),
-      Utils.el("div", { class: "browse-card-summary" }, [m.summary || ""]),
-      Utils.el("div", { class: "browse-card-cats" }, (m.categories || []).slice(0, 3).map(function (c) { return Utils.el("span", { class: "browse-card-cat" }, [c.name]); })),
-      Utils.el("div", { class: "browse-card-meta" }, [
-        Utils.el("span", {}, [Utils.formatNumber(m.downloadCount) + " downloads"]),
-        Utils.el("span", { title: Utils.fullDate(m.dateModified) }, ["updated " + Utils.relativeTime(m.dateModified)])
-      ]),
-      Utils.el("div", { class: "browse-card-footer" }, [btn])
-    ]);
-    node.addEventListener("click", function () { Components.Drawer.open(m.id, { tab: "overview", slug: m.slug }); });
-    return node;
-  }
-
-  // E12: Wago's search results are parsed HTML card snippets (slug/name/
-  // thumbnail only - see SPEC's verified Wago facts) rather than a full mod
-  // object, so this card is necessarily sparser than CurseForge's (no
-  // summary/downloads/categories - that detail only exists on the addon's
-  // own /addons/{slug} page, fetched once the drawer opens).
-  function wagoCard(item) {
-    const key = "wago:" + item.slug;
-    const tracked = !!Store.addonByProjectId(key);
-    const busy = Store.jobActingOn(key);
-    const btn = tracked
-      ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
-      : Utils.el("button", { type: "button", class: "btn btn-accent", disabled: busy, onclick: function (ev) { ev.stopPropagation(); Actions.installLatestWago(item.slug, item.name); } }, [busy ? "Installing…" : "Install"]);
-
-    const node = Utils.el("div", { class: "browse-card" }, [
-      Utils.el("div", { class: "browse-card-top" }, [
-        Components.Logo.build({ projectId: null, name: item.name, thumbnailUrl: item.thumbnail }, 44),
-        Utils.el("div", {}, [
-          Utils.el("div", { class: "browse-card-title" }, [item.name || item.slug]),
-          Utils.el("div", { class: "source-badge is-wago" }, ["Wago"])
-        ])
-      ]),
-      Utils.el("div", { class: "browse-card-footer" }, [btn])
-    ]);
-    node.addEventListener("click", function () { Components.Drawer.open(key, { tab: "overview", slug: item.slug, source: "wago" }); });
-    return node;
+  // CS3 (UX-SPEC.md 5.1, last bullet): the curseforge:// protocol toggle is
+  // gone from Browse entirely (Settings > Advanced keeps the one instance).
+  // There's no reliable way for this page to observe a click on CurseForge
+  // .com's own Install button failing out in that separate window/tab, so
+  // this fires the one thing Furphy CAN observe at the moment it matters -
+  // right after the user heads to CurseForge.com to install something, if
+  // the handler is confirmed off (Store.state.protocol, loaded once at
+  // startup by Actions.loadProtocolStatus) - shown at most once per session.
+  let installNoteShown = false;
+  function maybeShowInstallNote() {
+    if (installNoteShown) return;
+    const p = Store.state.protocol;
+    if (p && p.registered === false) {
+      installNoteShown = true;
+      Utils.qs("#browse-install-note").hidden = false;
+    }
   }
 
   function bindOnce() {
-    Utils.qsa("#browse-source-switch .segmented-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        const source = btn.dataset.sourceValue;
-        if (Store.state.browse.source === source) return;
-        Store.set({ browse: Object.assign({}, Store.state.browse, {
-          source: source, loaded: false, loading: false, error: null, results: [],
-          query: "", categoryId: "", categories: [], categoriesLoading: false,
-          index: 0, page: 1
-        }) });
-        Utils.qs("#browse-search").value = "";
-        renderSortOptions();
-        render();
-      });
-    });
-
     Utils.qs("#browse-search").addEventListener("input", Utils.debounce(function (ev) {
       Store.state.browse.query = ev.target.value;
       search(true);
     }, 400));
-    Utils.qs("#browse-category").addEventListener("change", function (ev) { Store.state.browse.categoryId = ev.target.value; search(true); });
-    Utils.qs("#browse-sort").addEventListener("change", function (ev) {
-      if (Store.state.browse.source === "wago") Store.state.browse.sort = ev.target.value;
-      else Store.state.browse.sortField = Number(ev.target.value);
-      search(true);
-    });
-    Utils.qs("#btn-load-more").addEventListener("click", function () {
-      const b = Store.state.browse;
-      if (b.source === "wago") b.page += 1; else b.index += b.pageSize;
-      search(false);
-    });
-    Utils.qs("#btn-keyless-settings").addEventListener("click", function () { App.switchView("settings"); });
-    // Round 6 fix: the key-rejected panel's own "Go to Settings" button.
+
     Utils.qs("#btn-keyrejected-settings").addEventListener("click", function () { App.switchView("settings"); });
+    Utils.qs("#btn-browse-nudge-settings").addEventListener("click", function () { App.switchView("settings"); });
+    Utils.qs("#btn-browse-install-note-settings").addEventListener("click", function () { App.switchView("settings"); });
 
-    Utils.qs("#install-by-id-form").addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      const input = Utils.qs("#install-by-id-input");
-      const msg = Utils.qs("#install-by-id-msg");
-      const value = input.value.trim();
-      if (!/^\d+$/.test(value)) { msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "Enter a numeric Project ID."; return; }
-      msg.hidden = false; msg.className = "form-msg is-info"; msg.textContent = "Installing…";
-      Actions.addByProjectId(Number(value)).then(function (ok) {
-        if (ok) { msg.className = "form-msg is-success"; msg.textContent = "Install started — watch the progress panel below."; input.value = ""; }
-        else { msg.hidden = true; }
-      });
-    });
-
-    // Round 9: "Search on CurseForge.com" - Enter in its input or the button
-    // both trigger the same external-window search; the input keeps
-    // whatever term was typed rather than clearing, since re-opening the
-    // same search (e.g. after closing the side window) is a common follow-up.
+    // CS3: demoted from a permanent "Search on CurseForge.com" box into a
+    // single fallback line - reuses the query already typed in the merged
+    // search box (unchanged Actions.searchCurseForgeWebsite plumbing, so
+    // this still opens the native host's embedded CurseForge tab, or the
+    // existing chromeless side window everywhere else).
     Utils.qs("#btn-cf-web-search").addEventListener("click", function () {
-      Actions.searchCurseForgeWebsite(Utils.qs("#cf-web-search-input").value);
+      const term = Utils.qs("#browse-search").value.trim();
+      if (!term) { Utils.qs("#browse-search").focus(); return; }
+      Actions.searchCurseForgeWebsite(term);
+      // Review fix: in the native host, Host.openCurseForge() already
+      // handled the click via the embedded CurseForge tab - no OS-level
+      // curseforge:// handoff (and thus no possible "Furphy isn't the
+      // handler" failure) was ever in play, so the protocol note would be
+      // misleading there. Only the non-native 'cf-window' fallback path can
+      // actually hit the failure this note is warning about.
+      if (!Host.isNative()) maybeShowInstallNote();
     });
-    Utils.qs("#cf-web-search-input").addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter") { ev.preventDefault(); Actions.searchCurseForgeWebsite(ev.target.value); }
-    });
-  }
 
-  // Swaps #browse-sort's options between CurseForge's (numeric sortField)
-  // and Wago's (a sort keyword) whenever the source switch changes.
-  //
-  // Verified live defect: Wago's own site only recognises sort=name. Any
-  // other sort value (popular/updated/downloads/recent/newest/likes/
-  // trending/latest/top) makes it silently ignore the search term and
-  // return the plain popularity listing, and sort=updated returns an
-  // empty list outright. So Wago only ever offers the two values that
-  // actually work: Popularity (value "popular", meaning "send no sort
-  // param at all" - see the server's Handle-WagoSearch) and Name (value
-  // "name", the one value Wago recognises). The CurseForge-only "Last
-  // updated"/"Total downloads" options are Wago-inapplicable and omitted.
-  function renderSortOptions() {
-    const sel = Utils.qs("#browse-sort");
-    sel.textContent = "";
-    if (Store.state.browse.source === "wago") {
-      [["popular", "Popularity"], ["name", "Name"]].forEach(function (pair) {
-        sel.appendChild(Utils.el("option", { value: pair[0] }, ["Sort: " + pair[1]]));
-      });
-      sel.value = Store.state.browse.sort;
-    } else {
-      [["2", "Popularity"], ["3", "Last updated"], ["4", "Name"], ["6", "Total downloads"]].forEach(function (pair) {
-        sel.appendChild(Utils.el("option", { value: pair[0] }, ["Sort: " + pair[1]]));
-      });
-      sel.value = String(Store.state.browse.sortField);
-    }
+    // CS3: demoted "Install by Project ID" into a fallback link that opens
+    // the existing Add-addon dialog - reuses its ID/URL parsing
+    // (Actions.submitAddInput) as-is, no new server code.
+    Utils.qs("#btn-browse-add-link").addEventListener("click", function () { Components.Dialogs.openAdd(); });
   }
 
   return { render: render, search: search, bindOnce: bindOnce };
@@ -4507,10 +5209,17 @@ Views.settings = (function () {
     Utils.qs("#settings-wow-root").textContent = s.wowRoot || "—";
     Utils.qs("#settings-addons-path").textContent = s.addonsPath || "—";
     // E13: read-only info sourced from WTF\Config.wtf, not a manager setting
-    // - see index.html's explanatory paragraph next to this row.
+    // - see index.html's one-sentence clarifier next to this row.
     Utils.qs("#settings-checkaddonversion").textContent = checkAddonVersionText(s.checkAddonVersion);
 
-    ["1", "2", "3"].forEach(function (v) { Utils.qs("#radio-release-" + v).checked = String(s.releaseType) === v; });
+    // CS4 (UX-SPEC.md 6.1): the old 3-way release-channel radio is now two
+    // independent toggles driven off the same releaseType value - "Include
+    // beta versions" (Essentials) and "Also include alpha/experimental
+    // versions" (Advanced). Alpha implies beta (releaseType 3), so the beta
+    // toggle also shows checked when releaseType is 3, even though flipping
+    // it back off on its own is what un-checks alpha too (see bindOnce).
+    Utils.qs("#toggle-beta").checked = Number(s.releaseType) === 2 || Number(s.releaseType) === 3;
+    Utils.qs("#toggle-alpha").checked = Number(s.releaseType) === 3;
     Utils.qs("#toggle-autoupdate").checked = !!s.autoUpdateOnLaunch;
 
     const apikeyInput = Utils.qs("#input-apikey");
@@ -4519,13 +5228,21 @@ Views.settings = (function () {
     Utils.qs("#btn-clear-apikey").disabled = !s.hasApiKey;
 
     Utils.qs("#about-version").textContent = App.getServerVersion() || "—";
+    // UX-SPEC.md §7/§8: "Client build number" was removed from My Addons and
+    // relocated here, matching the "kept, just relocated" pattern used for
+    // every other row in that table. Store.state.clientBuild is delivered on
+    // /api/state (see the reloadState diff below, ~line 6093).
+    Utils.qs("#about-client-build").textContent = Store.state.clientBuild || "—";
     const uptime = App.getServerUptime();
     Utils.qs("#about-uptime").textContent = uptime !== null ? formatUptime(uptime) : "—";
-    Utils.qs("#about-port").textContent = s.port || "—";
+    // CS4: "Port" is dropped from the visible About list (UX-SPEC.md 6.2) -
+    // it still goes out in Diagnostics' "Copy report" text, see
+    // diagnosticsReportText() below, which reads s.port directly.
 
     renderBrowsing(s);
     Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
+    renderApikeyCollapse();
     renderUntracked();
     renderDiagnostics();
     const busy = Store.isBusy();
@@ -4536,12 +5253,25 @@ Views.settings = (function () {
 
   // E13: WoW's own checkAddonVersion cvar - display text for the value
   // settings.checkAddonVersion carries (a raw string, whatever's actually in
-  // WTF\Config.wtf, or null when the file/setting isn't there yet).
+  // WTF\Config.wtf, or null when the file/setting isn't there yet). CS4
+  // (UX-SPEC.md 6.2/§7): plain "Off (they'll load anyway)"/"On (...)" text,
+  // no raw cvar digit or config-file path shown.
   function checkAddonVersionText(value) {
-    if (value === "0") return "Disabled (0) — out-of-date addons load anyway";
-    if (value === "1") return "Enabled (1) — WoW warns about/blocks out-of-date addons";
-    if (value === null || value === undefined) return "Unknown (WTF\\Config.wtf not found)";
-    return value; // some other value WoW itself wrote - shown verbatim rather than guessed at
+    if (value === "0") return "Off (they'll load anyway)";
+    if (value === "1") return "On (WoW warns about them at character select)";
+    return "Unknown";
+  }
+
+  // CS4: the collapsed-by-default "Add a CurseForge key" row. Local module
+  // state (not Store) so it survives repeated render() passes the same way
+  // apikeyVisible (show/hide password) already does, and so a settings
+  // re-render triggered elsewhere in the app never silently re-collapses a
+  // field the player is mid-edit on.
+  let apikeyExpanded = false;
+  function renderApikeyCollapse() {
+    Utils.qs("#apikey-expand").hidden = !apikeyExpanded;
+    Utils.qs("#btn-apikey-toggle").setAttribute("aria-expanded", String(apikeyExpanded));
+    Utils.qs("#apikey-toggle-chevron use").setAttribute("href", apikeyExpanded ? "#icon-chevron-down" : "#icon-chevron-right");
   }
 
   function formatUptime(seconds) {
@@ -4599,7 +5329,9 @@ Views.settings = (function () {
     if (untrackedLoading) { box.appendChild(Utils.el("div", { class: "skeleton-row" })); return; }
     if (untrackedError) { box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't scan: " + describeError(untrackedError)])); return; }
     if (!untrackedList.length) {
-      const msg = untrackedScanned ? "Scanned — no untracked folders found." : "No untracked folders found yet. Click Scan to look.";
+      // CS4 (UX-SPEC.md 6.2/§7): "Untracked" -> "doesn't manage yet" in
+      // every visible string here, not just the section heading/intro.
+      const msg = untrackedScanned ? "Scanned — nothing found." : "Nothing found yet. Click Scan to look.";
       box.appendChild(Utils.el("p", { class: "muted-text" }, [msg]));
       return;
     }
@@ -4607,41 +5339,47 @@ Views.settings = (function () {
   }
 
   function untrackedRow(u) {
-    const idInput = Utils.el("input", { type: "text", placeholder: "Project ID" });
+    // CS5 (UX-SPEC.md 6.2's own flagged follow-up): add the missing "find
+    // this on the addon's page" hint - a title tooltip rather than another
+    // visible sentence, matching Browse's own light-touch fallback link.
+    const idInput = Utils.el("input", { type: "text", placeholder: "Numeric ID", title: "Find this on the addon's CurseForge or Wago page" });
     const busy = Store.isBusy();
     const actions = [idInput];
     // E12: -Scan reports whatever curseId/wagoId it found in the folder's own
-    // .toc (## X-Curse-Project-ID / ## X-Wago-ID) - offer a one-click adopt
-    // straight from either id, ahead of the manual Project-ID input, when
-    // the toc already answers the question.
+    // .toc (## X-Curse-Project-ID / ## X-Wago-ID) - offer a one-click take-
+    // over straight from either id, ahead of the manual Project-ID input,
+    // when the folder's own info already answers the question. CS4
+    // (UX-SPEC.md 6.2/§7): "Adopt" -> "Take over" in every visible string
+    // this row shows - Actions.adopt/adoptWago (this row's only callers)
+    // carry the matching "Taking over..." job-panel label.
     if (u.curseId) {
       actions.push(Utils.el("button", {
         type: "button", class: "btn btn-outline", disabled: busy,
-        title: "Adopt as CurseForge project " + u.curseId,
+        title: "Take over as CurseForge project " + u.curseId,
         onclick: function () { Actions.adopt(u.folder, Number(u.curseId)); }
-      }, ["Adopt (CF " + u.curseId + ")"]));
+      }, ["Take over (CF " + u.curseId + ")"]));
     }
     if (u.wagoId) {
       actions.push(Utils.el("button", {
         type: "button", class: "btn btn-outline", disabled: busy,
-        title: "Adopt as Wago addon " + u.wagoId,
+        title: "Take over as Wago addon " + u.wagoId,
         onclick: function () { Actions.adoptWago(u.folder, u.wagoId); }
-      }, ["Adopt (Wago)"]));
+      }, ["Take over (Wago)"]));
     }
     actions.push(
       Utils.el("button", {
         type: "button", class: "btn btn-outline", disabled: busy, onclick: function () {
           const v = idInput.value.trim();
-          if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric Project ID first.", "warning"); return; }
+          if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric ID first.", "warning"); return; }
           Actions.adopt(u.folder, Number(v));
         }
-      }, ["Adopt"]),
+      }, ["Take over"]),
       Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"])
     );
     return Utils.el("div", { class: "untracked-row" }, [
       Utils.el("div", { class: "untracked-info" }, [
         Utils.el("div", { class: "untracked-folder" }, [u.folder]),
-        Utils.el("div", { class: "untracked-meta" }, [u.title ? (u.title + (u.version ? " · " + u.version : "")) : (u.hasToc ? "No title in .toc" : "No .toc file")])
+        Utils.el("div", { class: "untracked-meta" }, [u.title ? (u.title + (u.version ? " · " + u.version : "")) : (u.hasToc ? "No title found" : "No details found")])
       ]),
       Utils.el("div", { class: "untracked-actions" }, actions)
     ]);
@@ -4686,24 +5424,81 @@ Views.settings = (function () {
       copyBtn.hidden = true;
       return;
     }
-    diagChecks.forEach(function (c) { box.appendChild(diagRow(c)); });
+    // CS4 (UX-SPEC.md 6.2 + copy table): "PowerShell version" is dropped
+    // from the visible list entirely - it stays in diagChecks (and so in
+    // diagnosticsReportText()'s Copy report below) but is never painted as
+    // a row here.
+    diagChecks.forEach(function (c) { if (DIAG_HIDDEN_ONSCREEN.indexOf(c.name) === -1) box.appendChild(diagRow(c)); });
     copyBtn.hidden = diagChecks.length === 0;
   }
 
+  // CS4: on-screen rows show plain pass/fail language, never the server's
+  // raw filenames/HTTP codes/PS version string/internal source names/ISO
+  // timestamps (UX-SPEC.md 6.2 + copy table + acceptance checklist) - all of
+  // that stays intact, byte-verbatim, in diagnosticsReportText()'s Copy
+  // report output below. This is a purely client-side rewording layer;
+  // addon-server.ps1's /api/diagnostics response itself is untouched (out
+  // of this change set's file scope - see notesForNext).
+  const DIAG_HIDDEN_ONSCREEN = ["PowerShell version"];
+  const DIAG_ISO_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  function plainDiagRow(c) {
+    const ok = c.ok;
+    const detail = c.detail || "";
+    switch (c.name) {
+      case "AddOns folder":
+        return { label: "AddOns folder", detail: ok ? "Found and writable" : "Couldn't find or write to it" };
+      case "settings.json":
+        return { label: "Your addon settings", detail: ok ? "Look fine" : "There's a problem" };
+      case "addons.json": {
+        const m = detail.match(/^(\d+)\s+record/);
+        if (ok && m) return { label: "Tracked addons", detail: m[1] + " addon" + (m[1] === "1" ? "" : "s") + " tracked" };
+        return { label: "Tracked addons", detail: ok ? "Look fine" : "There's a problem" };
+      }
+      case "CurseForge reachability":
+        return { label: "CurseForge", detail: ok ? "Reached OK" : "Couldn't reach it" };
+      case "CurseForge API key":
+        if (!ok) return { label: "CurseForge API key", detail: "Rejected" };
+        return { label: "CurseForge API key", detail: detail.indexOf("No API key") === 0 ? "Not configured (optional)" : "Valid" };
+      case "Disk space":
+        return { label: "Disk space", detail: ok ? "Plenty free" : "Running low" };
+      case "Server uptime":
+        return { label: "Server uptime", detail: DIAG_ISO_RE.test(detail) ? "" : (detail || "—") };
+      case "Last sync":
+        return { label: "Last sync", detail: DIAG_ISO_RE.test(detail) ? "Recorded" : (detail || "never") };
+      case "WoW client build":
+        return { label: "WoW client build", detail: ok ? "Detected" : "Couldn't detect it" };
+      case "CurseForge catalogue cache":
+        return { label: "Addon catalogue", detail: ok ? "Up to date" : "Needs a refresh" };
+      case "addon-radar reachability":
+        return { label: "Addon search mirror", detail: ok ? "Reached OK" : "Couldn't reach it" };
+      default:
+        // Defensive fallback for any future check this mapping doesn't yet
+        // know about - still strips a raw ISO timestamp if one shows up.
+        return { label: c.name, detail: DIAG_ISO_RE.test(detail) ? "" : detail };
+    }
+  }
+
   function diagRow(c) {
+    const plain = plainDiagRow(c);
     return Utils.el("div", { class: "diag-row" }, [
       Utils.el("span", { class: "diag-dot " + (c.ok ? "is-ok" : "is-fail") }),
-      Utils.el("span", { class: "diag-name" }, [c.name]),
-      Utils.el("span", { class: "diag-detail" }, [c.detail || ""])
+      Utils.el("span", { class: "diag-name" }, [plain.label]),
+      Utils.el("span", { class: "diag-detail" }, [plain.detail || ""])
     ]);
   }
 
   // Plain text for the "Copy report" button - one line per check, no markup,
-  // so it pastes cleanly into a bug report or a chat message.
+  // so it pastes cleanly into a bug report or a chat message. Unlike the
+  // on-screen rows above, this reads the server's raw c.name/c.detail
+  // verbatim (including the hidden "PowerShell version" row) and appends
+  // the port, per UX-SPEC.md 6.2's "Port... kept in Copy report only".
   function diagnosticsReportText() {
     if (!diagChecks) return "";
     const lines = ["Furphy Addon Manager diagnostics - " + new Date().toLocaleString()];
     diagChecks.forEach(function (c) { lines.push((c.ok ? "[OK]   " : "[FAIL] ") + c.name + ": " + (c.detail || "")); });
+    const s = Store.state.settings;
+    if (s && s.port) lines.push("Port: " + s.port);
     return lines.join("\n");
   }
 
@@ -4721,8 +5516,22 @@ Views.settings = (function () {
   }
 
   function bindOnce() {
-    ["1", "2", "3"].forEach(function (v) {
-      Utils.qs("#radio-release-" + v).addEventListener("change", function () { Actions.saveSettings({ releaseType: Number(v) }); });
+    // CS4 (UX-SPEC.md 6.1/6.2): the old 3-way release-channel radio is now
+    // two independent toggles - "Include beta versions" (Essentials) and
+    // "Also include alpha/experimental versions" (Advanced) - driven off the
+    // one underlying releaseType value (1/2/3). Alpha implies beta, so
+    // turning beta OFF while alpha is still on turns alpha off too (there is
+    // no releaseType value for "alpha but not beta"); turning alpha ON always
+    // lands on 3 regardless of beta's current state.
+    Utils.qs("#toggle-beta").addEventListener("change", function (ev) {
+      const beta = ev.target.checked;
+      const alpha = beta && Utils.qs("#toggle-alpha").checked;
+      Actions.saveSettings({ releaseType: alpha ? 3 : (beta ? 2 : 1) });
+    });
+    Utils.qs("#toggle-alpha").addEventListener("change", function (ev) {
+      const alpha = ev.target.checked;
+      const beta = alpha || Utils.qs("#toggle-beta").checked;
+      Actions.saveSettings({ releaseType: alpha ? 3 : (beta ? 2 : 1) });
     });
     Utils.qs("#toggle-autoupdate").addEventListener("change", function (ev) { Actions.saveSettings({ autoUpdateOnLaunch: ev.target.checked }); });
     // E19: only visible/enabled while renderBrowsing() has shown the row
@@ -4734,6 +5543,15 @@ Views.settings = (function () {
     });
     Utils.qsa("#theme-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setTheme(btn.dataset.themeValue); renderAppearance(); });
+    });
+
+    // CS4: the collapsed-by-default "Add a CurseForge key" row - toggles
+    // apikeyExpanded (see render()/renderApikeyCollapse() above) and, when
+    // opening, focuses the field for immediate typing/pasting.
+    Utils.qs("#btn-apikey-toggle").addEventListener("click", function () {
+      apikeyExpanded = !apikeyExpanded;
+      renderApikeyCollapse();
+      if (apikeyExpanded) Utils.qs("#input-apikey").focus();
     });
 
     Utils.qs("#btn-toggle-apikey-visibility").addEventListener("click", function () {
@@ -4834,14 +5652,17 @@ Views.settings = (function () {
 
     Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("folder"); });
     Utils.qs("#btn-open-addons").addEventListener("click", function () { Actions.openWhat("addons"); });
-    Utils.qs("#btn-open-synclog").addEventListener("click", function () { Actions.openWhat("log"); });
-    Utils.qs("#btn-open-lastrun").addEventListener("click", function () { Actions.openWhat("lastrun"); });
-    // NOTE: SPEC section 2's base /api/open enum is 'log'|'folder'|'addons'|'curseforge'|'lastrun' -
-    // there is no separate value for server.log. Rather than invent a field the server won't
-    // recognise, this reuses 'log' until the contract grows a dedicated one. (Expansions E7 and
-    // E3 have since added 'backups' and 'url' respectively - see the calls just below/above.)
-    Utils.qs("#btn-open-serverlog").addEventListener("click", function () { Actions.openWhat("log"); });
-    Utils.qs("#btn-open-backups").addEventListener("click", function () { Actions.openWhat("backups"); });
+    // CS4 (UX-SPEC.md 6.2): the four separate "Open sync log / Open last run
+    // report / Open server log / Open backups folder" buttons collapse into
+    // one "Open logs folder" button, backed by a new server-side /api/open
+    // 'logs' target (addon-server.ps1 Handle-Open) that opens the app's own
+    // root folder in Explorer - sync.log, server.log, last-run.txt and
+    // backups\ all already live there side by side, so one Explorer window
+    // reaches every one of them. The 'log'/'serverlog'/'lastrun'/'backups'
+    // /api/open targets themselves are untouched server-side (demote, don't
+    // delete - still reachable by any other caller), just no longer wired to
+    // their own individual buttons here.
+    Utils.qs("#btn-open-logs").addEventListener("click", function () { Actions.openWhat("logs"); });
 
     // E16: forces a fresh fetch+merge of the offline CurseForge catalogue
     // index (Search-CfCatalogue/Get-CfCatalogueEntry's backing store) -
@@ -4855,8 +5676,11 @@ Views.settings = (function () {
       status.textContent = "Refreshing…";
       try {
         const res = await Api.cfCatalogueRefresh();
-        status.textContent = res.count + " addon(s) indexed, just now (" + res.source + ").";
-        Components.Toast.show("CurseForge catalogue refreshed (" + res.count + " addons).", "success");
+        // CS5: no raw internal source name (e.g. "instawow-data+strongbox")
+        // on screen, and "indexed" dropped too (the Browse card-badge term
+        // it echoed is itself banned) - a plain count is all a player needs.
+        status.textContent = res.count + " addons in the list, just now.";
+        Components.Toast.show("Addon list refreshed (" + res.count + " addons).", "success");
       } catch (err) {
         status.textContent = "Refresh failed: " + describeError(err);
         Components.Toast.show("Couldn't refresh the CurseForge catalogue: " + describeError(err), "error");
@@ -4913,8 +5737,19 @@ Views.settings = (function () {
         msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a Furphy Addon Manager export.";
         return;
       }
-      const existingIds = new Set(Store.state.addons.map(function (a) { return a.projectId; }));
-      const toAdd = data.addons.filter(function (a) { return a && !existingIds.has(Number(a.projectId)); }).length;
+      // Review fix: was keyed on a bare Number(a.projectId), which is 0 for
+      // every Wago entry (projectId is always null for those - Number(null)
+      // === 0, not null) - so a Wago addon in the file was checked against
+      // existingIds.has(0), essentially never true, meaning every Wago
+      // addon always previewed as "will be added" here even when already
+      // tracked. Both the export shape (Handle-Export) and Store.state.addons
+      // records carry the same source/slug/projectId fields Store.addonKey
+      // already knows how to read, so reuse it for both sides instead of a
+      // hand-rolled projectId comparison. This is purely a client-side
+      // preview-count fix - the actual import job is still resolved
+      // correctly server-side by Build-ImportPlan regardless.
+      const existingIds = new Set(Store.state.addons.map(function (a) { return Utils.normalizeId(Store.addonKey(a)); }));
+      const toAdd = data.addons.filter(function (a) { return a && !existingIds.has(Utils.normalizeId(Store.addonKey(a))); }).length;
       const present = data.addons.length - toAdd;
       const ok = await Components.Dialogs.confirm({
         title: "Import addon list?",
@@ -5090,6 +5925,23 @@ const App = (function () {
     renderChrome();
   }
 
+  // CS5: deep-link support for verification and future callers - a
+  // ?view=my-addons|browse|settings query param picks the initial view on
+  // load (default unchanged: no/unrecognized param stays on My Addons).
+  // Applied once, directly against the static markup (nav-item classes +
+  // .view section visibility) rather than via switchView() itself, since
+  // switchView() no-ops when the target already equals the current
+  // Store.state.view - which it does for the default "myaddons" case.
+  const VIEW_QUERY_MAP = { "my-addons": "myaddons", "browse": "browse", "settings": "settings" };
+  function applyInitialViewFromQuery() {
+    const raw = new URLSearchParams(location.search).get("view");
+    const target = VIEW_QUERY_MAP[raw];
+    if (!target || target === Store.state.view) return;
+    Store.state.view = target;
+    Utils.qsa(".nav-item").forEach(function (btn) { btn.classList.toggle("is-active", btn.dataset.view === target); });
+    Utils.qsa(".view").forEach(function (sec) { sec.hidden = sec.dataset.viewRoot !== target; });
+  }
+
   // Sidebar badges/status line, the Update-all label, global busy-disabling,
   // and a live drawer refresh - anything that isn't specific to one view.
   function renderChrome() {
@@ -5098,31 +5950,52 @@ const App = (function () {
     const updates = Store.updatesCount();
     if (updates > 0) { badge.hidden = false; badge.textContent = updates; } else { badge.hidden = true; }
 
-    renderStatusLine();
+    renderConnectivity();
+    Components.Freshness.render("sidebar-freshness", { dotOnly: true });
     renderUpdateAllButton();
     applyBusyToStaticButtons();
     Components.Drawer.refresh();
   }
 
-  function renderStatusLine() {
+  // CS2 (UX-SPEC.md section 2.1): connectivity ("can the UI reach the local
+  // server at all") is a separate fact from freshness, never folded into the
+  // same dot/text - the sidebar dot stays grey/green at all times and only
+  // carries visible text in the two problem states. Freshness itself is
+  // rendered by Components.Freshness (called from renderChrome, right next
+  // to this), not here.
+  function renderConnectivity() {
     const dot = Utils.qs("#status-dot");
     const text = Utils.qs("#status-text");
-    if (Store.state.online === false) { dot.dataset.state = "error"; text.textContent = "Server unreachable"; return; }
+    if (Store.state.online === false) {
+      dot.dataset.state = "error";
+      text.textContent = "Server not reachable — restart from the desktop shortcut.";
+      return;
+    }
     if (Store.state.online === null) { dot.dataset.state = "connecting"; text.textContent = "Connecting…"; return; }
     dot.dataset.state = "ok";
-    text.textContent = "Server OK" + (Store.state.updatesCheckedAt ? " — checked " + Utils.relativeTime(Store.state.updatesCheckedAt) : " — not checked yet");
+    text.textContent = ""; // connected and nothing wrong: silence, not absence
   }
 
+  // CS2 (UX-SPEC.md section 2.3 / copy table §7): "Update all" is kept but
+  // now outline-styled - on the main dashboard, the sidebar's "Update & Play"
+  // is the one accent-colored call to action against which "Update all" and
+  // the per-row Update pills should read as secondary (a handful of other
+  // dialog/empty-state buttons elsewhere in the app are also accent-styled
+  // as their own one-primary-CTA-per-dialog choice; this scoping is about
+  // the dashboard's own competing buttons, not a whole-app rule) - and
+  // hidden entirely once a completed check found nothing to update, not
+  // just disabled, so no dead button sits there.
   function renderUpdateAllButton() {
     const btn = Utils.qs("#btn-update-all");
     const n = Store.updatesCount();
     const checked = !!Store.state.updatesCheckedAt;
-    btn.textContent = checked && n > 0 ? ("Update all (" + n + ")") : "Update all";
-    const busy = Store.isBusy();
     const nothingToDo = checked && n === 0;
-    btn.disabled = busy || nothingToDo;
+    btn.hidden = nothingToDo;
+    if (nothingToDo) return;
+    btn.textContent = n > 0 ? ("Update all (" + n + ")") : "Update all";
+    const busy = Store.isBusy();
+    btn.disabled = busy;
     if (busy) btn.title = "Another task is running";
-    else if (nothingToDo) btn.title = "No updates found. Run Check for updates again after new releases.";
     else btn.removeAttribute("title");
   }
 
@@ -5195,14 +6068,22 @@ const App = (function () {
         renderCurrentView();
         if (job.state === "running") { pollJob(jobId); return; }
         await reloadState(true);
-        const summary = job.state === "failed" ? ("Failed: " + (job.error || "unknown error")) : Components.JobPanel.summarize(job.results);
+        // Review fix (UX-SPEC.md 7 copy table / acceptance checklist item 8):
+        // this toast used to be "Failed: " + raw job.error - the exact
+        // pre-spec string the copy table calls out by name. The plain-
+        // language sentence is now the same one already persisted in the
+        // job panel (Components.JobPanel.wholeJobFailureReason), and the
+        // toast itself is just a transient nudge to look at the panel - the
+        // raw text stays reachable only behind that panel's own Details.
+        const summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job) : Components.JobPanel.summarize(job.results);
         Components.Toast.show(summary, job.state === "failed" ? "error" : "success");
         notifyIfUpdatesFound(job);
       } catch (err) {
         markOnline(err);
         reloadState(true);
       }
-    }, 800);
+    }, 500); // CS2 (UX-SPEC.md section 4.3): 800ms -> 500ms, so the determinate
+             // progress bar/current-item line track a fast-moving job closely.
   }
 
   async function reloadState(afterJob) {
@@ -5216,6 +6097,12 @@ const App = (function () {
       const nextCheckedAt = data.updatesCheckedAt || null;
       const nextClientBuild = data.clientBuild || null;
       const nextClientInterface = data.clientInterface || null;
+      // CS2: the one computed freshness enum plus the two failure-detail
+      // fields CS1 added to /api/state - read here, alongside every other
+      // /api/state field, rather than in a separate fetch.
+      const nextFreshness = data.freshness || null;
+      const nextLastCheckFailed = !!data.lastCheckFailed;
+      const nextLastCheckError = data.lastCheckError || null;
 
       // Round 4 fix: the idle poll (every 5s, see scheduleIdlePoll below) used
       // to call renderCurrentView() unconditionally on every tick, even when
@@ -5233,12 +6120,16 @@ const App = (function () {
         || JSON.stringify(nextLastRun) !== JSON.stringify(Store.state.lastRun)
         || JSON.stringify(nextJob) !== JSON.stringify(Store.state.job)
         || nextCheckedAt !== Store.state.updatesCheckedAt
-        || nextClientBuild !== Store.state.clientBuild;
+        || nextClientBuild !== Store.state.clientBuild
+        || nextFreshness !== Store.state.freshness
+        || nextLastCheckFailed !== Store.state.lastCheckFailed
+        || nextLastCheckError !== Store.state.lastCheckError;
 
       Store.set({
         addons: nextAddons, settings: nextSettings, lastRun: nextLastRun,
         job: nextJob, updatesCheckedAt: nextCheckedAt,
         clientBuild: nextClientBuild, clientInterface: nextClientInterface,
+        freshness: nextFreshness, lastCheckFailed: nextLastCheckFailed, lastCheckError: nextLastCheckError,
         loadingState: false, stateError: null
       });
       if (!afterJob) resumeJobPollingIfNeeded();
@@ -5268,7 +6159,7 @@ const App = (function () {
       Utils.qs("#banner-offline").hidden = true;
       if (wasOnline === false) Components.Toast.show("Reconnected to the server.", "success");
     }
-    renderStatusLine();
+    renderConnectivity();
   }
 
   // Self-rescheduling (setTimeout, not setInterval) so the cadence can adapt
@@ -5346,14 +6237,13 @@ const App = (function () {
   // (its search box is hidden behind the no-key panel).
   function focusCurrentSearch() {
     if (Store.state.view === "myaddons") { Utils.qs("#myaddons-search").focus(); return; }
-    // E12: Wago's search box is always usable (no key needed). E16: so is
-    // CurseForge's now, keyed or not (a keyless session searches the
-    // offline catalogue/addon-radar instead of the official API) - the
-    // only state that still blocks it is a REJECTED key, which replaces
-    // #browse-content (and its search box) with a dedicated blocking panel.
+    // CS3: Browse's one merged search box is always usable (no key needed -
+    // a keyless session searches the offline catalogue/addon-radar plus
+    // Wago) - the only state that still blocks it is a REJECTED key, which
+    // replaces #browse-content (and its search box) with a dedicated
+    // blocking panel.
     const rejected = !!(Store.state.settings && Store.state.settings.hasApiKey) && Store.state.cfKeyRejected;
-    const canFocusBrowseSearch = Store.state.browse.source === "wago" || !rejected;
-    if (Store.state.view === "browse" && canFocusBrowseSearch) { Utils.qs("#browse-search").focus(); }
+    if (Store.state.view === "browse" && !rejected) { Utils.qs("#browse-search").focus(); }
   }
 
   function wireGlobal() {
@@ -5454,6 +6344,7 @@ const App = (function () {
   }
 
   async function init() {
+    applyInitialViewFromQuery();
     wireGlobal();
     Views.myAddons.bindOnce();
     Views.browse.bindOnce();

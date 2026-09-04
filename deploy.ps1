@@ -47,7 +47,7 @@ if (Test-Path -LiteralPath $Dest) {
 
 # 3. Copy code files (mirror ui\, never state files).
 New-Item -ItemType Directory -Force -Path $Dest, (Join-Path $Dest 'ui'), (Join-Path $Dest 'jobs') | Out-Null
-$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico')
+$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
 foreach ($f in $codeFiles) {
     $s = Join-Path $Source $f
     if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $Dest $f) -Force; "copied $f" }
@@ -115,7 +115,7 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
     New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs'), (Join-Path $RepoPath 'launcher') | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
     Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
-    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md')) {
+    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
     }
