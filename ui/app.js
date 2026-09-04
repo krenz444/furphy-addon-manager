@@ -80,6 +80,85 @@ const Mock = (function () {
   const enabled = new URLSearchParams(location.search).get("mock") === "1";
   if (!enabled) return { enabled: false };
 
+  // Round 15: ?mock=1&host=webview2 also stands up a fake window.chrome.webview
+  // so ui/app.js's Host module (window.chrome.webview.postMessage/
+  // addEventListener("message", ...)) has something real to talk to in a
+  // plain dev browser - no actual host\FurphyHost.exe involved. Every
+  // page->host postMessage is logged to the console; a fake host replies
+  // {type:"host-ready", capabilities:["cf-pane"]} once (mirroring the real
+  // host's own "sent once CoreWebView2 is ready, and again on {type:'hello'}"
+  // contract) and reacts to cf-show/cf-nav with plausible {type:"cf-state"}
+  // replies (url/title/canGoBack/canGoForward/loading), driven by a tiny
+  // in-memory history stack, so the CurseForge pane's toolbar/back/forward/
+  // title are all exercisable with zero real network access.
+  if (new URLSearchParams(location.search).get("host") === "webview2") {
+    const cfListeners = [];
+    let cfHistory = [];
+    let cfIdx = -1;
+    let cfHasPage = false;
+
+    function cfCurrentUrl() { return cfIdx >= 0 ? cfHistory[cfIdx] : null; }
+    function cfTitleFor(url) {
+      if (!url) return "";
+      const search = url.match(/[?&]search=([^&]+)/);
+      if (search) return "Search: " + decodeURIComponent(search[1]) + " - CurseForge";
+      const slug = url.match(/\/addons\/([a-z0-9-]+)/i);
+      if (slug) return slug[1].replace(/-/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); }) + " - CurseForge";
+      return "CurseForge - The Home for World of Warcraft Addons";
+    }
+    function sendToPage(msg) {
+      console.log("[mock-host] host->page", msg);
+      cfListeners.forEach(function (cb) { try { cb({ data: msg }); } catch (e) { /* a listener throwing shouldn't break the others */ } });
+    }
+    function sendCfState(loading) {
+      sendToPage({ type: "cf-state", url: cfCurrentUrl(), title: cfTitleFor(cfCurrentUrl()), canGoBack: cfIdx > 0, canGoForward: cfIdx < cfHistory.length - 1, loading: !!loading });
+    }
+    function cfNavigate(url) {
+      cfHistory = cfHistory.slice(0, cfIdx + 1);
+      cfHistory.push(url);
+      cfIdx = cfHistory.length - 1;
+      cfHasPage = true;
+      sendCfState(true);
+      setTimeout(function () { sendCfState(false); }, 350);
+    }
+
+    window.chrome = window.chrome || {};
+    window.chrome.webview = {
+      postMessage: function (obj) {
+        console.log("[mock-host] page->host", obj);
+        if (!obj || typeof obj !== "object") return;
+        if (obj.type === "hello") {
+          sendToPage({ type: "host-ready", version: "mock-host-1.0", capabilities: ["cf-pane"] });
+        } else if (obj.type === "cf-show") {
+          if (obj.url && (!cfHasPage || obj.navigate)) cfNavigate(obj.url);
+          else if (cfHasPage) sendCfState(false);
+        } else if (obj.type === "cf-nav") {
+          if (obj.action === "back" && cfIdx > 0) { cfIdx -= 1; sendCfState(false); }
+          else if (obj.action === "forward" && cfIdx < cfHistory.length - 1) { cfIdx += 1; sendCfState(false); }
+          else if (obj.action === "reload" && cfHasPage) { sendCfState(true); setTimeout(function () { sendCfState(false); }, 250); }
+          else if (obj.action === "home") cfNavigate("https://www.curseforge.com/wow/addons");
+          else if (obj.action === "go" && obj.url) cfNavigate(obj.url);
+        }
+        // cf-rect: nothing to reply to, already logged above.
+        // cf-hide, theme, open-curseforge (legacy compat): accepted, no
+        // reply needed for this mock's own purposes.
+      },
+      addEventListener: function (type, cb) { if (type === "message") cfListeners.push(cb); },
+      removeEventListener: function (type, cb) {
+        if (type !== "message") return;
+        const i = cfListeners.indexOf(cb);
+        if (i !== -1) cfListeners.splice(i, 1);
+      }
+    };
+
+    // Fired asynchronously (mirroring the real host's own timing) so it
+    // lands after Host.init() has already wired its own listener during
+    // App.init(), which runs after this module-load-time block.
+    setTimeout(function () {
+      sendToPage({ type: "host-ready", version: "mock-host-1.0", capabilities: ["cf-pane"] });
+    }, 60);
+  }
+
   // E19: adFilter/hostWindow join the mock settings shape too, so Settings'
   // Browsing card and the protocol row are exercisable under ?mock=1.
   const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, cfApiKey: "", port: 47831, adFilter: false, hostWindow: null };
@@ -1467,6 +1546,20 @@ const Store = (function () {
     return { column: "name", dir: "asc" };
   }
 
+  // Round 15: the Get new addons segmented switch's last choice persists
+  // across reloads (default Wago) - same "read once here so the first
+  // render already reflects it" reasoning as loadSortPref above. A
+  // ?tab=wago|curseforge query param (see App.applyInitialViewFromQuery)
+  // overrides this once, on load only.
+  const BROWSE_TAB_KEY = "addonSync.browseTab.v1";
+  function loadBrowseTabPref() {
+    try {
+      const raw = localStorage.getItem(BROWSE_TAB_KEY);
+      if (raw === "wago" || raw === "curseforge") return raw;
+    } catch (e) { /* storage unavailable - fall back to the default below */ }
+    return "wago";
+  }
+
   const state = {
     view: "myaddons",          // 'myaddons' | 'browse' | 'settings'
     online: null,               // null = unknown yet, else true/false
@@ -1504,14 +1597,15 @@ const Store = (function () {
     myaddonsSort: loadSortPref(),   // {column: 'name'|'installed'|'latest'|'status'|'updated', dir: 'asc'|'desc'}
     myaddonsSelection: [],   // E11: array of checked projectIds, driving the checkbox column/selection bar. Not persisted - resets on reload like search/filter.
 
-    // CS3 (UX-SPEC.md section 5): one merged search, no per-source switch -
-    // CurseForge and Wago are independent async fetches (each with its own
-    // loading/loaded/error/results) that Views.browse.renderResults()
-    // interleaves into one grid, rendering whichever has arrived so far
-    // without waiting on the slower one.
+    // Round 15: replaces CS3's merged CurseForge+Wago search with a
+    // segmented [Wago | CurseForge] switch (see UX-SPEC.md section 5,
+    // rewritten this round) - Wago keeps its own in-app search (query/
+    // loading/loaded/error/results); CurseForge is the real curseforge.com
+    // site rendered by the native host (or a fallback panel), tracked
+    // separately by Host.getCfState()/Host.hasCfPane(), not here.
     browse: {
+      tab: loadBrowseTabPref(),   // 'wago' | 'curseforge'
       query: "",
-      cf: { loading: false, loaded: false, error: null, results: [], keyless: true, catalogueAge: null },
       wago: { loading: false, loaded: false, error: null, results: [] }
     },
 
@@ -1568,6 +1662,13 @@ const Store = (function () {
   function setMyAddonsSort(sort) {
     state.myaddonsSort = sort;
     try { localStorage.setItem(SORT_PREF_KEY, JSON.stringify(sort)); } catch (e) { /* storage unavailable - sort still applies for this load */ }
+  }
+
+  // Round 15: sets and persists the Get new addons segmented switch's choice.
+  function setBrowseTab(tab) {
+    if (tab !== "wago" && tab !== "curseforge") return;
+    state.browse.tab = tab;
+    try { localStorage.setItem(BROWSE_TAB_KEY, tab); } catch (e) { /* storage unavailable - choice still applies for this load */ }
   }
 
   // E12: an addon's stable key - its numeric CurseForge projectId, or
@@ -1721,7 +1822,7 @@ const Store = (function () {
   }
 
   return {
-    state: state, set: set, setMyAddonsSort: setMyAddonsSort, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor, cacheMods: cacheMods, getCachedMod: getCachedMod,
     isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons
   };
 })();
@@ -1811,6 +1912,29 @@ const LogoCache = (function () {
 })();
 
 /* ==========================================================================
+   Round 15: a tiny reference-counted "something modal-ish is open right now"
+   tracker - any dialog (Components.Dialogs), the detail drawer
+   (Components.Drawer), a kebab/filter popover (Components.Dropdown), or the
+   screenshot lightbox (Components.Lightbox) calls open()/close() as it
+   shows/hides. Views.browse subscribes via onChange so the embedded
+   CurseForge pane can post cf-hide the instant anything opens on top of it
+   (a WebView2 child window always paints above ordinary HTML, so hiding it
+   is the only way a popover can ever appear "in front" of it) and cf-show
+   again once the last one closes. A plain counter, not a stack, since these
+   four things can nest (e.g. a confirm dialog opened from inside the
+   drawer) - only the 0->1 and 1->0 transitions matter to any listener.
+   ========================================================================== */
+const OverlayTracker = (function () {
+  let count = 0;
+  const listeners = [];
+  function open() { count += 1; if (count === 1) listeners.forEach(function (fn) { fn(true); }); }
+  function close() { count = Math.max(0, count - 1); if (count === 0) listeners.forEach(function (fn) { fn(false); }); }
+  function onChange(fn) { listeners.push(fn); }
+  function isAnyOpen() { return count > 0; }
+  return { open: open, close: close, onChange: onChange, isAnyOpen: isAnyOpen };
+})();
+
+/* ==========================================================================
    Components - reusable, presentation-only UI pieces shared by the views.
    ========================================================================== */
 const Components = {};
@@ -1858,6 +1982,7 @@ Components.Dialogs = (function () {
 
   function show(name) {
     openName = name;
+    OverlayTracker.open();
     const backdrop = Utils.qs("#dialog-backdrop");
     const dlg = Utils.qs("#dialog-" + name);
     backdrop.hidden = false;
@@ -1874,7 +1999,7 @@ Components.Dialogs = (function () {
     backdrop.classList.remove("is-visible");
     dlg.classList.remove("is-visible");
     setTimeout(function () { backdrop.hidden = true; dlg.hidden = true; }, 150);
-    if (openName === name) openName = null;
+    if (openName === name) { openName = null; OverlayTracker.close(); }
   }
 
   function openAdd() {
@@ -1989,7 +2114,7 @@ Components.Dropdown = (function () {
     // away from wherever the user actually clicked.
     const anchor = currentAnchor;
     const hadFocusInMenu = !!(currentMenu && currentMenu.contains(document.activeElement));
-    if (currentMenu) { currentMenu.remove(); currentMenu = null; currentAnchor = null; }
+    if (currentMenu) { currentMenu.remove(); currentMenu = null; currentAnchor = null; OverlayTracker.close(); }
     window.removeEventListener("scroll", reposition, true);
     window.removeEventListener("resize", reposition);
     if (hadFocusInMenu && anchor) anchor.focus();
@@ -2034,6 +2159,7 @@ Components.Dropdown = (function () {
   function open(anchorEl, items) {
     if (currentAnchor === anchorEl) { close(); return; }
     close();
+    OverlayTracker.open();
     const menu = Utils.el("div", { class: "dropdown-menu", role: "menu" }, items.map(function (item) {
       if (item === null) return Utils.el("div", { class: "dropdown-sep" });
       if (item.info) return Utils.el("div", { class: "dropdown-info", title: item.title || null }, [item.label]);
@@ -2277,12 +2403,15 @@ Components.Logo = (function () {
 /* ---------- Screenshot lightbox ---------- */
 Components.Lightbox = (function () {
   function open(url) {
+    OverlayTracker.open();
     Utils.qs("#lightbox-img").src = url;
     Utils.qs("#lightbox").hidden = false;
   }
   function close() {
+    if (Utils.qs("#lightbox").hidden) return;
     Utils.qs("#lightbox").hidden = true;
     Utils.qs("#lightbox-img").src = "";
+    OverlayTracker.close();
   }
   function isOpen() { return !Utils.qs("#lightbox").hidden; }
   return { open: open, close: close, isOpen: isOpen };
@@ -2308,6 +2437,10 @@ Components.Drawer = (function () {
     // instead of .mod for that state, via /api/cf/enrich (see loadEnrich).
     const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
     const source = isWago ? "wago" : (hasKey ? "curseforge" : "cf-keyless");
+    // Round 15 (OverlayTracker): open() can be called again to re-target an
+    // already-open drawer at a different addon (no intervening close()) -
+    // only count the 0->1 transition, never a re-open while already open.
+    const wasOpen = Store.state.drawer.open;
     Store.set({
       drawer: {
         open: true, projectId: key, source: source, slug: slug, tracked: !!addon,
@@ -2328,6 +2461,7 @@ Components.Drawer = (function () {
         enrich: null, enrichLoading: false, enrichError: null
       }
     });
+    if (!wasOpen) OverlayTracker.open();
     Utils.qs("#drawer-backdrop").hidden = false;
     Utils.qs("#drawer").hidden = false;
     Utils.qs("#drawer").setAttribute("aria-hidden", "false");
@@ -2343,11 +2477,13 @@ Components.Drawer = (function () {
   }
 
   function close() {
+    const wasOpen = Store.state.drawer.open;
     Utils.qs("#drawer-backdrop").classList.remove("is-visible");
     Utils.qs("#drawer").classList.remove("is-open");
     Utils.qs("#drawer").setAttribute("aria-hidden", "true");
     setTimeout(function () { Utils.qs("#drawer-backdrop").hidden = true; Utils.qs("#drawer").hidden = true; }, 150);
     Store.state.drawer.open = false;
+    if (wasOpen) OverlayTracker.close();
   }
 
   function isOpen() { return Store.state.drawer.open; }
@@ -2920,7 +3056,11 @@ Components.Drawer = (function () {
         Utils.el("span", { class: "dep-name" }, [name])
       ];
       if (missing) {
-        row.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.searchDependency(name); } }, [Utils.icon("search"), "Search CurseForge"]));
+        // Round 15: was "Search CurseForge" - Actions.searchDependency now
+        // lands on Get new addons' Wago search (CurseForge is reachable
+        // from there via the segment switch, not searched directly by this
+        // click any more), so a source-neutral label is the honest one.
+        row.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.searchDependency(name); } }, [Utils.icon("search"), "Search for it"]));
       }
       return Utils.el("li", { class: "dep-row" }, row);
     }));
@@ -4141,60 +4281,61 @@ const Actions = (function () {
     catch (err) { Components.Toast.show("Couldn't open that: " + describeError(err), "error"); }
   }
 
-  // E12/round 9's project-page URL shape, built client-side (as well as
-  // being what the server's own 'curseforge' /api/open target builds from
-  // {projectId, slug}) so round 12's Host.openCurseForge - which needs a
-  // concrete curseforge.com URL to hand the native host - can try it BEFORE
-  // ever reaching the server. Native host: goes to the embedded CurseForge
-  // tab. Everywhere else: unchanged, falls through to the existing
-  // 'curseforge' /api/open target (default browser).
+  // Round 15 (design D): switches Get new addons to the CurseForge segment
+  // and navigates the pane, in the native host with the cf-pane capability;
+  // everywhere else (a plain Edge-window install, or an older host without
+  // that capability), falls through to the existing 'cf-window'/'curseforge'
+  // /api/open targets (a chromeless side window) unchanged - the old
+  // Host.openCurseForge (E19b's embedded-CurseForge-tab message) is no
+  // longer sent by the SPA at all (SPEC.md E21: the host still accepts it
+  // for compatibility, but this app doesn't need it once cf-show/cf-nav
+  // exist).
+  function switchToCfPane(url, navigate) {
+    App.switchView("browse");
+    // navigateCf both switches the segment (if not already there) and
+    // navigates in one go - calling setTab first would show the pane at
+    // its home/last-state URL, then navigateCf would immediately have to
+    // send a second cf-nav to correct it.
+    Views.browse.navigateCf(url, navigate);
+  }
+
+  // E12/round 9's project-page URL shape, built client-side - what the
+  // server's own 'curseforge' /api/open target also builds from
+  // {projectId, slug}, kept here so this can decide whether to route into
+  // the CurseForge pane before ever reaching the server.
   function openOnCurseForge(projectId, slug) {
     const id = Utils.normalizeId(projectId);
     const url = slug
       ? "https://www.curseforge.com/wow/addons/" + encodeURIComponent(slug)
       : "https://www.curseforge.com/projects/" + encodeURIComponent(String(id));
-    if (Host.openCurseForge(url)) return;
+    if (Host.hasCfPane()) { switchToCfPane(url, true); return; }
     return openWhat("curseforge", { projectId: id, slug: slug || undefined });
   }
 
-  // Round 9: Browse's "Search on CurseForge.com" box (CurseForge pane, both
-  // keyless and keyed) - unlike searchDependency below, this always opens
-  // CurseForge's own website search rather than ever redirecting into this
-  // app's in-app search, since the whole point is reaching CurseForge's full
-  // catalogue/official ranking. Round 12: in the native host, goes straight
-  // to the embedded CurseForge tab (Host.openCurseForge); everywhere else,
-  // unchanged - the 'cf-window' open target (a chromeless side window
-  // beside this app) rather than 'url' (the default browser tab every
-  // other external link here uses) - server-side allowlisted to
-  // curseforge.com, same as every other open target.
+  // The Wago panel's "Not on Wago? Try CurseForge" fallback link (UX-SPEC.md
+  // section 5, rewritten round 15): switches segments in the native host;
+  // everywhere else, opens the existing chromeless side window directly
+  // (the 'cf-window' target) rather than switching to a CurseForge segment
+  // that would only show its own "browsing happens in the desktop window"
+  // fallback panel.
   function searchCurseForgeWebsite(term) {
     const q = (term || "").trim();
-    if (!q) return;
-    const url = "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons";
-    if (Host.openCurseForge(url)) return;
-    return openWhat("cf-window", { url: url });
+    const url = q
+      ? "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons"
+      : "https://www.curseforge.com/wow/addons";
+    if (Host.hasCfPane()) { switchToCfPane(url, true); return; }
+    return Views.browse.openCfWindowFallback(url);
   }
 
   // E3: "Search CurseForge" on a missing dependency, from the drawer's
-  // Overview tab. With a key, Browse can search directly, so switch there
-  // pre-filled rather than leaving the app; without one, Browse is hidden
-  // behind its own no-key panel, so fall back to opening CurseForge's own
-  // search page in the default browser (server-side allowlisted to the two
-  // addon marketplaces this app ever links to).
+  // Overview tab - switches to Get new addons' Wago search (unchanged
+  // plumbing; the query is pre-filled the same way it always was, just
+  // against Wago only now rather than the old merged CurseForge+Wago grid).
   function searchDependency(name) {
-    // CS3: Browse's merged search works fully without a key (keyless
-    // CurseForge catalogue + Wago, both concurrent), so this always switches
-    // there now rather than falling back to an external browser tab - set
-    // the query before switching: switching to a not-yet-loaded Browse view
-    // auto-searches using whatever query is already in Store, so setting it
-    // first means that auto-search (when it fires) already uses the right
-    // term instead of an empty/stale one. When Browse was already loaded
-    // that auto-search is skipped (Views.browse.render() only searches a
-    // given source when nothing has loaded yet), so an explicit search call
-    // is still needed to pick up the new query in that case.
     Store.state.browse.query = name;
-    const alreadyLoaded = Store.state.browse.cf.loaded || Store.state.browse.wago.loaded;
+    const alreadyLoaded = Store.state.browse.wago.loaded;
     App.switchView("browse");
+    Views.browse.setTab("wago");
     const input = Utils.qs("#browse-search");
     if (input) input.value = name;
     if (alreadyLoaded) Views.browse.search(true);
@@ -4797,104 +4938,48 @@ Views.myAddons = (function () {
   return { render: render, bindOnce: bindOnce };
 })();
 
-/* ---------- Browse ---------- */
-/* ---------- Browse ---------- */
-// CS3 (UX-SPEC.md section 5): one search box, no source-tab switch -
-// CurseForge (keyless catalogue+addon-radar merge, or the official API when
-// a key is set) and Wago are searched concurrently; each source keeps its
-// own loading/loaded/error/results in Store.state.browse.cf/.wago so the
-// merged grid can render whichever has arrived so far without ever
-// blocking on the slower one. No dedupe across sources (see UX-SPEC.md
-// 5.1's own note on why a cross-source id match can't safely run here) -
-// a same addon on both CurseForge and Wago shows as two source-badged
-// cards.
+/* ---------- Get new addons ---------- */
+// Round 15 (Eric, verbatim: "i dont like the weird tab thing on the left
+// with furphy and curseforge - get rid of that. rename browse to get new
+// addons. at the top of get new addons screen, let user switch between
+// wago in app search, and curseforge, which browses the site contained in
+// the area that the wago search was in, one unified experience"). Replaces
+// CS3's merged CurseForge+Wago search grid with a segmented [Wago |
+// CurseForge] switch (UX-SPEC.md section 5, rewritten this round):
+//  - Wago keeps its own in-app search (query/loading/loaded/error/results
+//    in Store.state.browse.wago) - CurseForge is no longer searched in-app;
+//    its /api/cf/* endpoints stay live for add-by-link resolution and
+//    drawer enrichment only.
+//  - CurseForge is the real curseforge.com site. Inside the native host
+//    with the cf-pane capability, an embedded WebView2 overlay the host
+//    positions over #cf-placeholder's screen rect (SPEC.md's new E21
+//    section - Host.cfShow/cfRect/cfHide/cfNav, and the host-ready/
+//    cf-state/cf-job messages it sends back). Everywhere else (a plain
+//    Edge-window install, or an older host without that capability), a
+//    compact fallback panel pointing at the existing chromeless side
+//    window (the 'cf-window' /api/open target).
 Views.browse = (function () {
-  // Whether the CurseForge half of the merged search is running in
-  // keyless mode (no API key configured) right now - a rejected key is a
-  // separate, fully-blocking state (#browse-keyrejected below), unaffected
-  // by this.
-  function isKeylessCf() {
-    return !(Store.state.settings && Store.state.settings.hasApiKey);
-  }
+  const CF_HOME = "https://www.curseforge.com/wow/addons";
 
-  function render() {
-    const b = Store.state.browse;
-    const hasKey = !!(Store.state.settings && Store.state.settings.hasApiKey);
-    // Round 6 fix: a configured-but-rejected key is a third state, distinct
-    // from "no key at all" - shows its own panel (with its own fix-it copy)
-    // instead of a search UI that would just keep failing every request.
-    // CS3 (UX-SPEC.md 5.1): kept as-is, still fully blocks #browse-content -
-    // a rejected key breaks the CurseForge half of every merged search.
-    const rejected = hasKey && Store.state.cfKeyRejected;
-    Utils.qs("#browse-keyrejected").hidden = !rejected;
-    Utils.qs("#browse-content").hidden = rejected;
-    if (rejected) return;
+  // Whether this module currently believes the pane is the active segment
+  // and has been told to show (subject to a temporary OverlayTracker-driven
+  // hide while a dialog/drawer/popover is open on top of it).
+  let cfActive = false;
+  let overlayHidden = false;
+  let rectObserver = null;
+  let rafPending = false;
+  let installNoteShown = false;
 
-    if (!b.cf.loaded && !b.cf.loading && !b.cf.error) searchCf(true);
-    if (!b.wago.loaded && !b.wago.loading && !b.wago.error) searchWago(true);
-    renderResults();
-  }
+  function currentTab() { return Store.state.browse.tab; }
 
-  // The official keyed search branches to the keyless one internally so
-  // every other caller (search(), render()) can treat CurseForge as one
-  // source regardless of key state.
-  async function searchCf(reset) {
-    if (isKeylessCf()) { return searchCfKeyless(reset); }
-    const b = Store.state.browse;
-    if (reset) { b.cf.results = []; }
-    b.cf.loading = true;
-    b.cf.error = null;
-    renderResults();
-    try {
-      const res = await Api.cfSearch({ q: b.query, sortField: 2, sortOrder: "desc", index: 0, pageSize: 30 });
-      Store.cacheMods(res.data || []);
-      b.cf.results = res.data || [];
-      b.cf.keyless = false;
-      b.cf.loaded = true;
-      b.cf.loading = false;
-      LogoCache.ensure((res.data || []).map(function (m) { return m.id; }), renderResults);
-    } catch (err) {
-      b.cf.loading = false;
-      b.cf.error = err;
-    }
-    renderResults();
-  }
+  /* ---- Wago (in-app search) ---- */
 
-  // E16: the no-key CurseForge search - GET /api/cf/browse, always keyless-
-  // capable, already tier-then-downloads sorted server-side (Search-
-  // CfCatalogue). No index/pageSize pagination on this endpoint (unlike the
-  // official search above) - CS3 removed "Load more" from the default view
-  // anyway, so this always asks for one fixed-size batch.
-  async function searchCfKeyless(reset) {
-    const b = Store.state.browse;
-    if (reset) { b.cf.results = []; }
-    b.cf.loading = true;
-    b.cf.error = null;
-    renderResults();
-    try {
-      const res = await Api.cfBrowse({ q: b.query, limit: 30 });
-      b.cf.results = res.items || [];
-      b.cf.catalogueAge = res.catalogueAge || null;
-      b.cf.keyless = true;
-      b.cf.loaded = true;
-      b.cf.loading = false;
-    } catch (err) {
-      b.cf.loading = false;
-      b.cf.error = err;
-    }
-    renderResults();
-  }
-
-  // E12 (Wago second source): Wago's search is a live scrape, never
-  // key-gated. CS3: fetched concurrently with CurseForge (search() below
-  // fires both without awaiting either), one fixed-size page - "Load more"
-  // is gone from the default view along with the rest of the pagination UI.
   async function searchWago(reset) {
     const b = Store.state.browse;
     if (reset) { b.wago.results = []; }
     b.wago.loading = true;
     b.wago.error = null;
-    renderResults();
+    renderWagoResults();
     try {
       const res = await Api.wagoSearch({ q: b.query, page: 1 });
       b.wago.results = res.items || [];
@@ -4904,25 +4989,17 @@ Views.browse = (function () {
       b.wago.loading = false;
       b.wago.error = err;
     }
-    renderResults();
+    renderWagoResults();
   }
 
-  // Fires both sources without awaiting either - "never block the faster
-  // source on the slower one" (UX-SPEC.md 5.1). Each fetch's own
-  // renderResults() calls repaint the merged grid as results land.
-  function search(reset) {
-    searchCf(reset);
-    searchWago(reset);
-  }
+  // Kept as a stable name for external callers (the input handler below,
+  // Actions.searchDependency) - Wago is the only in-app source now.
+  function search(reset) { searchWago(reset); }
 
-  // Case-insensitive exact/starts-with/contains tiering, mirroring the
-  // same three-tier scheme Search-CfCatalogue already applies server-side
-  // to the keyless CurseForge path (SPEC: exact -> starts-with -> contains)
-  // - applied uniformly here across both sources (and the official keyed
-  // CurseForge search, which has no tiering of its own) so the merged grid
-  // reads as one ranked list rather than two concatenated ones. An empty
-  // query (the default pre-typing view) gets one flat tier, ranked by
-  // downloads only.
+  // Case-insensitive exact/starts-with/contains tiering, mirroring the same
+  // three-tier scheme Search-CfCatalogue already applies server-side to the
+  // (now unused-in-Browse) keyless CurseForge path. An empty query (the
+  // default pre-typing view) gets one flat tier.
   function relevanceTier(name, needle) {
     if (!needle) return 3;
     const n = (name || "").toLowerCase();
@@ -4930,33 +5007,6 @@ Views.browse = (function () {
     if (n.indexOf(needle) === 0) return 1;
     if (n.indexOf(needle) !== -1) return 2;
     return 3;
-  }
-
-  // Normalizes a raw CurseForge search result (either shape - see the two
-  // branches of searchCf above) into the one card shape resultCard() reads,
-  // rendering only the fields that shape actually carries (UX-SPEC.md 5.1:
-  // "render only what the source actually supplied, never reserve blank
-  // space").
-  function normalizeCfEntry(m) {
-    if (Store.state.browse.cf.keyless) {
-      // /api/cf/browse item shape: id/name/slug/downloadCount/lastUpdated/
-      // logoUrl/source(catalogue|addon-radar) - no summary/author/category
-      // ever present here.
-      return {
-        source: "cf", id: m.id, key: m.id, name: m.name || ("Project " + m.id), slug: m.slug,
-        logoUrl: m.logoUrl, summary: null, author: null,
-        downloadCount: m.downloadCount, updatedAt: m.lastUpdated
-      };
-    }
-    // Official /v1/mods/search shape (Handle-CfSearch) - richer, but still
-    // guarded field-by-field below since summary/authors can be empty.
-    return {
-      source: "cf", id: m.id, key: m.id, name: m.name, slug: m.slug,
-      logoUrl: m.logo ? (m.logo.thumbnailUrl || m.logo.url) : null,
-      summary: m.summary || null,
-      author: (m.authors && m.authors[0]) ? m.authors[0].name : null,
-      downloadCount: m.downloadCount, updatedAt: m.dateModified
-    };
   }
 
   // E12: Wago's search results are parsed HTML card snippets (slug/name/
@@ -4971,78 +5021,49 @@ Views.browse = (function () {
     };
   }
 
-  function mergeResults(b) {
+  function sortedWagoEntries(b) {
     const needle = (b.query || "").trim().toLowerCase();
-    const all = b.cf.results.map(normalizeCfEntry).concat(b.wago.results.map(normalizeWagoEntry));
-    all.forEach(function (e) { e.tier = relevanceTier(e.name, needle); });
-    all.sort(function (a, c) {
-      if (a.tier !== c.tier) return a.tier - c.tier;
-      const ad = a.downloadCount != null ? a.downloadCount : -1;
-      const cd = c.downloadCount != null ? c.downloadCount : -1;
-      return cd - ad;
-    });
-    return all;
+    const list = b.wago.results.map(normalizeWagoEntry);
+    list.forEach(function (e) { e.tier = relevanceTier(e.name, needle); });
+    list.sort(function (a, c) { return a.tier - c.tier; });
+    return list;
   }
 
-  function renderResults() {
+  function renderWagoResults() {
     const b = Store.state.browse;
     const grid = Utils.qs("#browse-grid");
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
     const errorBox = Utils.qs("#browse-error");
     const summary = Utils.qs("#browse-summary");
-    const sourceNote = Utils.qs("#browse-source-note");
-    const nudge = Utils.qs("#browse-nudge");
-    const merged = mergeResults(b);
-    const bothDone = !b.cf.loading && !b.wago.loading;
+    const list = sortedWagoEntries(b);
 
-    // Neither source has anything yet and both are still in flight - the
-    // initial skeleton, same as the old single-source loading state.
-    if (!bothDone && !merged.length) {
+    if (b.wago.loading && !list.length) {
       grid.hidden = true; empty.hidden = true; errorBox.hidden = true; skeleton.hidden = false;
-      summary.textContent = ""; sourceNote.hidden = true; nudge.hidden = true;
+      summary.textContent = "";
       return;
     }
     skeleton.hidden = true;
 
-    // Both sources failed - the one case with nothing left to show at all.
-    if (bothDone && b.cf.error && b.wago.error && !merged.length) {
-      grid.hidden = true; empty.hidden = true; sourceNote.hidden = true; nudge.hidden = true;
+    if (!b.wago.loading && b.wago.error && !list.length) {
+      grid.hidden = true; empty.hidden = true;
       errorBox.hidden = false;
-      Utils.qs("#browse-error-msg").textContent = "Couldn't reach CurseForge or Wago right now.";
+      Utils.qs("#browse-error-msg").textContent = "Couldn't reach Wago right now.";
       summary.textContent = "";
       return;
     }
     errorBox.hidden = true;
 
-    if (bothDone && !merged.length) {
+    if (!b.wago.loading && !list.length) {
       grid.hidden = true; empty.hidden = false;
       summary.textContent = "";
     } else {
       empty.hidden = true;
       grid.hidden = false;
       grid.textContent = "";
-      merged.forEach(function (entry) { grid.appendChild(resultCard(entry)); });
-      summary.textContent = merged.length + " result" + (merged.length === 1 ? "" : "s");
+      list.forEach(function (entry) { grid.appendChild(resultCard(entry)); });
+      summary.textContent = list.length + " result" + (list.length === 1 ? "" : "s");
     }
-
-    // UX-SPEC.md 5.1: "if one source fails, the other still renders and a
-    // single quiet line says which source could not be reached" - only
-    // when exactly one source failed (both-failed is the errorBox case
-    // above, which already returned).
-    if (b.cf.error && !b.wago.error) {
-      sourceNote.hidden = false;
-      sourceNote.textContent = "Couldn't reach CurseForge search right now — showing Wago results only.";
-    } else if (b.wago.error && !b.cf.error) {
-      sourceNote.hidden = false;
-      sourceNote.textContent = "Couldn't reach Wago search right now — showing CurseForge results only.";
-    } else {
-      sourceNote.hidden = true;
-    }
-
-    // UX-SPEC.md 5.1: keyless nudge, thin (<3) or zero results, only once
-    // both sources have actually finished (never flickers on during load).
-    nudge.hidden = !(bothDone && isKeylessCf() && merged.length < 3);
   }
 
   function resultCard(entry) {
@@ -5087,59 +5108,276 @@ Views.browse = (function () {
     return node;
   }
 
-  // CS3 (UX-SPEC.md 5.1, last bullet): the curseforge:// protocol toggle is
-  // gone from Browse entirely (Settings > Advanced keeps the one instance).
-  // There's no reliable way for this page to observe a click on CurseForge
-  // .com's own Install button failing out in that separate window/tab, so
-  // this fires the one thing Furphy CAN observe at the moment it matters -
-  // right after the user heads to CurseForge.com to install something, if
-  // the handler is confirmed off (Store.state.protocol, loaded once at
-  // startup by Actions.loadProtocolStatus) - shown at most once per session.
-  let installNoteShown = false;
+  // The curseforge:// protocol toggle's one remaining home is Settings >
+  // Advanced. There's no reliable way for this page to observe a click on
+  // CurseForge.com's own Install button failing out in the separate side
+  // window, so this fires the one thing Furphy CAN observe at the moment it
+  // matters - right after the user opens that window, if the handler is
+  // confirmed off (Store.state.protocol, loaded once at startup by
+  // Actions.loadProtocolStatus) - shown at most once per session. Only
+  // relevant to the fallback panel's own window - inside the native host's
+  // embedded pane there is no OS-level protocol handoff in play at all.
   function maybeShowInstallNote() {
     if (installNoteShown) return;
     const p = Store.state.protocol;
     if (p && p.registered === false) {
       installNoteShown = true;
-      Utils.qs("#browse-install-note").hidden = false;
+      const note = Utils.qs("#browse-install-note");
+      if (note) note.hidden = false;
     }
   }
 
+  // Opens the existing chromeless side window directly - the Edge-window/
+  // older-host fallback path, used both by the fallback panel's own button
+  // and by Actions.searchCurseForgeWebsite when Host.hasCfPane() is false.
+  function openCfWindowFallback(url) {
+    Actions.openWhat("cf-window", { url: url || CF_HOME });
+    maybeShowInstallNote();
+  }
+
+  /* ---- CurseForge (native host, cf-pane capability) ---- */
+
+  function placeholderEl() { return Utils.qs("#cf-placeholder"); }
+
+  function measureRect() {
+    const el = placeholderEl();
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }
+
+  function scheduleRectUpdate() {
+    if (rafPending || !cfActive) return;
+    rafPending = true;
+    requestAnimationFrame(function () {
+      rafPending = false;
+      if (!cfActive) return;
+      const rect = measureRect();
+      if (rect) Host.cfRect(rect);
+    });
+  }
+
+  // Moves the actual #job-panel node (same node, same listeners) into
+  // .cfpane-job-mount so it renders inline between the toolbar and the
+  // placeholder instead of floating - see index.html's #job-panel-anchor
+  // comment. A ResizeObserver on the placeholder (below) naturally posts a
+  // fresh cf-rect once the panel's own height changes the placeholder's box.
+  function placeInline() {
+    const mount = Utils.qs("#cfpane-job-mount");
+    const panel = Utils.qs("#job-panel");
+    if (!mount || !panel || panel.parentNode === mount) return;
+    panel.classList.add("is-inline");
+    mount.appendChild(panel);
+  }
+  function placeFloating() {
+    const anchor = Utils.qs("#job-panel-anchor");
+    const panel = Utils.qs("#job-panel");
+    if (!anchor || !panel) return;
+    panel.classList.remove("is-inline");
+    if (panel.previousElementSibling === anchor) return;
+    if (anchor.parentNode) anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+  }
+
+  function renderCfToolbar() {
+    const st = Host.getCfState();
+    const back = Utils.qs("#cf-nav-back");
+    const fwd = Utils.qs("#cf-nav-forward");
+    if (back) back.disabled = !st.canGoBack;
+    if (fwd) fwd.disabled = !st.canGoForward;
+    const title = Utils.qs("#cf-pane-title");
+    if (title) title.textContent = st.loading ? "Loading…" : (st.title || "");
+  }
+
+  function ensureCfObservers() {
+    const el = placeholderEl();
+    if (!rectObserver && window.ResizeObserver) {
+      rectObserver = new ResizeObserver(function () { scheduleRectUpdate(); });
+    }
+    if (rectObserver && el) rectObserver.observe(el);
+    window.addEventListener("resize", scheduleRectUpdate);
+    window.addEventListener("scroll", scheduleRectUpdate, true);
+  }
+  function teardownCfObservers() {
+    if (rectObserver) rectObserver.disconnect();
+    window.removeEventListener("resize", scheduleRectUpdate);
+    window.removeEventListener("scroll", scheduleRectUpdate, true);
+  }
+
+  // opts: {url, navigate} - present only for an explicit "go to this URL"
+  // request (Actions.switchToCfPane/navigateCf below); a plain "just show/
+  // reposition" call (a tab click, a resize, returning from an overlay)
+  // passes nothing, and only ever navigates the very first time the pane is
+  // shown this session with no page of its own yet (SPEC.md E21's cf-show
+  // contract).
+  function setupCfPane(opts) {
+    opts = opts || {};
+    if (!cfActive) {
+      const rect = measureRect();
+      if (!rect) return;
+      const showOpts = {};
+      if (opts.url) { showOpts.url = opts.url; if (opts.navigate) showOpts.navigate = true; }
+      else if (!Host.getCfState().url) { showOpts.url = CF_HOME; }
+      Host.cfShow(rect, showOpts);
+      cfActive = true;
+      placeInline();
+      ensureCfObservers();
+      Utils.qs("#toast-container").classList.add("is-cf-pane");
+    } else if (opts.url) {
+      Host.cfNav("go", opts.url);
+    } else {
+      scheduleRectUpdate();
+    }
+    renderCfToolbar();
+  }
+
+  function teardownCfPane() {
+    if (cfActive) {
+      cfActive = false;
+      overlayHidden = false;
+      Host.cfHide();
+      teardownCfObservers();
+      Utils.qs("#toast-container").classList.remove("is-cf-pane");
+    }
+    placeFloating();
+  }
+
+  function applyTabVisibility() {
+    const tab = currentTab();
+    const wagoTab = Utils.qs("#tab-wago");
+    const cfTab = Utils.qs("#tab-curseforge");
+    wagoTab.classList.toggle("is-active", tab === "wago");
+    wagoTab.setAttribute("aria-selected", tab === "wago" ? "true" : "false");
+    cfTab.classList.toggle("is-active", tab === "curseforge");
+    cfTab.setAttribute("aria-selected", tab === "curseforge" ? "true" : "false");
+    const showCfNative = tab === "curseforge" && Host.hasCfPane();
+    const showCfFallback = tab === "curseforge" && !Host.hasCfPane();
+    Utils.qs("#browse-wago-panel").hidden = tab !== "wago";
+    Utils.qs("#browse-cf-panel").hidden = !showCfNative;
+    Utils.qs("#browse-cf-fallback").hidden = !showCfFallback;
+    return { tab: tab, showCfNative: showCfNative };
+  }
+
+  function render() {
+    const info = applyTabVisibility();
+    if (info.tab === "wago") {
+      const b = Store.state.browse;
+      if (!b.wago.loaded && !b.wago.loading && !b.wago.error) searchWago(true);
+      else renderWagoResults();
+      teardownCfPane();
+    } else if (info.showCfNative) {
+      setupCfPane();
+    } else {
+      teardownCfPane();
+    }
+  }
+
+  function setTab(tab) {
+    if (tab !== "wago" && tab !== "curseforge") return;
+    if (tab === currentTab()) return;
+    Store.setBrowseTab(tab);
+    render();
+  }
+
+  // Actions.switchToCfPane's navigation half - switches to the CurseForge
+  // segment (if not already there) and navigates the pane to url. A no-op
+  // past the tab switch when the native host doesn't have the cf-pane
+  // capability - applyTabVisibility() has already shown the fallback panel
+  // in that case, and Actions itself only calls this when hasCfPane() is
+  // true (see Actions.openOnCurseForge/searchCurseForgeWebsite).
+  function navigateCf(url, forceNavigate) {
+    Store.setBrowseTab("curseforge");
+    const info = applyTabVisibility();
+    if (info.showCfNative) setupCfPane({ url: url, navigate: forceNavigate !== false });
+  }
+
+  // App.switchView calls this when leaving Get new addons for another view
+  // entirely (render() above only tears the pane down for an in-view tab
+  // switch, since it's only ever called while this view is the active one).
+  function onLeaveView() { teardownCfPane(); }
+
   function bindOnce() {
+    Utils.qs("#tab-wago").addEventListener("click", function () { setTab("wago"); });
+    Utils.qs("#tab-curseforge").addEventListener("click", function () { setTab("curseforge"); });
+
     Utils.qs("#browse-search").addEventListener("input", Utils.debounce(function (ev) {
       Store.state.browse.query = ev.target.value;
       search(true);
     }, 400));
 
-    Utils.qs("#btn-keyrejected-settings").addEventListener("click", function () { App.switchView("settings"); });
-    Utils.qs("#btn-browse-nudge-settings").addEventListener("click", function () { App.switchView("settings"); });
+    // "Not on Wago? Try CurseForge" - switches segments in the native host;
+    // everywhere else, opens the existing side window directly rather than
+    // switching to a segment that would only show its own "browsing
+    // happens in the desktop window" fallback panel (UX-SPEC.md section 5).
+    Utils.qs("#btn-cf-web-search").addEventListener("click", function () {
+      if (Host.hasCfPane()) { setTab("curseforge"); return; }
+      openCfWindowFallback();
+    });
+    Utils.qs("#btn-browse-add-link").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+    Utils.qs("#btn-browse-add-link-fallback").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+
+    Utils.qs("#btn-cf-open-window").addEventListener("click", function () { openCfWindowFallback(); });
     Utils.qs("#btn-browse-install-note-settings").addEventListener("click", function () { App.switchView("settings"); });
 
-    // CS3: demoted from a permanent "Search on CurseForge.com" box into a
-    // single fallback line - reuses the query already typed in the merged
-    // search box (unchanged Actions.searchCurseForgeWebsite plumbing, so
-    // this still opens the native host's embedded CurseForge tab, or the
-    // existing chromeless side window everywhere else).
-    Utils.qs("#btn-cf-web-search").addEventListener("click", function () {
-      const term = Utils.qs("#browse-search").value.trim();
-      if (!term) { Utils.qs("#browse-search").focus(); return; }
-      Actions.searchCurseForgeWebsite(term);
-      // Review fix: in the native host, Host.openCurseForge() already
-      // handled the click via the embedded CurseForge tab - no OS-level
-      // curseforge:// handoff (and thus no possible "Furphy isn't the
-      // handler" failure) was ever in play, so the protocol note would be
-      // misleading there. Only the non-native 'cf-window' fallback path can
-      // actually hit the failure this note is warning about.
-      if (!Host.isNative()) maybeShowInstallNote();
+    // CurseForge pane toolbar (drawn in HTML - see design note at the top
+    // of this file's Views.browse comment).
+    Utils.qs("#cf-nav-back").addEventListener("click", function () { if (cfActive) Host.cfNav("back"); });
+    Utils.qs("#cf-nav-forward").addEventListener("click", function () { if (cfActive) Host.cfNav("forward"); });
+    Utils.qs("#cf-nav-reload").addEventListener("click", function () { if (cfActive) Host.cfNav("reload"); });
+    Utils.qs("#cf-nav-home").addEventListener("click", function () { if (cfActive) Host.cfNav("home"); });
+    Utils.qs("#cf-pane-search").addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" || !cfActive) return;
+      const q = ev.target.value.trim();
+      if (!q) return;
+      Host.cfNav("go", "https://www.curseforge.com/wow/search?search=" + encodeURIComponent(q) + "&class=addons");
     });
 
-    // CS3: demoted "Install by Project ID" into a fallback link that opens
-    // the existing Add-addon dialog - reuses its ID/URL parsing
-    // (Actions.submitAddInput) as-is, no new server code.
-    Utils.qs("#btn-browse-add-link").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+    // Host -> page (SPEC.md E21): cf-state repaints the toolbar; host-ready
+    // re-renders once hasCfPane() actually has an answer, which can arrive
+    // after the first render (a fresh page load racing the host's own
+    // CoreWebView2 startup - or the mock's own simulated delay); cf-job
+    // opens the job panel immediately for a job the host itself started (an
+    // Install click intercepted on curseforge.com), instead of waiting for
+    // the next poll tick.
+    Host.onCfState(function () {
+      if (Store.state.view === "browse" && currentTab() === "curseforge") renderCfToolbar();
+    });
+    Host.onHostReady(function () {
+      if (Store.state.view === "browse") render();
+    });
+    Host.onCfJob(function (jobId) {
+      if (jobId) App.attachToJob(jobId);
+    });
+
+    // Any dialog/drawer/popover opening covers the pane's screen rect with
+    // real HTML (a confirm dialog, the detail drawer, a kebab menu...) but
+    // a WebView2 child window always paints above ordinary HTML regardless
+    // of z-index, so it has to be told to hide instead - then shown again
+    // once the last one closes (OverlayTracker only fires on the 0->1/1->0
+    // transitions, so nested popovers don't flicker it).
+    OverlayTracker.onChange(function (open) {
+      if (!cfActive) return;
+      if (open) {
+        overlayHidden = true;
+        Host.cfHide();
+      } else if (overlayHidden) {
+        overlayHidden = false;
+        const rect = measureRect();
+        if (rect) Host.cfShow(rect);
+      }
+    });
+
+    // A reload/navigate-away/close - the host keeps the pane's own page
+    // loaded (so back/forward survives a reopen), but it should stop
+    // painting over whatever's about to replace this page.
+    window.addEventListener("pagehide", function () { if (cfActive) Host.cfHide(); });
   }
 
-  return { render: render, search: search, bindOnce: bindOnce };
+  return {
+    render: render, search: search, bindOnce: bindOnce,
+    setTab: setTab, navigateCf: navigateCf, onLeaveView: onLeaveView,
+    openCfWindowFallback: openCfWindowFallback
+  };
 })();
 
 /* ---------- Settings ---------- */
@@ -5608,7 +5846,10 @@ Views.settings = (function () {
     Utils.qs("#btn-clear-apikey").addEventListener("click", async function () {
       const ok = await Components.Dialogs.confirm({
         title: "Clear CurseForge API key?",
-        message: "Browse, logos, descriptions, and changelogs from CurseForge will stop working until a new key is saved.",
+        // Round 15: "Browse" dropped from this warning - Get new addons no
+        // longer depends on the key at all (Wago search never did; the
+        // CurseForge segment is now the real website, not a keyed search).
+        message: "Logos, descriptions, and changelogs from CurseForge will stop working until a new key is saved.",
         confirmLabel: "Clear key"
       });
       if (!ok) return;
@@ -5877,7 +6118,96 @@ const Host = (function () {
     return post({ type: "theme", name: name, colors: colors });
   }
 
-  return { isNative: isNative, post: post, openCurseForge: openCurseForge, reportTheme: reportTheme };
+  /* ------------------------------------------------------------------------
+     Round 15 (SPEC.md E21): the embedded CurseForge pane contract. The host
+     is the source of truth for whether it supports a pane at all - a
+     {type:"host-ready", capabilities:[...]} message (sent once when the
+     host's own CoreWebView2 is ready, and again in reply to this module's
+     own {type:"hello"} - the only way a page that reloaded mid-session can
+     rediscover it) is the ONLY thing that ever sets hasCfPane() true, so an
+     older host that doesn't know about any of this simply never flips it -
+     Views.browse falls back to the plain-Edge-window panel in that case,
+     exactly as it does outside the native host entirely.
+     ------------------------------------------------------------------------ */
+  let cfPaneCapable = false;
+  let hostVersionStr = null;
+  // {url, title, canGoBack, canGoForward, loading} - the host's last-reported
+  // CurseForge navigation state, mirrored here so a caller that hasn't
+  // subscribed yet (e.g. Views.browse.render() on first paint) can still
+  // read the current snapshot instead of waiting for the next message.
+  let lastCfState = { url: null, title: null, canGoBack: false, canGoForward: false, loading: false };
+  const cfStateListeners = [];
+  const cfJobListeners = [];
+  const hostReadyListeners = [];
+  let wired = false;
+
+  function onHostMessage(m) {
+    if (!m || typeof m !== "object") return;
+    if (m.type === "host-ready") {
+      cfPaneCapable = !!(m.capabilities && m.capabilities.indexOf("cf-pane") !== -1);
+      hostVersionStr = m.version || null;
+      // host-ready can arrive asynchronously, well after Views.browse's
+      // first render already ran with hasCfPane() still false (a fresh
+      // page load racing the host's own CoreWebView2 startup) - listeners
+      // re-check/re-render once it's actually known.
+      hostReadyListeners.forEach(function (fn) { try { fn(cfPaneCapable); } catch (e) { /* one bad listener shouldn't break the rest */ } });
+    } else if (m.type === "cf-state") {
+      lastCfState = { url: m.url || null, title: m.title || null, canGoBack: !!m.canGoBack, canGoForward: !!m.canGoForward, loading: !!m.loading };
+      cfStateListeners.forEach(function (fn) { try { fn(lastCfState); } catch (e) { /* one bad listener shouldn't break the rest */ } });
+    } else if (m.type === "cf-job") {
+      cfJobListeners.forEach(function (fn) { try { fn(m.jobId, m.status); } catch (e) { /* ditto */ } });
+    }
+  }
+
+  // Wires the host->page message channel once (called from App.init()) and
+  // asks whatever host is listening to (re-)announce itself. Outside the
+  // native host, window.chrome.webview never exists, so this is a harmless
+  // no-op - hasCfPane() simply stays false forever, same as an old host
+  // that never replies at all.
+  function init() {
+    if (wired) return;
+    wired = true;
+    try {
+      if (window.chrome && window.chrome.webview && window.chrome.webview.addEventListener) {
+        window.chrome.webview.addEventListener("message", function (e) { onHostMessage(e && e.data); });
+      }
+    } catch (e) { /* not the native host */ }
+    post({ type: "hello" });
+  }
+
+  function hasCfPane() { return isNative() && cfPaneCapable; }
+  function hostVersion() { return hostVersionStr; }
+  function getCfState() { return lastCfState; }
+  function onCfState(fn) { cfStateListeners.push(fn); }
+  function onCfJob(fn) { cfJobListeners.push(fn); }
+  function onHostReady(fn) { hostReadyListeners.push(fn); }
+
+  // Shows (or, called again while already shown, moves/resizes) the pane
+  // over a CSS-pixel rect (viewport-relative, from the placeholder's own
+  // getBoundingClientRect()) - device pixels are computed host-side as
+  // css * dpr. opts.url only actually navigates when the pane has no page
+  // loaded yet, or opts.navigate is explicitly set (SPEC.md E21).
+  function cfShow(rect, opts) {
+    opts = opts || {};
+    const msg = { type: "cf-show", rect: rect, dpr: window.devicePixelRatio || 1 };
+    if (opts.url) msg.url = opts.url;
+    if (opts.navigate) msg.navigate = true;
+    return post(msg);
+  }
+  function cfRect(rect) { return post({ type: "cf-rect", rect: rect, dpr: window.devicePixelRatio || 1 }); }
+  function cfHide() { return post({ type: "cf-hide" }); }
+  function cfNav(action, url) {
+    const msg = { type: "cf-nav", action: action };
+    if (url) msg.url = url;
+    return post(msg);
+  }
+
+  return {
+    isNative: isNative, post: post, openCurseForge: openCurseForge, reportTheme: reportTheme,
+    init: init, hasCfPane: hasCfPane, hostVersion: hostVersion,
+    getCfState: getCfState, onCfState: onCfState, onCfJob: onCfJob, onHostReady: onHostReady,
+    cfShow: cfShow, cfRect: cfRect, cfHide: cfHide, cfNav: cfNav
+  };
 })();
 
 /* ==========================================================================
@@ -5911,9 +6241,15 @@ const App = (function () {
 
   function switchView(view) {
     if (Store.state.view === view) return;
+    // Round 15: render() only tears the CurseForge pane down for an in-view
+    // tab switch (Wago <-> CurseForge) - leaving Get new addons for another
+    // view entirely needs its own explicit teardown, since Views.browse's
+    // own render() is never called again once another view is active.
+    const leavingBrowse = Store.state.view === "browse";
     Store.state.view = view;
     Utils.qsa(".nav-item").forEach(function (btn) { btn.classList.toggle("is-active", btn.dataset.view === view); });
     Utils.qsa(".view").forEach(function (sec) { sec.hidden = sec.dataset.viewRoot !== view; });
+    if (leavingBrowse) Views.browse.onLeaveView();
     Components.JobPanel.collapseIfOpen();
     renderCurrentView();
   }
@@ -5928,18 +6264,26 @@ const App = (function () {
   // CS5: deep-link support for verification and future callers - a
   // ?view=my-addons|browse|settings query param picks the initial view on
   // load (default unchanged: no/unrecognized param stays on My Addons).
-  // Applied once, directly against the static markup (nav-item classes +
-  // .view section visibility) rather than via switchView() itself, since
-  // switchView() no-ops when the target already equals the current
-  // Store.state.view - which it does for the default "myaddons" case.
-  const VIEW_QUERY_MAP = { "my-addons": "myaddons", "browse": "browse", "settings": "settings" };
+  // Round 15: "browse" is renamed "get-new-addons" everywhere visible, but
+  // "browse" keeps working as an alias (internal identifiers - Views.browse,
+  // Store.state.view's "browse" value - are unchanged, per design B); a
+  // ?tab=wago|curseforge alongside either one picks the initial segment
+  // (design D). Applied once, directly against the static markup (nav-item
+  // classes + .view section visibility, and Store.setBrowseTab for the tab)
+  // rather than via switchView()/Views.browse.setTab() themselves, since
+  // both no-op when the target already equals the current state - true for
+  // the default "myaddons"/"wago" case.
+  const VIEW_QUERY_MAP = { "my-addons": "myaddons", "browse": "browse", "get-new-addons": "browse", "settings": "settings" };
   function applyInitialViewFromQuery() {
-    const raw = new URLSearchParams(location.search).get("view");
-    const target = VIEW_QUERY_MAP[raw];
-    if (!target || target === Store.state.view) return;
-    Store.state.view = target;
-    Utils.qsa(".nav-item").forEach(function (btn) { btn.classList.toggle("is-active", btn.dataset.view === target); });
-    Utils.qsa(".view").forEach(function (sec) { sec.hidden = sec.dataset.viewRoot !== target; });
+    const params = new URLSearchParams(location.search);
+    const target = VIEW_QUERY_MAP[params.get("view")];
+    if (target && target !== Store.state.view) {
+      Store.state.view = target;
+      Utils.qsa(".nav-item").forEach(function (btn) { btn.classList.toggle("is-active", btn.dataset.view === target); });
+      Utils.qsa(".view").forEach(function (sec) { sec.hidden = sec.dataset.viewRoot !== target; });
+    }
+    const tab = params.get("tab");
+    if (target === "browse" && (tab === "wago" || tab === "curseforge")) Store.setBrowseTab(tab);
   }
 
   // Sidebar badges/status line, the Update-all label, global busy-disabling,
@@ -6020,6 +6364,27 @@ const App = (function () {
     renderChrome();
     renderCurrentView();
     pollJob(jobId);
+  }
+
+  // Round 15 (SPEC.md E21's cf-job message): a job the host itself started
+  // (an Install click intercepted on curseforge.com, POSTed to /api/jobs
+  // directly by the host, not through this page's own Actions.startJob) -
+  // fetches its current state and opens the job panel for it immediately,
+  // instead of waiting for the next 500ms poll tick to notice it. Ignored
+  // if this page already knows about it (its own startJob already showed
+  // the panel and is already polling). Best-effort - a fetch failure here
+  // just means the panel opens on the next regular poll instead, same as
+  // before this message existed.
+  async function attachToJob(jobId) {
+    if (!jobId || (Store.state.job && Store.state.job.id === jobId)) return;
+    try {
+      const job = await Api.getJob(jobId);
+      Store.state.job = job;
+      Components.JobPanel.show(job);
+      renderChrome();
+      renderCurrentView();
+      if (job.state === "running") pollJob(jobId);
+    } catch (err) { /* best-effort only - see comment above */ }
   }
 
   // Round 9: a completed check job that found updates gets a real desktop
@@ -6233,17 +6598,14 @@ const App = (function () {
   }
 
   // E7: '/' keyboard shortcut - focuses whichever search box belongs to the
-  // view currently on screen; a no-op in Settings and in Browse without a key
-  // (its search box is hidden behind the no-key panel).
+  // view currently on screen; a no-op in Settings. On Get new addons, that's
+  // the Wago search box on the Wago segment, or the CurseForge pane's own
+  // toolbar search field on the CurseForge segment (Round 15).
   function focusCurrentSearch() {
     if (Store.state.view === "myaddons") { Utils.qs("#myaddons-search").focus(); return; }
-    // CS3: Browse's one merged search box is always usable (no key needed -
-    // a keyless session searches the offline catalogue/addon-radar plus
-    // Wago) - the only state that still blocks it is a REJECTED key, which
-    // replaces #browse-content (and its search box) with a dedicated
-    // blocking panel.
-    const rejected = !!(Store.state.settings && Store.state.settings.hasApiKey) && Store.state.cfKeyRejected;
-    if (Store.state.view === "browse" && !rejected) { Utils.qs("#browse-search").focus(); }
+    if (Store.state.view !== "browse") return;
+    if (Store.state.browse.tab === "curseforge") { Utils.qs("#cf-pane-search").focus(); return; }
+    Utils.qs("#browse-search").focus();
   }
 
   function wireGlobal() {
@@ -6356,6 +6718,12 @@ const App = (function () {
     // module-load-time applyTheme() call ran before that was possible and
     // no-opped (see Host's module comment and Prefs.applyTheme above).
     Host.reportTheme();
+    // Round 15: same ordering requirement - Host.init()'s own {type:"hello"}
+    // goes through post(), which is a no-op until isNative() can answer.
+    // Wires the host->page message listener and asks the host to (re-)
+    // announce host-ready, so Host.hasCfPane() has a real answer by the time
+    // Views.browse first renders below.
+    Host.init();
     // E19: fire-and-forget, like maybeShowWelcome below - loadProtocolStatus
     // catches its own errors (leaves Store.state.protocol null, rendered as
     // "Checking..."/"Unknown" by Components.ProtocolControl) and is a
@@ -6370,7 +6738,7 @@ const App = (function () {
 
   return {
     switchView: switchView, renderCurrentView: renderCurrentView, renderChrome: renderChrome,
-    onJobStarted: onJobStarted, reloadState: reloadState, init: init,
+    onJobStarted: onJobStarted, attachToJob: attachToJob, reloadState: reloadState, init: init,
     getServerVersion: function () { return serverVersion; }, getServerUptime: currentUptime,
     getServerHost: function () { return serverHost; }
   };

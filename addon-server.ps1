@@ -5304,7 +5304,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.1.0'
+$Script:Version = '1.2.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

@@ -3,8 +3,25 @@
 <head><meta charset="utf-8"><title>Furphy host selftest</title></head>
 <body>
 <h1>Furphy host selftest page</h1>
-<img src="https://pagead2.googlesyndication.com/pixel.png" width="1" height="1" alt="">
 <script>
+// Round 15 (E20 - embedded CurseForge pane): this page now loads AS the
+// Furphy webview's own content during --selftest (see FurphyHost.cs's
+// MainForm_Load), standing in for the real server-hosted SPA - it is
+// exercising the page->host messages (contract E) that the host only ever
+// honors from that one webview: hello, theme, cf-show, cf-rect, cf-hide,
+// cf-nav. Sequence: hello, then a theme message (existing test palette),
+// then cf-show (rect + curseforge.com url), then after 2s a no-op cf-nav
+// back followed by cf-hide, then cf-show again.
+//
+// The curseforge:// deep-link interception path (HandleCurseforgeProtocol
+// -> POST /api/jobs, feeding the marker's `intercepted`/`jobPostStatus`
+// fields) is exercised host-side, not from this page: FurphyHost.cs's
+// EnsureSelftestDeepLinkInjection injects a script into whatever document
+// the CF pane (_cfWebView) loads - i.e. the real curseforge.com page this
+// page's own cf-show above navigates it to - which fires a test
+// curseforge://install?... link a couple of seconds after that document
+// is created. CfWebView_NavigationStarting cancels and intercepts it
+// exactly like a real "Install" click would.
 function postToHost(msg) {
     try {
         if (window.chrome && window.chrome.webview) {
@@ -12,7 +29,23 @@ function postToHost(msg) {
         }
     } catch (e) { }
 }
+
+// Listen for the host's own replies (host-ready/cf-state/cf-job) purely
+// for host.log visibility during a live run - not required for the
+// marker itself, which the host writes from its own state.
+try {
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.addEventListener("message", function (e) {
+            try {
+                console.log("host->page: " + JSON.stringify(e.data));
+            } catch (e2) { }
+        });
+    }
+} catch (e) { }
+
 setTimeout(function () {
+    postToHost({ type: "hello" });
+
     postToHost({
         type: "theme",
         name: "selftest",
@@ -21,9 +54,29 @@ setTimeout(function () {
             border: "#506070", text: "#f0f0f0", muted: "#c0c0c0", accent: "#ff8800"
         }
     });
-    location.href = "curseforge://install?addonId=1521253&fileId=8720783";
-    postToHost({ type: "open-curseforge", url: "https://www.curseforge.com/wow/addons/bigwigs" });
+
+    postToHost({
+        type: "cf-show",
+        rect: { x: 300, y: 120, w: 800, h: 600 },
+        dpr: 1,
+        url: "https://www.curseforge.com/wow/addons"
+    });
 }, 1000);
+
+setTimeout(function () {
+    // No-op: the pane has no back history yet from this one navigation,
+    // so this just exercises the message path without changing anything.
+    postToHost({ type: "cf-nav", action: "back" });
+    postToHost({ type: "cf-hide" });
+}, 3000);
+
+setTimeout(function () {
+    postToHost({
+        type: "cf-show",
+        rect: { x: 300, y: 120, w: 800, h: 600 },
+        dpr: 1
+    });
+}, 4000);
 </script>
 </body>
 </html>
