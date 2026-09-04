@@ -248,8 +248,8 @@ if (Test-Path -LiteralPath $versionSrc) {
 
 $settingsPath = Join-Path -Path $appDest -ChildPath 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath)) {
-    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "cfApiKey": "", "port": 47831 }' | Set-Content -LiteralPath $settingsPath -Encoding Ascii
-    Write-Info 'Created default settings.json (no API key needed - see Settings for the optional one).'
+    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "port": 47831 }' | Set-Content -LiteralPath $settingsPath -Encoding Ascii
+    Write-Info 'Created default settings.json (no account or API key needed).'
 } else {
     Write-Info 'settings.json already exists - left as-is.'
 }

@@ -25,6 +25,7 @@
   <symbol id="icon-play" viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></symbol>
   <symbol id="icon-kebab" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></symbol>
   <symbol id="icon-close" viewBox="0 0 24 24"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></symbol>
+  <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A11 11 0 0 1 12 19c-7 0-11-7-11-7a20.7 20.7 0 0 1 4.2-5.2M9.9 4.2A10.4 10.4 0 0 1 12 4c7 0 11 7 11 7a20.6 20.6 0 0 1-2.5 3.5"/><path d="M14.1 14.1a3 3 0 1 1-4.2-4.2"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
   <symbol id="icon-chevron-down" viewBox="0 0 24 24"><polyline points="6,9 12,15 18,9"/></symbol>
   <symbol id="icon-chevron-right" viewBox="0 0 24 24"><polyline points="9,6 15,12 9,18"/></symbol>
   <symbol id="icon-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15,3 21,3 21,9"/><line x1="10" y1="14" x2="21" y2="3"/></symbol>
@@ -39,10 +40,7 @@
   <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7,10 12,15 17,10"/><path d="M4 19h16"/></symbol>
   <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11A8 8 0 0 0 6.3 6.3L4 8.6"/><polyline points="4,3 4,8.6 9.6,8.6"/><path d="M4 13a8 8 0 0 0 13.7 4.7L20 15.4"/><polyline points="20,21 20,15.4 14.4,15.4"/></symbol>
   <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3,3 3,9 9,9"/><polyline points="12,7 12,12 16,14"/></symbol>
-  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></symbol>
-  <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A11 11 0 0 1 12 19c-7 0-11-7-11-7a20.7 20.7 0 0 1 4.2-5.2M9.9 4.2A10.4 10.4 0 0 1 12 4c7 0 11 7 11 7a20.6 20.6 0 0 1-2.5 3.5"/><path d="M14.1 14.1a3 3 0 1 1-4.2-4.2"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
   <symbol id="icon-spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" opacity="0.25"/><path d="M21 12a9 9 0 0 0-9-9"/></symbol>
-  <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M16 7l3 3"/><path d="M13 10l2.5 2.5"/></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
   <!-- Round 15: CurseForge pane toolbar icons (back/forward/home). -->
   <symbol id="icon-arrow-left" viewBox="0 0 24 24"><polyline points="14,4 6,12 14,20"/><line x1="6" y1="12" x2="21" y2="12"/></symbol>
@@ -418,7 +416,7 @@
                both demoted into one place here. -->
           <div class="browse-fallback">
             <p class="muted-text"><button type="button" class="link-btn" id="btn-cf-web-search">Not on Wago? Try CurseForge</button></p>
-            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link">Or paste an addon&rsquo;s CurseForge page link or number</button></p>
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link">Or type an addon's CurseForge ID number</button></p>
           </div>
         </div>
 
@@ -458,7 +456,7 @@
             <svg class="icon nokey-icon"><use href="#icon-compass"></use></svg>
             <p class="muted-text">CurseForge browsing happens inside the Furphy desktop window.</p>
             <button type="button" class="btn btn-outline" id="btn-cf-open-window">Open CurseForge in a window</button>
-            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link-fallback">Or paste an addon&rsquo;s CurseForge page link or number</button></p>
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link-fallback">Or type an addon's CurseForge ID number</button></p>
             <!-- One-time note: shown only right after "Open CurseForge in a
                  window" is used while Furphy's own curseforge:// handler is
                  off, since that's when a CurseForge.com Install click would
@@ -520,42 +518,6 @@
             </div>
           </section>
 
-          <section class="settings-group" id="settings-apikey">
-            <h3>CurseForge key (optional)</h3>
-            <p class="muted-text">Not required &mdash; everything works without it. A free key adds CurseForge&rsquo;s own addon descriptions.</p>
-            <!-- CS4: collapsed by default to one clickable row; expands the
-                 field + Show/Hide + Test + Save + Clear in place. The status
-                 line stays visible even collapsed, as this row's own subtitle. -->
-            <button type="button" class="settings-row settings-collapse-row" id="btn-apikey-toggle" aria-expanded="false" aria-controls="apikey-expand">
-              <div class="settings-row-text">
-                <div class="settings-row-label">Add a CurseForge key</div>
-                <div class="settings-row-value" id="apikey-status">No key configured</div>
-              </div>
-              <svg class="icon settings-collapse-chevron" id="apikey-toggle-chevron"><use href="#icon-chevron-right"></use></svg>
-            </button>
-            <div id="apikey-expand" hidden>
-              <div class="apikey-row">
-                <div class="password-field">
-                  <input type="password" id="input-apikey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
-                  <button type="button" class="icon-btn" id="btn-toggle-apikey-visibility" aria-label="Show key" title="Show key">
-                    <svg class="icon"><use href="#icon-eye"></use></svg>
-                  </button>
-                </div>
-                <button type="button" class="btn btn-outline" id="btn-test-apikey">Test</button>
-                <!-- Review fix: was btn-accent, colliding with the sidebar's
-                     persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
-                <button type="button" class="btn btn-outline" id="btn-save-apikey">Save</button>
-                <button type="button" class="btn btn-danger-outline" id="btn-clear-apikey">Clear key</button>
-              </div>
-              <!-- Round 6 fix: shown only while the masked field is focused for
-                   editing - reminds the user the old key stays saved until they
-                   click Save, since the field is cleared (not pre-filled) the
-                   moment they click into it. -->
-              <p class="form-msg is-info" id="apikey-hint" hidden></p>
-              <p class="form-msg" id="apikey-test-result" hidden></p>
-            </div>
-          </section>
-
           <!-- ===================== Advanced (CS4, UX-SPEC.md 6.2) =====================
                One collapsed disclosure, closed by default, holding everything else. -->
           <details class="settings-advanced" id="settings-advanced">
@@ -612,17 +574,19 @@
                 </div>
               </section>
 
-              <!-- E19: OFF by default (Eric's explicit decision) - only
-                   meaningful in the native FurphyHost.exe window (host\), which
-                   has a real embedded CurseForge tab; the plain Edge app window
-                   has no such tab to filter, so this shows a muted explainer
-                   there instead of a toggle that would do nothing. -->
+              <!-- E19: ON by default as of 2026-09-04 (Eric's explicit
+                   request, SPEC E22 - was OFF by default originally, that
+                   earlier decision is superseded) - only meaningful in the
+                   native FurphyHost.exe window (host\), which has a real
+                   embedded CurseForge tab; the plain Edge app window has no
+                   such tab to filter, so this shows a muted explainer there
+                   instead of a toggle that would do nothing. -->
               <section class="settings-group" id="settings-browsing">
                 <h3>Browsing</h3>
                 <div class="settings-row" id="browsing-adfilter-row">
                   <div class="settings-row-text">
                     <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
-                    <p class="muted-text">Off by default. CurseForge is ad-funded and pays addon authors from that revenue; enabling this is your choice.</p>
+                    <p class="muted-text">On by default. CurseForge is ad-funded and pays addon authors from that revenue; turn this off in Settings if you'd rather see it unfiltered.</p>
                   </div>
                   <label class="switch">
                     <input type="checkbox" id="toggle-adfilter">
@@ -630,6 +594,18 @@
                   </label>
                 </div>
                 <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.</p>
+                <!-- Round 16 (E22): unlike the ad-filter row above, this one is
+                     never hidden - it saves in the plain Edge window too (it
+                     just applies next time the desktop window is used there). -->
+                <div class="settings-row" id="browsing-cffocus-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Show only search results on CurseForge</div>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-cf-focus">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
               </section>
 
               <section class="settings-group" id="settings-untracked">
@@ -660,7 +636,7 @@
                 </div>
                 <!-- E16: forces a fresh fetch+merge of the offline CurseForge
                      catalogue index (instawow-data + strongbox-catalogue) that
-                     Browse/the detail drawer fall back to with no API key -
+                     Browse/the detail drawer are always built from -
                      otherwise refreshed automatically at most once/24h. -->
                 <div class="btn-row">
                   <button type="button" class="btn btn-outline" id="btn-refresh-cf-catalogue">Refresh the addon list from CurseForge</button>
@@ -671,7 +647,7 @@
 
               <section class="settings-group" id="settings-diagnostics">
                 <h3>Diagnostics</h3>
-                <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, API key, disk space.</p>
+                <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, disk space.</p>
                 <div class="btn-row">
                   <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
                     <svg class="icon"><use href="#icon-shield"></use></svg>
@@ -772,9 +748,9 @@
 
 <div class="dialog" id="dialog-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-add-title">
   <h3 id="dialog-add-title">Add addon</h3>
-  <p class="muted-text">Paste an addon link (CurseForge or Wago), or type its ID number.</p>
+  <p class="muted-text">Paste a wago.io addon link, or type a CurseForge ID number.</p>
   <form id="add-addon-form">
-    <input type="text" id="add-addon-input" placeholder="1521253, a curseforge.com URL, or a wago.io URL" autocomplete="off">
+    <input type="text" id="add-addon-input" placeholder="1521253, or a wago.io URL" autocomplete="off">
     <p class="form-msg" id="add-addon-error" hidden></p>
     <div class="dialog-footer">
       <button type="button" class="btn btn-ghost" id="add-addon-cancel">Cancel</button>
@@ -800,7 +776,7 @@
      AddOns folder the user populated by hand before ever opening the app). -->
 <div class="dialog dialog-welcome" id="dialog-welcome" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-welcome-title">
   <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found <span id="welcome-count">0</span> addons in your AddOns folder</h3>
-  <p class="muted-text">Furphy can start managing these — it re-downloads each one so it can keep them updated from now on. No CurseForge key needed.</p>
+  <p class="muted-text">Furphy can start managing these — it re-downloads each one so it can keep them updated from now on.</p>
   <ul class="welcome-list" id="welcome-list"></ul>
   <div class="nokey-inline welcome-nokey-note">
     <svg class="icon"><use href="#icon-info"></use></svg>

@@ -699,6 +699,20 @@ namespace Furphy
         private bool _adFilterEnabled;
         private List<string> _adFilterHosts;
 
+        // Round 16 (E22 - CurseForge focus view): _cfFocusScriptRegistered
+        // guards the ONE-TIME AddScriptToExecuteOnDocumentCreatedAsync
+        // registration (EnsureCfFocusInfra), mirroring _cfAdCssInjected's
+        // pattern above. _cfFocusEnabled is the host's current view of the
+        // setting - seeded from settings.json (ReadCfFocusSetting, like
+        // _adFilterEnabled/ReadAdFilterSetting) and kept live by both an
+        // in-app toggle (HandleCfFocusMessage) and a re-read on every CF
+        // navigation start (CfWebView_NavigationStarting, same spot the ad
+        // filter re-reads its own setting) in case it changed out-of-band
+        // (e.g. the plain-browser-tab Settings page, which has no host to
+        // message).
+        private bool _cfFocusScriptRegistered;
+        private bool _cfFocusEnabled;
+
         // cf-pane state (contract E/F): whether the CF view has ever been
         // navigated (cf-show only auto-navigates the FIRST time, or when
         // the message explicitly carries navigate:true), whether its most
@@ -886,9 +900,23 @@ namespace Furphy
             object v;
             if (settings.TryGetValue("adFilter", out v) && v != null)
             {
-                return ToBool(v, false);
+                return ToBool(v, true);
             }
-            return false;
+            return true;
+        }
+
+        // Round 16 (E22): mirrors ReadAdFilterSetting exactly, except the
+        // default is TRUE (per spec) when settings.json has no "cfFocus"
+        // key yet, rather than false.
+        private bool ReadCfFocusSetting()
+        {
+            Dictionary<string, object> settings = HostFiles.LoadJsonObject(_settingsPath);
+            object v;
+            if (settings.TryGetValue("cfFocus", out v) && v != null)
+            {
+                return ToBool(v, true);
+            }
+            return true;
         }
 
         private void ApplyWindowBounds()
@@ -1248,6 +1276,10 @@ namespace Furphy
         // entirely (adversarial-review precedent from Round 13: an
         // untrusted CF-pane page must not be able to drive host chrome,
         // theme, or the pane's own position/navigation via postMessage).
+        // Round 16 (E22) adds cf-focus to this same Furphy-webview-only
+        // set - the CurseForge focus view toggle is app chrome (a
+        // Settings > Advanced row), never something the untrusted CF page
+        // itself should be able to flip.
         private void HostWebView_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             try
@@ -1285,6 +1317,10 @@ namespace Furphy
                 else if (type == "cf-nav")
                 {
                     HandleCfNav(msg);
+                }
+                else if (type == "cf-focus")
+                {
+                    HandleCfFocusMessage(msg);
                 }
                 else if (type == "theme")
                 {
@@ -1755,6 +1791,7 @@ namespace Furphy
 
             _adFilterHosts = HostFiles.LoadHostList(_adFilterListPath);
             _adFilterEnabled = ReadAdFilterSetting();
+            _cfFocusEnabled = ReadCfFocusSetting();
 
             _cfWebView.CoreWebView2.NavigationStarting +=
                 new EventHandler<CoreWebView2NavigationStartingEventArgs>(CfWebView_NavigationStarting);
@@ -1779,6 +1816,7 @@ namespace Furphy
             // position/navigation via postMessage.
 
             EnsureAdFilterInfra();
+            EnsureCfFocusInfra();
 
             if (_options.SelftestActive)
             {
@@ -1877,6 +1915,20 @@ namespace Furphy
             // ad-hiding injection is gated on the toggle.
             _adFilterEnabled = ReadAdFilterSetting();
             EnsureAdFilterInfra();
+
+            // Round 16 (E22): same re-read-on-every-navigation-start idea
+            // as the ad filter above, but cfFocus can also change out from
+            // under this navigation without a fresh document ever loading
+            // (the setting is normally toggled live via cf-focus messages
+            // instead) - this only catches the out-of-band case (settings
+            // changed elsewhere while a CF page was already up) and pushes
+            // it live via ApplyCfFocusToggle exactly like an in-app toggle
+            // would.
+            bool freshCfFocus = ReadCfFocusSetting();
+            if (freshCfFocus != _cfFocusEnabled)
+            {
+                ApplyCfFocusToggle(freshCfFocus);
+            }
 
             if (uri.StartsWith("curseforge://", StringComparison.OrdinalIgnoreCase))
             {
@@ -2227,6 +2279,461 @@ namespace Furphy
             }
         }
 
+        // -------------------------------------------------------- cf focus
+
+        // Round 16 (E22 - CurseForge focus view). On CurseForge LISTING and
+        // SEARCH pages (location.pathname === "/wow/search" - both share
+        // the exact same markup, per recon) this hides the promo banner
+        // strip, global site header/nav, hero/title block, in-site
+        // Discover/Browse-All + search row, and the LEFT FILTER SIDEBAR,
+        // then collapses .search-page/.ads-layout from grid to block so
+        // the results column (starting at the "1 of 500 / 10,000+
+        // Projects / Relevancy" row) fills the freed width. On PROJECT/
+        // ADDON pages (pathname starts with "/wow/addons/") only the
+        // promo strip/header/nav/footer are hidden - all project content
+        // (title, description, tabs, the download/stats panel) stays.
+        // Any other URL is left completely untouched apart from the
+        // overlay hiding described next.
+        //
+        // Overlay hiding (Eric, 2026-09-04 follow-up: "get rid of cookie
+        // banner, and the other banner that appears on top, and anything
+        // else other than the content"): hideOverlaysApply runs on EVERY
+        // page kind, including "other" - unlike the listing/project rules
+        // above, a consent banner or promo interstitial can appear on any
+        // CurseForge URL, not just the two scoped ones. It is VISUAL
+        // HIDING ONLY - display:none via CSS/inline style, nothing is
+        // clicked, no form is submitted, and no consent cookie or
+        // localStorage value is ever written (the only localStorage key
+        // this script touches is its own 'cfFocusEnabled'). Two layers,
+        // both scoped narrowly so they cannot catch real page content:
+        //   (a) OVERLAY_CSS - known widget selectors (#cookiebar/
+        //       .cookiebar, OneTrust, Quantcast Choice, Cookiebot,
+        //       Usercentrics, Sourcepoint's #sp_message_* pattern, an
+        //       "ncmp-banner" pattern matching the "ncmp-consent-link"
+        //       footer link actually observed live on curseforge.com in
+        //       this round's testing) PLUS a generic body>[id/class*=
+        //       cookie|consent|gdpr|onetrust] rule - scoped to DIRECT
+        //       CHILDREN OF <body> only, because every consent/interstitial
+        //       widget this codebase has ever observed on this site (both
+        //       this round and Round 15) injects as a late, top-level
+        //       sibling of the app's own root div, never nested inside
+        //       .search-page/.project-page/.content - so this cannot
+        //       accidentally hide real results/project content even if a
+        //       future CurseForge class happened to contain one of these
+        //       words deeper in the tree.
+        //   (b) scanTextOverlays - a live-DOM text-content heuristic for
+        //       whatever CSS doesn't already catch: any position:fixed or
+        //       sticky element within two levels of <body> whose visible
+        //       text contains "cookie" plus one of consent/policy/"we
+        //       use"/"got it" gets display:none set directly (tracked in
+        //       overlayHidden[] so ENABLED=false can put it back). This is
+        //       the layer that targets the specific bar Eric's screenshot
+        //       shows ("We use cookies to improve your experience...
+        //       Got it") - candidate elements are limited to <body>'s
+        //       children and grandchildren (not a full document scan) for
+        //       the same "overlays inject shallow" reasoning as (a), kept
+        //       cheap enough to run on every debounced mutation/poll tick.
+        // restoreScrollIfNeeded then clears an inline overflow:hidden the
+        // widget may have set on <html>/<body> (only inline styles this
+        // script itself would find, never anything CurseForge's own CSS
+        // sets for unrelated reasons) - the "restore scroll" half of
+        // Eric's ask, so a trimmed page never becomes unscrollable because
+        // its dismissed banner left a lock behind.
+        //
+        // VERIFIED LIVE (2026-09-04, this round): against the app's OWN
+        // fresh WebView2 profile (host\bin's FurphyHost.exe.WebView2
+        // folder deleted first, to rule out an already-answered consent
+        // cookie from an earlier test run), the CF pane's real DOM
+        // produced <div id="cookiebar" class="cookiebar"> containing "We
+        // use cookies to improve your experience and increase the
+        // relevancy of content when using CurseForge. Our coo[kies...]" -
+        // an exact match for Eric's screenshot, confirming an earlier
+        // recon pass's #cookiebar/.cookiebar finding (position:fixed,
+        // z-index 2147483001, direct child of <body>). It rendered late
+        // (present by ~4s after navigation, absent at ~2s), which is why
+        // a single-shot dump at NavigationCompleted can miss it - this is
+        // exactly what the debounced MutationObserver/poll re-application
+        // in cfFocusApply's caller chain is for, not a one-time check. Both
+        // (a)'s static #cookiebar/.cookiebar rule and (b)'s text heuristic
+        // catch it (confirmed via the live data-cf-focus-hidden marker and
+        // the element's own id/class/text, captured with a temporary
+        // verification probe during this session and removed afterward,
+        // matching TempDumpConsentDom's own "recon-only, removed before
+        // final compile" convention). Layer (b) stays in place as defense
+        // in depth for whatever future CMP swap or A/B variant does not
+        // carry that exact id/class.
+        //
+        // Fail-safe (hard requirement): before hiding anything on a
+        // listing/search page, cfFocusApply confirms .search-page exists
+        // (else this isn't actually a listing/search page's real shell -
+        // "skipped-no-shell") and that .results-container or .options
+        // exists with a non-trivial size (else "skipped-no-results" / a
+        // literal 0-results search, or "skipped-empty"), checks none of
+        // the hide-candidates already CONTAINS the results/options nodes
+        // ("skipped-selector-conflict" - a future CurseForge redesign
+        // nesting them), and re-measures .search-page .content one frame
+        // after enabling the stylesheet, reverting immediately if it is
+        // still near-empty ("skipped-post-check-failed"). Any failure
+        // leaves the style element's `disabled` at true, i.e. nothing
+        // hidden at all - a blank pane is a worse failure than an
+        // untrimmed one. The live state is recorded on the injected
+        // <style data-cf-focus="1"> element as data-cf-focus-state (one
+        // of: applied, disabled, skipped-no-shell, skipped-no-results,
+        // skipped-selector-conflict, skipped-empty,
+        // skipped-post-check-failed, error) and data-cf-focus-checked-at
+        // (epoch ms), queryable via ExecuteScriptAsync for verification.
+        //
+        // Self-healing across CurseForge's own client-side routing
+        // (pagination/sort/search are React re-renders, not full
+        // navigations): a MutationObserver on document.body (150ms
+        // trailing debounce) plus wrapped history.pushState/replaceState
+        // and a popstate listener re-run cfFocusApply, backed by a
+        // bounded 8-tick/400ms fallback poll that stops itself once two
+        // consecutive checks agree. Because the hide/collapse rules are
+        // CSS selectors (not per-node inline styles), React swapping
+        // nodes in/out under an already-hidden ancestor needs no
+        // re-application at all - only the guard's PASS/FAIL verdict
+        // ever needs re-deciding.
+        //
+        // Live bidirectional toggle without a reload: unlike
+        // EnsureAdFilterInfra's CSS (purely additive, never turned back
+        // off once injected), this needs to flip on/off instantly while
+        // a CurseForge page is already showing (the SPA's Settings >
+        // Advanced toggle applies live). Re-registering (or removing) the
+        // AddScriptToExecuteOnDocumentCreatedAsync registration itself
+        // would need its returned Task<string> id, and blocking on that
+        // Task's result from this UI thread risks a classic WebView2
+        // deadlock (its continuation is marshalled back onto this same
+        // thread's message loop) - this codebase has no async/await
+        // anywhere (see Http's own comment) specifically to avoid that
+        // trap. So the persistent document-created script is registered
+        // exactly ONCE per _cfWebView lifetime (EnsureCfFocusInfra, same
+        // guarded-once shape as EnsureAdFilterInfra's CSS injection) with
+        // a baked-in cold-start default, and on every FUTURE document it
+        // creates it instead reads its actual enabled state from
+        // window.localStorage['cfFocusEnabled'] (persists per-origin
+        // across navigations within the same WebView2 profile).
+        // Toggling (ApplyCfFocusToggle/PushCfFocusLive) writes that same
+        // localStorage key AND calls the already-loaded page's exposed
+        // window.__cfFocusSetEnabled directly via a second, ordinary
+        // fire-and-forget ExecuteScriptAsync - both the current page and
+        // every future navigation stay in sync, with no Task ever
+        // awaited/blocked-on.
+
+        private const string CfFocusScriptPrefix =
+@"(function(){
+try{
+if(window.__cfFocusInit){return;}
+window.__cfFocusInit=true;
+var ENABLED=";
+
+        private const string CfFocusScriptSuffix =
+@";
+var VERSION='3';
+var HIDE_LISTING=['.top-banner','.curseforge-header','.game-navbar','.game-header','.game-description','.search-filters','.site-footer','.side-container-right','.mobile-sort-overlay','.filter-reflection-bar','.search-tags-and-count','nav.mobile-footer-nav'];
+var HIDE_PROJECT=['.top-banner','.curseforge-header','.game-navbar','.game-header','.site-footer','nav.mobile-footer-nav','.shelf','.side-container-left','.side-container-right'];
+var OVERLAY_CSS='#cookiebar,.cookiebar,#onetrust-banner-sdk,#onetrust-consent-sdk,.ot-sdk-container,#onetrust-pc-sdk,.qc-cmp2-container,#usercentrics-root,#CybotCookiebotDialog,#CybotCookiebotDialogBodyUnderlay,[id^=sp_message i],[class*=sp_message i],[id*=ncmp-banner i],[class*=ncmp-banner i],body>[id*=cookie i],body>[class*=cookie i],body>[id*=consent i],body>[class*=consent i],body>[id*=gdpr i],body>[class*=gdpr i],body>[id*=onetrust i],body>[class*=onetrust i]{display:none !important;}';
+var styleEl=null;
+var overlayStyleEl=null;
+var overlayHidden=[];
+var pending=null;
+var fallbackTimer=null;
+var applyGen=0;
+function readStoredEnabled(){
+try{
+var v=window.localStorage.getItem('cfFocusEnabled');
+if(v==='1'){return true;}
+if(v==='0'){return false;}
+}catch(e){}
+return ENABLED;
+}
+ENABLED=readStoredEnabled();
+function ensureStyleEl(){
+if(styleEl&&styleEl.parentNode){return styleEl;}
+styleEl=document.createElement('style');
+styleEl.setAttribute('data-cf-focus','1');
+styleEl.setAttribute('data-cf-focus-version',VERSION);
+(document.head||document.documentElement).appendChild(styleEl);
+return styleEl;
+}
+function setState(s){
+try{
+var el=ensureStyleEl();
+el.setAttribute('data-cf-focus-state',s);
+el.setAttribute('data-cf-focus-checked-at',String(Date.now()));
+}catch(e){}
+window.__cfFocusState=s;
+}
+function ensureOverlayStyleEl(){
+if(overlayStyleEl&&overlayStyleEl.parentNode){return overlayStyleEl;}
+overlayStyleEl=document.createElement('style');
+overlayStyleEl.setAttribute('data-cf-focus-overlay','1');
+overlayStyleEl.textContent=OVERLAY_CSS;
+(document.head||document.documentElement).appendChild(overlayStyleEl);
+return overlayStyleEl;
+}
+function collectShallowCandidates(){
+var out=[];
+try{
+var kids=document.body?document.body.children:null;
+if(!kids){return out;}
+var i;var j;
+for(i=0;i<kids.length;i++){
+out.push(kids[i]);
+var gk=kids[i].children;
+for(j=0;j<gk.length;j++){out.push(gk[j]);}
+}
+}catch(e){}
+return out;
+}
+function scanTextOverlays(){
+try{
+var cands=collectShallowCandidates();
+for(var i=0;i<cands.length;i++){
+var el=cands[i];
+if(!el||(el.getAttribute&&el.getAttribute('data-cf-focus-hidden'))){continue;}
+var cs=null;try{cs=window.getComputedStyle(el);}catch(e){}
+if(!cs){continue;}
+var pos=cs.position;
+if(pos!=='fixed'&&pos!=='sticky'){continue;}
+var txt='';
+try{txt=(el.innerText||'').trim().slice(0,160).toLowerCase();}catch(e){}
+if(txt.length===0||txt.indexOf('cookie')===-1){continue;}
+if(txt.indexOf('consent')===-1&&txt.indexOf('policy')===-1&&txt.indexOf('we use')===-1&&txt.indexOf('got it')===-1){continue;}
+try{
+el.setAttribute('data-cf-focus-hidden','1');
+el.style.setProperty('display','none','important');
+overlayHidden.push(el);
+}catch(e){}
+}
+}catch(e){}
+}
+function restoreScrollIfNeeded(){
+try{
+if(overlayHidden.length===0){return;}
+var deEl=document.documentElement;
+var b=document.body;
+if(deEl&&deEl.style&&deEl.style.overflow==='hidden'){deEl.style.removeProperty('overflow');}
+if(b&&b.style&&b.style.overflow==='hidden'){b.style.removeProperty('overflow');}
+}catch(e){}
+}
+function revertOverlayHides(){
+try{
+for(var i=0;i<overlayHidden.length;i++){
+try{
+var h=overlayHidden[i];
+h.style.removeProperty('display');
+h.removeAttribute('data-cf-focus-hidden');
+}catch(e){}
+}
+overlayHidden=[];
+}catch(e){}
+}
+function hideOverlaysApply(){
+try{
+var el=ensureOverlayStyleEl();
+el.disabled=!ENABLED;
+if(!ENABLED){revertOverlayHides();el.setAttribute('data-cf-focus-overlay-hidden-count','0');return;}
+scanTextOverlays();
+restoreScrollIfNeeded();
+el.setAttribute('data-cf-focus-overlay-hidden-count',String(overlayHidden.length));
+}catch(e){}
+}
+function pageKind(){
+var p=location.pathname;
+if(p==='/wow/search'){return 'listing';}
+if(p.indexOf('/wow/addons/')===0){return 'project';}
+return 'other';
+}
+function cssFor(kind){
+if(kind==='listing'){
+return HIDE_LISTING.join(',')+'{display:none !important;}.search-page,.ads-layout{display:block !important;}';
+}
+if(kind==='project'){
+return HIDE_PROJECT.join(',')+'{display:none !important;}.ads-layout{display:block !important;}';
+}
+return '';
+}
+function cfFocusApply(){
+try{
+hideOverlaysApply();
+var el=ensureStyleEl();
+applyGen++;var myGen=applyGen;
+if(!ENABLED){el.disabled=true;setState('disabled');return;}
+var kind=pageKind();
+if(kind==='other'){el.disabled=true;setState('disabled');return;}
+if(kind==='listing'){
+var searchPage=document.querySelector('.search-page');
+if(!searchPage){el.disabled=true;setState('skipped-no-shell');return;}
+var results=document.querySelector('.results-container');
+var options=document.querySelector('.options');
+if(!results&&!options){el.disabled=true;setState('skipped-no-results');return;}
+var i;
+for(i=0;i<HIDE_LISTING.length;i++){
+var cand=document.querySelector(HIDE_LISTING[i]);
+if(cand&&((results&&cand.contains(results))||(options&&cand.contains(options)))){
+el.disabled=true;setState('skipped-selector-conflict');return;
+}
+}
+var rHeight=results?results.getBoundingClientRect().height:0;
+var oHeight=options?options.getBoundingClientRect().height:0;
+if(rHeight<=40&&oHeight<=0){el.disabled=true;setState('skipped-empty');return;}
+el.textContent=cssFor('listing');
+el.disabled=false;
+setState('applied');
+try{
+window.requestAnimationFrame(function(){
+if(myGen!==applyGen||pageKind()!=='listing'){return;}
+var c=document.querySelector('.search-page .content');
+var h=c?c.getBoundingClientRect().height:0;
+if(h<40){el.disabled=true;setState('skipped-post-check-failed');}
+});
+}catch(e){}
+return;
+}
+if(kind==='project'){
+var header=document.querySelector('.project-header')||document.querySelector('.project-details-box');
+if(!header){el.disabled=true;setState('skipped-no-shell');return;}
+el.textContent=cssFor('project');
+el.disabled=false;
+setState('applied');
+return;
+}
+}catch(e){
+try{if(styleEl){styleEl.disabled=true;}}catch(e2){}
+setState('error');
+}
+}
+function startPoll(){
+try{clearInterval(fallbackTimer);}catch(e){}
+var ticks=0;
+var last=null;
+fallbackTimer=setInterval(function(){
+cfFocusApply();
+ticks++;
+var s=window.__cfFocusState;
+if(s===last||ticks>=8){try{clearInterval(fallbackTimer);}catch(e){}}
+last=s;
+},400);
+}
+function boot(){
+if(!document.body){setTimeout(boot,20);return;}
+cfFocusApply();
+try{
+var mo=new MutationObserver(function(){
+clearTimeout(pending);
+pending=setTimeout(cfFocusApply,150);
+});
+mo.observe(document.body,{childList:true,subtree:true});
+}catch(e){}
+try{
+var origPush=history.pushState;
+var origReplace=history.replaceState;
+history.pushState=function(){var r=origPush.apply(history,arguments);setTimeout(cfFocusApply,0);startPoll();return r;};
+history.replaceState=function(){var r=origReplace.apply(history,arguments);setTimeout(cfFocusApply,0);startPoll();return r;};
+window.addEventListener('popstate',function(){cfFocusApply();startPoll();});
+}catch(e){}
+}
+window.__cfFocusSetEnabled=function(v){
+ENABLED=!!v;
+try{window.localStorage.setItem('cfFocusEnabled',ENABLED?'1':'0');}catch(e){}
+cfFocusApply();
+};
+window.__cfFocusGetState=function(){return window.__cfFocusState||'unknown';};
+if(document.readyState==='loading'){
+document.addEventListener('DOMContentLoaded',boot);
+}else{
+boot();
+}
+}catch(e){}
+})();
+";
+
+        private static string BuildCfFocusScript(bool defaultEnabled)
+        {
+            string enabledLiteral = defaultEnabled ? "true" : "false";
+            return CfFocusScriptPrefix + enabledLiteral + CfFocusScriptSuffix;
+        }
+
+        // Registers the persistent per-document injection exactly once
+        // (see the region comment above for why this never re-registers
+        // on a toggle). _cfFocusEnabled must already be set by the caller
+        // (CfWebView_InitCompleted seeds it from ReadCfFocusSetting before
+        // calling this) - it becomes the cold-start default baked into
+        // the script, used only until the CF pane's origin-local
+        // localStorage has its own value (i.e. effectively only for the
+        // very first document this webview ever loads).
+        private void EnsureCfFocusInfra()
+        {
+            if (_cfWebView.CoreWebView2 == null) return;
+            if (_cfFocusScriptRegistered) return;
+
+            try
+            {
+                string script = BuildCfFocusScript(_cfFocusEnabled);
+                System.Threading.Tasks.Task<string> scriptTask =
+                    _cfWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(script);
+                GC.KeepAlive(scriptTask);
+                _cfFocusScriptRegistered = true;
+                LogHost("cf-focus CSS injection registered, default enabled=" +
+                    _cfFocusEnabled.ToString(CultureInfo.InvariantCulture));
+            }
+            catch (Exception ex)
+            {
+                LogHost("failed to register cf-focus CSS: " + ex.Message);
+            }
+        }
+
+        // {type:"cf-focus", enabled:<bool>}: the SPA's Settings > Advanced
+        // "Show only search results on CurseForge" toggle. Furphy webview
+        // only - see HostWebView_WebMessageReceived's own comment.
+        private void HandleCfFocusMessage(Dictionary<string, object> msg)
+        {
+            object v;
+            bool enabled = ToBool(msg.TryGetValue("enabled", out v) ? v : null, true);
+            ApplyCfFocusToggle(enabled);
+        }
+
+        // Shared by HandleCfFocusMessage (an explicit in-app toggle) and
+        // CfWebView_NavigationStarting's out-of-band re-sync above -
+        // updates the host's view of the setting, makes sure the
+        // persistent injection is registered at least once (first-ever
+        // call), and pushes the new value live to whatever the CF pane
+        // currently has loaded.
+        private void ApplyCfFocusToggle(bool enabled)
+        {
+            _cfFocusEnabled = enabled;
+            EnsureCfFocusInfra();
+            PushCfFocusLive(enabled);
+            LogHost("cf-focus set enabled=" + enabled.ToString(CultureInfo.InvariantCulture));
+        }
+
+        // Fire-and-forget ExecuteScriptAsync (GC.KeepAlive, never awaited -
+        // see the region comment above): writes the new value into the CF
+        // pane's own localStorage (so the NEXT document-created run of the
+        // persistent script above picks it up) and, if that page's
+        // bootstrap has already run, calls its exposed
+        // window.__cfFocusSetEnabled directly so the CURRENTLY loaded page
+        // applies the change immediately with no reload.
+        private void PushCfFocusLive(bool enabled)
+        {
+            if (_cfWebView.CoreWebView2 == null) return;
+            try
+            {
+                string storeVal = enabled ? "1" : "0";
+                string boolVal = enabled ? "true" : "false";
+                string script =
+                    "(function(){try{window.localStorage.setItem('cfFocusEnabled','" + storeVal + "');" +
+                    "if(window.__cfFocusSetEnabled){window.__cfFocusSetEnabled(" + boolVal + ");}}catch(e){}})();";
+                System.Threading.Tasks.Task<string> execTask = _cfWebView.CoreWebView2.ExecuteScriptAsync(script);
+                GC.KeepAlive(execTask);
+            }
+            catch (Exception ex)
+            {
+                LogHost("cf-focus live push failed: " + ex.Message);
+            }
+        }
+
         // -------------------------------------------------------- logging
 
         private readonly object _logLock = new object();
@@ -2356,6 +2863,18 @@ namespace Furphy
             marker["cfStateMessages"] = (long)_cfStateMessageCount;
             marker["cfLastUrl"] = _cfLastUrl;
             marker["capturePath"] = _selftestCapturePath;
+
+            // Round 16 (E22). Deliberately NOT also querying the injected
+            // <style data-cf-focus> element's live data-cf-focus-state
+            // here via ExecuteScriptAsync: that call is async with no
+            // await in this codebase (see the cf-focus region's own
+            // comment), and blocking this synchronous marker write on its
+            // Task's result from the UI thread risks the exact WebView2
+            // deadlock that design avoids elsewhere - not worth
+            // destabilising an otherwise-reliable marker write for one
+            // more field. _cfFocusEnabled (the host's own in-memory view
+            // of the setting, no IPC needed) is safe to include as-is.
+            marker["cfFocusEnabled"] = _cfFocusEnabled;
 
             List<string> blockedCopy;
             List<string> allowedCopy;

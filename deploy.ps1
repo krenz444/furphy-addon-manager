@@ -71,7 +71,7 @@ if (Test-Path -LiteralPath $hostSrc) {
 # 4. Ensure settings.json exists (never overwrite an existing one).
 $settings = Join-Path $Dest 'settings.json'
 if (-not (Test-Path -LiteralPath $settings)) {
-    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "cfApiKey": "", "port": 47831 }' | Set-Content -LiteralPath $settings -Encoding Ascii
+    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "port": 47831 }' | Set-Content -LiteralPath $settings -Encoding Ascii
     "created default settings.json"
 }
 
@@ -96,7 +96,7 @@ if (-not $SkipServerCheck) {
     }
     if (-not $ok) { throw 'live server did not answer /api/ping within 15 s' }
     $state = Invoke-RestMethod -Uri "http://localhost:$port/api/state" -TimeoutSec 10
-    "server ok on port $port : state has $(@($state.addons).Count) addons, hasApiKey=$($state.settings.hasApiKey)"
+    "server ok on port $port : state has $(@($state.addons).Count) addons, adFilter=$($state.settings.adFilter), cfFocus=$($state.settings.cfFocus)"
     $html = Invoke-WebRequest -Uri "http://localhost:$port/" -UseBasicParsing -TimeoutSec 10
     "ui ok: $($html.StatusCode), $($html.Content.Length) bytes"
     try { Invoke-RestMethod -Uri "http://localhost:$port/api/shutdown" -Method Post -TimeoutSec 5 | Out-Null } catch {}
