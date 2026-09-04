@@ -509,6 +509,45 @@
                 <span class="switch-track"><span class="switch-thumb"></span></span>
               </label>
             </div>
+            <!-- Round 18 (tray stage B): the host-side --tray process
+                 (host\FurphyHost.cs, already shipped) does the actual
+                 background sync work; these three controls just start/stop
+                 it and persist its settings. "Start with Windows" and
+                 "Update addons in the background" are independently
+                 saved/reversible, but turning Start with Windows ON while
+                 background updates is OFF also turns background updates ON
+                 (Actions.setRunAtStartup, ui\app.js) - a --tray process with
+                 nothing to do would just exit within a minute of every
+                 logon otherwise, which is not what the toggle promises. -->
+            <div class="settings-row" id="updates-background-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Update addons in the background</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-background-updates">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+            <div class="settings-row settings-row-col" id="updates-interval-row" hidden>
+              <div class="settings-row-label">How often</div>
+              <select class="select" id="select-background-interval">
+                <option value="60">Every hour</option>
+                <option value="120">Every 2 hours</option>
+                <option value="240">Every 4 hours</option>
+                <option value="480">Every 8 hours</option>
+                <option value="1440">Once a day</option>
+              </select>
+            </div>
+            <div class="settings-row" id="updates-startup-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Start with Windows</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-run-at-startup">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+            <p class="muted-text" id="updates-background-status"></p>
           </section>
 
           <section class="settings-group" id="settings-appearance">
@@ -522,12 +561,13 @@
             </div>
             <div class="settings-row settings-row-col">
               <div class="settings-row-label">Theme</div>
-              <div class="segmented" id="theme-toggle" role="group" aria-label="Color theme">
-                <button type="button" class="segmented-btn" data-theme-value="vaporwave">Vaporwave</button>
-                <button type="button" class="segmented-btn" data-theme-value="lofi">Lofi Night</button>
-                <button type="button" class="segmented-btn" data-theme-value="dark">Dark</button>
-                <button type="button" class="segmented-btn" data-theme-value="light">Light</button>
-              </div>
+              <!-- THEMES-SPEC.md Set B: swatch-grid picker, replacing the old
+                   4-option segmented control. Buttons are rendered entirely by
+                   app.js (Views.settings.buildThemeGrid, from the single
+                   THEMES array) - this container starts empty on purpose, so
+                   the array stays the one source of truth for slugs/labels/
+                   order (see THEMES-SPEC.md section 4). -->
+              <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="Color theme"></div>
             </div>
           </section>
 

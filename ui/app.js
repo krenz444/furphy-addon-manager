@@ -14,6 +14,35 @@
    ========================================================================== */
 
 /* ==========================================================================
+   THEMES - THEMES-SPEC.md section 4's single source of truth: one {slug,
+   name} entry per Appearance option, in the exact order the swatch-grid
+   picker shows them (section 3.4 - Vaporwave, Lofi Night, Dark, Light, then
+   the ten Round 18 (Set A) themes in tally order). Adding theme #15 is a
+   one-entry change here, plus its own :root[data-theme] token block, .select
+   chevron override, and .theme-swatch[data-theme-value] preview rule in
+   style.css - nothing else. isKnownTheme, Views.settings.buildThemeGrid()'s
+   picker rendering, and Host.reportTheme()'s message to the native host all
+   derive from this array; none of them hardcode a theme list of their own.
+   ========================================================================== */
+const THEMES = [
+  { slug: "vaporwave",         name: "Vaporwave" },
+  { slug: "lofi",              name: "Lofi Night" },
+  { slug: "dark",              name: "Dark" },
+  { slug: "light",             name: "Light" },
+  { slug: "terminal-green",    name: "Terminal Green" },
+  { slug: "arctic-ice",        name: "Arctic Ice" },
+  { slug: "art-deco-gold",     name: "Art Deco" },
+  { slug: "alpine-dawn",       name: "Alpine Dawn" },
+  { slug: "matcha",            name: "Matcha" },
+  { slug: "desert-night",      name: "Desert Night" },
+  { slug: "tokyo-rain",        name: "Tokyo Rain" },
+  { slug: "brushed-steel",     name: "Brushed Steel" },
+  { slug: "aurora-sky",        name: "Aurora Sky" },
+  { slug: "strawberry-cream",  name: "Strawberry Cream" },
+];
+const DEFAULT_THEME = "vaporwave";
+
+/* ==========================================================================
    Prefs - persisted appearance settings (theme, density), read from
    localStorage and stamped onto <html> as data-theme/data-density as the
    very first thing this script does (before Mock, before DOMContentLoaded)
@@ -24,23 +53,25 @@ const Prefs = (function () {
   const THEME_KEY = "addonSync.theme.v1";
   const DENSITY_KEY = "addonSync.density.v1";
 
-  // E15/E15b: four theme values total - "light", "vaporwave" and "dark" (E15),
-  // joined by "lofi" (E15b, round 11). Round 17 (Eric: "make vaporwave the
-  // main theme again"): "vaporwave" is the DEFAULT once more, superseding
-  // round 11's flip to "lofi" - see SPEC.md section 3. Anything else read
-  // back (missing key, corrupt value, an older/newer build's value) falls
-  // through to "vaporwave".
-  function isKnownTheme(v) { return v === "light" || v === "vaporwave" || v === "dark" || v === "lofi"; }
+  // E15/E15b/round 18: started as four theme values ("light", "vaporwave",
+  // "dark" from E15, joined by "lofi" in E15b/round 11), now checks
+  // membership against the full 14-slug THEMES array above (THEMES-SPEC.md
+  // section 4) instead of a hardcoded list of its own - adding theme #15
+  // needs no change here. "vaporwave" is the DEFAULT (round 17, Eric: "make
+  // vaporwave the main theme again" - see SPEC.md section 3). Anything else
+  // read back (missing key, corrupt value, an older/newer build's value, an
+  // unknown slug) falls through to DEFAULT_THEME.
+  function isKnownTheme(v) { return THEMES.some(function (t) { return t.slug === v; }); }
 
   function readTheme() {
-    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : "vaporwave"; } catch (e) { return "vaporwave"; }
+    try { const v = localStorage.getItem(THEME_KEY); return isKnownTheme(v) ? v : DEFAULT_THEME; } catch (e) { return DEFAULT_THEME; }
   }
   function readDensity() {
     try { return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable"; } catch (e) { return "comfortable"; }
   }
 
   function applyTheme(value) {
-    document.documentElement.dataset.theme = isKnownTheme(value) ? value : "vaporwave";
+    document.documentElement.dataset.theme = isKnownTheme(value) ? value : DEFAULT_THEME;
     // Round 12 (E19b): relay the just-applied theme to the native host (the
     // Host module, defined later in this file, near App) so it can recolor
     // its own chrome/title bar to match - see SPEC.md's E19b. Guarded: this
@@ -55,7 +86,7 @@ const Prefs = (function () {
   function applyDensity(value) { document.documentElement.dataset.density = value === "compact" ? "compact" : "comfortable"; }
 
   function setTheme(value) {
-    const v = isKnownTheme(value) ? value : "vaporwave";
+    const v = isKnownTheme(value) ? value : DEFAULT_THEME;
     applyTheme(v);
     try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* storage unavailable - theme still applies for this load */ }
   }
@@ -68,7 +99,7 @@ const Prefs = (function () {
   applyTheme(readTheme());
   applyDensity(readDensity());
 
-  return { getTheme: readTheme, getDensity: readDensity, setTheme: setTheme, setDensity: setDensity };
+  return { getTheme: readTheme, getDensity: readDensity, setTheme: setTheme, setDensity: setDensity, isKnownTheme: isKnownTheme };
 })();
 
 /* ==========================================================================
@@ -168,7 +199,18 @@ const Mock = (function () {
   // was OFF by default originally, see Get-DefaultSettings on the server).
   // Round 16 (E22): cfFocus joins them too, default true (see
   // Get-DefaultSettings on the server).
-  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null };
+  // Round 18 (tray stage B): backgroundUpdates/runAtStartup default off,
+  // backgroundIntervalMinutes defaults 120 - same defaults as the real
+  // server's Get-DefaultSettings.
+  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false };
+  // Round 18: a fake background tray, entirely in-memory - no real process,
+  // no real registry access. mockTray.running mirrors what a real
+  // GET /api/tray/status would report (state.running AND that pid is alive);
+  // starting it fabricates one plausible completed cycle immediately rather
+  // than simulating a real wait, so the Settings status line is exercisable
+  // under ?mock=1 without a timer.
+  const mockTray = { running: false, state: null };
+  let mockStartupRegistered = false;
   // E19: mock curseforge:// handler state - toggled entirely in-memory by
   // the /api/protocol/register|unregister handling below, no real registry
   // access. ?mock=1&host=webview2 also flips /api/ping's host field, so the
@@ -862,7 +904,46 @@ const Mock = (function () {
         if (typeof body.adFilter === "boolean") mockSettings.adFilter = body.adFilter;
         if (typeof body.cfFocus === "boolean") mockSettings.cfFocus = body.cfFocus;
         if (body.hostWindow !== undefined && body.hostWindow !== null) mockSettings.hostWindow = body.hostWindow;
+        if (typeof body.backgroundUpdates === "boolean") mockSettings.backgroundUpdates = body.backgroundUpdates;
+        if (typeof body.backgroundIntervalMinutes === "number") {
+          mockSettings.backgroundIntervalMinutes = Math.max(30, Math.min(1440, body.backgroundIntervalMinutes));
+        }
+        if (typeof body.runAtStartup === "boolean") mockSettings.runAtStartup = body.runAtStartup;
         return currentSettings();
+      }
+      // Round 18 (tray stage B): fake tray/startup endpoints - see mockTray above.
+      if (p === "/api/tray/status" && method === "GET") {
+        return { running: mockTray.running, state: mockTray.state, startupRegistered: mockStartupRegistered };
+      }
+      if (p === "/api/tray/start" && method === "POST") {
+        if (mockTray.running) return { __status: 409, error: "tray already running" };
+        const now = new Date();
+        const next = new Date(now.getTime() + mockSettings.backgroundIntervalMinutes * 60000);
+        mockTray.running = true;
+        mockTray.state = {
+          running: true, pid: 99999, lastRunAt: now.toISOString(), lastResult: "up_to_date",
+          updatedNames: [], failedNames: [], message: "Furphy - up to date", nextRunAt: next.toISOString()
+        };
+        return { __status: 202, ok: true };
+      }
+      if (p === "/api/tray/stop" && method === "POST") {
+        if (!mockTray.running) return { ok: false, reason: "not running" };
+        mockTray.running = false;
+        if (mockTray.state) mockTray.state.running = false;
+        return { ok: true };
+      }
+      if (p === "/api/startup/register" && method === "POST") {
+        mockStartupRegistered = true;
+        mockSettings.runAtStartup = true;
+        return { ok: true, settings: currentSettings() };
+      }
+      if (p === "/api/startup/unregister" && method === "POST") {
+        mockStartupRegistered = false;
+        mockSettings.runAtStartup = false;
+        return { ok: true, settings: currentSettings() };
+      }
+      if (p === "/api/startup/status" && method === "GET") {
+        return { registered: mockStartupRegistered };
       }
       // E19 (script itself is E17's, unchanged) - mock curseforge:// handler
       // toggle, in-memory only.
@@ -936,7 +1017,13 @@ const Mock = (function () {
     // Round 17: checkAddonVersion (E13's read-only WTF\Config.wtf display)
     // is gone - Eric: "WoW's out-of-date warning... get rid of this it
     // doesn't do anything."
-    return { releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port, addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_", adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow };
+    return {
+      releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port,
+      addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
+      adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow,
+      // Round 18 (tray stage B)
+      backgroundUpdates: mockSettings.backgroundUpdates, backgroundIntervalMinutes: mockSettings.backgroundIntervalMinutes, runAtStartup: mockSettings.runAtStartup
+    };
   }
 })();
 
@@ -1355,6 +1442,15 @@ const Api = (function () {
     protocolStatus: function () { return request("GET", "/api/protocol/status"); },
     protocolRegister: function () { return request("POST", "/api/protocol/register", {}); },
     protocolUnregister: function () { return request("POST", "/api/protocol/unregister", {}); },
+
+    // Round 18 (tray stage B): start/stop the background-updater tray
+    // process and read its live state; register/unregister is the "Start
+    // with Windows" HKCU Run value.
+    getTrayStatus: function () { return request("GET", "/api/tray/status"); },
+    startTray: function () { return request("POST", "/api/tray/start", {}); },
+    stopTray: function () { return request("POST", "/api/tray/stop", {}); },
+    registerStartup: function () { return request("POST", "/api/startup/register", {}); },
+    unregisterStartup: function () { return request("POST", "/api/startup/unregister", {}); },
 
     // E16: keyless CurseForge enrichment (Round 16, E22: the only
     // CurseForge fetch path left, now that the key-gated search/mod/
@@ -4056,6 +4152,59 @@ const Actions = (function () {
     }
   }
 
+  // Round 18 (tray stage B): re-fetches /api/tray/status into
+  // Store.state.trayStatus and repaints the status line if Settings is the
+  // active view. Called after every tray-affecting action here, and once on
+  // entering Settings (App.switchView) - the normal state poll
+  // (App.reloadState) also calls this on its own cadence while Settings
+  // stays open, so the line never goes stale without needing its own timer.
+  async function refreshTrayStatus() {
+    try {
+      Store.state.trayStatus = await Api.getTrayStatus();
+    } catch (err) {
+      Store.state.trayStatus = null;
+    }
+    if (Store.state.view === "settings") Views.settings.render();
+  }
+
+  // Saves backgroundUpdates, then starts or stops the tray process to match -
+  // one settings save (saveSettings' own "Settings saved." toast covers it),
+  // no separate toast for the start/stop call itself.
+  async function setBackgroundUpdates(enabled) {
+    try {
+      await saveSettings({ backgroundUpdates: enabled });
+      if (enabled) await Api.startTray(); else await Api.stopTray();
+    } catch (err) {
+      Components.Toast.show("Couldn't change background updates: " + describeError(err), "error");
+    } finally {
+      await refreshTrayStatus();
+    }
+  }
+
+  // Registers/unregisters the "Start with Windows" Run value. Turning it ON
+  // while background updates is currently off also turns background updates
+  // on - a single settings PUT (one save, one toast) rather than two, since
+  // a --tray process with nothing to do would just exit within a minute of
+  // every logon otherwise (task brief: "one action, plainly labelled").
+  async function setRunAtStartup(enabled) {
+    try {
+      const patch = { runAtStartup: enabled };
+      const alsoStartBackground = enabled && !Store.state.settings.backgroundUpdates;
+      if (alsoStartBackground) patch.backgroundUpdates = true;
+      await saveSettings(patch);
+      if (enabled) {
+        await Api.registerStartup();
+        if (alsoStartBackground) await Api.startTray();
+      } else {
+        await Api.unregisterStartup();
+      }
+    } catch (err) {
+      Components.Toast.show("Couldn't change Start with Windows: " + describeError(err), "error");
+    } finally {
+      await refreshTrayStatus();
+    }
+  }
+
   return {
     startJob: startJob, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
@@ -4071,7 +4220,9 @@ const Actions = (function () {
     // E18 (first-run welcome)
     adoptAll: adoptAll,
     // E19 (curseforge:// handler toggle; ad filter goes through saveSettings above)
-    loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered
+    loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered,
+    // Round 18 (tray stage B)
+    setBackgroundUpdates: setBackgroundUpdates, setRunAtStartup: setRunAtStartup, refreshTrayStatus: refreshTrayStatus
   };
 })();
 
@@ -5051,6 +5202,7 @@ Views.settings = (function () {
     // diagnosticsReportText() below, which reads s.port directly.
 
     renderBrowsing(s);
+    renderBackgroundUpdates(s);
     Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
     renderUntracked();
@@ -5101,17 +5253,137 @@ Views.settings = (function () {
     Utils.qs("#toggle-cf-focus").checked = !!s.cfFocus;
   }
 
+  // Round 18 (tray stage B): unlike adFilter, these three are meaningful
+  // (and saved) everywhere - the background tray is a plain Windows process,
+  // not tied to the native host's own CurseForge pane - so this row is never
+  // hidden. The interval <select> only shows while background updates is on;
+  // the status line reads Store.state.trayStatus, kept fresh by the normal
+  // state poll and by an immediate fetch on entering this view (see
+  // App.switchView/App.reloadState).
+  function renderBackgroundUpdates(s) {
+    const bgOn = !!s.backgroundUpdates;
+    Utils.qs("#toggle-background-updates").checked = bgOn;
+    Utils.qs("#updates-interval-row").hidden = !bgOn;
+    Utils.qs("#select-background-interval").value = String(s.backgroundIntervalMinutes || 120);
+    Utils.qs("#toggle-run-at-startup").checked = !!s.runAtStartup;
+    Utils.qs("#updates-background-status").textContent = backgroundStatusText(s, Store.state.trayStatus);
+  }
+
+  // "HH:MM" in the viewer's local time, from a lastRunAt ISO timestamp -
+  // matches the plain "14:02" style the task brief's status lines use, no
+  // date/seconds/timezone clutter.
+  function formatLocalTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+
+  // One plain-words line, fed by /api/tray/status (Store.state.trayStatus) -
+  // the five shapes are exactly what the task brief specifies; anything else
+  // tray-state.json's lastResult could report (skipped_busy, error, or no
+  // cycle run yet) gets a same-style fallback rather than blank text.
+  function backgroundStatusText(s, trayStatus) {
+    if (!s || !s.backgroundUpdates) return "Background updates off";
+    const state = trayStatus && trayStatus.state;
+    if (!state || !state.lastResult) return "Running - waiting for the first check";
+    const time = formatLocalTime(state.lastRunAt);
+    switch (state.lastResult) {
+      case "up_to_date": return "Running - last check " + time + ": everything up to date";
+      case "updated": return "Running - updated " + ((state.updatedNames || []).length) + " at " + time;
+      case "failed": return "Running - " + ((state.failedNames || []).length) + " failed at " + time;
+      case "skipped_wow_running": return "Waiting - WoW is running";
+      case "skipped_busy": return "Waiting - another task is running";
+      default: return "Running - check failed at " + time;
+    }
+  }
+
   // E7: reflects the persisted density/theme choice (Prefs, already applied
   // to <html> as soon as the page loaded) as the active button in each
-  // segmented toggle.
+  // segmented toggle, and (round 18, Set B) the checked swatch in the theme
+  // picker grid.
   function renderAppearance() {
     const density = Prefs.getDensity();
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.classList.toggle("is-active", btn.dataset.densityValue === density);
     });
+    paintThemeGrid();
+  }
+
+  // THEMES-SPEC.md section 3.1/3.3: one <button role="radio"> per THEMES
+  // entry, built ONCE (called from bindOnce, not render) so a mid-session
+  // repaint - the idle poll while Settings is open, for instance - never
+  // yanks focus out from under a keyboard user mid-navigation. Every commit
+  // path (click, or Enter/Space which a real <button> already turns into a
+  // "click" for free) re-renders only the checked state via paintThemeGrid()
+  // below, never rebuilds the buttons.
+  function buildThemeGrid() {
+    const grid = Utils.qs("#theme-grid");
+    if (!grid || grid.childElementCount) return; // already built, or markup missing
+    THEMES.forEach(function (t) {
+      const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      check.setAttribute("class", "theme-swatch-check");
+      check.setAttribute("viewBox", "0 0 12 12");
+      check.setAttribute("width", "12");
+      check.setAttribute("height", "12");
+      check.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M2 6l3 3 5-6");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.6");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      check.appendChild(path);
+
+      const btn = Utils.el("button", {
+        type: "button", class: "theme-swatch", role: "radio",
+        dataset: { themeValue: t.slug }
+      }, [
+        Utils.el("span", { class: "theme-swatch-preview", "aria-hidden": "true" }, [
+          Utils.el("span", { class: "theme-swatch-accent" }),
+          Utils.el("span", { class: "theme-swatch-text" }, ["Aa"]),
+          check
+        ]),
+        Utils.el("span", { class: "theme-swatch-name" }, [t.name])
+      ]);
+      grid.appendChild(btn);
+    });
+
+    // Click commits immediately. Enter/Space on a focused <button> already
+    // fire a native "click" event, so no separate key handling is needed for
+    // those two - only arrow/Home/End navigation (focus-only, per section
+    // 3.3) needs its own keydown handler.
+    grid.addEventListener("click", function (ev) {
+      const btn = ev.target.closest(".theme-swatch");
+      if (!btn) return;
+      Prefs.setTheme(btn.dataset.themeValue);
+      paintThemeGrid();
+    });
+    grid.addEventListener("keydown", function (ev) {
+      const swatches = Utils.qsa(".theme-swatch", grid);
+      const i = swatches.indexOf(document.activeElement);
+      if (i === -1) return;
+      let next = -1;
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = (i + 1) % swatches.length;
+      else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = (i - 1 + swatches.length) % swatches.length;
+      else if (ev.key === "Home") next = 0;
+      else if (ev.key === "End") next = swatches.length - 1;
+      else return;
+      ev.preventDefault();
+      swatches[next].focus(); // focus only - theme changes only on the commit path above
+    });
+  }
+
+  // Roving tabindex + aria-checked/visual ring, kept in sync with
+  // Prefs.getTheme() on every settings render and every commit - never
+  // recreates the buttons themselves (see buildThemeGrid above).
+  function paintThemeGrid() {
     const theme = Prefs.getTheme();
-    Utils.qsa("#theme-toggle .segmented-btn").forEach(function (btn) {
-      btn.classList.toggle("is-active", btn.dataset.themeValue === theme);
+    Utils.qsa("#theme-grid .theme-swatch").forEach(function (btn) {
+      const checked = btn.dataset.themeValue === theme;
+      btn.setAttribute("aria-checked", checked ? "true" : "false");
+      btn.tabIndex = checked ? 0 : -1;
     });
   }
 
@@ -5249,9 +5521,6 @@ Views.settings = (function () {
       }
       case "CurseForge reachability":
         return { label: "CurseForge", detail: ok ? "Reached OK" : "Couldn't reach it" };
-      case "CurseForge API key":
-        if (!ok) return { label: "CurseForge API key", detail: "Rejected" };
-        return { label: "CurseForge API key", detail: detail.indexOf("No API key") === 0 ? "Not configured (optional)" : "Valid" };
       case "Disk space":
         return { label: "Disk space", detail: ok ? "Plenty free" : "Running low" };
       case "Server uptime":
@@ -5338,12 +5607,27 @@ Views.settings = (function () {
       Host.cfFocus(ev.target.checked);
     });
 
+    // Round 18 (tray stage B): these three drive the background tray
+    // process (start/stop, its interval, and the Windows Run value) - see
+    // Actions.setBackgroundUpdates/setRunAtStartup for the actual
+    // save+tray-control sequencing.
+    Utils.qs("#toggle-background-updates").addEventListener("change", function (ev) {
+      Actions.setBackgroundUpdates(ev.target.checked);
+    });
+    Utils.qs("#select-background-interval").addEventListener("change", function (ev) {
+      Actions.saveSettings({ backgroundIntervalMinutes: Number(ev.target.value) });
+    });
+    Utils.qs("#toggle-run-at-startup").addEventListener("change", function (ev) {
+      Actions.setRunAtStartup(ev.target.checked);
+    });
+
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setDensity(btn.dataset.densityValue); renderAppearance(); });
     });
-    Utils.qsa("#theme-toggle .segmented-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () { Prefs.setTheme(btn.dataset.themeValue); renderAppearance(); });
-    });
+    // Round 18 (Set B): the theme picker is a dynamically-built grid, not
+    // static markup - built once here (its own click/keydown wiring lives
+    // inside buildThemeGrid itself), never rebuilt by render().
+    buildThemeGrid();
 
     Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("folder"); });
     Utils.qs("#btn-open-addons").addEventListener("click", function () { Actions.openWhat("addons"); });
@@ -5542,7 +5826,7 @@ const Host = (function () {
   // the native host.
   function reportTheme() {
     if (!isNative()) return false;
-    const name = document.documentElement.dataset.theme || "vaporwave";
+    const name = document.documentElement.dataset.theme || DEFAULT_THEME;
     const cs = getComputedStyle(document.documentElement);
     const propByKey = { bg0: "--bg-0", bg1: "--bg-1", bg2: "--bg-2", bg3: "--bg-3", border: "--border", text: "--text", muted: "--text-muted", accent: "--accent" };
     const colors = {};
@@ -5694,6 +5978,10 @@ const App = (function () {
     if (leavingBrowse) Views.browse.onLeaveView();
     Components.JobPanel.collapseIfOpen();
     renderCurrentView();
+    // Round 18 (tray stage B): fetch the current tray status right away on
+    // entering Settings, rather than waiting up to one idle-poll tick (see
+    // reloadState) for the status line to stop showing stale/empty data.
+    if (view === "settings") Actions.refreshTrayStatus();
   }
 
   function renderCurrentView() {
@@ -5718,6 +6006,13 @@ const App = (function () {
   const VIEW_QUERY_MAP = { "my-addons": "myaddons", "browse": "browse", "get-new-addons": "browse", "settings": "settings" };
   function applyInitialViewFromQuery() {
     const params = new URLSearchParams(location.search);
+    // THEMES-SPEC.md Set B: ?theme=<slug> applies AND persists that theme on
+    // load, same pattern as ?view=/?tab= above - used for verification
+    // screenshots and deep links. An unknown slug is silently ignored (no
+    // theme change) rather than falling back to the default, so a typo in a
+    // link can't clobber whatever the viewer already had set.
+    const themeParam = params.get("theme");
+    if (themeParam && Prefs.isKnownTheme(themeParam)) Prefs.setTheme(themeParam);
     const target = VIEW_QUERY_MAP[params.get("view")];
     if (target && target !== Store.state.view) {
       Store.state.view = target;
@@ -5941,6 +6236,13 @@ const App = (function () {
       });
       if (!afterJob) resumeJobPollingIfNeeded();
       if (changed) renderCurrentView();
+      // Round 18 (tray stage B): the background-tray status line
+      // (Views.settings) is fed by a separate endpoint (/api/tray/status,
+      // not part of /api/state's own shape) - piggyback it on this same
+      // poll cadence, but only while Settings is actually the active view,
+      // so no extra request happens on every other screen. Fire-and-forget:
+      // refreshTrayStatus repaints Settings itself once the fetch resolves.
+      if (Store.state.view === "settings") Actions.refreshTrayStatus();
     } catch (err) {
       markOnline(err);
       Store.set({ loadingState: false, stateError: err });
