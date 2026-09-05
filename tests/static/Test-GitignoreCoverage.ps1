@@ -8,12 +8,55 @@
   Read-only: this test only inspects the mirror's .gitignore, it never
   writes to the repo mirror (out of scope for this test layer - deploy.ps1
   owns mirroring).
+
+  P3 perf-pass fix: the mirror path used to be a second, hand-typed literal
+  here, independent of deploy.ps1's own -RepoPath default - two copies of
+  the same path that could silently drift apart (this test would then
+  "pass" against the wrong checkout, or fail with a confusing "not found"
+  against a moved mirror, while deploy.ps1 itself kept working fine against
+  its own, unchanged, correct value). Get-MirrorRootFromDeployScript reads
+  deploy.ps1's actual [string]$RepoPath = '...' default via a plain regex
+  instead, so this test always inspects the SAME checkout deploy.ps1 itself
+  mirrors into - one source of truth. Falls back to the historical literal
+  only if deploy.ps1 is missing or its param shape changes unexpectedly
+  (never silently skips the check).
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 $results = New-ResultsCollector -Suite 'static:gitignore-coverage'
 
-$mirrorRoot = 'C:\Users\drops\Documents\furphy-addon-manager'
+function Get-MirrorRootFromDeployScript {
+    <#
+      Reads deploy.ps1's own param default for -RepoPath - the actual
+      value deploy.ps1 mirrors this project into - rather than a second,
+      independently hand-typed copy of the same path. Returns $null (never
+      throws) if deploy.ps1 is missing or its shape has changed enough that
+      the pattern no longer matches, so the caller can fall back cleanly.
+    #>
+    param([string]$DeployScriptPath)
+
+    if (-not (Test-Path -LiteralPath $DeployScriptPath -PathType Leaf)) { return $null }
+    try {
+        $deployText = Get-Content -LiteralPath $DeployScriptPath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ($deployText -match "\[string\]\`$RepoPath\s*=\s*'([^']+)'") {
+            return $matches[1]
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+$Script:HistoricalMirrorRootFallback = 'C:\Users\drops\Documents\furphy-addon-manager'
+$deployScriptPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'deploy.ps1'
+$mirrorRoot = Get-MirrorRootFromDeployScript -DeployScriptPath $deployScriptPath
+$mirrorRootSource = 'deploy.ps1 -RepoPath default'
+if (-not $mirrorRoot) {
+    $mirrorRoot = $Script:HistoricalMirrorRootFallback
+    $mirrorRootSource = 'fallback literal (deploy.ps1 -RepoPath default could not be read)'
+}
+Add-Result -Collector $results -Name 'mirror path read from deploy.ps1 -RepoPath default' -Passed ($mirrorRootSource -eq 'deploy.ps1 -RepoPath default') -Message "using: $mirrorRoot (source: $mirrorRootSource)"
+
 $gitignorePath = Join-Path -Path $mirrorRoot -ChildPath '.gitignore'
 
 if (-not (Test-Path -LiteralPath $mirrorRoot -PathType Container)) {

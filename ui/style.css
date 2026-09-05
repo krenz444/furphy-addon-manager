@@ -1041,6 +1041,7 @@ button { font-family: inherit; }
 button.freshness-headline { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: var(--danger); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 button.freshness-headline:hover { color: var(--danger-hover); }
 .freshness-clause { color: var(--text-faint); font-weight: 400; }
+.freshness-game-note { margin-top: 2px; }
 /* Review fix: dot-only sidebar mount (Components.Freshness dotOnly) renders
    the dot as a real <button> when a Retry is available, so the click-to-
    retry affordance survives losing its label - reset the default button

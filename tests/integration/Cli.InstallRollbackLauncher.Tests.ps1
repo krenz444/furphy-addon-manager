@@ -154,3 +154,114 @@ Describe '-Launcher dry behaviour (autoUpdateOnLaunch=false -> exit 0, no networ
         ($logText -like '*auto-update disabled*') | Should Be $true
     }
 }
+
+Describe '-Launcher skip-if-recently-checked (P1 perf pass, task brief item 5)' {
+    # ROOT\state.json's updatesCheckedAt.retail within the last 10 minutes
+    # -> -Launcher skips the whole check/sync (exit 0, no network,
+    # results:[]) exactly like the autoUpdateOnLaunch=false Describe above -
+    # even with a real, otherwise-checkable addon record on file, so a
+    # regression back to "always sync" would show up as a real (not just
+    # slow) failure here: a nonzero results count, not just a slow run.
+    $wowRoot = Copy-Fixture
+    $tempRoot = New-TempRoot -Name 'cli-launcher-recent'
+    $cliPath = Join-Path $tempRoot 'addon-sync.ps1'
+    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination $cliPath -Force
+
+    $settings = @{ releaseType = 1; autoUpdateOnLaunch = $true; port = 47831; schemaVersion = 2 }
+    ConvertTo-Json -InputObject $settings -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'settings.json') -Encoding UTF8
+
+    # Real, otherwise-checkable record (same shape as the rollback Describe
+    # above) - proves the skip happens BEFORE any per-addon network check,
+    # not merely "there was nothing to check anyway".
+    $flavourDir = Join-Path $tempRoot 'flavours\retail'
+    New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+    $record = [PSCustomObject]@{
+        name          = 'SingleFlavourAddon'
+        projectId     = 424242
+        fileId        = 1000
+        version       = '1.0.0'
+        fileName      = 'SingleFlavourAddon-1.0.0.zip'
+        installedAt   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        folders       = @('SingleFlavourAddon')
+        author        = $null
+        ignoreUpdates = $false
+        pinnedFileId  = $null
+        releaseType   = $null
+        previousFileId  = $null
+        previousVersion = $null
+    }
+    ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
+
+    # ROOT\state.json (shared root, NOT under flavours\<id>\ - see
+    # addon-server.ps1's own Save-CheckState doc comment) - checked 2
+    # minutes ago, well inside the 10-minute window.
+    $state = @{ updatesCheckedAt = @{ retail = (Get-Date).ToUniversalTime().AddMinutes(-2).ToString('yyyy-MM-ddTHH:mm:ssZ') } }
+    ConvertTo-Json -InputObject $state -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'state.json') -Encoding UTF8
+
+    It 'exits 0 with empty results and logs "recently checked" - completes near-instantly, never reaching the real record' {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 15 -ArgumentList @(
+            '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
+            '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns'))
+        $sw.Stop()
+        $r.ExitCode | Should Be 0
+        @($r.Json.results).Count | Should Be 0
+        ($sw.Elapsed.TotalSeconds -lt 8) | Should Be $true
+
+        $syncLog = Join-Path $tempRoot 'sync.log'
+        (Test-Path -LiteralPath $syncLog) | Should Be $true
+        $logText = Get-Content -LiteralPath $syncLog -Raw
+        ($logText -like '*recently checked*') | Should Be $true
+    }
+}
+
+Describe '-Launcher does NOT skip when updatesCheckedAt is older than 10 minutes' -Tags 'Network' {
+    # Same shape as the Describe above, except the timestamp is 30 minutes
+    # old - proves the 10-minute window is actually enforced (not "always
+    # skip once state.json exists"). No real CurseForge network is
+    # exercised either way (the addons.json record's project id is bogus),
+    # so this stays fully offline/fast while still reaching the real
+    # per-addon sync path - "Skipped"/"Failed" both prove the addon was
+    # actually processed, as opposed to the empty-results skip shape above.
+    $wowRoot = Copy-Fixture
+    $tempRoot = New-TempRoot -Name 'cli-launcher-stale'
+    $cliPath = Join-Path $tempRoot 'addon-sync.ps1'
+    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination $cliPath -Force
+
+    $settings = @{ releaseType = 1; autoUpdateOnLaunch = $true; port = 47831; schemaVersion = 2 }
+    ConvertTo-Json -InputObject $settings -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'settings.json') -Encoding UTF8
+
+    $flavourDir = Join-Path $tempRoot 'flavours\retail'
+    New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+    $record = [PSCustomObject]@{
+        name          = 'BogusAddon'
+        projectId     = 999999998
+        fileId        = 1000
+        version       = '1.0.0'
+        fileName      = 'BogusAddon-1.0.0.zip'
+        installedAt   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        folders       = @('BogusAddon')
+        author        = $null
+        ignoreUpdates = $false
+        pinnedFileId  = $null
+        releaseType   = $null
+        previousFileId  = $null
+        previousVersion = $null
+    }
+    ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
+
+    $state = @{ updatesCheckedAt = @{ retail = (Get-Date).ToUniversalTime().AddMinutes(-30).ToString('yyyy-MM-ddTHH:mm:ssZ') } }
+    ConvertTo-Json -InputObject $state -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'state.json') -Encoding UTF8
+
+    It 'reaches the real per-addon sync (one result row), never logging "recently checked"' {
+        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 60 -ArgumentList @(
+            '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
+            '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns'))
+        $r.ExitCode | Should Be 0
+        @($r.Json.results).Count | Should Be 1
+
+        $syncLog = Join-Path $tempRoot 'sync.log'
+        $logText = Get-Content -LiteralPath $syncLog -Raw
+        ($logText -like '*recently checked*') | Should Be $false
+    }
+}

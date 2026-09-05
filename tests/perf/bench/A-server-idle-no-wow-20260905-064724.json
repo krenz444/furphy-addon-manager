@@ -1,0 +1,32 @@
+﻿{
+    "Label":  "A-server-idle-no-wow",
+    "Notes":  "State A: server running (port 47899), no window, no WoW. Idle baseline - nothing polling it.",
+    "DurationSec":  60,
+    "SampleIntervalSec":  2,
+    "SampleCount":  30,
+    "WindowStartUtc":  "2026-09-05T11:46:24Z",
+    "WindowStart":  "2026-09-05 06:46:24",
+    "WindowEnd":  "2026-09-05 06:47:24",
+    "ActualDurationSec":  60,
+    "ServerLogPath":  "C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\server.log",
+    "RequestCountInWindow":  0,
+    "ProcessCount":  null,
+    "TotalCpuSeconds":  0.062,
+    "TotalIOReadBytes":  0,
+    "TotalIOWriteBytes":  0,
+    "TotalNewTcpConnections":  0,
+    "PeakWorkingSetBytesAnyProcess":  0,
+    "Processes":  {
+                      "ProcessId":  38388,
+                      "Name":  "powershell.exe",
+                      "Role":  "server",
+                      "SampleCount":  30,
+                      "CpuSeconds":  0.062,
+                      "PeakWorkingSetBytes":  454516736,
+                      "AvgWorkingSetBytes":  453441946,
+                      "IOReadBytes":  0,
+                      "IOWriteBytes":  0,
+                      "NewTcpConnections":  0,
+                      "CommandLine":  "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\addon-server.ps1 -Port 47899 -Root C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2 -IdleMinutes 60 -WowRoot C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-wowroot-20260905-064557-460f54 "
+                  }
+}

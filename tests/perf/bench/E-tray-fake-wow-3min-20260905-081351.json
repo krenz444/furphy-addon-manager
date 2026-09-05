@@ -1,0 +1,34 @@
+﻿{
+    "Label":  "E-tray-fake-wow-3min",
+    "Notes":  "State E: --tray running (backgroundUpdates true, interval 30), FAKE Wow.exe already running for the whole 3-minute window. First cycle fires at t=90s, sees WoW running, and must skip without ever starting/pinging the server. No addon-server.ps1/CLI process should appear here at all.",
+    "DurationSec":  180,
+    "SampleIntervalSec":  2,
+    "SampleCount":  90,
+    "WindowStartUtc":  "2026-09-05T13:10:51Z",
+    "WindowStart":  "2026-09-05 08:10:51",
+    "WindowEnd":  "2026-09-05 08:13:51",
+    "ActualDurationSec":  180,
+    "ServerLogPath":  "C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-080023-b3de27\\server.log",
+    "RequestCountInWindow":  0,
+    "ProcessCount":  1,
+    "TotalCpuSeconds":  0.016,
+    "TotalIOReadBytes":  1932,
+    "TotalIOWriteBytes":  313,
+    "TotalNewTcpConnections":  0,
+    "PeakWorkingSetBytesAnyProcess":  33759232,
+    "Processes":  [
+                      {
+                          "ProcessId":  52008,
+                          "Name":  "FurphyHost.exe",
+                          "Role":  "host-tray",
+                          "SampleCount":  90,
+                          "CpuSeconds":  0.016,
+                          "PeakWorkingSetBytes":  33759232,
+                          "AvgWorkingSetBytes":  32293092,
+                          "IOReadBytes":  1932,
+                          "IOWriteBytes":  313,
+                          "NewTcpConnections":  0,
+                          "CommandLine":  "\"C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-080023-b3de27\\host\\bin\\FurphyHost.exe\" --port 47899 --tray "
+                      }
+                  ]
+}

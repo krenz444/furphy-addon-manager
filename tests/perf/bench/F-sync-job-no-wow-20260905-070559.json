@@ -1,0 +1,47 @@
+﻿{
+    "Label":  "F-sync-job-no-wow",
+    "Notes":  "State F: a real sync job (kind=sync, force=true, retail: BigWigs+LittleWigs) running via POST /api/jobs, no WoW running.",
+    "DurationSec":  45,
+    "SampleIntervalSec":  2,
+    "SampleCount":  23,
+    "WindowStartUtc":  "2026-09-05T12:05:14Z",
+    "WindowStart":  "2026-09-05 07:05:14",
+    "WindowEnd":  "2026-09-05 07:05:59",
+    "ActualDurationSec":  45,
+    "ServerLogPath":  "C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\server.log",
+    "RequestCountInWindow":  2,
+    "ProcessCount":  2,
+    "TotalCpuSeconds":  0.797,
+    "TotalIOReadBytes":  8558234,
+    "TotalIOWriteBytes":  14689902,
+    "TotalNewTcpConnections":  0,
+    "PeakWorkingSetBytesAnyProcess":  320552960,
+    "Processes":  [
+                      {
+                          "ProcessId":  43376,
+                          "Name":  "powershell.exe",
+                          "Role":  "server",
+                          "SampleCount":  23,
+                          "CpuSeconds":  0.156,
+                          "PeakWorkingSetBytes":  320552960,
+                          "AvgWorkingSetBytes":  319354435,
+                          "IOReadBytes":  34385,
+                          "IOWriteBytes":  8396,
+                          "NewTcpConnections":  0,
+                          "CommandLine":  "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\addon-server.ps1 -Port 47899 -Root C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2 -IdleMinutes 60 -WowRoot C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-wowroot-20260905-064557-460f54 "
+                      },
+                      {
+                          "ProcessId":  27468,
+                          "Name":  "powershell.exe",
+                          "Role":  "sync-cli-job",
+                          "SampleCount":  2,
+                          "CpuSeconds":  0.641,
+                          "PeakWorkingSetBytes":  146866176,
+                          "AvgWorkingSetBytes":  136626176,
+                          "IOReadBytes":  8523849,
+                          "IOWriteBytes":  14681506,
+                          "NewTcpConnections":  0,
+                          "CommandLine":  "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\addon-sync.ps1\" \"-Force\" -Json -WowRoot \"C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-wowroot-20260905-064557-460f54\" -ProgressPath \"C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-064557-626de2\\jobs\\3.progress.json\" "
+                      }
+                  ]
+}
