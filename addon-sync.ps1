@@ -3760,7 +3760,6 @@ if (-not $scriptRootPath) {
     $scriptRootPath = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
 }
 
-$script:StagingPath = Join-Path -Path $scriptRootPath -ChildPath 'staging'
 $script:LogPath = Join-Path -Path $scriptRootPath -ChildPath 'sync.log'
 $script:LastRunPath = Join-Path -Path $scriptRootPath -ChildPath 'last-run.txt'
 $script:SettingsPath = Join-Path -Path $scriptRootPath -ChildPath 'settings.json'
@@ -3838,11 +3837,11 @@ foreach ($f in $script:InstalledFlavours) {
 # Sync-SingleWagoAddon compute their own copy the same way.
 $effectiveCfMapping = Get-CfFlavourMapping -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
 
-# ---- FLAVORS-SPEC S3.1/S3.5: per-flavour addons.json/state.json/backups
-#      nest under flavours\<id>\ - only the target flavour's subfolder is
-#      ever created (never every installed flavour's, so a single-flavour
-#      machine ends up with exactly one). Shared files (settings.json,
-#      staging\, sync.log, last-run.txt, cache\, jobs\) stay at
+# ---- FLAVORS-SPEC S3.1/S3.5: per-flavour addons.json/state.json/backups/
+#      staging nest under flavours\<id>\ - only the target flavour's
+#      subfolder is ever created (never every installed flavour's, so a
+#      single-flavour machine ends up with exactly one). Shared files
+#      (settings.json, sync.log, last-run.txt, cache\, jobs\) stay at
 #      $scriptRootPath, unchanged. ----
 $script:FlavourDir = Join-Path -Path (Join-Path -Path $scriptRootPath -ChildPath 'flavours') -ChildPath $effectiveFlavor
 if (-not (Test-Path -LiteralPath $script:FlavourDir)) {
@@ -3854,6 +3853,11 @@ if (-not (Test-Path -LiteralPath $script:FlavourDir)) {
 }
 $script:ConfigPath = Join-Path -Path $script:FlavourDir -ChildPath 'addons.json'
 $script:BackupsPath = Join-Path -Path $script:FlavourDir -ChildPath 'backups'
+# CLI-1/security-5: staging is per-flavour (not shared at $scriptRootPath)
+# so two concurrent per-flavour syncs (update-all-flavours, the tray's
+# scheduled cycle) never race on the same Remove-Item/New-Item or extract
+# the same project id into the same folder.
+$script:StagingPath = Join-Path -Path $script:FlavourDir -ChildPath 'staging'
 
 try {
     # ---- Load config ----
