@@ -36,7 +36,7 @@ Describe 'Tray lifecycle and start-with-Windows registration' -Tags 'Tray' {
         $exePath = Join-Path $root 'host\bin\FurphyHost.exe'
 
         $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $valueName = 'FurphyAddonManager'
+        $valueName = 'FurphyAddonManager.Test'   # round 29: a 47899 server writes the test-scoped name, never the owner's real value
         $registeredByThisTest = $false
 
         try {
@@ -128,13 +128,13 @@ Describe 'Tray lifecycle and start-with-Windows registration' -Tags 'Tray' {
                 $leftover = Get-ItemProperty -LiteralPath $keyPath -Name $valueName -ErrorAction SilentlyContinue
                 if ($leftover) { Remove-ItemProperty -LiteralPath $keyPath -Name $valueName -ErrorAction SilentlyContinue }
             } catch { }
-            # Also hard-kill any surviving FurphyHost --tray process by
+            # Also hard-kill any surviving TEST FurphyHost --tray process (test port or non-live exe path; round 29: never the owner's live tray) by
             # command line, in case the graceful stop above didn't run
             # (server already gone, etc.) - never touches a non-tray
             # FurphyHost.exe instance.
             try {
                 $stragglers = Get-CimInstance -ClassName Win32_Process -Filter "Name = 'FurphyHost.exe'" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.CommandLine -like '*--tray*' }
+                    Where-Object { ($_.CommandLine -match '--tray') -and (($_.CommandLine -match '--port\s+4789\d') -or ([string]$_.ExecutablePath -notlike '*\Program Files*')) }
                 foreach ($s in @($stragglers)) {
                     try { Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
                 }

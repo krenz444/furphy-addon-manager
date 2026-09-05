@@ -4080,6 +4080,26 @@ boot();
             return ProductionMutexName + "." + port.ToString(CultureInfo.InvariantCulture);
         }
 
+        // Round 29 (live-safety fix): the stop EVENT had the exact same
+        // "global to the Windows user session regardless of --port" defect
+        // ResolveMutexName was fixed for in round 28, just missed then - it
+        // was still always the bare literal StopEventName, so a POST
+        // /api/tray/stop against ANY addon-server.ps1 instance (any port)
+        // set the SAME named event a real, live, production --tray (port
+        // 47831) is waiting on, silently stopping it. Same rule as
+        // ResolveMutexName, same reasoning: the production literal only
+        // when the resolved port is really 47831 (a real user's tray must
+        // still be stoppable by name exactly as today), else a
+        // port-suffixed name so a test run's stop signal can never reach a
+        // real tray on a different port. addon-server.ps1's Handle-TrayStop
+        // computes this exact same name (from its own $Script:Port) - see
+        // SPEC.md's tray section.
+        public static string ResolveStopEventName(int port)
+        {
+            if (port == ProductionPort) return StopEventName;
+            return StopEventName + "." + port.ToString(CultureInfo.InvariantCulture);
+        }
+
         public static int Run(HostOptions options, bool dpiAware)
         {
             // Port must be resolved BEFORE the mutex is constructed (the
@@ -4377,14 +4397,22 @@ boot();
             // goes through _startupValueName instead of a hardcoded
             // literal, and RunSelftestSequence always removes whatever it
             // wrote in its own finally block.
-            _startupValueName = _options.TraySelftestActive
+            // Round 29 live-safety: a tray on any non-production port (test
+            // servers spawn --tray --port 47899) must never touch the owner's
+            // real Start-with-Windows value either.
+            _startupValueName = (_options.TraySelftestActive || _port != 47831)
                 ? "FurphyAddonManager.Test"
                 : StartupRegistry.ProductionValueName;
 
             bool createdNewEvent;
             try
             {
-                _stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, TrayProgram.StopEventName, out createdNewEvent);
+                // Round 29: named per the SAME rule as the mutex above -
+                // production port 47831 keeps the exact legacy literal, any
+                // other port gets its own suffixed name, so a stop signal
+                // aimed at THIS port's addon-server.ps1 can never reach a
+                // tray running on a different port.
+                _stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, TrayProgram.ResolveStopEventName(_port), out createdNewEvent);
             }
             catch
             {
@@ -4584,7 +4612,7 @@ boot();
 
         private void MenuQuit_Click(object sender, EventArgs e)
         {
-            LogHost("[tray] quit selected");
+            LogHost("[tray] quit from menu");
             try { _stopEvent.Set(); } catch { }
         }
 
@@ -4736,7 +4764,7 @@ boot();
                 int idx = WaitHandle.WaitAny(handles, slice * 1000);
                 if (idx == 0)
                 {
-                    LogHost("[tray] stop event signaled");
+                    LogHost("[tray] stop signal received - exiting");
                     return true;
                 }
                 if (idx == 1)
@@ -4747,7 +4775,7 @@ boot();
                 TrayBackgroundSettings s = TraySettingsReader.Read(_settingsPath);
                 if (!s.BackgroundUpdates)
                 {
-                    LogHost("[tray] backgroundUpdates is now false - exiting");
+                    LogHost("[tray] background updates turned off - exiting");
                     return true;
                 }
                 remaining -= slice;

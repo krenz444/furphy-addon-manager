@@ -28,9 +28,9 @@
                  otherwise changing which layers run - usable standalone
                  against a full run too ("everything except network").
    -NoTray       Excludes every test tagged 'Tray' (starts a real
-                 FurphyHost.exe --tray process and touches the real HKCU
-                 Run value, though always removing it again in a finally
-                 block) - independent of -Quick/-NoNetwork.
+                 FurphyHost.exe --tray --port 47899 process and toggles the
+                 TEST registry value FurphyAddonManager.Test, removing it
+                 again in a finally block; the production value is untouched) - independent of -Quick/-NoNetwork.
    -Only <names> Restricts the run to exactly these layer names (any of
                  static/unit/integration/host/spa/fixture-acceptance/
                  perf), overriding the default Quick/full layer
@@ -43,10 +43,10 @@
  HYGIENE: every port this run might have touched (47899, 47890-47897) is
  checked and any owning process force-stopped, and tests\.tmp is swept
  to empty, in a top-level `finally` block regardless of outcome. A
- straggler FurphyHost.exe process or a leftover HKCU
- FurphyAddonManager Run value (both hard rules: tests must never leave
- either behind) is also checked and force-cleaned as a last-resort safety
- net, independent of whatever cleanup the failing test itself attempted -
+ straggler TEST FurphyHost.exe process (test port or non-live exe path)
+ or a leftover HKCU FurphyAddonManager.Test value is also checked and
+ force-cleaned as a last-resort safety net - the owner's live tray and
+ production Run value are never touched - independent of whatever cleanup the failing test itself attempted -
  logged loudly if it had to do anything, since that means some test's
  own `finally` did not run to completion.
 
@@ -276,23 +276,41 @@ function Invoke-HygieneSweep {
     Write-Host "== $Label ==" -ForegroundColor Cyan
     foreach ($p in @(47899) + @(47890..47897)) { Stop-ProcessOnPort -Port $p }
 
-    $strayHost = Get-Process -Name 'FurphyHost' -ErrorAction SilentlyContinue
-    if ($strayHost) {
-        Write-Host "  WARN: $(@($strayHost).Count) straggler FurphyHost.exe process(es) found - force-stopping" -ForegroundColor Yellow
-        foreach ($p in @($strayHost)) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { } }
+    # Round 29 live-safety fix: only TEST trays/windows are stragglers. A test
+    # instance is one launched with a test port (--port 4789x) or from a
+    # non-live executable path (the build root, tests\.tmp, a scratch copy).
+    # The owner's LIVE tray (the exe under the installed AddonSync folder,
+    # no test port) must never be stopped by the test runner - it was, twice,
+    # before this guard existed.
+    $allHosts = @(Get-CimInstance Win32_Process -Filter "Name='FurphyHost.exe'" -ErrorAction SilentlyContinue)
+    $strayHost = @($allHosts | Where-Object {
+        $cl = [string]$_.CommandLine; $ep = [string]$_.ExecutablePath
+        ($cl -match '--port\s+4789\d') -or ($ep -and ($ep -notlike '*\Program Files*'))
+    })
+    $liveHosts = @($allHosts | Where-Object { $strayHost -notcontains $_ })
+    if ($strayHost.Count -gt 0) {
+        Write-Host "  WARN: $($strayHost.Count) straggler TEST FurphyHost.exe process(es) found - force-stopping" -ForegroundColor Yellow
+        foreach ($p in $strayHost) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
     } else {
-        Write-Host "  ok: no straggler FurphyHost.exe process"
+        Write-Host "  ok: no straggler test FurphyHost.exe process"
     }
+    if ($liveHosts.Count -gt 0) { Write-Host "  info: $($liveHosts.Count) live FurphyHost.exe process(es) left alone (not test instances)" }
 
     try {
         $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
-        if ($null -ne $existing) {
-            Write-Host "  WARN: HKCU Run still carries a FurphyAddonManager value - removing it" -ForegroundColor Yellow
-            Remove-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+        # Round 29 live-safety fix: tests only ever write the TEST value name
+        # ("FurphyAddonManager.Test", see --tray-selftest). The production
+        # value "FurphyAddonManager" belongs to the owner's own "Start with
+        # Windows" setting and is never touched here.
+        $existingTest = Get-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager.Test' -ErrorAction SilentlyContinue
+        if ($null -ne $existingTest) {
+            Write-Host "  WARN: HKCU Run still carries the TEST value FurphyAddonManager.Test - removing it" -ForegroundColor Yellow
+            Remove-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager.Test' -ErrorAction SilentlyContinue
         } else {
-            Write-Host "  ok: HKCU Run has no FurphyAddonManager value"
+            Write-Host "  ok: HKCU Run has no test value"
         }
+        $prod = Get-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+        if ($null -ne $prod) { Write-Host "  info: production Start-with-Windows value present - left alone" }
     } catch { }
 
     if (Test-Path -LiteralPath $Script:FurphyTmpRoot) {

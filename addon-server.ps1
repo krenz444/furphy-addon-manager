@@ -6350,14 +6350,38 @@ function Handle-SettingsPut {
 # Tray + start-with-Windows (Round 18, tray stage B)
 #
 # Stage A (already shipped, host\FurphyHost.cs) is the actual --tray
-# process: a NotifyIcon-only run mode guarded by the "FurphyAddonManager.Tray"
-# Mutex, exited by setting the "FurphyAddonManager.TrayStop" EventWaitHandle
-# or by backgroundUpdates going false (checked every <=60s), writing
+# process: a NotifyIcon-only run mode guarded by a per-port
+# "FurphyAddonManager.Tray[.<port>]" Mutex, exited by setting a per-port
+# "FurphyAddonManager.TrayStop[.<port>]" EventWaitHandle or by
+# backgroundUpdates going false (checked every <=60s), writing
 # tray-state.json next to settings.json on every cycle. This section is the
 # SERVER's half of stage B: start/stop that process, report its state, and
 # register/unregister the HKCU Run value - the SPA (ui\app.js) never touches
 # the registry or spawns FurphyHost.exe directly, only these endpoints do.
+#
+# Round 29 (live-safety fix): the stop event name used to be the bare
+# literal "FurphyAddonManager.TrayStop" regardless of what port THIS
+# addon-server.ps1 instance is listening on - so a test server on, say,
+# port 47899 handling POST /api/tray/stop would signal the exact same named
+# event a real, live, production --tray (port 47831) is waiting on, and
+# silently stop it. Get-TrayStopEventName below computes the name the same
+# way host\FurphyHost.cs's TrayProgram.ResolveStopEventName does (from THIS
+# server's own $Script:Port, mirroring how a --tray process launched to
+# match this server would resolve its own port): the production literal
+# only when $Script:Port is really 47831, else a port-suffixed name -
+# documented in SPEC.md's tray section.
 # =====================================================================
+
+function Get-TrayStopEventName {
+    <#
+      Same naming rule as host\FurphyHost.cs's TrayProgram.ResolveStopEventName
+      (and its ResolveMutexName sibling) - keyed off THIS server's own
+      $Script:Port so a stop request handled by a non-production server
+      instance can never reach a real, live tray on a different port.
+    #>
+    if ($Script:Port -eq 47831) { return 'FurphyAddonManager.TrayStop' }
+    return ('FurphyAddonManager.TrayStop.' + [string]$Script:Port)
+}
 
 function Get-TrayExePath {
     <# host\bin\FurphyHost.exe under the app root - built by host\build-host.ps1. #>
@@ -6369,6 +6393,21 @@ function Get-TrayStatePath {
        TrayForm writes it there (Path.Combine(logDir, "tray-state.json") where
        logDir is settings.json's own directory), so this just mirrors that. #>
     return Join-Path -Path $Script:Root -ChildPath 'tray-state.json'
+}
+
+function Get-StartupValueName {
+    <#
+      Round 29 live-safety: the HKCU Run value name this server reads and
+      writes. The production port owns the real "FurphyAddonManager" value;
+      any other port (test servers on 47899 etc.) uses the test-scoped
+      "FurphyAddonManager.Test" name, so a test can never delete or rewrite
+      the owner's own Start-with-Windows entry. The host's tray uses the
+      identical rule (TrayForm._startupValueName) and tests
+un-all.ps1's
+      sweep removes only the test name.
+    #>
+    if ($Script:Port -eq 47831) { return 'FurphyAddonManager' }
+    return 'FurphyAddonManager.Test'
 }
 
 function Get-TrayRunValue {
@@ -6423,7 +6462,8 @@ function Test-TrayProcessAlive {
     try {
         $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = " + $ProcId) -ErrorAction Stop
         if ($null -eq $cim -or [string]::IsNullOrEmpty($cim.CommandLine)) { return $false }
-        return ($cim.CommandLine.TrimEnd() -like '*--tray')
+        # Round 29: '--tray' may be followed by '--port <n>' (Handle-TrayStart forwards its port), so match it as a token anywhere, not only at the end.
+        return ($cim.CommandLine -match '(^|\s)--tray(\s|$)')
     } catch {
         # Get-CimInstance failing (WMI hiccup, access denied, etc.) should
         # not be treated as "definitely not a tray process" OR "definitely
@@ -6439,9 +6479,10 @@ function Test-StartupRegistered {
        stale one pointing at a moved exe, correctly reads as "not registered"
        by Furphy's own contract. #>
     try {
-        $prop = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+        $prop = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name (Get-StartupValueName) -ErrorAction SilentlyContinue
         if ($null -eq $prop) { return $false }
-        return ([string]$prop.FurphyAddonManager -ceq (Get-TrayRunValue))
+        $valueName = Get-StartupValueName
+        return ([string]$prop.PSObject.Properties[$valueName].Value -ceq (Get-TrayRunValue))
     } catch {
         return $false
     }
@@ -6494,7 +6535,7 @@ function Handle-TrayStart {
             return
         }
         $hostBinDir = Split-Path -Path $exePath -Parent
-        Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $hostBinDir | Out-Null
+        Start-Process -FilePath $exePath -ArgumentList @('--tray', '--port', [string]$Script:Port) -WorkingDirectory $hostBinDir | Out-Null
         Send-Json -Context $Context -StatusCode 202 -Body @{ ok = $true }
     } catch {
         Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
@@ -6503,19 +6544,26 @@ function Handle-TrayStart {
 
 function Handle-TrayStop {
     <#
-      POST /api/tray/stop - signals the "FurphyAddonManager.TrayStop"
-      EventWaitHandle a live --tray process is waiting on. OpenExisting
-      throws (caught, not a 500) when no tray currently holds that name -
-      that is the normal "nothing to stop" case, not a server error, so it
-      still returns 200 with ok:false per the stage-B contract. Reset() is
-      deliberately not called: the contract has the tray exit on this
-      signal, not loop back around waiting for another one.
+      POST /api/tray/stop - signals the per-port
+      "FurphyAddonManager.TrayStop[.<port>]" EventWaitHandle (see
+      Get-TrayStopEventName) a live --tray process on THIS server's own
+      port is waiting on. OpenExisting throws (caught, not a 500) when no
+      tray currently holds that name - that is the normal "nothing to stop"
+      case, not a server error, so it still returns 200 with ok:false per
+      the stage-B contract. Reset() is deliberately not called: the
+      contract has the tray exit on this signal, not loop back around
+      waiting for another one.
+
+      Round 29 (live-safety fix, HARD RULE): never widen this back to the
+      bare literal name - a non-production server instance (any port other
+      than 47831) must only ever be able to signal a tray on THAT SAME
+      port, never a real, live, production tray on 47831.
     #>
     param($Context, $RouteMatch)
 
     $ev = $null
     try {
-        $ev = [System.Threading.EventWaitHandle]::OpenExisting('FurphyAddonManager.TrayStop')
+        $ev = [System.Threading.EventWaitHandle]::OpenExisting((Get-TrayStopEventName))
         $ev.Set() | Out-Null
         Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
     } catch {
@@ -6541,7 +6589,7 @@ function Handle-StartupRegister {
         if (-not (Test-Path -LiteralPath $keyPath)) {
             New-Item -Path $keyPath -Force | Out-Null
         }
-        Set-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -Value (Get-TrayRunValue) -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name (Get-StartupValueName) -Value (Get-TrayRunValue) -Type String
 
         $settings = Get-Settings
         $settings.runAtStartup = $true
@@ -6560,9 +6608,9 @@ function Handle-StartupUnregister {
     try {
         $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         if (Test-Path -LiteralPath $keyPath) {
-            $existing = Get-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+            $existing = Get-ItemProperty -LiteralPath $keyPath -Name (Get-StartupValueName) -ErrorAction SilentlyContinue
             if ($null -ne $existing) {
-                Remove-ItemProperty -LiteralPath $keyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -LiteralPath $keyPath -Name (Get-StartupValueName) -ErrorAction SilentlyContinue
             }
         }
 
@@ -7149,7 +7197,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.10.0'
+$Script:Version = '1.10.1'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

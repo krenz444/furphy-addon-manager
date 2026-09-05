@@ -1,5 +1,44 @@
 # Furphy Addon Manager - changelog
 
+## Round 29 (tray stop signal scoped per port)
+
+Live-safety fix: round 28 (section K below) scoped the tray's single-
+instance Mutex name per port, but missed the tray's STOP event, which
+stayed the bare literal `"FurphyAddonManager.TrayStop"` regardless of
+`--port` - so a test agent's `POST /api/tray/stop` against a non-production
+`addon-server.ps1` instance (any port other than 47831) set the exact same
+named event a real, live, production `--tray` (port 47831) waits on, and
+silently stopped it. The fix mirrors round 28's mutex fix exactly:
+
+- **`host\FurphyHost.cs`**: `TrayProgram` gained `ResolveStopEventName(port)`
+  next to the existing `ResolveMutexName(port)` - same rule, same production
+  literal only when the resolved port is really 47831, else a port-suffixed
+  name. `TrayForm`'s constructor now creates its stop `EventWaitHandle` via
+  `TrayProgram.ResolveStopEventName(_port)` instead of the bare
+  `TrayProgram.StopEventName` constant. The three tray-exit log lines are
+  now consistent: `"[tray] stop signal received - exiting"` (external stop
+  signal via `WaitForNextCycle`), `"[tray] background updates turned off -
+  exiting"` (settings-driven exit, `backgroundUpdates` going false), and
+  `"[tray] quit from menu"` (the tray icon's own Quit menu item, which then
+  still goes through the same stop-signal path to actually exit).
+- **`addon-server.ps1`**: `Handle-TrayStop` no longer opens the bare literal
+  name - a new `Get-TrayStopEventName` helper computes it from THIS
+  server's own `$Script:Port` using the identical rule, so a non-production
+  server instance can only ever signal a tray on that same port.
+- **Tests**: `tests\integration\Server.TrayStopScope.Tests.ps1` (new) proves
+  the scoping end to end using two isolated `--tray --port <N>` processes
+  at two different non-production ports (47899/47898, never 47831) - a
+  `POST /api/tray/stop` against the 47899 server's own port stops only the
+  47899 tray within 5s while the 47898 tray keeps running throughout, and
+  a `--tray-selftest`-style direct process check confirms neither test ever
+  opens, sets, or creates the production-named event. See that file's
+  header comment for the full safety reasoning.
+
+- **Fixed (live-safety, by hand)** - `tests
+un-all.ps1`'s hygiene sweep used to force-stop EVERY `FurphyHost.exe` by name and delete the production HKCU Run value `FurphyAddonManager`; it ran before and after every test run and as the deploy gate, and it killed the owner's live tray and removed his Start-with-Windows entry twice. It now stops only test instances (launched with `--port 4789x` or from an executable outside the live install path) and removes only the test value `FurphyAddonManager.Test`; live instances and the production value are reported and left alone.
+- **Fixed (live-safety, by hand)** - `POST /api/tray/start` now launches the child with `--port <this server's port>`; before, a tray started by a test server read the production port from settings, talked to the live server and held the production single-instance lock.
+- **Fixed (live-safety, by hand)** - the server's `/api/startup/register|unregister|status` handlers wrote and removed the production HKCU Run value `FurphyAddonManager` on every port; a test server on 47899 therefore deleted the owner's real Start-with-Windows entry when the tray integration test ran. `Get-StartupValueName` now returns the production name only on port 47831 and `FurphyAddonManager.Test` otherwise; the tray process applies the identical rule to its own menu toggle (`TrayForm._startupValueName`), and the tray integration test expects the test name.
+
 ## Round 28 (tray experience)
 
 The incident this round fixes: a background cycle checking 34 addons (none
