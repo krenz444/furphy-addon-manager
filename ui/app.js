@@ -858,18 +858,24 @@ const Mock = (function () {
         const requestedFlavour = (q.get("flavour") || q.get("flavor") || "").toLowerCase() || mockSettings.activeFlavour || mockInstalledFlavours[0].id;
         const extra = requestedFlavour !== "retail" ? mockFlavourExtra[requestedFlavour] : null;
         const meta = mockInstalledFlavours.find(function (f) { return f.id === requestedFlavour; });
+        // P2 perf pass: ?mock=1&game=1 previews the gameRunning contract
+        // (idle poll backing off to 60s, auto-check paused, the freshness
+        // component's muted note) without a real server/fake WoW client.
+        const mockGameRunning = new URLSearchParams(location.search).get("game") === "1";
         const body = extra
           ? {
             addons: extra.addons.map(function (a) { return Object.assign({}, a); }),
             lastRun: extra.lastRun, job: null, updatesCheckedAt: extra.updatesCheckedAt,
             freshness: mockFreshnessForExtra(extra), lastCheckFailed: extra.lastCheckFailed, lastCheckError: extra.lastCheckError,
-            clientBuild: meta ? meta.clientBuild : null, clientInterface: meta ? meta.clientInterface : null
+            clientBuild: meta ? meta.clientBuild : null, clientInterface: meta ? meta.clientInterface : null,
+            gameRunning: mockGameRunning
           }
           : {
             addons: addons.map(function (a) { return Object.assign({}, a); }),
             lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt,
             freshness: mockFreshness(), lastCheckFailed: lastCheckFailed, lastCheckError: lastCheckError,
-            clientBuild: "12.1.0.69587", clientInterface: 120100
+            clientBuild: "12.1.0.69587", clientInterface: 120100,
+            gameRunning: mockGameRunning
           };
         // Real server contract (addon-server.ps1 Handle-State): activeFlavour
         // and flavour are the exact SAME value - whichever flavour THIS
@@ -1733,6 +1739,12 @@ const Store = (function () {
     freshness: null,
     lastCheckFailed: false,
     lastCheckError: null,
+    // P2 perf pass: whether any WoW client is currently running, from
+    // /api/state's gameRunning field (also pushed early by the native host's
+    // own {type:"game"} message - see Host.onGame) - read by the idle poll/
+    // auto-check schedulers to back off, and by Components.Freshness to show
+    // the one muted "background checks paused" line.
+    gameRunning: false,
     // E13 (compatibility audit): the WoW client's own build string/Interface
     // number, from /api/state (server reads .build.info once at startup).
     clientBuild: null,
@@ -2461,6 +2473,15 @@ Components.Freshness = (function () {
     }
     if (d.clause) parts.push(Utils.el("span", { class: "freshness-clause" }, [" · " + d.clause]));
     box.appendChild(Utils.el("div", { class: "freshness-row" }, parts));
+    // P2 perf pass: one muted line, removed the instant the game closes -
+    // the only on-screen sign that the idle poll/auto-check backed off
+    // while a WoW client is running. Never replaces the headline above (the
+    // last real freshness fact stays visible), just adds this note under it.
+    if (Store.state.gameRunning) {
+      box.appendChild(Utils.el("div", { class: "freshness-row freshness-game-note" }, [
+        Utils.el("span", { class: "freshness-clause" }, ["WoW is running - background checks paused"])
+      ]));
+    }
   }
 
   return { render: render };
@@ -5348,6 +5369,16 @@ Views.browse = (function () {
   }
 
   function scheduleRectUpdate() {
+    // gameRunning is NOT a proxy for "the pane is backgrounded" - a player
+    // can run WoW windowed with this window in the foreground the whole
+    // time (a manual install while the game runs must still work), in
+    // which case the host never force-hides the pane at all and a resize/
+    // scroll here is real, needed work. Gating on gameRunning dropped these
+    // updates silently and left the visible pane misaligned. The host's own
+    // EnterBackgroundMode (unfocused/minimized, independent of gameRunning)
+    // already force-hides and suspends the pane in the cases where a
+    // cf-rect really would be wasted, so cfActive alone is the right guard
+    // here - a rect posted while genuinely backgrounded is harmless.
     if (rafPending || !cfActive) return;
     rafPending = true;
     requestAnimationFrame(function () {
@@ -6356,6 +6387,12 @@ const Host = (function () {
   const cfStateListeners = [];
   const cfJobListeners = [];
   const hostReadyListeners = [];
+  const gameListeners = [];
+  // P2 perf pass: the host's own 30s WowDetector poll pushes {type:"game",
+  // running:true|false} independently of the next /api/state fetch, so a
+  // window that's already open reacts to the game starting/stopping without
+  // waiting up to 60s for the idle poll to notice - see gameListeners below.
+  let hostGameRunning = null; // null = not yet told by the host this session
   let wired = false;
 
   function onHostMessage(m) {
@@ -6373,6 +6410,9 @@ const Host = (function () {
       cfStateListeners.forEach(function (fn) { try { fn(lastCfState); } catch (e) { /* one bad listener shouldn't break the rest */ } });
     } else if (m.type === "cf-job") {
       cfJobListeners.forEach(function (fn) { try { fn(m.jobId, m.status); } catch (e) { /* ditto */ } });
+    } else if (m.type === "game") {
+      hostGameRunning = !!m.running;
+      gameListeners.forEach(function (fn) { try { fn(hostGameRunning); } catch (e) { /* ditto */ } });
     }
   }
 
@@ -6398,6 +6438,10 @@ const Host = (function () {
   function onCfState(fn) { cfStateListeners.push(fn); }
   function onCfJob(fn) { cfJobListeners.push(fn); }
   function onHostReady(fn) { hostReadyListeners.push(fn); }
+  // null when the host hasn't said yet this session (falls back to
+  // /api/state's own gameRunning field, read on the normal poll cadence).
+  function hostGameRunningState() { return hostGameRunning; }
+  function onGame(fn) { gameListeners.push(fn); }
 
   // Shows (or, called again while already shown, moves/resizes) the pane
   // over a CSS-pixel rect (viewport-relative, from the placeholder's own
@@ -6430,7 +6474,8 @@ const Host = (function () {
     isNative: isNative, post: post, openCurseForge: openCurseForge, reportTheme: reportTheme,
     init: init, hasCfPane: hasCfPane, hostVersion: hostVersion,
     getCfState: getCfState, onCfState: onCfState, onCfJob: onCfJob, onHostReady: onHostReady,
-    cfShow: cfShow, cfRect: cfRect, cfHide: cfHide, cfNav: cfNav, cfFocus: cfFocus
+    cfShow: cfShow, cfRect: cfRect, cfHide: cfHide, cfNav: cfNav, cfFocus: cfFocus,
+    hostGameRunningState: hostGameRunningState, onGame: onGame
   };
 })();
 
@@ -6752,6 +6797,13 @@ const App = (function () {
       const nextFreshness = data.freshness || null;
       const nextLastCheckFailed = !!data.lastCheckFailed;
       const nextLastCheckError = data.lastCheckError || null;
+      // P2 perf pass: the server's own WowDetector-backed gameRunning field -
+      // the host's {type:"game"} push (Host.hostGameRunningState) is faster
+      // when the native window is open, but this is the only signal at all
+      // in a plain browser tab, so it always wins when the host hasn't
+      // reported anything yet this session.
+      const hostGame = Host.hostGameRunningState();
+      const nextGameRunning = hostGame !== null ? hostGame : !!data.gameRunning;
       // FLAVORS-SPEC.md CS-F4 (S5.2): the two fields present on every
       // response regardless of ?flavour= - describe the MACHINE, not one
       // flavour's data. installedFlavours always has at least one entry;
@@ -6792,6 +6844,7 @@ const App = (function () {
         || nextFreshness !== Store.state.freshness
         || nextLastCheckFailed !== Store.state.lastCheckFailed
         || nextLastCheckError !== Store.state.lastCheckError
+        || nextGameRunning !== Store.state.gameRunning
         || JSON.stringify(nextInstalledFlavours) !== JSON.stringify(Store.state.installedFlavours)
         || nextActiveFlavour !== Store.state.activeFlavour
         || JSON.stringify(nextPendingFlavourChoice) !== JSON.stringify(Store.state.pendingFlavourChoice);
@@ -6801,6 +6854,7 @@ const App = (function () {
         job: nextJob, updatesCheckedAt: nextCheckedAt,
         clientBuild: nextClientBuild, clientInterface: nextClientInterface,
         freshness: nextFreshness, lastCheckFailed: nextLastCheckFailed, lastCheckError: nextLastCheckError,
+        gameRunning: nextGameRunning,
         installedFlavours: nextInstalledFlavours, activeFlavour: nextActiveFlavour,
         pendingFlavourChoice: nextPendingFlavourChoice,
         loadingState: false, stateError: null
@@ -6860,9 +6914,14 @@ const App = (function () {
   // after every tick: 5s while the server answers normally, backing off to
   // 10s while it's unreachable (banner-offline shown by markOnline) so a
   // server that exited on idle isn't hammered, then dropping straight back
-  // to 5s on the first successful response once it's back.
+  // to 5s on the first successful response once it's back. P2 perf pass:
+  // while a WoW client is running, 60s regardless of connectivity - this is
+  // the "zero impact on gameplay" contract's one on-screen concession
+  // (Components.Freshness's muted note), so it stays slow even once the
+  // host reports the server back online.
   const POLL_ONLINE_MS = 5000;
   const POLL_OFFLINE_MS = 10000;
+  const POLL_GAME_MS = 60000;
 
   function startIdlePolling() {
     clearTimeout(idleTimer);
@@ -6870,7 +6929,8 @@ const App = (function () {
   }
 
   function scheduleIdlePoll() {
-    const delay = Store.state.online === false ? POLL_OFFLINE_MS : POLL_ONLINE_MS;
+    const delay = Store.state.gameRunning ? POLL_GAME_MS
+      : (Store.state.online === false ? POLL_OFFLINE_MS : POLL_ONLINE_MS);
     idleTimer = setTimeout(async function () {
       if (!Store.isBusy()) await reloadState(false); // the 800ms job poller already covers the busy window
       scheduleIdlePoll();
@@ -6889,10 +6949,15 @@ const App = (function () {
   // or older than 10 minutes and nothing else is running), then arms a
   // 30-minute repeat for as long as this page stays open.
   function scheduleAutoCheck() {
-    if (!Store.isBusy() && isUpdatesCheckStale()) Actions.autoCheckForUpdates();
+    // P2 perf pass: a WoW client running means this is a fresh page load
+    // that raced the very first /api/state fetch - Store.state.gameRunning
+    // is already known by the time init() gets here (reloadState awaited
+    // first), so this also covers "opened the window while the game is
+    // already up" cleanly, not just "the game started while it was open".
+    if (!Store.state.gameRunning && !Store.isBusy() && isUpdatesCheckStale()) Actions.autoCheckForUpdates();
     clearInterval(autoCheckTimer);
     autoCheckTimer = setInterval(function () {
-      if (Store.isBusy()) return;
+      if (Store.state.gameRunning || Store.isBusy()) return;
       Actions.autoCheckForUpdates();
     }, AUTO_CHECK_INTERVAL_MS);
   }
@@ -7053,6 +7118,16 @@ const App = (function () {
     // announce host-ready, so Host.hasCfPane() has a real answer by the time
     // Views.browse first renders below.
     Host.init();
+    // P2 perf pass: react to the host's own {type:"game"} push immediately
+    // instead of waiting up to 60s for the next /api/state poll to notice -
+    // only actually changes anything when the value flips, so this is a
+    // no-op on every repeat of the same running/not-running state the host
+    // may re-post.
+    Host.onGame(function (running) {
+      if (Store.state.gameRunning === running) return;
+      Store.state.gameRunning = running;
+      renderCurrentView();
+    });
     // E19: fire-and-forget, like maybeShowWelcome below - loadProtocolStatus
     // catches its own errors (leaves Store.state.protocol null, rendered as
     // "Checking..."/"Unknown" by Components.ProtocolControl) and is a

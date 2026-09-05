@@ -1,0 +1,1061 @@
+
+== Hygiene sweep (pre-flight) ==
+  ok: no straggler FurphyHost.exe process
+  ok: HKCU Run has no FurphyAddonManager value
+  ok: tests\.tmp swept (0 item(s) found, removed where possible)
+
+== static: Test-AsciiScan ==
+  [PASS] ascii: addon-server.ps1
+  [PASS] ascii: addon-sync.ps1
+  [PASS] ascii: deploy.ps1
+  [PASS] ascii: install.ps1
+  [PASS] ascii: make-icon.ps1
+  [PASS] ascii: package.ps1
+  [PASS] ascii: register-protocol.ps1
+  [PASS] ascii: host\build-host.ps1
+  [PASS] ascii: host\FurphyHost.cs
+  [PASS] ascii: tests\run-all.ps1
+  [PASS] ascii: tests\fixture-acceptance\FlavorsSpec.Section8.Tests.ps1
+  [PASS] ascii: tests\host\Host.Tests.ps1
+  [PASS] ascii: tests\integration\Cli.InstallRollbackLauncher.Tests.ps1
+  [PASS] ascii: tests\integration\Cli.StagingConcurrency.Tests.ps1
+  [PASS] ascii: tests\integration\Cli.StatusAndDetection.Tests.ps1
+  [PASS] ascii: tests\integration\Server.FreshnessAndFlavours.Tests.ps1
+  [PASS] ascii: tests\integration\Server.Jobs.Tests.ps1
+  [PASS] ascii: tests\integration\Server.Security.Tests.ps1
+  [PASS] ascii: tests\integration\Server.Settings.Tests.ps1
+  [PASS] ascii: tests\integration\Server.State.Tests.ps1
+  [PASS] ascii: tests\integration\Server.Tray.Tests.ps1
+  [PASS] ascii: tests\lib\common.ps1
+  [PASS] ascii: tests\perf\Measure-Furphy.ps1
+  [PASS] ascii: tests\perf\Perf.Tests.ps1
+  [PASS] ascii: tests\perf\Run-StateA.ps1
+  [PASS] ascii: tests\perf\Run-StateB.ps1
+  [PASS] ascii: tests\perf\Run-StateC.ps1
+  [PASS] ascii: tests\perf\Run-StateD.ps1
+  [PASS] ascii: tests\perf\Run-StateE.ps1
+  [PASS] ascii: tests\perf\Run-StateF.ps1
+  [PASS] ascii: tests\perf\Run-StateG.ps1
+  [PASS] ascii: tests\perf\Setup-Baseline.ps1
+  [PASS] ascii: tests\spa\Run-SpaHarness.ps1
+  [PASS] ascii: tests\spa\Run-ThemeAudit.ps1
+  [PASS] ascii: tests\static\Test-AsciiScan.ps1
+  [PASS] ascii: tests\static\Test-BannedTerms.ps1
+  [PASS] ascii: tests\static\Test-GitignoreCoverage.ps1
+  [PASS] ascii: tests\static\Test-JsonValidity.ps1
+  [PASS] ascii: tests\static\Test-NodeCheck.ps1
+  [PASS] ascii: tests\static\Test-PackageAllowList.ps1
+  [PASS] ascii: tests\static\Test-ParseAllScripts.ps1
+  [PASS] ascii: tests\unit\Cli.Flavours.Tests.ps1
+  [PASS] ascii: tests\unit\Cli.LauncherPerf.Tests.ps1
+  [PASS] ascii: tests\unit\Cli.ProgressMigrationZip.Tests.ps1
+  [PASS] ascii: tests\unit\Cli.TocAndFileSelection.Tests.ps1
+  [PASS] ascii: tests\unit\Server.Flavour.Tests.ps1
+  [PASS] ascii: tests\unit\Server.GameState.Tests.ps1
+  [PASS] ascii: tests\unit\Server.Handlers.Tests.ps1
+  [PASS] ascii: tests\unit\Server.Security.Tests.ps1
+  [PASS] ascii: tests\unit\Server.Settings.Tests.ps1
+
+[static:ascii-scan] 50/50 passed
+
+
+== static: Test-BannedTerms ==
+  [PASS] index.html: 'project id'
+  [PASS] index.html: 'file id'
+  [PASS] index.html: 'release type'
+  [PASS] index.html: 'interface version'
+  [PASS] index.html: 'stale-minor'
+  [PASS] index.html: 'adopting'
+  [PASS] index.html: 'untracked'
+  [PASS] index.html: 'keyless'
+  [PASS] index.html: 'instawow-data'
+  [PASS] index.html: 'addon-radar.com'
+  [PASS] index.html: word 'toc'
+  [PASS] index.html: word 'compat'
+  [PASS] index.html: word 'stale'
+  [PASS] index.html: word 'adopt'
+  [PASS] index.html: word 'digest'
+  [PASS] index.html: word 'indexed'
+  [PASS] index.html: raw HTTP status code
+  [PASS] index.html: word 'Port'
+  [PASS] app.js: copy literals extracted
+  [PASS] app.js: 'project id'
+  [PASS] app.js: 'file id'
+  [PASS] app.js: 'release type'
+  [PASS] app.js: 'interface version'
+  [PASS] app.js: 'stale-minor'
+  [PASS] app.js: 'adopting'
+  [PASS] app.js: 'untracked'
+  [PASS] app.js: 'keyless'
+  [PASS] app.js: 'instawow-data'
+  [PASS] app.js: 'addon-radar.com'
+  [PASS] app.js: word 'toc'
+  [PASS] app.js: word 'compat'
+  [PASS] app.js: word 'stale'
+  [PASS] app.js: word 'adopt'
+  [PASS] app.js: word 'digest'
+  [PASS] app.js: word 'indexed'
+  [PASS] style.css: content: 'toc'
+  [PASS] style.css: content: 'compat'
+  [PASS] style.css: content: 'stale'
+  [PASS] style.css: content: 'adopt'
+  [PASS] style.css: content: 'digest'
+  [PASS] style.css: content: 'indexed'
+  [PASS] style.css: content: 'project id'
+  [PASS] style.css: content: 'file id'
+  [PASS] style.css: content: 'release type'
+  [PASS] style.css: content: 'interface version'
+  [PASS] style.css: content: 'stale-minor'
+  [PASS] style.css: content: 'adopting'
+  [PASS] style.css: content: 'untracked'
+  [PASS] style.css: content: 'keyless'
+  [PASS] style.css: content: 'instawow-data'
+  [PASS] style.css: content: 'addon-radar.com'
+
+[static:banned-terms] 51/51 passed
+
+
+== static: Test-GitignoreCoverage ==
+  [PASS] mirror path read from deploy.ps1 -RepoPath default
+  [PASS] repo mirror exists
+  [PASS] .gitignore exists
+  [PASS] gitignore covers 'addons.json'
+  [PASS] gitignore covers 'settings.json'
+  [PASS] gitignore covers 'state.json'
+  [PASS] gitignore covers 'last-run.txt'
+  [PASS] gitignore covers 'tray-state.json'
+  [PASS] gitignore covers 'server.pid'
+  [PASS] gitignore covers 'sync.log'
+  [PASS] gitignore covers 'server.log'
+  [PASS] gitignore covers 'jobs/some.out'
+  [PASS] gitignore covers 'staging/x'
+  [PASS] gitignore covers 'backups/1/1.zip'
+  [PASS] gitignore covers 'cache/cf-catalogue.json'
+  [PASS] gitignore covers 'flavours/retail/addons.json'
+  [PASS] gitignore covers 'flavours/_migration-backup-20260101-000000/state.json'
+
+[static:gitignore-coverage] 17/17 passed
+
+
+== static: Test-JsonValidity ==
+  [PASS] json: ui\manifest.json
+
+[static:json-validity] 1/1 passed
+
+
+== static: Test-NodeCheck ==
+  [PASS] node --check ui\app.js
+  [PASS] node --check tests\spa\harness.js
+  [PASS] node --check tests\spa\theme-audit.js
+
+[static:node-check] 3/3 passed
+
+
+== static: Test-PackageAllowList ==
+  [PASS] rootFiles array located
+  [PASS] rootFiles is non-empty
+  [PASS] rootFiles entry 'install.ps1'
+  [PASS] rootFiles entry 'Install Furphy.cmd'
+  [PASS] rootFiles entry 'addon-sync.ps1'
+  [PASS] rootFiles entry 'addon-server.ps1'
+  [PASS] rootFiles entry 'Addon Manager.vbs'
+  [PASS] rootFiles entry 'curseforge-handler.vbs'
+  [PASS] rootFiles entry 'register-protocol.ps1'
+  [PASS] rootFiles entry 'icon.ico'
+  [PASS] rootFiles entry 'VERSION'
+  [PASS] rootFiles entry 'README.md'
+  [PASS] rootFiles entry 'README.txt'
+  [PASS] rootFiles entry 'CHANGELOG.md'
+
+[static:package-allowlist] 14/14 passed
+
+
+== static: Test-ParseAllScripts ==
+  [PASS] parse: addon-server.ps1
+  [PASS] parse: addon-sync.ps1
+  [PASS] parse: deploy.ps1
+  [PASS] parse: install.ps1
+  [PASS] parse: make-icon.ps1
+  [PASS] parse: package.ps1
+  [PASS] parse: register-protocol.ps1
+  [PASS] parse: host\build-host.ps1
+  [PASS] parse: tests\run-all.ps1
+  [PASS] parse: tests\fixture-acceptance\FlavorsSpec.Section8.Tests.ps1
+  [PASS] parse: tests\host\Host.Tests.ps1
+  [PASS] parse: tests\integration\Cli.InstallRollbackLauncher.Tests.ps1
+  [PASS] parse: tests\integration\Cli.StagingConcurrency.Tests.ps1
+  [PASS] parse: tests\integration\Cli.StatusAndDetection.Tests.ps1
+  [PASS] parse: tests\integration\Server.FreshnessAndFlavours.Tests.ps1
+  [PASS] parse: tests\integration\Server.Jobs.Tests.ps1
+  [PASS] parse: tests\integration\Server.Security.Tests.ps1
+  [PASS] parse: tests\integration\Server.Settings.Tests.ps1
+  [PASS] parse: tests\integration\Server.State.Tests.ps1
+  [PASS] parse: tests\integration\Server.Tray.Tests.ps1
+  [PASS] parse: tests\lib\common.ps1
+  [PASS] parse: tests\perf\Measure-Furphy.ps1
+  [PASS] parse: tests\perf\Perf.Tests.ps1
+  [PASS] parse: tests\perf\Run-StateA.ps1
+  [PASS] parse: tests\perf\Run-StateB.ps1
+  [PASS] parse: tests\perf\Run-StateC.ps1
+  [PASS] parse: tests\perf\Run-StateD.ps1
+  [PASS] parse: tests\perf\Run-StateE.ps1
+  [PASS] parse: tests\perf\Run-StateF.ps1
+  [PASS] parse: tests\perf\Run-StateG.ps1
+  [PASS] parse: tests\perf\Setup-Baseline.ps1
+  [PASS] parse: tests\spa\Run-SpaHarness.ps1
+  [PASS] parse: tests\spa\Run-ThemeAudit.ps1
+  [PASS] parse: tests\static\Test-AsciiScan.ps1
+  [PASS] parse: tests\static\Test-BannedTerms.ps1
+  [PASS] parse: tests\static\Test-GitignoreCoverage.ps1
+  [PASS] parse: tests\static\Test-JsonValidity.ps1
+  [PASS] parse: tests\static\Test-NodeCheck.ps1
+  [PASS] parse: tests\static\Test-PackageAllowList.ps1
+  [PASS] parse: tests\static\Test-ParseAllScripts.ps1
+  [PASS] parse: tests\unit\Cli.Flavours.Tests.ps1
+  [PASS] parse: tests\unit\Cli.LauncherPerf.Tests.ps1
+  [PASS] parse: tests\unit\Cli.ProgressMigrationZip.Tests.ps1
+  [PASS] parse: tests\unit\Cli.TocAndFileSelection.Tests.ps1
+  [PASS] parse: tests\unit\Server.Flavour.Tests.ps1
+  [PASS] parse: tests\unit\Server.GameState.Tests.ps1
+  [PASS] parse: tests\unit\Server.Handlers.Tests.ps1
+  [PASS] parse: tests\unit\Server.Security.Tests.ps1
+  [PASS] parse: tests\unit\Server.Settings.Tests.ps1
+
+[static:parse-all-scripts] 49/49 passed
+
+
+
+
+
+
+Describing Get-InstalledFlavours
+ [+] returns retail, classic, classic_era, ptr in FLAVORS-SPEC section 2.1 fixed order 501ms
+ [+] flags none of the four fixture flavours as buildInfoMissing 82ms
+ [+] reads each flavour clientBuild exactly from its own .build.info row 28ms
+ [+] tolerates a missing .build.info entirely (no throw, buildInfoMissing true for every folder found) 28ms
+ [+] ignores non-flavour top-level folders (a decoy folder never appears in the result) 30ms
+ [+] a plain folder with no Interface\AddOns is never surfaced by the generic fallback 27ms
+ [+] deleting _classic_ drops it from the result live, with no error, and nothing else changes 38ms
+ [+] returns an empty result (never throws) for a WowRoot that does not exist 4ms
+ [+] never touches the real fixture on disk (still exactly the checked-in 12 files afterward) 8ms
+Describing Resolve-ClassicProgressionTypeId
+ [+] Vanilla / Classic Era range (11500-11599) resolves to TypeId 67408 112ms
+ [+] Burning Crusade Classic range (20500-20599) resolves to TypeId 73246 / wago "bc" 4ms
+ [+] Wrath Classic first range (30400-30699) resolves to TypeId 73713 / wago "wotlk" 5ms
+ [+] Wrath Classic second range (38000-38099) resolves to the same wrath row 4ms
+ [+] Cataclysm Classic range (40400-40499) resolves to TypeId 77522 / wago "cata" 5ms
+ [+] Mists Classic range (50500-50599) resolves to TypeId 79434 / wago "mop" - the fixture's own live value 8ms
+ [+] Retail range (120000-129999) resolves to TypeId 517 6ms
+ [+] an Interface number in a genuine gap between known ranges fails loudly as EraKey "unknown", never silently defaulting to Retail 9ms
+ [+] a non-zero Interface below every known range also fails loudly as "unknown", not Retail 9ms
+ [+] a null/unreadable Interface (missing .build.info) falls back to the safe Retail default, never "unknown" 5ms
+ [+] an Interface of 0 (the same "unreadable" sentinel) also falls back to Retail, not "unknown" 5ms
+ [+] is re-derivable with zero code change: editing which range an Interface falls in changes the result, not the function 5ms
+Describing Get-StateUpdatesCheckedAtMinutesAgo
+ [+] returns $null when state.json does not exist at all 75ms
+ [+] returns $null when state.json exists but has no updatesCheckedAt at all 44ms
+ [+] returns $null when state.json is corrupt/unparseable 12ms
+ [+] returns approximately the right number of minutes for the current per-flavour object shape 23ms
+ [+] returns $null for a flavour with no entry in the per-flavour object, even though other flavours have one 7ms
+ [+] tolerates the pre-flavour flat-string shape, treated as the retail bucket 8ms
+ [+] the pre-flavour flat-string shape is null for any OTHER flavour (it only ever means retail) 6ms
+Describing Test-LauncherBudgetExceeded
+ [+] is $false well before the budget (10s elapsed, 40s budget) 17ms
+ [+] is $true once elapsed reaches the budget exactly 5ms
+ [+] is $true well past the budget (41s elapsed, 40s budget) 4ms
+ [+] is $false at 39s elapsed against a 40s budget (boundary, one second under) 4ms
+Describing Write-ProgressStep
+ [+] is a complete no-op (no file created) when $script:ProgressPath is unset 39ms
+ [+] writes valid, readable JSON after a single call, atomically (no .tmp leftover) 29ms
+ [+] produces valid JSON after every call in a sequence, each one overwriting the last 26ms
+ [+] includes bytesDone/bytesTotal only when supplied, and failPhase only when supplied 20ms
+ [+] never throws even when the progress path's parent directory does not exist 6ms
+Describing Invoke-FlavourMigration
+ [+] copies (not just moves) the pre-flavour backup identically, moves the originals, and stamps schemaVersion 2 62ms
+ [+] is idempotent: re-running after a completed migration creates no second backup and does not error 17ms
+ [+] a brand-new install with no top-level addons.json/state.json/backups leaves no migration-backup folder (nothing to protect) 11ms
+ [+] crash-mid-move safe: a pre-landed flavours\retail\addons.json (simulated crash) is never overwritten by a retry, and no second backup is created 23ms
+Describing Install-AddonPackage - zip extraction safety
+ [+] a "../../" traversal entry never escapes the extraction root and its content is never installed into AddOns 251ms
+ [+] a leading-slash "absolute path" entry never escapes staging and is never copied into AddOns (not a folder with a .toc) 20ms
+ [+] a well-formed zip with only a legitimate addon folder still installs normally (no false-positive rejection) 15ms
+Describing Invoke-HttpDownloadWithProgress
+ [+] downloads a file whose bytes match the source exactly, and writes at least one progress snapshot 845ms
+Describing Get-PrimaryTocFile
+ [+] X-Flavor tag is authoritative: classic_era picks MultiFlavourAddon_Vanilla.toc (X-Flavor: Vanilla), not the Mainline bare file 66ms
+ [+] retail on the same multi-.toc folder picks the Mainline-tagged bare file via its X-Flavor tag 5ms
+ [+] filename-suffix table wins over a decoy bare file: classic (Mists era) picks FakeAddon_Mists.toc, not FakeAddon.toc 5ms
+ [+] a bare-only folder (no suffix, no X-Flavor) is still picked for classic_era when it is the sole file present 9ms
+ [+] regression: retail against the real Details fixture picks the bare Details.toc, not any suffixed sibling 25ms
+ [+] regression: retail against the real WeakAuras fixture picks the bare WeakAuras.toc, not any suffixed sibling 6ms
+ [+] returns $null for a folder with no .toc file at all, never throws 5ms
+ [+] a folder that does not exist also returns $null rather than throwing 4ms
+Describing Select-CfFile
+ [+] picks the retail (517) release-only file over a beta one when MaxReleaseType is 1 24ms
+ [+] picks the classic_era TypeId (67408) file when asked for it, ignoring a retail (517) one in the same list 4ms
+ [+] falls back to gameVersions-prefix match when no file carries the requested (unassigned) TypeId 8ms
+ [+] MaxReleaseType still allows a higher-channel file when nothing at the ceiling matches the TypeId (step 2, any release type) 4ms
+ [+] returns $null when nothing matches TypeId or the version prefix 4ms
+ [+] returns $null for an empty file list 4ms
+Describing Select-WagoRelease
+ [+] picks the newest stable release whose supported_retail_patches is non-empty 21ms
+ [+] allows a beta release when MaxReleaseType is 2 (release+beta) 4ms
+ [+] falls back to the newest allowed-stability release even with an empty patch list, when nothing satisfies both 4ms
+ [+] reads the correct field for a non-retail WagoField (classic_era -> supported_classic_patches) 5ms
+ [+] returns $null when nothing is allowed at all (every release above the stability ceiling) 4ms
+Describing ConvertTo-InterfaceNumber
+ [+] parses a normal three-part version string into major*10000+minor*100+patch 14ms
+ [+] parses a Classic Era version string correctly 6ms
+ [+] returns $null for a string with fewer than 3 dot-parts 6ms
+ [+] returns $null for a non-numeric version string 6ms
+ [+] returns $null for an empty/null input 7ms
+Describing Resolve-RequestFlavour
+ [+] a single-flavour machine resolves to that flavour with no ?flavour= needed at all 155ms
+ [+] a multi-flavour machine, ?flavour= omitted, on a FLAVOUR-SCOPED endpoint: 400 "flavour required" 57ms
+ [+] a multi-flavour machine, ?flavour= omitted, on a NON-scoped endpoint: falls back to settings.activeFlavour when it is installed 79ms
+ [+] a multi-flavour machine, ?flavour= omitted, non-scoped endpoint, with no usable activeFlavour: falls back to the S4.1 default (retail) 47ms
+ [+] an explicit ?flavour= for an installed flavour is honored exactly, even on a scoped endpoint 37ms
+ [+] the "flavor" alias (no u) is accepted identically to "flavour" 45ms
+ [+] an explicit ?flavour= for a flavour that is NOT installed on this machine is a clean 400, never silently coerced 46ms
+ [+] a path-traversal-shaped ?flavour= value is rejected by shape alone, before the installed-list check even runs 30ms
+ [+] an uppercase ?flavour= value is rejected by the same lowercase-only shape check 38ms
+Describing Test-GameRunning
+ [+] reports $false when the substituted process name does not exist 107ms
+ [+] reports $true when the substituted process name is really running 8ms
+ [+] caches its answer for $Script:GameProbeIntervalSeconds - a changed process name is NOT reflected until the cache goes stale 16ms
+Describing gameRunning surfaced on GET /api/ping and GET /api/state
+ [+] GET /api/ping carries a boolean gameRunning field 45ms
+Describing Handle-Open (POST /api/open, what=url)
+ [+] a well-formed curseforge.com URL is allowed and opened verbatim 61ms
+ [+] addons.wago.io is also an allowed exact host 12ms
+ [+] a smuggled-space command-line-injection URL is neutralized (opened URL has no literal space, never reaches Start-Process unescaped) 13ms
+ [+] a different host entirely is rejected with 400, and nothing is opened 8ms
+ [+] a host that merely CONTAINS an allowed name (not an exact match) is rejected 9ms
+ [+] an http (non-https) URL to an otherwise-allowed host is rejected 13ms
+ [+] a missing url field is a 400 "url required" 13ms
+ [+] an unrecognized "what" value is a 400, never a 500 6ms
+Describing Job-history retention never loses a running job
+ [+] Add-JobToHistory trims the list to 20, evicting the OLDEST entry regardless of its state 35ms
+ [+] a job still running is evicted from the 20-item history the same way - BUT Handle-JobsGetOne still finds it via $Script:CurrentJobByFlavour 37ms
+ [+] a job id that is neither in the history nor any current-job map is a clean 404 7ms
+Describing Get-ComputedFreshness
+ [+] reports "checking" while a sync/check/add/install/launch job is running 16ms
+ [+] a running job of an unrelated kind (e.g. "launch" with updateFirst false is still "launch") is also "checking" per the documented kind list 7ms
+ [+] reports "check_failed" when the flavour's last check job failed 7ms
+ [+] reports "not_checked" when updatesCheckedAt has never been set for this flavour 4ms
+ [+] reports "updates_available" when the flavour has at least one pending update 9ms
+ [+] reports "up_to_date" when checked, not failed, and nothing is pending 4ms
+ [+] each flavour has its own independent freshness - a Classic Era job "checking" never leaks into Retail's freshness 5ms
+Describing Test-SameOriginRequest
+ [+] accepts a same-origin Origin header (http://localhost:<port>) 47ms
+ [+] accepts a same-origin Origin header using 127.0.0.1 instead of localhost 9ms
+ [+] rejects a foreign Origin 6ms
+ [+] rejects when neither Origin nor Referer is present 7ms
+ [+] falls back to Referer when Origin is absent, and accepts a same-origin Referer 10ms
+ [+] rejects an Origin on the wrong port, even for localhost 12ms
+ [+] rejects an https Origin (the server only ever listens on http) 8ms
+ [+] rejects a malformed (unparsable) Origin header instead of throwing 8ms
+Describing ConvertTo-SafeProcessArg (CommandLineToArgvW round-trip)
+ [+] a value containing a literal space round-trips exactly (the CS-F2 injection repro: "1 -Remove 999") 83ms
+ [+] a value containing a literal double quote round-trips exactly 4ms
+ [+] a value containing backslashes immediately before a quote round-trips exactly (the classic CommandLineToArgvW edge case) 6ms
+ [+] a value that is a single backslash followed by a quote character round-trips exactly 3ms
+ [+] an empty string round-trips as an empty argv element (not a dropped argument) 4ms
+ [+] a value that already looks like an extra command-line flag never becomes a separate argv token 4ms
+ [+] null is treated as an empty string, never throws 3ms
+Describing ConvertTo-SettingsBool
+ [+] a real boolean $true stays $true 29ms
+ [+] a real boolean $false stays $false 6ms
+ [+] the integer 1 coerces to $true 4ms
+ [+] the integer 0 coerces to $false 4ms
+ [+] the string "false" coerces to $false (Round 20's own fix - used to invert to $true) 4ms
+ [+] the string "0" coerces to $false 4ms
+ [+] the string "no" coerces to $false 5ms
+ [+] the string "off" coerces to $false 6ms
+ [+] an empty string coerces to $false 4ms
+ [+] the string is case-insensitive ("FALSE"/"False" both coerce to $false) 6ms
+ [+] any other non-empty string (e.g. "true", "yes", "banana") coerces to $true 6ms
+Describing Test-HostTheme
+ [+] accepts a well-formed theme (lowercase-alnum-hyphen name, hex colors) 21ms
+ [+] rejects $null outright 5ms
+ [+] rejects a name with uppercase letters (case-SENSITIVE per Round 12's own fix - "LofiNight" used to pass) 7ms
+ [+] rejects a name longer than 32 characters 6ms
+ [+] rejects an empty name 3ms
+ [+] rejects a name containing characters outside [a-z0-9-] 3ms
+ [+] rejects a color value that is not a "#rrggbb" 6-digit hex string 4ms
+ [+] rejects a color value with only 3 hex digits (CSS shorthand is not accepted) 3ms
+ [+] rejects more than 12 color keys 4ms
+ [+] accepts exactly 12 color keys 8ms
+ [+] rejects a theme with no colors object at all 4ms
+Describing Get-DefaultSettings
+ [+] defaults releaseType to 1 (release only) 11ms
+ [+] defaults adFilter to ON (superseded by E22, 2026-09-04) 3ms
+ [+] defaults cfFocus to ON (E22) 3ms
+ [+] defaults backgroundUpdates to OFF (never runs unattended out of the box) 3ms
+ [+] defaults backgroundIntervalMinutes to 120 3ms
+ [+] defaults runAtStartup to OFF, independent of backgroundUpdates 4ms
+ [+] defaults schemaVersion to 2 for a brand-new install (never needs migrating) 3ms
+ [+] defaults showTestRealms to OFF (PTR/Beta hidden by default) 3ms
+Tests completed in 4.18s
+Passed: 145 Failed: 0 Skipped: 0 Pending: 0 Inconclusive: 0
+
+
+
+
+
+Describing Real CurseForge install into classic_era_ (AtlasLootClassic, project 326516)
+ [+] installs a real classic-era-compatible file and reports Installed 3.03s
+ [+] running again (no -Force) reports Up-to-date for that same addon 1.33s
+Describing a bogus/nonexistent project id fails with a clear per-row message
+ [+] reports a clean non-install status naming the project id, with the real reason in sync.log, and exits 0 1.26s
+Describing rollback with no recorded previous version fails cleanly (fully offline)
+ [+] reports Failed for that project id, no network, no crash 865ms
+Describing -Launcher dry behaviour (autoUpdateOnLaunch=false -> exit 0, no network, empty results)
+ [+] exits 0 with empty results and logs "auto-update disabled" - completes near-instantly (no network round trip) 589ms
+Describing -Launcher skip-if-recently-checked (P1 perf pass, task brief item 5)
+ [+] exits 0 with empty results and logs "recently checked" - completes near-instantly, never reaching the real record 603ms
+Describing -Launcher does NOT skip when updatesCheckedAt is older than 10 minutes
+ [+] reaches the real per-addon sync (one result row), never logging "recently checked" 1.23s
+Describing staging\ is per-flavour: concurrent addon-free syncs across flavours never race (CHANGELOG Round 20)
+ [+] runs 4 rounds of all 4 flavours concurrently against one shared script root with zero staging errors 2.72s
+Describing -Status -Json exact key set
+ [+] returns exactly {action, flavour, installedFlavours, results, addons, clientBuild, clientInterface} 603ms
+Describing flavour detection order on the fixture
+ [+] installedFlavours is retail, classic, classic_era, ptr - in that fixed order (xptr/beta absent from the fixture) 614ms
+ [+] the default (omitted -Flavor) run resolves to retail, since retail is installed 517ms
+Describing -Scan per flavour
+ [+] retail: SingleFlavourAddon is untracked (no addons.json exists yet) 631ms
+ [+] classic_era: both MultiFlavourAddon and PreExistingEraAddon are untracked, with parsed toc title/version 574ms
+ [+] classic (no addons installed there beyond the fixture default): FakeAddon is untracked 575ms
+Describing Freshness: not_checked -> up_to_date (offline, zero tracked addons)
+ [-] Error occurred in Describe block 15.44s
+   RuntimeException: Start-TestServer: server on port 47899 did not answer /api/ping in time
+   at Start-TestServer, C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\lib\common.ps1: line 472
+   at <ScriptBlock>, C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\integration\Server.FreshnessAndFlavours.Tests.ps1: line 39
+Describing Freshness: check_failed (offline - forced via an unresolvable AddonsPath)
+ [-] Error occurred in Describe block 15.88s
+   RuntimeException: Start-TestServer: server on port 47899 did not answer /api/ping in time
+   at Start-TestServer, C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\lib\common.ps1: line 472
+   at <ScriptBlock>, C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\integration\Server.FreshnessAndFlavours.Tests.ps1: line 73
+Describing Freshness: checking (mid-flight)
+ [+] is observed at least once while a slow check job is still running, then settles to up_to_date 7.3s
+Describing update-all-flavours excludes ptr unless showTestRealms
+ [+] showTestRealms=false (default): ptr is excluded from the fan-out 4.77s
+ [+] showTestRealms=true: ptr is included 839ms
+Describing POST /api/jobs - basic validation
+ [+] an unknown kind is 400 3.8s
+ [+] missing kind entirely is 400 11ms
+ [+] kind=install missing fileId is 400 14ms
+ [+] kind=rollback missing projectId is 400 13ms
+Describing a projectId containing a space survives as ONE argv token and fails cleanly citing it
+ [+] kind=add projectId="123 456" reaches the CLI as one token and the job fails, citing the whole string 4.67s
+Describing per-flavour job concurrency: SAME flavour is 409
+ [+] a second sync/check job for the SAME flavour while one is genuinely still running is 409, not a fresh 202 10.26s
+Describing per-flavour job concurrency: other shapes
+ [+] GET /api/jobs/{id} never 404s for a job that was just started 4.65s
+ [+] the job-status view carries a "progress" property (present even when null) 638ms
+ [+] two DIFFERENT flavours may run a job concurrently (per-flavour busy scoping) 729ms
+Describing CSRF guard (Test-SameOriginRequest)
+ [+] a state-changing request with NO Origin/Referer is refused 403 3.75s
+ [+] a state-changing request with a FOREIGN Origin is refused 403 21ms
+ [+] a foreign Origin on a different PORT (same host) is still refused 403 8ms
+ [+] a same-origin Referer (no Origin header at all) is accepted 200 84ms
+ [+] GET requests never need Origin/Referer at all 170ms
+Describing Content-Type validation (Read-Body, Round 20 security-2)
+ [+] a non-application/json Content-Type with a body is rejected 400, never reaching the handler 3.72s
+ [+] a completely missing Content-Type on a request WITH a body is rejected 400 20ms
+ [+] application/json with a charset suffix (the SPA's own real value) is still accepted 200 78ms
+Describing Listener bound to loopback only (Round 20 security-1)
+ [+] GET-NetTCPConnection shows the listener bound only to 127.0.0.1 and/or ::1, never 0.0.0.0/*/[::] 4.22s
+ [+] a real LAN IP on this machine refuses the connection (loopback-only bind, not Host-header dispatch) 1.05s
+Describing POST /api/open validation (never triggering the positive/window-opening case)
+ [+] an unknown "what" is 400 3.78s
+ [+] missing "what" entirely is 400 13ms
+ [+] what=url with a foreign host is 400 (allow-list is exact-match, not prefix) 18ms
+ [+] what=url with a smuggled space AND a foreign host is 400 (host check runs first) 12ms
+ [+] what=url missing url entirely is 400 15ms
+ [+] what=cf-window with a non-curseforge url is 400 12ms
+ [+] what=curseforge with neither slug nor projectId is 400 126ms
+Describing GET/PUT /api/settings
+ [+] GET returns every documented default key 3.76s
+ [+] PUT releaseType=2 round-trips 218ms
+ [+] PUT releaseType out of range (0 or 4) is a clean 400, never a crash 27ms
+ [+] PUT releaseType="abc" (non-numeric) is a clean 400, not a raw 500 9ms
+ [+] PUT port="abc" is a clean 400 11ms
+ [+] PUT backgroundIntervalMinutes clamps below 30 up to 30 20ms
+ [+] PUT backgroundIntervalMinutes clamps above 1440 down to 1440 30ms
+ [+] PUT backgroundIntervalMinutes="abc" is a clean 400 13ms
+ [+] bool fields (autoUpdateOnLaunch etc.) COERCE rather than reject an invalid value - no 400 exists for these 55ms
+ [+] PUT hostTheme with an uppercase name is rejected 400 17ms
+ [+] PUT hostTheme with a bad color value is rejected 400 16ms
+ [+] PUT a valid hostTheme round-trips 19ms
+ [+] PUT activeFlavour to a value that is not currently installed is silently ignored (no 400, no change) 30ms
+ [+] PUT with an empty body is a 400 9ms
+Describing GET /api/ping
+ [+] returns ok/version/uptime and the version matches the VERSION file 3.69s
+Describing GET /api/state - single/no-flavour root
+ [+] never 400s on GET /api/state with no ?flavour= 3.8s
+ [+] carries every documented additive/base field 26ms
+ [+] rejects an unrecognized ?flavour= value with 400, even at <=1 installed 15ms
+ [+] rejects a path-escape-shaped ?flavour= value with 400 and never reaches the filesystem 7ms
+Describing GET /api/state and flavour-scoped endpoints - multi-flavour root (fixture)
+ [+] GET /api/state with no ?flavour= still succeeds (bootstrap exception) and reports every installed flavour 4.06s
+ [+] a flavour-SCOPED endpoint (GET /api/scan) 400s "flavour required" with no ?flavour= on a multi-flavour root 18ms
+ [+] the same scoped endpoint succeeds once ?flavour= is supplied 666ms
+ [+] an unrecognized ?flavour= on a multi-flavour root is still a clean 400 15ms
+ [+] the flavour alias ?flavor= (no u) is accepted the same way 42ms
+Describing Tray lifecycle and start-with-Windows registration
+ [+] start -> real --tray process appears -> 409 on a second start -> stop -> gone within 5s; startup register/unregister write/remove the exact Run value 5.12s
+Tests completed in 122.96s
+Passed: 68 Failed: 2 Skipped: 0 Pending: 0 Inconclusive: 0
+
+
+
+
+
+Describing Host --selftest (main window)
+ [+] writes a marker with init/dpiAware/cf-pane/deep-link fields, real screenshot 12.1s
+Describing Host --tray-selftest (tray)
+ [+] skips the cycle with skipped_wow_running when --wow-fake matches a real running process 474ms
+ [+] runs a real cycle: one flavourJobs entry per installed first-class flavour, icon shown, Run value written then removed and absent afterward 10.24s
+Tests completed in 22.81s
+Passed: 3 Failed: 0 Skipped: 0 Pending: 0 Inconclusive: 0
+
+== spa: Run-SpaHarness ==
+  [PASS] msedge --dump-dom exited 0
+  [PASS] dump-dom produced non-empty output
+  [PASS] harness <pre id=results> found in dumped DOM
+  [PASS] harness results JSON parses
+  [PASS] harness reported complete=true (every phase ran)
+  [PASS] default (?mock=1&test=1) :: readiness hook fired
+  [PASS] default (?mock=1&test=1) :: exactly one freshness headline element (sidebar has none, My Addons has exactly one - duplicates now fail)
+  [PASS] default (?mock=1&test=1) :: table has exactly 5 columns
+  [PASS] default (?mock=1&test=1) :: every addon row shows exactly one status pill
+  [PASS] default (?mock=1&test=1) :: filter chips include All and Updates (permanent per UX-SPEC.md 3.4)
+  [PASS] default (?mock=1&test=1) :: flavour switcher DOM entirely absent at 1 flavour
+  [PASS] default (?mock=1&test=1) :: Update all visible, count excludes ignored addons
+  [PASS] default (?mock=1&test=1) :: drawer opens with the real addon name, not 'Project N'
+  [PASS] default (?mock=1&test=1) :: freshness headline flips to 'Checking.' immediately on job start, not frozen on stale text (Round 21 onJobStarted fix)
+  [PASS] default (?mock=1&test=1) :: job panel shows a determinate <progress> bar mid-flight
+  [PASS] default (?mock=1&test=1) :: job progress label reads 'Updating i of N addons'
+  [PASS] default (?mock=1&test=1) :: Details disclosure is collapsed by default
+  [PASS] default (?mock=1&test=1) :: job reaches a done-with-failure state within 9s
+  [PASS] default (?mock=1&test=1) :: results list has one failed row with an inline Retry (Mock.runProgressJob forces exactly one target to fail)
+  [PASS] default (?mock=1&test=1) :: Save (export) shows a 'Saved N addon(s)' toast
+  [PASS] default (?mock=1&test=1) :: Load shows a confirm dialog with the real added/present counts from the file
+  [PASS] default (?mock=1&test=1) :: job title reads 'Loading addon list' while the import job runs
+  [PASS] default (?mock=1&test=1) :: import job completes with the real Installed/Skipped outcome for the two file entries
+  [PASS] default (?mock=1&test=1) :: segmented Wago/CurseForge tabs present
+  [PASS] default (?mock=1&test=1) :: Wago grid rows carry a WAGO badge only, never CurseForge
+  [PASS] default (?mock=1&test=1) :: CurseForge segment shows the fallback panel with no host param
+  [PASS] default (?mock=1&test=1) :: Essentials (Updates+Appearance) running prose is <= 60 words
+  [PASS] default (?mock=1&test=1) :: no CurseForge API key row anywhere in Settings
+  [PASS] default (?mock=1&test=1) :: Advanced is collapsed by default on load
+  [PASS] default (?mock=1&test=1) :: Advanced contains both flavour-era toggles (show-test-realms, alpha)
+  [PASS] default (?mock=1&test=1) :: theme grid has 14 radios in THEMES-SPEC.md order, vaporwave checked on a fresh profile
+  [PASS] default (?mock=1&test=1) :: no banned UX-SPEC.md section 11 term appears in rendered body text
+  [PASS] default (?mock=1&test=1) :: no console errors during this phase
+  [PASS] multi-flavour (?mock=1&test=1&flavours=3) :: switcher shows exactly 3 pills in fixed order (Retail, Classic, Classic Era)
+  [PASS] multi-flavour (?mock=1&test=1&flavours=3) :: Classic Era pill carries the Hardcore/Anniversary tooltip
+  [PASS] multi-flavour (?mock=1&test=1&flavours=3) :: no console errors during this phase
+  [PASS] host=webview2 (?mock=1&test=1&host=webview2&view=browse&tab=curseforge) :: CurseForge segment shows the native placeholder, not the fallback, under host=webview2
+  [PASS] host=webview2 (?mock=1&test=1&host=webview2&view=browse&tab=curseforge) :: no console errors during this phase
+  [PASS] theme deep link (?mock=1&test=1&theme=matcha) :: ?theme=matcha applies on load
+  [PASS] theme deep link (?mock=1&test=1&theme=matcha) :: no console errors during this phase
+  [PASS] view deep link (?mock=1&test=1&view=settings) :: ?view=settings shows the Settings view on load
+  [PASS] view deep link (?mock=1&test=1&view=settings) :: no console errors during this phase
+
+[spa:harness] 42/42 passed
+
+
+== spa: Run-ThemeAudit (14 themes, full-only) ==
+  [PASS] contrast pass: msedge --dump-dom exited 0
+  [PASS] contrast pass: harness <pre id=results> found in dumped DOM
+  [PASS] contrast pass: harness results JSON parses
+  [PASS] contrast pass: all 14 themes audited (complete=true)
+  [PASS] vaporwave :: data-theme attribute == vaporwave
+  [PASS] vaporwave :: --bg-0 is a literal 6-digit hex value
+  [PASS] vaporwave :: --bg-1 is a literal 6-digit hex value
+  [PASS] vaporwave :: --bg-2 is a literal 6-digit hex value
+  [PASS] vaporwave :: --bg-3 is a literal 6-digit hex value
+  [PASS] vaporwave :: --text is a literal 6-digit hex value
+  [PASS] vaporwave :: --text-muted is a literal 6-digit hex value
+  [PASS] vaporwave :: --text-faint is a literal 6-digit hex value
+  [PASS] vaporwave :: --accent is a literal 6-digit hex value
+  [PASS] vaporwave :: --accent-text is a literal 6-digit hex value
+  [PASS] vaporwave :: text vs bg-0
+  [PASS] vaporwave :: text vs bg-1
+  [PASS] vaporwave :: text vs bg-2
+  [PASS] vaporwave :: text vs bg-3
+  [PASS] vaporwave :: text-muted vs bg-1
+  [PASS] vaporwave :: text-muted vs bg-2
+  [PASS] vaporwave :: text-faint vs bg-1
+  [PASS] vaporwave :: text-faint vs bg-2
+  [PASS] vaporwave :: text-faint vs bg-3
+  [PASS] vaporwave :: accent-text vs accent
+  [PASS] vaporwave :: chip-success vs --bg-1
+  [PASS] vaporwave :: chip-warning vs --bg-1
+  [PASS] vaporwave :: chip-info vs --bg-1
+  [PASS] vaporwave :: chip-muted vs --bg-1
+  [PASS] vaporwave :: chip-danger vs --bg-1
+  [PASS] vaporwave :: chip-success vs --bg-2
+  [PASS] vaporwave :: chip-warning vs --bg-2
+  [PASS] vaporwave :: chip-info vs --bg-2
+  [PASS] vaporwave :: chip-muted vs --bg-2
+  [PASS] vaporwave :: chip-danger vs --bg-2
+  [PASS] lofi :: data-theme attribute == lofi
+  [PASS] lofi :: --bg-0 is a literal 6-digit hex value
+  [PASS] lofi :: --bg-1 is a literal 6-digit hex value
+  [PASS] lofi :: --bg-2 is a literal 6-digit hex value
+  [PASS] lofi :: --bg-3 is a literal 6-digit hex value
+  [PASS] lofi :: --text is a literal 6-digit hex value
+  [PASS] lofi :: --text-muted is a literal 6-digit hex value
+  [PASS] lofi :: --text-faint is a literal 6-digit hex value
+  [PASS] lofi :: --accent is a literal 6-digit hex value
+  [PASS] lofi :: --accent-text is a literal 6-digit hex value
+  [PASS] lofi :: text vs bg-0
+  [PASS] lofi :: text vs bg-1
+  [PASS] lofi :: text vs bg-2
+  [PASS] lofi :: text vs bg-3
+  [PASS] lofi :: text-muted vs bg-1
+  [PASS] lofi :: text-muted vs bg-2
+  [PASS] lofi :: text-faint vs bg-1
+  [PASS] lofi :: text-faint vs bg-2
+  [PASS] lofi :: text-faint vs bg-3
+  [PASS] lofi :: accent-text vs accent
+  [PASS] lofi :: chip-success vs --bg-1
+  [PASS] lofi :: chip-warning vs --bg-1
+  [PASS] lofi :: chip-info vs --bg-1
+  [PASS] lofi :: chip-muted vs --bg-1
+  [PASS] lofi :: chip-danger vs --bg-1
+  [PASS] lofi :: chip-success vs --bg-2
+  [PASS] lofi :: chip-warning vs --bg-2
+  [PASS] lofi :: chip-info vs --bg-2
+  [PASS] lofi :: chip-muted vs --bg-2
+  [PASS] lofi :: chip-danger vs --bg-2
+  [PASS] dark :: data-theme attribute == dark
+  [PASS] dark :: --bg-0 is a literal 6-digit hex value
+  [PASS] dark :: --bg-1 is a literal 6-digit hex value
+  [PASS] dark :: --bg-2 is a literal 6-digit hex value
+  [PASS] dark :: --bg-3 is a literal 6-digit hex value
+  [PASS] dark :: --text is a literal 6-digit hex value
+  [PASS] dark :: --text-muted is a literal 6-digit hex value
+  [PASS] dark :: --text-faint is a literal 6-digit hex value
+  [PASS] dark :: --accent is a literal 6-digit hex value
+  [PASS] dark :: --accent-text is a literal 6-digit hex value
+  [PASS] dark :: text vs bg-0
+  [PASS] dark :: text vs bg-1
+  [PASS] dark :: text vs bg-2
+  [PASS] dark :: text vs bg-3
+  [PASS] dark :: text-muted vs bg-1
+  [PASS] dark :: text-muted vs bg-2
+  [PASS] dark :: text-faint vs bg-1
+  [PASS] dark :: text-faint vs bg-2
+  [PASS] dark :: text-faint vs bg-3
+  [PASS] dark :: accent-text vs accent
+  [PASS] dark :: chip-success vs --bg-1
+  [PASS] dark :: chip-warning vs --bg-1
+  [PASS] dark :: chip-info vs --bg-1
+  [PASS] dark :: chip-muted vs --bg-1
+  [PASS] dark :: chip-danger vs --bg-1
+  [PASS] dark :: chip-success vs --bg-2
+  [PASS] dark :: chip-warning vs --bg-2
+  [PASS] dark :: chip-info vs --bg-2
+  [PASS] dark :: chip-muted vs --bg-2
+  [PASS] dark :: chip-danger vs --bg-2
+  [PASS] light :: data-theme attribute == light
+  [PASS] light :: --bg-0 is a literal 6-digit hex value
+  [PASS] light :: --bg-1 is a literal 6-digit hex value
+  [PASS] light :: --bg-2 is a literal 6-digit hex value
+  [PASS] light :: --bg-3 is a literal 6-digit hex value
+  [PASS] light :: --text is a literal 6-digit hex value
+  [PASS] light :: --text-muted is a literal 6-digit hex value
+  [PASS] light :: --text-faint is a literal 6-digit hex value
+  [PASS] light :: --accent is a literal 6-digit hex value
+  [PASS] light :: --accent-text is a literal 6-digit hex value
+  [PASS] light :: text vs bg-0
+  [PASS] light :: text vs bg-1
+  [PASS] light :: text vs bg-2
+  [PASS] light :: text vs bg-3
+  [PASS] light :: text-muted vs bg-1
+  [PASS] light :: text-muted vs bg-2
+  [PASS] light :: text-faint vs bg-1
+  [PASS] light :: text-faint vs bg-2
+  [PASS] light :: text-faint vs bg-3
+  [PASS] light :: accent-text vs accent
+  [PASS] light :: chip-success vs --bg-1
+  [PASS] light :: chip-warning vs --bg-1
+  [PASS] light :: chip-info vs --bg-1
+  [PASS] light :: chip-muted vs --bg-1
+  [PASS] light :: chip-danger vs --bg-1
+  [PASS] light :: chip-success vs --bg-2
+  [PASS] light :: chip-warning vs --bg-2
+  [PASS] light :: chip-info vs --bg-2
+  [PASS] light :: chip-muted vs --bg-2
+  [PASS] light :: chip-danger vs --bg-2
+  [PASS] terminal-green :: data-theme attribute == terminal-green
+  [PASS] terminal-green :: --bg-0 is a literal 6-digit hex value
+  [PASS] terminal-green :: --bg-1 is a literal 6-digit hex value
+  [PASS] terminal-green :: --bg-2 is a literal 6-digit hex value
+  [PASS] terminal-green :: --bg-3 is a literal 6-digit hex value
+  [PASS] terminal-green :: --text is a literal 6-digit hex value
+  [PASS] terminal-green :: --text-muted is a literal 6-digit hex value
+  [PASS] terminal-green :: --text-faint is a literal 6-digit hex value
+  [PASS] terminal-green :: --accent is a literal 6-digit hex value
+  [PASS] terminal-green :: --accent-text is a literal 6-digit hex value
+  [PASS] terminal-green :: text vs bg-0
+  [PASS] terminal-green :: text vs bg-1
+  [PASS] terminal-green :: text vs bg-2
+  [PASS] terminal-green :: text vs bg-3
+  [PASS] terminal-green :: text-muted vs bg-1
+  [PASS] terminal-green :: text-muted vs bg-2
+  [PASS] terminal-green :: text-faint vs bg-1
+  [PASS] terminal-green :: text-faint vs bg-2
+  [PASS] terminal-green :: text-faint vs bg-3
+  [PASS] terminal-green :: accent-text vs accent
+  [PASS] terminal-green :: chip-success vs --bg-1
+  [PASS] terminal-green :: chip-warning vs --bg-1
+  [PASS] terminal-green :: chip-info vs --bg-1
+  [PASS] terminal-green :: chip-muted vs --bg-1
+  [PASS] terminal-green :: chip-danger vs --bg-1
+  [PASS] terminal-green :: chip-success vs --bg-2
+  [PASS] terminal-green :: chip-warning vs --bg-2
+  [PASS] terminal-green :: chip-info vs --bg-2
+  [PASS] terminal-green :: chip-muted vs --bg-2
+  [PASS] terminal-green :: chip-danger vs --bg-2
+  [PASS] arctic-ice :: data-theme attribute == arctic-ice
+  [PASS] arctic-ice :: --bg-0 is a literal 6-digit hex value
+  [PASS] arctic-ice :: --bg-1 is a literal 6-digit hex value
+  [PASS] arctic-ice :: --bg-2 is a literal 6-digit hex value
+  [PASS] arctic-ice :: --bg-3 is a literal 6-digit hex value
+  [PASS] arctic-ice :: --text is a literal 6-digit hex value
+  [PASS] arctic-ice :: --text-muted is a literal 6-digit hex value
+  [PASS] arctic-ice :: --text-faint is a literal 6-digit hex value
+  [PASS] arctic-ice :: --accent is a literal 6-digit hex value
+  [PASS] arctic-ice :: --accent-text is a literal 6-digit hex value
+  [PASS] arctic-ice :: text vs bg-0
+  [PASS] arctic-ice :: text vs bg-1
+  [PASS] arctic-ice :: text vs bg-2
+  [PASS] arctic-ice :: text vs bg-3
+  [PASS] arctic-ice :: text-muted vs bg-1
+  [PASS] arctic-ice :: text-muted vs bg-2
+  [PASS] arctic-ice :: text-faint vs bg-1
+  [PASS] arctic-ice :: text-faint vs bg-2
+  [PASS] arctic-ice :: text-faint vs bg-3
+  [PASS] arctic-ice :: accent-text vs accent
+  [PASS] arctic-ice :: chip-success vs --bg-1
+  [PASS] arctic-ice :: chip-warning vs --bg-1
+  [PASS] arctic-ice :: chip-info vs --bg-1
+  [PASS] arctic-ice :: chip-muted vs --bg-1
+  [PASS] arctic-ice :: chip-danger vs --bg-1
+  [PASS] arctic-ice :: chip-success vs --bg-2
+  [PASS] arctic-ice :: chip-warning vs --bg-2
+  [PASS] arctic-ice :: chip-info vs --bg-2
+  [PASS] arctic-ice :: chip-muted vs --bg-2
+  [PASS] arctic-ice :: chip-danger vs --bg-2
+  [PASS] art-deco-gold :: data-theme attribute == art-deco-gold
+  [PASS] art-deco-gold :: --bg-0 is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --bg-1 is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --bg-2 is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --bg-3 is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --text is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --text-muted is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --text-faint is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --accent is a literal 6-digit hex value
+  [PASS] art-deco-gold :: --accent-text is a literal 6-digit hex value
+  [PASS] art-deco-gold :: text vs bg-0
+  [PASS] art-deco-gold :: text vs bg-1
+  [PASS] art-deco-gold :: text vs bg-2
+  [PASS] art-deco-gold :: text vs bg-3
+  [PASS] art-deco-gold :: text-muted vs bg-1
+  [PASS] art-deco-gold :: text-muted vs bg-2
+  [PASS] art-deco-gold :: text-faint vs bg-1
+  [PASS] art-deco-gold :: text-faint vs bg-2
+  [PASS] art-deco-gold :: text-faint vs bg-3
+  [PASS] art-deco-gold :: accent-text vs accent
+  [PASS] art-deco-gold :: chip-success vs --bg-1
+  [PASS] art-deco-gold :: chip-warning vs --bg-1
+  [PASS] art-deco-gold :: chip-info vs --bg-1
+  [PASS] art-deco-gold :: chip-muted vs --bg-1
+  [PASS] art-deco-gold :: chip-danger vs --bg-1
+  [PASS] art-deco-gold :: chip-success vs --bg-2
+  [PASS] art-deco-gold :: chip-warning vs --bg-2
+  [PASS] art-deco-gold :: chip-info vs --bg-2
+  [PASS] art-deco-gold :: chip-muted vs --bg-2
+  [PASS] art-deco-gold :: chip-danger vs --bg-2
+  [PASS] alpine-dawn :: data-theme attribute == alpine-dawn
+  [PASS] alpine-dawn :: --bg-0 is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --bg-1 is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --bg-2 is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --bg-3 is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --text is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --text-muted is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --text-faint is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --accent is a literal 6-digit hex value
+  [PASS] alpine-dawn :: --accent-text is a literal 6-digit hex value
+  [PASS] alpine-dawn :: text vs bg-0
+  [PASS] alpine-dawn :: text vs bg-1
+  [PASS] alpine-dawn :: text vs bg-2
+  [PASS] alpine-dawn :: text vs bg-3
+  [PASS] alpine-dawn :: text-muted vs bg-1
+  [PASS] alpine-dawn :: text-muted vs bg-2
+  [PASS] alpine-dawn :: text-faint vs bg-1
+  [PASS] alpine-dawn :: text-faint vs bg-2
+  [PASS] alpine-dawn :: text-faint vs bg-3
+  [PASS] alpine-dawn :: accent-text vs accent
+  [PASS] alpine-dawn :: chip-success vs --bg-1
+  [PASS] alpine-dawn :: chip-warning vs --bg-1
+  [PASS] alpine-dawn :: chip-info vs --bg-1
+  [PASS] alpine-dawn :: chip-muted vs --bg-1
+  [PASS] alpine-dawn :: chip-danger vs --bg-1
+  [PASS] alpine-dawn :: chip-success vs --bg-2
+  [PASS] alpine-dawn :: chip-warning vs --bg-2
+  [PASS] alpine-dawn :: chip-info vs --bg-2
+  [PASS] alpine-dawn :: chip-muted vs --bg-2
+  [PASS] alpine-dawn :: chip-danger vs --bg-2
+  [PASS] matcha :: data-theme attribute == matcha
+  [PASS] matcha :: --bg-0 is a literal 6-digit hex value
+  [PASS] matcha :: --bg-1 is a literal 6-digit hex value
+  [PASS] matcha :: --bg-2 is a literal 6-digit hex value
+  [PASS] matcha :: --bg-3 is a literal 6-digit hex value
+  [PASS] matcha :: --text is a literal 6-digit hex value
+  [PASS] matcha :: --text-muted is a literal 6-digit hex value
+  [PASS] matcha :: --text-faint is a literal 6-digit hex value
+  [PASS] matcha :: --accent is a literal 6-digit hex value
+  [PASS] matcha :: --accent-text is a literal 6-digit hex value
+  [PASS] matcha :: text vs bg-0
+  [PASS] matcha :: text vs bg-1
+  [PASS] matcha :: text vs bg-2
+  [PASS] matcha :: text vs bg-3
+  [PASS] matcha :: text-muted vs bg-1
+  [PASS] matcha :: text-muted vs bg-2
+  [PASS] matcha :: text-faint vs bg-1
+  [PASS] matcha :: text-faint vs bg-2
+  [PASS] matcha :: text-faint vs bg-3
+  [PASS] matcha :: accent-text vs accent
+  [PASS] matcha :: chip-success vs --bg-1
+  [PASS] matcha :: chip-warning vs --bg-1
+  [PASS] matcha :: chip-info vs --bg-1
+  [PASS] matcha :: chip-muted vs --bg-1
+  [PASS] matcha :: chip-danger vs --bg-1
+  [PASS] matcha :: chip-success vs --bg-2
+  [PASS] matcha :: chip-warning vs --bg-2
+  [PASS] matcha :: chip-info vs --bg-2
+  [PASS] matcha :: chip-muted vs --bg-2
+  [PASS] matcha :: chip-danger vs --bg-2
+  [PASS] desert-night :: data-theme attribute == desert-night
+  [PASS] desert-night :: --bg-0 is a literal 6-digit hex value
+  [PASS] desert-night :: --bg-1 is a literal 6-digit hex value
+  [PASS] desert-night :: --bg-2 is a literal 6-digit hex value
+  [PASS] desert-night :: --bg-3 is a literal 6-digit hex value
+  [PASS] desert-night :: --text is a literal 6-digit hex value
+  [PASS] desert-night :: --text-muted is a literal 6-digit hex value
+  [PASS] desert-night :: --text-faint is a literal 6-digit hex value
+  [PASS] desert-night :: --accent is a literal 6-digit hex value
+  [PASS] desert-night :: --accent-text is a literal 6-digit hex value
+  [PASS] desert-night :: text vs bg-0
+  [PASS] desert-night :: text vs bg-1
+  [PASS] desert-night :: text vs bg-2
+  [PASS] desert-night :: text vs bg-3
+  [PASS] desert-night :: text-muted vs bg-1
+  [PASS] desert-night :: text-muted vs bg-2
+  [PASS] desert-night :: text-faint vs bg-1
+  [PASS] desert-night :: text-faint vs bg-2
+  [PASS] desert-night :: text-faint vs bg-3
+  [PASS] desert-night :: accent-text vs accent
+  [PASS] desert-night :: chip-success vs --bg-1
+  [PASS] desert-night :: chip-warning vs --bg-1
+  [PASS] desert-night :: chip-info vs --bg-1
+  [PASS] desert-night :: chip-muted vs --bg-1
+  [PASS] desert-night :: chip-danger vs --bg-1
+  [PASS] desert-night :: chip-success vs --bg-2
+  [PASS] desert-night :: chip-warning vs --bg-2
+  [PASS] desert-night :: chip-info vs --bg-2
+  [PASS] desert-night :: chip-muted vs --bg-2
+  [PASS] desert-night :: chip-danger vs --bg-2
+  [PASS] tokyo-rain :: data-theme attribute == tokyo-rain
+  [PASS] tokyo-rain :: --bg-0 is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --bg-1 is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --bg-2 is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --bg-3 is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --text is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --text-muted is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --text-faint is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --accent is a literal 6-digit hex value
+  [PASS] tokyo-rain :: --accent-text is a literal 6-digit hex value
+  [PASS] tokyo-rain :: text vs bg-0
+  [PASS] tokyo-rain :: text vs bg-1
+  [PASS] tokyo-rain :: text vs bg-2
+  [PASS] tokyo-rain :: text vs bg-3
+  [PASS] tokyo-rain :: text-muted vs bg-1
+  [PASS] tokyo-rain :: text-muted vs bg-2
+  [PASS] tokyo-rain :: text-faint vs bg-1
+  [PASS] tokyo-rain :: text-faint vs bg-2
+  [PASS] tokyo-rain :: text-faint vs bg-3
+  [PASS] tokyo-rain :: accent-text vs accent
+  [PASS] tokyo-rain :: chip-success vs --bg-1
+  [PASS] tokyo-rain :: chip-warning vs --bg-1
+  [PASS] tokyo-rain :: chip-info vs --bg-1
+  [PASS] tokyo-rain :: chip-muted vs --bg-1
+  [PASS] tokyo-rain :: chip-danger vs --bg-1
+  [PASS] tokyo-rain :: chip-success vs --bg-2
+  [PASS] tokyo-rain :: chip-warning vs --bg-2
+  [PASS] tokyo-rain :: chip-info vs --bg-2
+  [PASS] tokyo-rain :: chip-muted vs --bg-2
+  [PASS] tokyo-rain :: chip-danger vs --bg-2
+  [PASS] brushed-steel :: data-theme attribute == brushed-steel
+  [PASS] brushed-steel :: --bg-0 is a literal 6-digit hex value
+  [PASS] brushed-steel :: --bg-1 is a literal 6-digit hex value
+  [PASS] brushed-steel :: --bg-2 is a literal 6-digit hex value
+  [PASS] brushed-steel :: --bg-3 is a literal 6-digit hex value
+  [PASS] brushed-steel :: --text is a literal 6-digit hex value
+  [PASS] brushed-steel :: --text-muted is a literal 6-digit hex value
+  [PASS] brushed-steel :: --text-faint is a literal 6-digit hex value
+  [PASS] brushed-steel :: --accent is a literal 6-digit hex value
+  [PASS] brushed-steel :: --accent-text is a literal 6-digit hex value
+  [PASS] brushed-steel :: text vs bg-0
+  [PASS] brushed-steel :: text vs bg-1
+  [PASS] brushed-steel :: text vs bg-2
+  [PASS] brushed-steel :: text vs bg-3
+  [PASS] brushed-steel :: text-muted vs bg-1
+  [PASS] brushed-steel :: text-muted vs bg-2
+  [PASS] brushed-steel :: text-faint vs bg-1
+  [PASS] brushed-steel :: text-faint vs bg-2
+  [PASS] brushed-steel :: text-faint vs bg-3
+  [PASS] brushed-steel :: accent-text vs accent
+  [PASS] brushed-steel :: chip-success vs --bg-1
+  [PASS] brushed-steel :: chip-warning vs --bg-1
+  [PASS] brushed-steel :: chip-info vs --bg-1
+  [PASS] brushed-steel :: chip-muted vs --bg-1
+  [PASS] brushed-steel :: chip-danger vs --bg-1
+  [PASS] brushed-steel :: chip-success vs --bg-2
+  [PASS] brushed-steel :: chip-warning vs --bg-2
+  [PASS] brushed-steel :: chip-info vs --bg-2
+  [PASS] brushed-steel :: chip-muted vs --bg-2
+  [PASS] brushed-steel :: chip-danger vs --bg-2
+  [PASS] aurora-sky :: data-theme attribute == aurora-sky
+  [PASS] aurora-sky :: --bg-0 is a literal 6-digit hex value
+  [PASS] aurora-sky :: --bg-1 is a literal 6-digit hex value
+  [PASS] aurora-sky :: --bg-2 is a literal 6-digit hex value
+  [PASS] aurora-sky :: --bg-3 is a literal 6-digit hex value
+  [PASS] aurora-sky :: --text is a literal 6-digit hex value
+  [PASS] aurora-sky :: --text-muted is a literal 6-digit hex value
+  [PASS] aurora-sky :: --text-faint is a literal 6-digit hex value
+  [PASS] aurora-sky :: --accent is a literal 6-digit hex value
+  [PASS] aurora-sky :: --accent-text is a literal 6-digit hex value
+  [PASS] aurora-sky :: text vs bg-0
+  [PASS] aurora-sky :: text vs bg-1
+  [PASS] aurora-sky :: text vs bg-2
+  [PASS] aurora-sky :: text vs bg-3
+  [PASS] aurora-sky :: text-muted vs bg-1
+  [PASS] aurora-sky :: text-muted vs bg-2
+  [PASS] aurora-sky :: text-faint vs bg-1
+  [PASS] aurora-sky :: text-faint vs bg-2
+  [PASS] aurora-sky :: text-faint vs bg-3
+  [PASS] aurora-sky :: accent-text vs accent
+  [PASS] aurora-sky :: chip-success vs --bg-1
+  [PASS] aurora-sky :: chip-warning vs --bg-1
+  [PASS] aurora-sky :: chip-info vs --bg-1
+  [PASS] aurora-sky :: chip-muted vs --bg-1
+  [PASS] aurora-sky :: chip-danger vs --bg-1
+  [PASS] aurora-sky :: chip-success vs --bg-2
+  [PASS] aurora-sky :: chip-warning vs --bg-2
+  [PASS] aurora-sky :: chip-info vs --bg-2
+  [PASS] aurora-sky :: chip-muted vs --bg-2
+  [PASS] aurora-sky :: chip-danger vs --bg-2
+  [PASS] strawberry-cream :: data-theme attribute == strawberry-cream
+  [PASS] strawberry-cream :: --bg-0 is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --bg-1 is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --bg-2 is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --bg-3 is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --text is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --text-muted is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --text-faint is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --accent is a literal 6-digit hex value
+  [PASS] strawberry-cream :: --accent-text is a literal 6-digit hex value
+  [PASS] strawberry-cream :: text vs bg-0
+  [PASS] strawberry-cream :: text vs bg-1
+  [PASS] strawberry-cream :: text vs bg-2
+  [PASS] strawberry-cream :: text vs bg-3
+  [PASS] strawberry-cream :: text-muted vs bg-1
+  [PASS] strawberry-cream :: text-muted vs bg-2
+  [PASS] strawberry-cream :: text-faint vs bg-1
+  [PASS] strawberry-cream :: text-faint vs bg-2
+  [PASS] strawberry-cream :: text-faint vs bg-3
+  [PASS] strawberry-cream :: accent-text vs accent
+  [PASS] strawberry-cream :: chip-success vs --bg-1
+  [PASS] strawberry-cream :: chip-warning vs --bg-1
+  [PASS] strawberry-cream :: chip-info vs --bg-1
+  [PASS] strawberry-cream :: chip-muted vs --bg-1
+  [PASS] strawberry-cream :: chip-danger vs --bg-1
+  [PASS] strawberry-cream :: chip-success vs --bg-2
+  [PASS] strawberry-cream :: chip-warning vs --bg-2
+  [PASS] strawberry-cream :: chip-info vs --bg-2
+  [PASS] strawberry-cream :: chip-muted vs --bg-2
+  [PASS] strawberry-cream :: chip-danger vs --bg-2
+  [PASS] screenshot: vaporwave
+  [PASS] screenshot: lofi
+  [PASS] screenshot: dark
+  [PASS] screenshot: light
+  [PASS] screenshot: terminal-green
+  [PASS] screenshot: arctic-ice
+  [PASS] screenshot: art-deco-gold
+  [PASS] screenshot: alpine-dawn
+  [PASS] screenshot: matcha
+  [PASS] screenshot: desert-night
+  [PASS] screenshot: tokyo-rain
+  [PASS] screenshot: brushed-steel
+  [PASS] screenshot: aurora-sky
+  [PASS] screenshot: strawberry-cream
+  (14/14 screenshots written to C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\theme-screenshots)
+
+[spa:theme-audit] 438/438 passed
+
+
+
+
+
+
+Describing install.ps1 home-flavour ordering against the fixture (FLAVORS-SPEC S2.1/S3.1)
+ [+] with every flavour present, installs into _retail_ (Retail is home when installed) 1.68s
+ [+] with _retail_ removed, falls back to _classic_ (next in S2.1 fixed order) 1.64s
+ [+] with _retail_ and _classic_ both removed, falls back to _classic_era_ (the fixture install into _classic_era_) 1.63s
+ [+] never touches the real checked-in fixture on disk (still exactly the pristine 12 files afterward) 8ms
+Describing Resolve-CfInstallFlavour flavour-targeting cases (FLAVORS-SPEC S5.5)
+ [+] case 3: exactly one installed flavour matches -> that one id, no others 29ms
+ [+] case 4: zero installed flavours match -> empty array, not treated as a fetch failure 5ms
+ [+] case 5: more than one installed flavour matches -> both ids, in InstalledFlavours order 6ms
+ [+] a network/parse failure sets FetchError and returns an empty MatchingFlavourIds the caller must not read as case 4 5ms
+ [+] an explicit -FileId fetches that one file's own gameVersionTypeIds, not the project's file list 12ms
+Tests completed in 5.03s
+Passed: 9 Failed: 0 Skipped: 0 Pending: 0 Inconclusive: 0
+
+
+
+
+
+Describing Perf: zero impact on gameplay (P3 automated layer)
+ [+] steady state (WoW running, minimized window, tray past its first skip): CPU/network/log growth all stay within tolerance 201.08s
+ [+] game stops: normal behaviour resumes within 60s (a poll reaches the server; a fresh tray cycle is not skipped) 67.86s
+ [+] -Launcher with a fresh updatesCheckedAt finishes in under 3 seconds (launch-chain budget, P1 skip-if-recently-checked) 671ms
+Tests completed in 269.6s
+Passed: 3 Failed: 0 Skipped: 0 Pending: 0 Inconclusive: 0
+
+== Hygiene sweep ==
+  ok: no straggler FurphyHost.exe process
+  ok: HKCU Run has no FurphyAddonManager value
+  ok: tests\.tmp swept (60 item(s) found, removed where possible)
+
+===================== SUMMARY =====================
+Layer                Status   Passed/Total   Duration(s)
+static               PASS     7/7                   2.2
+unit                 PASS     145/145               4.2
+integration          FAIL     68/70                 123
+host                 PASS     3/3                  22.8
+spa                  PASS     2/2                  67.7
+fixture-acceptance   PASS     9/9                     5
+perf                 PASS     3/3                 269.6
+====================================================
+FAILED - see failures above (full run, 503.7s)
+Report: C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\last-report.json
+Report: C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\tests\last-report.md

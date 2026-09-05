@@ -1,0 +1,34 @@
+﻿{
+    "Label":  "B-server-fake-wow",
+    "Notes":  "State B: server running (port 47899), no window, FAKE Wow.exe running. Nothing should touch the server or the addon files while this runs.",
+    "DurationSec":  60,
+    "SampleIntervalSec":  2,
+    "SampleCount":  30,
+    "WindowStartUtc":  "2026-09-05T12:33:57Z",
+    "WindowStart":  "2026-09-05 07:33:57",
+    "WindowEnd":  "2026-09-05 07:34:57",
+    "ActualDurationSec":  60,
+    "ServerLogPath":  "C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-073027-8f5843\\server.log",
+    "RequestCountInWindow":  0,
+    "ProcessCount":  1,
+    "TotalCpuSeconds":  0.109,
+    "TotalIOReadBytes":  0,
+    "TotalIOWriteBytes":  0,
+    "TotalNewTcpConnections":  0,
+    "PeakWorkingSetBytesAnyProcess":  299757568,
+    "Processes":  [
+                      {
+                          "ProcessId":  47432,
+                          "Name":  "powershell.exe",
+                          "Role":  "server",
+                          "SampleCount":  30,
+                          "CpuSeconds":  0.109,
+                          "PeakWorkingSetBytes":  299757568,
+                          "AvgWorkingSetBytes":  296612386,
+                          "IOReadBytes":  0,
+                          "IOWriteBytes":  0,
+                          "NewTcpConnections":  0,
+                          "CommandLine":  "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-073027-8f5843\\addon-server.ps1 -Port 47899 -Root C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-app-20260905-073027-8f5843 -IdleMinutes 60 -WowRoot C:\\Users\\drops\\AppData\\Local\\Temp\\claude\\C--Users-drops-Documents-3d\\e63e63f2-6f4b-4497-8d16-50029ad3f751\\scratchpad\\AddonSync2\\tests\\.tmp\\perf-wowroot-20260905-073027-8893d3 "
+                      }
+                  ]
+}

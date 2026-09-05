@@ -9,16 +9,19 @@
  green) or 1 (any failure) - see TESTING.md for the full layer writeup.
 
  LAYERS, IN ORDER: static -> unit -> integration -> host -> spa ->
- fixture-acceptance -> perf (placeholder - no tests\perf\ yet; always
- reported as skipped with a note, never fails the run).
+ fixture-acceptance -> perf ("zero impact on gameplay" pass, P3: a real
+ fake-Wow.exe + server + tray + host-window steady-state window, plus the
+ -Launcher fresh-check budget - see tests\perf\Perf.Tests.ps1).
 
  PARAMS
    -Quick        Runs static/unit/integration/host/spa only (skips
-                 fixture-acceptance and the perf placeholder entirely -
-                 both are real-network-and/or-real-host-build-heavy full
-                 run bullets, not part of the <4-minute Quick budget) and
-                 implies -NoNetwork. Target: under 4 minutes: measured
-                 and reported (see the "total quick time" line).
+                 fixture-acceptance and perf entirely - both are real-
+                 network-and/or-real-host-build-heavy full run bullets
+                 (perf alone needs a ~90s fake-play steady-state window
+                 plus a tray first-cycle wait, well over the <4-minute
+                 Quick budget on its own), not part of the <4-minute Quick
+                 budget) and implies -NoNetwork. Target: under 4 minutes:
+                 measured and reported (see the "total quick time" line).
    -NoNetwork    Excludes every test tagged 'Network' (real internet
                  calls: a live CurseForge install, the host --selftest
                  Describe, one freshness 'checking' Describe) without
@@ -101,10 +104,17 @@ $effectiveNoTray = [bool]$NoTray
 # block the gate (see the header comment above). Keyed by the exact
 # check DisplayName used below. Every entry MUST cite where it is
 # tracked outside this file.
+#
+# P3 perf pass: the one long-standing entry here (the repo mirror's
+# .gitignore missing a cache/ pattern, T1/Round 22) is now REMOVED - Eric
+# fixed the mirror's .gitignore by hand (it now has a cache/ line) and
+# tests\static\Test-GitignoreCoverage.ps1 itself was fixed to read the
+# mirror path from deploy.ps1's own -RepoPath default instead of a second
+# hand-typed copy (see that file's own header comment) - the check passes
+# clean (17/17) again, so this allowlist is empty until a new, genuinely
+# already-flagged-elsewhere finding needs it.
 # ---------------------------------------------------------------------
-$Script:KnownNonBlockingChecks = @{
-    'static: Test-GitignoreCoverage' = 'Pre-existing repo-mirror .gitignore has no cache/ pattern (T1 finding, still open) - deploy.ps1/the mirror owns this file, not a tests-only change. Tracked in CHANGELOG.md (Round 22) and ROADMAP.md ("Up next").'
-}
+$Script:KnownNonBlockingChecks = @{}
 
 $excludeTags = New-Object 'System.Collections.Generic.List[string]'
 if ($effectiveNoNetwork) { $excludeTags.Add('Network') }
@@ -383,12 +393,15 @@ if ($layersToRun -contains 'fixture-acceptance') {
 }
 
 # =====================================================================
-# perf (placeholder - no tests\perf\ yet)
+# perf ("zero impact on gameplay" pass, P3 - full-run-only by design, same
+# reason as fixture-acceptance/the theme audit above: a real fake-Wow.exe +
+# server + tray + host-window steady-state window costs real wall-clock
+# seconds, well over the Quick budget - see tests\perf\Perf.Tests.ps1's own
+# header comment for the exact timeline)
 # =====================================================================
 if ($layersToRun -contains 'perf') {
     $layer = New-LayerReport -Name 'perf'
-    $layer.Skipped = $true
-    $layer.SkipReason = 'no tests\perf\ yet - the performance round has not started; this layer is a placeholder so run-all.ps1 already has a slot for it.'
+    Invoke-PesterLayer -Layer $layer -Dir (Join-Path $Script:FurphyTestsRoot 'perf')
     $layerReports.Add($layer)
 }
 

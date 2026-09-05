@@ -51,6 +51,13 @@
                         flavour folder names) - never touches the real WoW
                         folder unless -Root's own real deployment path leads
                         there, unchanged from today.
+   -WowFakeProcessName <name>  P1 perf pass: substitutes the real "is any
+                        known WoW client running" process-name probe
+                        (Test-GameRunning) with a single caller-supplied
+                        process name - the same test-only substitution
+                        host\FurphyHost.cs's WowDetector.IsRunning already
+                        accepts via --wow-fake. Never used by a real launch;
+                        intended for tests only.
 =====================================================================
 #>
 
@@ -61,7 +68,8 @@ param(
     [int]$IdleMinutes = 20,
     [switch]$OpenBrowser,
     [string]$BuildInfoPath,
-    [string]$WowRoot
+    [string]$WowRoot,
+    [string]$WowFakeProcessName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,14 +80,167 @@ $ProgressPreference = 'SilentlyContinue'
 # Logging
 # =====================================================================
 
+# P1 perf pass (item 4): a server left running for days/weeks (the whole
+# point of the background tray) would otherwise grow server.log without
+# bound - every request logs at least one line. Capped at ~2MB, rotated to
+# a single "<path>.1" (overwritten, never accumulated) so long uptimes never
+# turn into unbounded disk writes. Best-effort: a rotation failure (locked
+# file, read-only volume) never blocks the log write itself.
+$Script:LogRotationMaxBytes = 2097152
+
+function Invoke-LogRotationIfNeeded {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.Length -lt $Script:LogRotationMaxBytes) { return }
+        $rotatedPath = "$Path.1"
+        try { Remove-Item -LiteralPath $rotatedPath -Force -ErrorAction SilentlyContinue } catch { }
+        Move-Item -LiteralPath $Path -Destination $rotatedPath -Force -ErrorAction Stop
+    } catch {
+        # Rotation must never block logging.
+    }
+}
+
 function Write-ServerLog {
     param([string]$Message)
 
     $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Message
     try {
+        Invoke-LogRotationIfNeeded -Path $Script:ServerLogPath
         Add-Content -LiteralPath $Script:ServerLogPath -Value $line -Encoding UTF8 -ErrorAction Stop
     } catch {
         # Logging must never abort a request.
+    }
+}
+
+# =====================================================================
+# Game state (P1 perf pass) - "is any known WoW client running"
+# =====================================================================
+#
+# Eric's rule (verbatim): "do a full performance tuning / pass, absolutely
+# nothing / everything must have zero impact on gameplay". This server is
+# resident (the background tray keeps it alive, and the native host talks to
+# it while Get New Addons/My Addons is open) - so it needs its OWN cheap,
+# cached answer to "is WoW running right now", not just a UI-side check, so
+# that server-initiated work (the startup catalogue refresh, the keyless
+# enrichment fetches a browsing session can trigger) can refuse to do network
+# I/O while the game is up even if the caller forgot to gate on it.
+#
+# KnownWowProcessNames MUST be kept byte-identical to host\FurphyHost.cs's
+# WowDetector.KnownWowNames (documented as one shared list in SPEC.md's
+# addon-server.ps1 section) - two independent lists that quietly drift apart
+# is exactly the kind of gap that would let one half of the app treat the
+# game as "not running" while the other half correctly does.
+$Script:KnownWowProcessNames = @(
+    'Wow',
+    'Wow-64',
+    'WowClassic',
+    'WowClassicT',
+    'WowClassicB',
+    'WowT',
+    'WowB'
+)
+
+# Evaluated at most once per $Script:GameProbeIntervalSeconds - a
+# Get-Process call is cheap but not free, and this server's whole point here
+# is to add as close to zero overhead as possible, so a real request burst
+# (a dozen /api/state polls in a few seconds from an open SPA tab) pays for
+# exactly one live process scan, not one per request.
+$Script:GameProbeIntervalSeconds = 30
+$Script:GameRunningCache = $false
+$Script:GameRunningCacheAt = [DateTime]::MinValue
+
+function Test-GameRunning {
+    <#
+      Returns $true if any known WoW client process is running, cached for
+      $Script:GameProbeIntervalSeconds so a burst of requests/internal calls
+      pays for one Get-Process scan, not one per call. -WowFakeProcessName
+      (module-level $Script:WowFakeProcessNameOverride, set once at startup
+      from the -WowFakeProcessName param) substitutes a single caller-chosen
+      process name for the whole known-names list, the same test-only
+      substitution host\FurphyHost.cs's WowDetector.IsRunning accepts via
+      --wow-fake - never used by a real launch.
+    #>
+    $now = Get-Date
+    if (($now - $Script:GameRunningCacheAt).TotalSeconds -lt $Script:GameProbeIntervalSeconds) {
+        return $Script:GameRunningCache
+    }
+
+    $names = $Script:KnownWowProcessNames
+    if ($Script:WowFakeProcessNameOverride) {
+        $names = @($Script:WowFakeProcessNameOverride)
+    }
+
+    $running = $false
+    foreach ($n in $names) {
+        try {
+            $procs = Get-Process -Name $n -ErrorAction SilentlyContinue
+            if ($procs -and $procs.Count -gt 0) { $running = $true; break }
+        } catch {
+            # Ignore and check the next known name.
+        }
+    }
+
+    $Script:GameRunningCache = $running
+    $Script:GameRunningCacheAt = $now
+    return $running
+}
+
+# =====================================================================
+# Process priority (P1 perf pass, item 3) - defense in depth
+# =====================================================================
+#
+# Lowers this process's OS scheduling priority and (Windows 10 1709+) opts
+# into EcoQoS via SetProcessInformation, so the scheduler/power manager
+# treat it as background work rather than something that could compete with
+# a foreground game for cycles - on top of (not instead of) the gameRunning
+# gates above, which stop the work itself rather than just deprioritizing
+# it. Best-effort throughout: a failure here (older Windows, a locked-down
+# environment) must never block startup or a CLI run.
+function Set-FurphyLowPriority {
+    try {
+        [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+    } catch {
+        # Best-effort only.
+    }
+    try {
+        if (-not ('Furphy.PowerThrottling' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Furphy {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_POWER_THROTTLING_STATE {
+        public uint Version;
+        public uint ControlMask;
+        public uint StateMask;
+    }
+    public static class PowerThrottling {
+        public const int ProcessPowerThrottling = 4;
+        public const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+        public const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetProcessInformation(IntPtr hProcess, int ProcessInformationClass, ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, uint ProcessInformationSize);
+
+        public static bool EnableEcoQoS() {
+            PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE();
+            state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+            state.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+            uint size = (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE));
+            return SetProcessInformation(System.Diagnostics.Process.GetCurrentProcess().Handle, ProcessPowerThrottling, ref state, size);
+        }
+    }
+}
+'@ -Language CSharp -ErrorAction Stop
+        }
+        [Furphy.PowerThrottling]::EnableEcoQoS() | Out-Null
+    } catch {
+        # Best-effort only - older Windows or a blocked API surface must
+        # never block startup.
     }
 }
 
@@ -4446,7 +4607,14 @@ function Initialize-CfCatalogueIndex {
             $stale = $true
         }
     }
-    if ($stale) {
+    if ($stale -and (Test-GameRunning)) {
+        # P1 perf pass (item 2): a startup landing mid-play (crash recovery,
+        # or a machine where the tray's own server auto-start races a login
+        # WoW launch) must not spend network/CPU on a catalogue refresh
+        # while the game is up - use whatever is already on disk (possibly
+        # empty) and let the NEXT restart (or a manual refresh) catch up.
+        Write-ServerLog 'CurseForge catalogue refresh skipped at startup: WoW is running'
+    } elseif ($stale) {
         $result = Save-CfCatalogueIndex
         if (-not $result.ok) {
             Write-ServerLog "CurseForge catalogue index unavailable at startup (will retry on next restart or manual refresh): $($result.error)"
@@ -4970,11 +5138,20 @@ function Get-CfEnrichmentNoKey {
 
     $catalogueEntry = Get-CfCatalogueEntry -ProjectId $ProjectId
 
+    # P1 perf pass (item 2): "no enrichment prefetch" while a WoW client is
+    # running - both live-network branches below (Wago-match, addon-radar)
+    # are skipped entirely and this falls straight through to the
+    # catalogue-only/memory-and-disk-only fallback (step 3), which does no
+    # network I/O at all. This is a server-side backstop: the SPA/host
+    # already gate the window/poll loop on WowDetector separately, but a
+    # stray request must never itself trigger a live fetch during gameplay.
+    $gameIsRunning = Test-GameRunning
+
     # 1) Wago match.
     $wagoRef = $null
-    if ($rec -and $rec.wagoId) {
+    if ((-not $gameIsRunning) -and $rec -and $rec.wagoId) {
         $wagoRef = [string]$rec.wagoId
-    } elseif ($rec -and $rec.name) {
+    } elseif ((-not $gameIsRunning) -and $rec -and $rec.name) {
         $auto = Get-WagoAutoMatch -Name $rec.name -Author $rec.author
         if ($auto) { $wagoRef = $auto.slug }
     }
@@ -5005,7 +5182,7 @@ function Get-CfEnrichmentNoKey {
     }
 
     # 2) addon-radar.com, via the catalogue-resolved slug.
-    if ($catalogueEntry -and $catalogueEntry.slug) {
+    if ((-not $gameIsRunning) -and $catalogueEntry -and $catalogueEntry.slug) {
         $detail = Get-AddonRadarDetail -Slug ([string]$catalogueEntry.slug)
         if ($detail) {
             return [PSCustomObject]@{
@@ -5439,7 +5616,10 @@ function Handle-Ping {
     # Invoke-Route's static-file branch) to 'webview2' the moment a GET / or
     # GET /index.html arrives with ?host=webview2, which only
     # host\FurphyHost.cs's Furphy-tab navigation ever sends.
-    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1); host = $Script:HostKind }
+    # P1 perf pass (item 1): cheap, cached signal for a caller (the SPA's
+    # poll loop, the native host's window) to gate its own work on, same
+    # cache Test-GameRunning already uses server-side.
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1); host = $Script:HostKind; gameRunning = (Test-GameRunning) }
 }
 
 function Handle-State {
@@ -5547,6 +5727,11 @@ function Handle-State {
         # server startup - see that function's own doc comment.
         clientBuild      = $Script:ClientBuildInfo.clientBuild
         clientInterface  = $Script:ClientBuildInfo.clientInterface
+        # P1 perf pass (item 1): present regardless of ?flavour= (describes
+        # the machine, not one flavour's data) - a future UI change can gate
+        # its own poll cadence/window visibility on this without a second
+        # request to /api/ping.
+        gameRunning      = (Test-GameRunning)
     }
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
@@ -6939,7 +7124,22 @@ $Script:CfCatalogueCachePath = Join-Path -Path $Script:CacheDir -ChildPath 'cf-c
 $Script:AddonRadarCacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'addon-radar'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
+# P1 perf pass (item 2): while a WoW client is running, the idle-exit window
+# shortens from the normal 20 minutes to 5 - nothing should be polling this
+# server during gameplay (the SPA/host gate on WowDetector too), so if it's
+# still up and idle 5 minutes into a play session, that is itself a signal
+# something forgot to close/stop polling, and getting the process torn down
+# sooner rather than later is the safer default. $Script:IdleMinutesNormal
+# preserves the caller's real -IdleMinutes value for use the moment
+# Test-GameRunning next reports false.
+$Script:IdleMinutesNormal = $IdleMinutes
+$Script:IdleMinutesGameRunning = 5
 $Script:BuildInfoPathOverride = $BuildInfoPath
+# Test-only substitution for Test-GameRunning (see its own doc comment) -
+# set here, as early as possible, so it is already in effect before
+# Initialize-CfCatalogueIndex's startup gameRunning check runs below. Never
+# set outside a test harness passing -WowFakeProcessName explicitly.
+$Script:WowFakeProcessNameOverride = $WowFakeProcessName
 # FLAVORS-SPEC.md CS-F2: overrides Get-InstalledFlavours'/Resolve-
 # EffectiveAddonsPath's own WoW-root detection (S8's fixture path), the same
 # way addon-sync.ps1's own -WowRoot does.
@@ -6949,7 +7149,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.8.0'
+$Script:Version = '1.9.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -7119,6 +7319,13 @@ function Remove-OldJobFiles {
 }
 Remove-OldJobFiles
 
+# P1 perf pass (item 3): defense in depth on top of the gameRunning gates
+# above - lower this process's own scheduling priority/QoS regardless of
+# whether a game is running right now, since a resident server (the tray
+# keeps it alive across the whole session) should never compete for cycles
+# even during the brief window before Test-GameRunning's first probe.
+Set-FurphyLowPriority
+
 Write-ServerLog "Starting addon-server on port $Script:Port, root $Script:Root"
 
 $listener = New-Object System.Net.HttpListener
@@ -7176,11 +7383,29 @@ try {
     while ($true) {
         if ($Script:ShuttingDown) { break }
 
-        $signaled = $pending.AsyncWaitHandle.WaitOne(2000)
+        # P1 perf pass (item 2): while a WoW client is running, wait longer
+        # between wake-ups (15s instead of 2s) - WaitOne still returns the
+        # instant a real request arrives (this only bounds how often the
+        # idle loop wakes up with nothing to do), so this has zero effect on
+        # request latency and only reduces how often an otherwise-idle
+        # process wakes the thread at all during a play session. Also
+        # shortens the idle-exit window itself (5 minutes instead of the
+        # normal -IdleMinutes) for the same reason Test-GameRunning's own
+        # section documents - nothing should still be polling this server
+        # deep into a play session.
+        $gameRunningNow = Test-GameRunning
+        $waitMs = 2000
+        $idleLimit = $Script:IdleMinutesNormal
+        if ($gameRunningNow) {
+            $waitMs = 15000
+            $idleLimit = $Script:IdleMinutesGameRunning
+        }
+
+        $signaled = $pending.AsyncWaitHandle.WaitOne($waitMs)
         if (-not $signaled) {
-            if ($Script:IdleMinutes -gt 0) {
+            if ($idleLimit -gt 0) {
                 $idleSpan = (Get-Date) - $Script:LastRequestTime
-                if ($idleSpan.TotalMinutes -ge $Script:IdleMinutes) {
+                if ($idleSpan.TotalMinutes -ge $idleLimit) {
                     # Round 20 (adversarial bug pass, server-2): unlike
                     # Handle-Shutdown (the explicit POST /api/shutdown),
                     # this idle-exit path used to only look at wall-clock
@@ -7199,7 +7424,7 @@ try {
                         }
                     }
                     if (-not $anyJobRunning) {
-                        Write-ServerLog "Idle for $($Script:IdleMinutes) minutes - shutting down"
+                        Write-ServerLog "Idle for $idleLimit minutes - shutting down"
                         break
                     }
                 }

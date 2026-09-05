@@ -903,6 +903,46 @@ namespace Furphy
         private string _selftestOpenCurseforgeUrl;
         private string _selftestCapturePath;
 
+        // P2 perf pass (SPEC.md "Expansion E29" - host/tray/SPA game mode):
+        // whether this window currently counts as "foreground" for the
+        // suspend/priority contract below - tracked via Activated/Deactivate
+        // plus Resize (WindowState == Minimized also counts as background,
+        // and Resize's own un-minimize branch is ALSO a standalone trigger
+        // for exiting background mode - see MainForm_Resize's comment for
+        // why that duplicates what Activated is supposed to cover).
+        // _backgroundModeActive mirrors whether EnterBackgroundMode has
+        // actually run (guards against a second Deactivate/grace-timer tick
+        // re-doing work, and tells MainForm_Activated/MainForm_Resize
+        // whether ExitBackgroundMode has anything to undo). _backgroundGraceTimer
+        // is created once and only Stopped/Started afterward - see
+        // StartBackgroundGraceTimer.
+        private bool _isForeground = true;
+        private bool _isMinimized;
+        private bool _backgroundModeActive;
+        private System.Windows.Forms.Timer _backgroundGraceTimer;
+
+        // Adversarial-review fix (finding: CF pane stays permanently blank
+        // after any background-mode cycle while the CF tab is active):
+        // EnterBackgroundMode force-hides _cfWebView regardless of the
+        // page's own cfActive state, and the page only re-sends cf-show on
+        // a false->true transition of its own cfActive - which never
+        // happens here because the host never told it cfActive went false.
+        // Rather than teach the page a new push message, track whether the
+        // pane was actually visible right before we hid it, and have
+        // ExitBackgroundMode show it again itself - same as the
+        // _furphyWebView restore branch just below it already does.
+        private bool _cfWasVisibleBeforeBackground;
+
+        // Independent of the above: a 30s poll of the same WowDetector the
+        // tray uses, so the SPA can back off its own polling/auto-check
+        // (Host.onGame in ui/app.js) the instant a WoW client starts or
+        // stops, rather than waiting for the next /api/state fetch. This
+        // does NOT gate the suspend/priority logic above - a player who has
+        // the window in front while playing is actively using it, so
+        // foreground-ness alone still decides that.
+        private System.Windows.Forms.Timer _gameCheckTimer;
+        private bool? _lastReportedGameRunning;
+
         public int ExitCode;
 
         public MainForm(HostOptions options, bool dpiAware)
@@ -959,6 +999,13 @@ namespace Furphy
 
             Load += new EventHandler(MainForm_Load);
             FormClosing += new FormClosingEventHandler(MainForm_FormClosing);
+
+            // P2 perf pass: foreground tracking for the suspend/priority
+            // contract - see the field comments above and EnterBackgroundMode/
+            // ExitBackgroundMode below.
+            Activated += new EventHandler(MainForm_Activated);
+            Deactivate += new EventHandler(MainForm_Deactivate);
+            Resize += new EventHandler(MainForm_Resize);
         }
 
         // Windows creates the native window handle before Load fires (per
@@ -1604,7 +1651,22 @@ namespace Furphy
                 }
             }
 
-            ShowCfPane();
+            // While backgrounded, the pane is force-hidden/suspended by
+            // EnterBackgroundMode and must stay that way regardless of what
+            // the page asks for - a cf-show can still arrive here (the SPA
+            // WebView2 keeps running when merely unfocused-but-visible, and
+            // OverlayTracker re-issues cf-show on any overlay/drawer close,
+            // not just a focus-restoring click). Record that the page wants
+            // it visible so ExitBackgroundMode's own restore path shows it
+            // on refocus, but do not show/resume it now.
+            if (_backgroundModeActive)
+            {
+                _cfWasVisibleBeforeBackground = true;
+            }
+            else
+            {
+                ShowCfPane();
+            }
             SendCfState();
 
             LogHost("cf-show rect=" + _cfPaneBoundsDevicePx.X.ToString(CultureInfo.InvariantCulture) +
@@ -1808,6 +1870,288 @@ namespace Furphy
             PostToFurphy(msg);
         }
 
+        // ------------------------------------------------ P2 perf pass ----
+        // Expansion E29 (SPEC.md): "zero impact on gameplay" for the native
+        // window. Two independent mechanisms:
+        //  (1) foreground tracking (Activated/Deactivate/Resize below) -
+        //      after 10s of not being the foreground window (including
+        //      minimized), suspend the CF webview and lower this process's
+        //      priority; minimized also suspends the SPA webview itself
+        //      (nothing to show anyway); merely-unfocused-but-visible only
+        //      lowers the SPA's CoreWebView2.MemoryUsageTargetLevel, since
+        //      TrySuspendAsync would pause its scripts entirely and a
+        //      visible-but-unfocused window is still something the player
+        //      could be looking at.
+        //  (2) a 30s WowDetector poll (independent of window focus) that
+        //      posts {type:"game", running} to the SPA so ui/app.js can
+        //      back its own polling off - see Host.onGame there. Does NOT
+        //      feed into (1): a player with this window in front while WoW
+        //      runs (windowed mode) is actively using it.
+        //
+        // Verification note: a GetForegroundWindow()-poll alternative was
+        // tried and DISCARDED here - live-tested and confirmed to falsely
+        // enter background mode on a perfectly normal, undisturbed,
+        // never-minimized foreground window after the grace period, because
+        // GetForegroundWindow() never agreed with this Form's own Handle at
+        // all in the sandboxed session used to build this (returned the
+        // SAME unrelated window handle at every check, including the very
+        // instant the window was created and definitely was the app's own
+        // active window - an environment/session artifact this file cannot
+        // rely on, but a false positive an actual player would notice as
+        // "the app randomly stops working while I'm using it," which is a
+        // much worse failure mode than the one gap this event-driven
+        // approach has (below). Activated/Deactivate/Resize are the standard
+        // WM_ACTIVATE-based WinForms mechanism every "is my window active"
+        // implementation uses and do NOT share that false-positive risk (the
+        // plain foreground case never fired Deactivate at all in the same
+        // session) - kept as the primary signal for exactly that reason.
+        //
+        // Their one confirmed gap: restoring a minimized window via an
+        // external process's ShowWindow(SW_RESTORE) call (even paired with
+        // SetForegroundWindow/AppActivate) does not reliably deliver a
+        // WM_ACTIVATE this Form reacts to in that same sandboxed session -
+        // PriorityClass stayed BelowNormal and no "background mode exited"
+        // line appeared after such a restore. MainForm_Resize's own
+        // un-minimize branch below closes exactly that gap without touching
+        // GetForegroundWindow at all: WindowState leaving Minimized is, on
+        // any real desktop, only ever driven by the user (clicking the
+        // taskbar icon, Win+Tab, double-clicking the title bar) - there is
+        // no legitimate way for a window to silently un-minimize itself - so
+        // treating that transition alone as "exit background mode" is safe
+        // and does not depend on activation events at all.
+
+        private void MainForm_Activated(object sender, EventArgs e)
+        {
+            _isForeground = true;
+            if (_backgroundGraceTimer != null) _backgroundGraceTimer.Stop();
+            if (_backgroundModeActive) ExitBackgroundMode();
+        }
+
+        private void MainForm_Deactivate(object sender, EventArgs e)
+        {
+            _isForeground = false;
+            StartBackgroundGraceTimer();
+        }
+
+        private void MainForm_Resize(object sender, EventArgs e)
+        {
+            bool minimizedNow = WindowState == FormWindowState.Minimized;
+            bool wasMinimized = _isMinimized;
+            _isMinimized = minimizedNow;
+
+            if (minimizedNow)
+            {
+                // Minimizing already fires Deactivate on every Windows
+                // version this has been checked on, but arm the same grace
+                // timer here too rather than depending on that - a no-op
+                // (Stop+Start on an already-running timer) when it does.
+                _isForeground = false;
+                StartBackgroundGraceTimer();
+                return;
+            }
+
+            if (wasMinimized)
+            {
+                // See the region comment above - closes the one confirmed
+                // Activated gap (an external restore not reliably re-firing
+                // it) without relying on any focus-detection API at all.
+                if (_backgroundGraceTimer != null) _backgroundGraceTimer.Stop();
+                _isForeground = true;
+                if (_backgroundModeActive) ExitBackgroundMode();
+            }
+        }
+
+        // Created once; every later call just restarts the countdown
+        // (Stop+Start), so a flurry of Deactivate/Resize events (e.g.
+        // Alt-Tabbing through several windows) only ever means "the 10s
+        // clock keeps resetting," never a pile of duplicate Tick handlers.
+        private void StartBackgroundGraceTimer()
+        {
+            if (_backgroundModeActive) return;
+            if (_backgroundGraceTimer == null)
+            {
+                _backgroundGraceTimer = new System.Windows.Forms.Timer();
+                _backgroundGraceTimer.Interval = 10000;
+                _backgroundGraceTimer.Tick += new EventHandler(delegate(object s, EventArgs ev)
+                {
+                    _backgroundGraceTimer.Stop();
+                    if (!_isForeground) EnterBackgroundMode(_isMinimized);
+                });
+            }
+            _backgroundGraceTimer.Stop();
+            _backgroundGraceTimer.Start();
+        }
+
+        private void EnterBackgroundMode(bool minimized)
+        {
+            if (_backgroundModeActive) return;
+            _backgroundModeActive = true;
+            LogHost("background mode entered (minimized=" + minimized.ToString() + ")");
+
+            ProcessPerf.ApplyLowPriority();
+
+            // CF pane: force-hidden and suspended regardless of what the
+            // page currently thinks its own visibility is - a deliberate
+            // host-side override of cf-show. Remember whether it was
+            // actually visible so ExitBackgroundMode can show it again
+            // itself (see _cfWasVisibleBeforeBackground's own comment) -
+            // Visible=true auto-resumes the suspended webview per the
+            // WebView2 SDK's own documented TrySuspendAsync/Resume
+            // behavior, no explicit Resume() call needed on this side.
+            try
+            {
+                _cfWasVisibleBeforeBackground = _cfWebView != null && _cfWebView.Visible;
+                if (_cfWasVisibleBeforeBackground)
+                {
+                    _cfWebView.Visible = false;
+                }
+                SuspendWebViewIfIdle(_cfWebView);
+            }
+            catch (Exception ex) { LogHost("EnterBackgroundMode: CF pane suspend failed: " + ex.Message); }
+
+            try
+            {
+                if (minimized)
+                {
+                    // Nothing to show while minimized either way - full
+                    // suspend, same auto-resume-on-Visible=true story as the
+                    // CF pane above.
+                    if (_furphyWebView != null && _furphyWebView.Visible)
+                    {
+                        _furphyWebView.Visible = false;
+                    }
+                    SuspendWebViewIfIdle(_furphyWebView);
+                }
+                else if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
+                {
+                    // Just unfocused, still visible (e.g. WoW running
+                    // windowed with this window behind it) - keep scripts/
+                    // network alive (the idle poll backs off on its own via
+                    // {type:"game"}/gameRunning) but ask WebView2 to trim
+                    // memory, per the SDK's own documented use case for this
+                    // property.
+                    _furphyWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
+                }
+            }
+            catch (Exception ex) { LogHost("EnterBackgroundMode: SPA memory-level change failed: " + ex.Message); }
+        }
+
+        private void ExitBackgroundMode()
+        {
+            if (!_backgroundModeActive) return;
+            _backgroundModeActive = false;
+            LogHost("background mode exited");
+
+            ProcessPerf.ApplyNormalPriority();
+
+            try
+            {
+                if (_furphyWebView != null && !_furphyWebView.Visible)
+                {
+                    // Auto-resumes the CoreWebView2 per the SDK's documented
+                    // "resumed when it becomes visible" behavior - no
+                    // explicit Resume()/MemoryUsageTargetLevel reset needed.
+                    _furphyWebView.Visible = true;
+                }
+                else if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
+                {
+                    _furphyWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
+                }
+            }
+            catch (Exception ex) { LogHost("ExitBackgroundMode: SPA restore failed: " + ex.Message); }
+
+            // CF pane: restore visibility ourselves if we were the ones who
+            // hid it while it was actually showing - the page's own
+            // cfActive never went false (we never told it), so it will not
+            // re-send cf-show on its own. ShowCfPane()/SendCfState() mirror
+            // exactly what a real cf-show message would have done.
+            try
+            {
+                if (_cfWasVisibleBeforeBackground && _cfWebView != null)
+                {
+                    ShowCfPane();
+                    SendCfState();
+                }
+            }
+            catch (Exception ex) { LogHost("ExitBackgroundMode: CF pane restore failed: " + ex.Message); }
+            finally
+            {
+                _cfWasVisibleBeforeBackground = false;
+            }
+        }
+
+        // TrySuspendAsync throws unless Controller.IsVisible is already
+        // false (thrown as a COMException per the SDK docs), and returns a
+        // Task<bool> this C# 5 file never awaits (no async/await here) - the
+        // ContinueWith below just observes/logs the result instead of
+        // leaving an unobserved-task-exception behind.
+        private void SuspendWebViewIfIdle(WebView2 view)
+        {
+            if (view == null || view.CoreWebView2 == null) return;
+            if (view.Visible) return;
+            if (view.CoreWebView2.IsSuspended) return;
+            try
+            {
+                System.Threading.Tasks.Task<bool> task = view.CoreWebView2.TrySuspendAsync();
+                task.ContinueWith(delegate(System.Threading.Tasks.Task<bool> completed)
+                {
+                    try
+                    {
+                        if (completed.Exception != null)
+                        {
+                            LogHost("TrySuspendAsync failed: " + completed.Exception.Message);
+                        }
+                        else if (!completed.Result)
+                        {
+                            LogHost("TrySuspendAsync returned false (best-effort, see WebView2 sleeping-tabs conditions)");
+                        }
+                    }
+                    catch { }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogHost("TrySuspendAsync call failed: " + ex.Message);
+            }
+        }
+
+        // Independent 30s WowDetector poll - see the region comment above.
+        // Fires once immediately (Interval elapses before the first Tick,
+        // so schedule an immediate check right here) so a window opened
+        // while WoW is already running tells the SPA right away instead of
+        // waiting 30s.
+        private void StartGameCheckTimer()
+        {
+            if (_gameCheckTimer != null) return;
+            _gameCheckTimer = new System.Windows.Forms.Timer();
+            _gameCheckTimer.Interval = 30000;
+            _gameCheckTimer.Tick += new EventHandler(delegate(object s, EventArgs ev) { CheckAndReportGameState(); });
+            _gameCheckTimer.Start();
+            CheckAndReportGameState();
+        }
+
+        private void CheckAndReportGameState()
+        {
+            bool running;
+            try
+            {
+                running = WowDetector.IsRunning(_options.WowFakeProcessName);
+            }
+            catch
+            {
+                return;
+            }
+            if (_lastReportedGameRunning.HasValue && _lastReportedGameRunning.Value == running) return;
+            _lastReportedGameRunning = running;
+            Dictionary<string, object> msg = new Dictionary<string, object>();
+            msg["type"] = "game";
+            msg["running"] = running;
+            PostToFurphy(msg);
+            LogHost("game state reported: running=" + running.ToString());
+        }
+
+        // -------------------------------------------------------------
+
         // Round 15 (E20): the DPI-derived Scaled()/DpiScale() pixel-math
         // helpers that used to size the hand-built WinForms nav strip and
         // CurseForge toolbar are gone along with that chrome - the page
@@ -1950,6 +2294,8 @@ namespace Furphy
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
             SaveWindowBounds();
+            try { if (_backgroundGraceTimer != null) { _backgroundGraceTimer.Stop(); _backgroundGraceTimer.Dispose(); } } catch { }
+            try { if (_gameCheckTimer != null) { _gameCheckTimer.Stop(); _gameCheckTimer.Dispose(); } } catch { }
         }
 
         private void FurphyWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -1976,6 +2322,8 @@ namespace Furphy
             // again on every page-sent {type:"hello"} (handled inline in
             // HostWebView_WebMessageReceived above).
             SendHostReady();
+
+            StartGameCheckTimer();
         }
 
         private void CfWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -3331,6 +3679,69 @@ boot();
         }
     }
 
+    // P2 perf pass (item 3, defense in depth): process priority/EcoQoS
+    // toggling, ported from addon-server.ps1/addon-sync.ps1's own
+    // Set-FurphyLowPriority (that copy stays a runtime Add-Type string,
+    // since PowerShell has no compiled equivalent to fall back to; this one
+    // is native C# since the host is compiled anyway). Every entry point is
+    // best-effort: a failure here (older Windows, a locked-down
+    // environment) must never affect the host's actual functionality.
+    internal static class ProcessPerf
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_POWER_THROTTLING_STATE
+        {
+            public uint Version;
+            public uint ControlMask;
+            public uint StateMask;
+        }
+
+        private const int ProcessPowerThrottling = 4;
+        private const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+        private const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetProcessInformation(IntPtr hProcess, int processInformationClass,
+            ref PROCESS_POWER_THROTTLING_STATE processInformation, uint processInformationSize);
+
+        // Tray process (always) and the window process while not the
+        // foreground window (MainForm's EnterBackgroundMode).
+        public static void ApplyLowPriority()
+        {
+            try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; }
+            catch { }
+            SetEcoQoS(true);
+        }
+
+        // Window process only, restored the instant it becomes the
+        // foreground window again (ExitBackgroundMode) - the tray process
+        // never calls this; it stays BelowNormal+EcoQoS for its whole life.
+        public static void ApplyNormalPriority()
+        {
+            try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal; }
+            catch { }
+            SetEcoQoS(false);
+        }
+
+        private static void SetEcoQoS(bool enable)
+        {
+            try
+            {
+                PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE();
+                state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+                state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+                state.StateMask = enable ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+                uint size = (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE));
+                SetProcessInformation(Process.GetCurrentProcess().Handle, ProcessPowerThrottling, ref state, size);
+            }
+            catch
+            {
+                // Best-effort only - older Windows (pre-1709) or a blocked
+                // API surface must never affect startup/foreground handling.
+            }
+        }
+    }
+
     // "any process named 'Wow' is running" (contract step 5a). --wow-fake
     // lets --tray-selftest substitute a harmless process name so the skip
     // path can be proven without launching the real game.
@@ -3636,6 +4047,13 @@ boot();
             _options = options;
             _dpiAware = dpiAware;
 
+            // P2 perf pass (item 3): the tray process has no window to be
+            // foreground/backgrounded, so unlike MainForm's toggle this is
+            // just applied once, unconditionally, for its whole life -
+            // best-effort defense in depth on top of the WaitForNextCycle/
+            // gameRunning gates that actually stop the work itself.
+            ProcessPerf.ApplyLowPriority();
+
             // Never actually shown - see SetVisibleCore/CreateParams -
             // but give it sane bounds anyway in case some future code
             // path forgets and calls Show().
@@ -3939,9 +4357,18 @@ boot();
         // stop event (returns true immediately - "stop the loop"), a
         // manual "check now" trigger (returns false early - "run a cycle
         // now"), or settings.json's backgroundUpdates having gone false
-        // (returns true - contract's once-a-minute disabled check; here
-        // effectively every slice, which only ever checks more often than
-        // required).
+        // (returns true - contract's once-a-minute disabled check).
+        //
+        // Adversarial-review fix (finding: a 5-minute slice - tried during
+        // the P2 perf pass - left "Run in background" disabled in Settings
+        // taking up to 5 minutes to actually stop the tray, not the "within
+        // a minute" the contract and this method's own name promise, since
+        // settings.json is only re-read once per slice and nothing else
+        // wakes the wait early). WaitHandle.WaitAny itself is one truly
+        // idle OS wait regardless of slice length, so capping this back at
+        // 60s costs only a few extra disk reads of a file that essentially
+        // never changes mid-wait - not worth trading away the "notices
+        // within a minute" contract.
         private bool WaitForNextCycle(int totalSeconds)
         {
             WaitHandle[] handles = new WaitHandle[] { _stopEvent, _manualTrigger };
@@ -3992,16 +4419,19 @@ boot();
         {
             TrayCycleOutcome outcome = new TrayCycleOutcome();
             LogHost("[tray] cycle start");
-            SetTooltip("Furphy - Checking...");
 
-            // (a) WoW running check.
+            // (a) WoW running check - deliberately BEFORE the "Checking..."
+            // tooltip/any disk access below, so a WoW session that runs for
+            // the whole 10-minute recheck window produces no tooltip
+            // flicker and (via CompleteCycleSkippedWow) no tray-state.json
+            // write once the first skip has already recorded the fact.
             if (WowDetector.IsRunning(_options.WowFakeProcessName))
             {
-                LogHost("[tray] cycle skipped: WoW is running");
-                CompleteCycle("skipped_wow_running", new List<string>(), new List<string>(),
-                    "Furphy - Waiting: WoW is running", DateTime.UtcNow.AddMinutes(10), false);
+                CompleteCycleSkippedWow();
                 return outcome;
             }
+
+            SetTooltip("Furphy - Checking...");
 
             // (b) ensure the server answers /api/ping, starting it if not.
             bool pingOk = Http.GetString(PingUrl(), 3000) != null;
@@ -4359,6 +4789,36 @@ boot();
                 " flavours=" + flavourJobs.Count.ToString(CultureInfo.InvariantCulture));
             CompleteCycle(overallResult, allUpdated, allFailed, overallMessage,
                 DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), overallBalloon);
+        }
+
+        // P2 perf pass (item 4): "never touch tray-state.json unless
+        // something changed, no balloon" while WoW runs. The FIRST cycle
+        // that finds WoW running still goes through the normal CompleteCycle
+        // path (a real transition worth recording - a not-running ->
+        // running icon/tooltip/state-file update). Every REPEAT skip while
+        // the same WoW session keeps running is otherwise byte-identical
+        // (same result/message/empty updated/failed lists) except the
+        // timestamps, so it only advances the in-memory next-run clock
+        // WaitForNextCycle reads - no WriteStateFile, no SetTooltip, no
+        // balloon, matching "zero impact" for a WoW session that runs for
+        // hours.
+        private void CompleteCycleSkippedWow()
+        {
+            bool alreadySkipped;
+            lock (_stateLock) { alreadySkipped = _lastResult == "skipped_wow_running"; }
+            DateTime nextRun = DateTime.UtcNow.AddMinutes(10);
+            if (alreadySkipped)
+            {
+                lock (_stateLock)
+                {
+                    _lastRunAtUtc = DateTime.UtcNow;
+                    _nextRunAtUtc = nextRun;
+                }
+                return;
+            }
+            LogHost("[tray] cycle skipped: WoW is running");
+            CompleteCycle("skipped_wow_running", new List<string>(), new List<string>(),
+                "Furphy - Waiting: WoW is running", nextRun, false);
         }
 
         private void CompleteCycle(string result, List<string> updated, List<string> failed, string message,

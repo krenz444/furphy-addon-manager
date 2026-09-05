@@ -172,13 +172,27 @@
     check("readiness hook fired", true);
 
     // Freshness headline: exactly one on screen (sidebar dot-only + the
-    // My Addons headline text - UX-SPEC.md 2.2/11).
-    checkTry("exactly one freshness headline with visible text", function () {
-      const sidebar = q(win, "#sidebar-freshness");
-      const myaddons = q(win, "#myaddons-freshness");
-      const sidebarHasText = text(sidebar).length > 0;
-      const myaddonsHasText = text(myaddons).length > 0;
-      return sidebarHasText !== myaddonsHasText || (!sidebarHasText && myaddonsHasText);
+    // My Addons headline text - UX-SPEC.md 2.2/11). P3 perf-pass fix: the
+    // old version only checked whether EACH CONTAINER'S textContent was
+    // non-empty (text(sidebar).length > 0 / text(myaddons).length > 0) -
+    // that only ever proves "the sidebar container has some text" vs "the
+    // My Addons container has some text", never how many actual headline
+    // ELEMENTS live inside a container. A regression that rendered the
+    // headline TWICE inside #myaddons-freshness (Components.Freshness
+    // appending instead of replacing, say) would still read as
+    // "myaddonsHasText" and pass. Count the real `.freshness-headline`
+    // elements (the class both the plain-span and Retry-button variants in
+    // Components.Freshness.render carry) inside each container instead -
+    // the sidebar's dotOnly mount must have NONE (it renders a colored dot
+    // only, no headline text - see that function's own comment on why),
+    // My Addons must have EXACTLY one; 0 or 2+ in either container is a
+    // real failure now, not silently passed.
+    checkTry("exactly one freshness headline element (sidebar has none, My Addons has exactly one - duplicates now fail)", function () {
+      const sidebarHeadlines = qa(win, "#sidebar-freshness .freshness-headline");
+      const myaddonsHeadlines = qa(win, "#myaddons-freshness .freshness-headline");
+      if (sidebarHeadlines.length !== 0) return false;
+      if (myaddonsHeadlines.length !== 1) return false;
+      return text(myaddonsHeadlines[0]).length > 0;
     });
 
     checkTry("table has exactly 5 columns", function () {
