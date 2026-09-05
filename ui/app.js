@@ -2325,7 +2325,7 @@ Components.Chip = (function () {
     // Priority 3: a newer version exists - the pill itself is the one-click
     // fix (the Version cell next to it already shows the installed->latest
     // diff, so this pill only needs the verb).
-    if (addon.updateAvailable) {
+    if (addon.updateAvailable && !addon.ignoreUpdates) {
       return buildAction("Update", "chip-warning", function () { Actions.updateNow(key); });
     }
     // Priorities 4/5: the compat check found real evidence the installed
@@ -3605,7 +3605,7 @@ Components.JobPanel = (function () {
   function titleFor(job) {
     if (Store.state.jobLabel) return Store.state.jobLabel;
     if (!job) return "Working…";
-    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Importing addon list", "switch-source": "Reinstalling from another source" };
+    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Loading addon list", "switch-source": "Reinstalling from another source" };
     return map[job.kind] || "Working…";
   }
 
@@ -3648,7 +3648,7 @@ Components.JobPanel = (function () {
     [/^Adding/, "Added"],
     [/^Removing/, "Removed"],
     [/^Reinstalling/, "Reinstalled"],
-    [/^Importing/, "Imported"],
+    [/^Loading/, "Loaded"],
     [/^Launching/, "Launched"],
     [/^Syncing/, "Synced"]
   ];
@@ -4111,7 +4111,7 @@ const Actions = (function () {
   // with only the updates-needed count, so the two numbers could disagree
   // mid-run whenever an already-up-to-date addon was also in the job.
   function updateAll() {
-    const ids = Store.state.addons.filter(function (a) { return a.updateAvailable; }).map(Store.addonKey);
+    const ids = Store.state.addons.filter(function (a) { return a.updateAvailable && !a.ignoreUpdates; }).map(Store.addonKey);
     const n = ids.length;
     const label = n > 0 ? ("Updating " + n + " addon" + (n === 1 ? "" : "s")) : "Updating addons";
     return startJob("sync", n > 0 ? { ids: ids } : {}, label);
@@ -4499,7 +4499,15 @@ const Actions = (function () {
     // call (/api/cf/resolve, now deleted along with the key feature) - a
     // CurseForge addon can still be added by its numeric ID (shown on its
     // CurseForge page) or, better, by clicking Install on that page inside
-    // Furphy's own CurseForge pane.
+    // Furphy's own CurseForge pane. Review fix (F1): name what the player
+    // just did when it's actually a CurseForge link (the dialog's own
+    // permanent hint above now says where the ID number lives, so this
+    // doesn't repeat that) - anything else unrecognized keeps the original,
+    // more general message.
+    if (/curseforge\.com/i.test(value)) {
+      fail("That looks like a CurseForge page link - type its ID number instead.");
+      return;
+    }
     fail("Type a numeric CurseForge ID, or paste a wago.io addon link.");
   }
 
@@ -4512,7 +4520,7 @@ const Actions = (function () {
   // is ever called.
   async function importAddons(payload) {
     if (Store.isBusy()) { Components.Toast.show("Another task is running.", "warning"); return false; }
-    Store.state.jobLabel = "Importing addon list";
+    Store.state.jobLabel = "Loading addon list";
     try {
       const res = await Api.importAddons(payload);
       Store.state.job = { id: res.jobId, kind: "import", params: payload, state: "running", startedAt: new Date().toISOString(), finishedAt: null, exitCode: null, log: [], results: [], error: null };
@@ -6160,7 +6168,7 @@ Views.settings = (function () {
         a.click();
         a.remove();
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-        Components.Toast.show("Exported " + ((data.addons && data.addons.length) || 0) + " addon(s).", "success");
+        Components.Toast.show("Saved " + ((data.addons && data.addons.length) || 0) + " addon(s).", "success");
       } catch (err) {
         Components.Toast.show("Couldn't export: " + describeError(err), "error");
       }
@@ -6184,7 +6192,7 @@ Views.settings = (function () {
         return;
       }
       if (!data || data.format !== "wow-addon-manager/1" || !Array.isArray(data.addons)) {
-        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a Furphy Addon Manager export.";
+        msg.hidden = false; msg.className = "form-msg is-error"; msg.textContent = "That file isn't a Furphy Addon Manager addon list.";
         return;
       }
       // Review fix: was keyed on a bare Number(a.projectId), which is 0 for
@@ -6202,9 +6210,9 @@ Views.settings = (function () {
       const toAdd = data.addons.filter(function (a) { return a && !existingIds.has(Utils.normalizeId(Store.addonKey(a))); }).length;
       const present = data.addons.length - toAdd;
       const ok = await Components.Dialogs.confirm({
-        title: "Import addon list?",
+        title: "Load addon list?",
         message: data.addons.length + " addon(s) in the file — " + toAdd + " will be added, " + present + " already present.",
-        confirmLabel: "Import",
+        confirmLabel: "Load",
         danger: false
       });
       if (!ok) return;
@@ -6523,9 +6531,6 @@ const App = (function () {
   // and a live drawer refresh - anything that isn't specific to one view.
   function renderChrome() {
     Utils.qs("#nav-count-total").textContent = Store.state.addons.length;
-    const badge = Utils.qs("#nav-count-updates");
-    const updates = Store.updatesCount();
-    if (updates > 0) { badge.hidden = false; badge.textContent = updates; } else { badge.hidden = true; }
 
     renderConnectivity();
     Components.Freshness.render("sidebar-freshness", { dotOnly: true });
@@ -6583,7 +6588,13 @@ const App = (function () {
   // just disabled, so no dead button sits there.
   function renderUpdateAllButton() {
     const btn = Utils.qs("#btn-update-all");
-    const n = Store.updatesCount();
+    // Review fix (F2): scope the button's own count to what updateAll()
+    // actually updates (excludes ignored addons) - Store.updatesCount()
+    // stays the informational "updates exist somewhere" figure used by the
+    // sidebar badge/Freshness headline, but this button's label promises
+    // what clicking it will do, so it must match updateAll()'s real scope
+    // per the file's own pre-existing post-CS6 invariant (see updateAll()).
+    const n = Store.state.addons.filter(function (a) { return a.updateAvailable && !a.ignoreUpdates; }).length;
     const checked = !!Store.state.updatesCheckedAt;
     const nothingToDo = checked && n === 0;
     btn.hidden = nothingToDo;
@@ -6615,6 +6626,14 @@ const App = (function () {
     Components.JobPanel.show(Store.state.job);
     renderChrome();
     renderCurrentView();
+    // Review fix (F1/F3): pick up the server's already-"checking" freshness
+    // (Get-ComputedFreshness flips the instant the job's state is "running")
+    // right away, instead of leaving the headline frozen on stale text for
+    // the whole run - pollJob only re-fetches /api/jobs/{id} (no freshness
+    // field on that endpoint) and only calls reloadState once the job stops
+    // running; the idle poll explicitly skips reloadState while busy. Fire-
+    // and-forget: reloadState repaints on its own once the fetch resolves.
+    reloadState(false);
     pollJob(jobId);
   }
 

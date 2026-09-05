@@ -3752,7 +3752,7 @@ boot();
             openItem.Click += new EventHandler(MenuOpen_Click);
             _menu.Items.Add(openItem);
 
-            ToolStripMenuItem checkItem = new ToolStripMenuItem("Check for updates now");
+            ToolStripMenuItem checkItem = new ToolStripMenuItem("Check now");
             checkItem.Click += new EventHandler(MenuCheckNow_Click);
             _menu.Items.Add(checkItem);
 
@@ -4329,8 +4329,8 @@ boot();
             else if (allUpdated.Count > 0)
             {
                 overallResult = "updated";
-                overallMessage = "Furphy - " + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
-                    " updates ready at " + nowStamp + " (" + JoinNames(breakdownParts) + ")";
+                overallMessage = "Furphy - Updated " + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
+                    " at " + nowStamp + " (" + JoinNames(breakdownParts) + ")";
                 overallBalloon = true;
             }
             else

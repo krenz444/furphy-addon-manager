@@ -16,21 +16,18 @@ TWO WAYS IN
   Both are safe to use any time; the app refuses to run two operations at once.
 
 NO API KEY NEEDED
-  Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up. An
-  optional free CurseForge API key (Settings -> API key) additionally gets you CurseForge's own official search/
-  sort/categories plus descriptions, changelogs and screenshots sourced directly from CurseForge.
+  Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up, no
+  account, and no key of any kind - there's nothing to configure.
 
 THE APP
-  My Addons  installed addons with version, update badges, status (up to date / update available / pinned / ignored),
-             per-addon menu: Update, Versions (install any specific version), Pin/Unpin, Ignore updates, Roll back,
-             Uninstall, Open on CurseForge/Wago. "Check for updates" and "Update all" in the toolbar.
-             "Update & Play" in the sidebar.
-  Browse     search CurseForge and Wago Addons (source switch at the top), categories/sorting, descriptions,
-             screenshots, changelogs and one-click install - all keyless. Install by Project ID or wago:<slug> also
-             works without a key (the Project ID is shown in the right-hand "About Project" box on any CurseForge
-             addon page).
-  Settings   release channel (release / beta / alpha), auto-update on launch, optional API key, scan for untracked
-             folders (with one-click adopt), diagnostics, open logs, force reinstall.
+  My Addons       installed addons with version, update badges, status (up to date / update available / pinned /
+                  ignored), per-addon menu: Update, Versions (install any specific version), Pin/Unpin, Ignore
+                  updates, Roll back, Uninstall, Open on CurseForge/Wago. "Check now" and "Update all" in the
+                  toolbar. "Update & Play" in the sidebar.
+  Get new addons  switch between an in-app Wago search and the real CurseForge.com (open right inside the app
+                  window) - both fully keyless. Paste a CurseForge link/ID or a wago.io link to install directly.
+  Settings        release channel (release / beta / alpha), auto-update on launch, folders Furphy doesn't manage
+                  yet (with one-click take over), diagnostics, open logs, force reinstall.
 
 FILES (this folder)
   install.ps1 / Install Furphy.cmd   the installer (see NEW INSTALL above); -Uninstall removes the app cleanly
@@ -39,7 +36,7 @@ FILES (this folder)
   Addon Manager.vbs   starts the server hidden and opens the app window (Edge app mode)
   ui\                 the app's HTML/JS/CSS (no internet resources, works offline except the addon sources)
   addons.json         your addon list and installed state (project id, file id, version, folders, pin/ignore flags)
-  settings.json       release channel, auto-update flag, API key, port
+  settings.json       release channel, auto-update flag, port
   VERSION             the installed version (also reported by the app's Settings -> About)
   last-run.txt        result table of the most recent update run
   sync.log            everything the updater did          server.log   everything the server did

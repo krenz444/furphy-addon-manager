@@ -786,7 +786,7 @@ if (-not $NoProtocol) {
 # =====================================================================
 
 if (-not $SkipAdopt) {
-    Write-Step 'Looking for existing addons to adopt'
+    Write-Step 'Looking for existing addons to take over'
     $showFlavourHeader = ($installedFlavours.Count -gt 1)
 
     foreach ($def in $installedFlavours) {
@@ -807,7 +807,7 @@ if (-not $SkipAdopt) {
         # S8 fixture's empty _ptr_\Interface\AddOns). Check $scan itself
         # (did ConvertFrom-Json actually produce an object) instead.
         if (-not $scan) {
-            Write-Info 'Could not read scan results - skipped adoption.'
+            Write-Info 'Could not read scan results - skipped taking over.'
             continue
         }
 
@@ -825,10 +825,10 @@ if (-not $SkipAdopt) {
         }
 
         if ($targets.Count -eq 0) {
-            Write-Info 'No untracked folders with a recognizable CurseForge or Wago id - nothing to adopt.'
+            Write-Info 'No untracked folders with a recognizable CurseForge or Wago id - nothing to take over.'
         } else {
             $idArg = [string]::Join(',', $targets.ToArray())
-            Write-Info "Adopting $($targets.Count) addon(s) (reinstalling each from its source)..."
+            Write-Info "Taking over $($targets.Count) addon(s) (reinstalling each from its source)..."
             $addJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cliPath -AddonsPath $flavourAddonsPath -Flavor $def.Id -Add $idArg -Json
             $addResult = $null
             try { $addResult = $addJson | ConvertFrom-Json } catch { $addResult = $null }
@@ -837,17 +837,17 @@ if (-not $SkipAdopt) {
                     Write-Info ("  " + $r.status + ": " + $r.name)
                 }
             } else {
-                Write-Warn2 'Could not parse the adopt step''s results - check sync.log.'
+                Write-Warn2 'Could not parse the take-over step''s results - check sync.log.'
             }
         }
 
         if ($unmanaged.Count -gt 0) {
-            Write-Info 'Left unmanaged (no CurseForge or Wago id found in their .toc):'
+            Write-Info 'Left unmanaged (no CurseForge or Wago id found):'
             foreach ($name in $unmanaged) { Write-Info ("  - " + $name) }
         }
     }
 } else {
-    Write-Info 'Skipped adoption (-SkipAdopt).'
+    Write-Info 'Skipped taking over existing addons (-SkipAdopt).'
 }
 
 # =====================================================================
@@ -861,6 +861,5 @@ Write-Info "AddOns:   $addonsPath"
 if ($installedFlavours.Count -gt 1) {
     Write-Info ("Flavours: " + (($installedFlavours | ForEach-Object { $_.Label }) -join ', '))
 }
-Write-Info 'No CurseForge API key is required - Browse and installs both work out of the box.'
-Write-Info '(An optional key in Settings adds official CurseForge metadata: descriptions, changelogs, screenshots.)'
+Write-Info 'No CurseForge API key needed - Get new addons and installs both work out of the box.'
 exit 0
