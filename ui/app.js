@@ -202,7 +202,56 @@ const Mock = (function () {
   // Round 18 (tray stage B): backgroundUpdates/runAtStartup default off,
   // backgroundIntervalMinutes defaults 120 - same defaults as the real
   // server's Get-DefaultSettings.
-  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false };
+  // FLAVORS-SPEC.md CS-F4: activeFlavour/showTestRealms join the mock
+  // settings shape too (S3.4 - same plain client-writable pattern as
+  // adFilter/cfFocus), round-tripped by the PUT handler below.
+  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false };
+
+  // FLAVORS-SPEC.md CS-F4 (section 8's own acceptance item / task brief's own
+  // "?mock=1&flavours=3" verify step): ?mock=1&flavours=N (2-4) fakes an
+  // N-flavour machine so the switcher/per-flavour views are exercisable with
+  // no real server - omitted or out of range keeps today's single-Retail
+  // shape exactly (installedFlavours stays a 1-entry array, matching what
+  // the real server also always sends - S5.2's two always-present fields -
+  // so this is a size difference only, never a shape one).
+  const mockFlavourPool = [
+    { id: "retail", label: "Retail", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", clientBuild: "12.1.0.69587", clientInterface: 120100, buildInfoMissing: false },
+    { id: "classic", label: "Classic", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_classic_\\Interface\\AddOns", clientBuild: "5.5.4.61180", clientInterface: 50504, buildInfoMissing: false },
+    { id: "classic_era", label: "Classic Era", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_classic_era_\\Interface\\AddOns", clientBuild: "1.15.9.60546", clientInterface: 11509, buildInfoMissing: false },
+    { id: "ptr", label: "PTR", addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_ptr_\\Interface\\AddOns", clientBuild: "12.1.0.69588", clientInterface: 120100, buildInfoMissing: true }
+  ];
+  const mockFlavourCountParam = parseInt(new URLSearchParams(location.search).get("flavours"), 10);
+  const mockInstalledFlavours = (mockFlavourCountParam >= 2 && mockFlavourCountParam <= 4)
+    ? mockFlavourPool.slice(0, mockFlavourCountParam)
+    : [mockFlavourPool[0]];
+
+  // A small, deliberately distinct fixture per non-Retail flavour, so
+  // switching the switcher's pills visibly changes My Addons' list/
+  // freshness (the task brief's own verify bar) - Retail keeps using the
+  // full `addons`/`jobs`/`currentJob` machinery below completely unchanged
+  // (read-only for the others: no job-posting simulation for a non-Retail
+  // flavour, nothing in the acceptance bar needs one).
+  const mockFlavourExtra = {
+    classic: {
+      addons: [
+        { name: "FakeAddon", projectId: 9001001, fileId: 1, version: "1.0.0", fileName: "FakeAddon-1.0.0.zip", installedAt: new Date(Date.now() - 10 * 24 * 3600e3).toISOString(), folders: ["FakeAddon"], author: "test", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: { fileId: 2, version: "1.1.0" }, tocInterfaces: [50504], compat: "ok", latestGameVersions: ["5.5.4"], latestFileDate: new Date().toISOString() }
+      ],
+      lastRun: null, updatesCheckedAt: new Date(Date.now() - 40 * 60e3).toISOString(), lastCheckFailed: false, lastCheckError: null
+    },
+    classic_era: {
+      addons: [
+        { name: "MultiFlavourAddon", projectId: 9002002, fileId: 1, version: "2.0.0", fileName: "MultiFlavourAddon-2.0.0.zip", installedAt: new Date(Date.now() - 5 * 24 * 3600e3).toISOString(), folders: ["MultiFlavourAddon"], author: "test", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null, tocInterfaces: [11509], compat: "ok", latestGameVersions: ["1.15.9"], latestFileDate: new Date().toISOString() },
+        { name: "PreExistingEraAddon", projectId: 9002003, fileId: 1, version: "0.9.0", fileName: "PreExistingEraAddon-0.9.0.zip", installedAt: new Date(Date.now() - 90 * 24 * 3600e3).toISOString(), folders: ["PreExistingEraAddon"], author: "test", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null }
+      ],
+      lastRun: null, updatesCheckedAt: new Date(Date.now() - 2 * 3600e3).toISOString(), lastCheckFailed: false, lastCheckError: null
+    },
+    ptr: { addons: [], lastRun: null, updatesCheckedAt: null, lastCheckFailed: false, lastCheckError: null }
+  };
+  function mockFreshnessForExtra(fx) {
+    if (!fx.updatesCheckedAt) return "not_checked";
+    if (fx.addons.some(function (a) { return !!a.updateAvailable; })) return "updates_available";
+    return "up_to_date";
+  }
   // Round 18: a fake background tray, entirely in-memory - no real process,
   // no real registry access. mockTray.running mirrors what a real
   // GET /api/tray/status would report (state.running AND that pid is alive);
@@ -745,11 +794,15 @@ const Mock = (function () {
     nextTarget();
   }
 
-  function runJob(kind, params) {
+  function runJob(kind, params, flavourId) {
     if (currentJob && currentJob.state === "running") return null;
     const id = String(nextJobId++);
     const job = {
-      id: id, kind: kind, params: params || {}, state: "running",
+      // FLAVORS-SPEC.md CS-F4/S5.4: every job carries its own flavour - the
+      // job panel's badge (Components.JobPanel) reads this the same way it
+      // reads a real server job's field. Falls back to 'retail' the same
+      // way the real server's job.flavour defaults for anything pre-CS-F2.
+      id: id, kind: kind, flavour: flavourId || "retail", params: params || {}, state: "running",
       startedAt: new Date().toISOString(), finishedAt: null, exitCode: null,
       log: [], results: [], error: null, progress: null
     };
@@ -794,7 +847,42 @@ const Mock = (function () {
         // CS1 (UX-SPEC.md sections 2.1/4.2): freshness/lastCheckFailed/
         // lastCheckError mirror the real server's Handle-State additions -
         // see mockFreshness above for how the enum is derived here.
-        return { addons: addons.map(function (a) { return Object.assign({}, a); }), settings: currentSettings(), lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt, freshness: mockFreshness(), lastCheckFailed: lastCheckFailed, lastCheckError: lastCheckError, clientBuild: "12.1.0.69587", clientInterface: 120100 };
+        // FLAVORS-SPEC.md CS-F4 (S5.2): installedFlavours/activeFlavour are
+        // now always present too (a 1-entry array at n=1, matching the real
+        // server exactly) - requestedFlavour resolves the SAME way
+        // Resolve-RequestFlavour does (explicit ?flavour=/?flavor=, else the
+        // persisted activeFlavour setting, else the first installed one).
+        // Retail's data is the untouched `addons`/`lastRun`/`currentJob`
+        // fixture above; every other flavour reads its own small fixture
+        // from mockFlavourExtra (read-only - no job simulation).
+        const requestedFlavour = (q.get("flavour") || q.get("flavor") || "").toLowerCase() || mockSettings.activeFlavour || mockInstalledFlavours[0].id;
+        const extra = requestedFlavour !== "retail" ? mockFlavourExtra[requestedFlavour] : null;
+        const meta = mockInstalledFlavours.find(function (f) { return f.id === requestedFlavour; });
+        const body = extra
+          ? {
+            addons: extra.addons.map(function (a) { return Object.assign({}, a); }),
+            lastRun: extra.lastRun, job: null, updatesCheckedAt: extra.updatesCheckedAt,
+            freshness: mockFreshnessForExtra(extra), lastCheckFailed: extra.lastCheckFailed, lastCheckError: extra.lastCheckError,
+            clientBuild: meta ? meta.clientBuild : null, clientInterface: meta ? meta.clientInterface : null
+          }
+          : {
+            addons: addons.map(function (a) { return Object.assign({}, a); }),
+            lastRun: lastRun, job: currentJob, updatesCheckedAt: updatesCheckedAt,
+            freshness: mockFreshness(), lastCheckFailed: lastCheckFailed, lastCheckError: lastCheckError,
+            clientBuild: "12.1.0.69587", clientInterface: 120100
+          };
+        // Real server contract (addon-server.ps1 Handle-State): activeFlavour
+        // and flavour are the exact SAME value - whichever flavour THIS
+        // request resolved to - never the persisted settings.activeFlavour
+        // read back independently (that's only ever a fallback INPUT to
+        // resolution, never the OUTPUT). Mirrored here as requestedFlavour
+        // for both fields, so a just-clicked pill's own explicit ?flavour=
+        // is reflected immediately with no dependency on the separate,
+        // fire-and-forget settings PUT having resolved first.
+        return Object.assign({
+          installedFlavours: mockInstalledFlavours, activeFlavour: requestedFlavour, flavour: requestedFlavour,
+          settings: currentSettings()
+        }, body);
       }
       // E19: ?mock=1&host=webview2 previews the native-host-only ad-filter
       // toggle branch without a real FurphyHost.exe - mirrors the real
@@ -810,8 +898,35 @@ const Mock = (function () {
         return j;
       }
       if (p === "/api/jobs" && method === "POST") {
+        // FLAVORS-SPEC.md CS-F4 (S5.4/S5.6): the bulk fan-out kind the
+        // switcher's own "Update All" button posts - never a single job id,
+        // always the {kind, jobs:[]} wrapper shape. Only Retail gets a real
+        // simulated job (this mock's only fixture with live job machinery);
+        // every other visible flavour gets a small already-"done" job
+        // object (still real enough for Api.getJob/attachToJob to resolve),
+        // matching the real server's per-flavour fan-out without building a
+        // fuller multi-flavour job engine this mock doesn't otherwise have.
+        if (body.kind === "update-all-flavours") {
+          const showTest = !!mockSettings.showTestRealms;
+          const hiddenIds = { ptr: true, xptr: true, beta: true };
+          const targets = mockInstalledFlavours.filter(function (f) { return showTest || !hiddenIds[f.id]; });
+          const jobsOut = targets.map(function (f) {
+            if (f.id === "retail") {
+              if (currentJob && currentJob.state === "running") return { flavour: f.id, busy: true, jobId: currentJob.id };
+              const job = runJob("sync", {}, "retail");
+              if (!job) return { flavour: f.id, busy: true };
+              return { flavour: f.id, jobId: job.id };
+            }
+            const id = String(nextJobId++);
+            const job = { id: id, kind: "sync", flavour: f.id, params: {}, state: "done", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode: 0, log: [], results: [], error: null, progress: null };
+            jobs.unshift(job);
+            if (jobs.length > 20) jobs.length = 20;
+            return { flavour: f.id, jobId: job.id };
+          });
+          return { __status: 202, kind: "update-all-flavours", jobs: jobsOut };
+        }
         if (currentJob && currentJob.state === "running") return { __status: 409, error: "busy", jobId: currentJob.id };
-        const job = runJob(body.kind, body);
+        const job = runJob(body.kind, body, q.get("flavour") || q.get("flavor"));
         if (!job) return { __status: 409, error: "busy" };
         return { __status: 202, jobId: job.id };
       }
@@ -909,6 +1024,15 @@ const Mock = (function () {
           mockSettings.backgroundIntervalMinutes = Math.max(30, Math.min(1440, body.backgroundIntervalMinutes));
         }
         if (typeof body.runAtStartup === "boolean") mockSettings.runAtStartup = body.runAtStartup;
+        // FLAVORS-SPEC.md CS-F4/S3.4: activeFlavour is pure UI continuity -
+        // silently ignored (never rejected) when it doesn't name one of this
+        // mock's own installed flavours, matching the real server's own
+        // never-load-bearing design.
+        if (typeof body.activeFlavour === "string") {
+          const candidate = body.activeFlavour.trim().toLowerCase();
+          if (mockInstalledFlavours.some(function (f) { return f.id === candidate; })) mockSettings.activeFlavour = candidate;
+        }
+        if (typeof body.showTestRealms === "boolean") mockSettings.showTestRealms = body.showTestRealms;
         return currentSettings();
       }
       // Round 18 (tray stage B): fake tray/startup endpoints - see mockTray above.
@@ -1022,7 +1146,9 @@ const Mock = (function () {
       addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
       adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow,
       // Round 18 (tray stage B)
-      backgroundUpdates: mockSettings.backgroundUpdates, backgroundIntervalMinutes: mockSettings.backgroundIntervalMinutes, runAtStartup: mockSettings.runAtStartup
+      backgroundUpdates: mockSettings.backgroundUpdates, backgroundIntervalMinutes: mockSettings.backgroundIntervalMinutes, runAtStartup: mockSettings.runAtStartup,
+      // FLAVORS-SPEC.md CS-F4 (S3.4/S5.2)
+      activeFlavour: mockSettings.activeFlavour, showTestRealms: mockSettings.showTestRealms
     };
   }
 })();
@@ -1370,9 +1496,49 @@ const Api = (function () {
     return err;
   }
 
+  // FLAVORS-SPEC.md CS-F4/S5.1: the exact same fixed, addon-scoped endpoint
+  // set addon-server.ps1's own $Script:FlavourScopedEndpoints enumerates
+  // server-side. Mirrored here so request() below can auto-append the
+  // active flavour's ?flavour= to exactly these calls, and only once more
+  // than one flavour is installed - never otherwise, so a single-flavour
+  // machine's requests stay byte-identical to before this change set
+  // (principle 2). Add a new addon-scoped endpoint here AND to the server's
+  // own list - never scatter this per call site.
+  const FLAVOUR_SCOPED_PATTERNS = [
+    { method: "GET", re: /^\/api\/state$/ },
+    { method: "POST", re: /^\/api\/addons\/[^/]+\/ignore$/ },
+    { method: "POST", re: /^\/api\/addons\/[^/]+\/unpin$/ },
+    { method: "GET", re: /^\/api\/addons\/[^/]+\/files$/ },
+    { method: "GET", re: /^\/api\/scan$/ },
+    { method: "POST", re: /^\/api\/scan\/delete$/ },
+    { method: "GET", re: /^\/api\/export$/ },
+    { method: "POST", re: /^\/api\/import$/ },
+    { method: "GET", re: /^\/api\/wago\/search$/ }
+  ];
+  function needsFlavourParam(method, pathname) {
+    return FLAVOUR_SCOPED_PATTERNS.some(function (p) { return p.method === method && p.re.test(pathname); });
+  }
+
   async function request(method, path, body) {
+    // FLAVORS-SPEC.md CS-F4: auto-append ?flavour=<active> to the fixed
+    // addon-scoped endpoint set above - but only once Store.hasMultipleFlavours()
+    // (raw installed count > 1, matching the server's own gate exactly) and
+    // only when the caller hasn't already named one (postJob's own optional
+    // flavour arg, or resumeJobWithFlavour's explicit pick, both win). A
+    // single-flavour machine never sends the param at all - byte-identical
+    // URLs to before this change set.
+    let finalPath = path;
+    if (Store.hasMultipleFlavours() && Store.state.activeFlavour) {
+      const qIdx = path.indexOf("?");
+      const pathname = qIdx === -1 ? path : path.slice(0, qIdx);
+      const alreadyHasFlavour = qIdx !== -1 && /[?&](flavour|flavor)=/.test(path.slice(qIdx));
+      if (!alreadyHasFlavour && needsFlavourParam(method, pathname)) {
+        finalPath = path + (qIdx === -1 ? "?" : "&") + "flavour=" + encodeURIComponent(Store.state.activeFlavour);
+      }
+    }
+
     if (Mock.enabled) {
-      const result = await Mock.handle(method, path, body);
+      const result = await Mock.handle(method, finalPath, body);
       const status = (result && result.__status) || 200;
       const data = result ? Object.assign({}, result) : {};
       delete data.__status;
@@ -1382,7 +1548,7 @@ const Api = (function () {
 
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(finalPath, {
         method: method,
         headers: body ? { "Content-Type": "application/json; charset=utf-8" } : undefined,
         body: body ? JSON.stringify(body) : undefined
@@ -1401,6 +1567,29 @@ const Api = (function () {
     return data;
   }
 
+  // FLAVORS-SPEC.md CS-F3/S5.5's exact carve-out (Handle-JobsPost, addon-
+  // server.ps1), mirrored here so postJob below can default the SAME set of
+  // job kinds to the active flavour without defeating the CurseForge
+  // install-flavour ask flow: a genuine single-target CurseForge add/
+  // install/add-by-slug (never a bulk add, never a Wago target) must reach
+  // the server with NO ?flavour= at all when the caller didn't name one, so
+  // Start-Job's own auto/refuse/ask resolution (S5.5) can run. Every other
+  // kind - sync/check/remove/rollback/switch-source/launch/import, a bulk
+  // add, or any Wago-sourced add/install - is scoped to one flavour's own
+  // addons.json/AddOns folder already, so it needs the active flavour
+  // supplied automatically or the server 400s "flavour required".
+  function isSkipFlavourGateKind(kind, params) {
+    const p = params || {};
+    const hasWagoSourceSlug = !!(p.source && p.slug);
+    const hasMultiAdd = !!(p.projectIds && p.projectIds.length);
+    const bodyHasSingleProjectId = !!p.projectId;
+    const isSingleCfInstallKind = (kind === "add" && bodyHasSingleProjectId && !hasMultiAdd) || kind === "install" || kind === "add-by-slug";
+    if (!isSingleCfInstallKind) return false;
+    const pidText = (p.projectId !== undefined && p.projectId !== null) ? String(p.projectId) : "";
+    const targetsWago = hasWagoSourceSlug || pidText.toLowerCase().indexOf("wago:") === 0;
+    return !targetsWago;
+  }
+
   function qs(params) {
     const usp = new URLSearchParams();
     Object.keys(params || {}).forEach(function (k) {
@@ -1416,7 +1605,24 @@ const Api = (function () {
     getState: function () { return request("GET", "/api/state"); },
     ping: function () { return request("GET", "/api/ping"); },
 
-    postJob: function (kind, params) { return request("POST", "/api/jobs", Object.assign({ kind: kind }, params || {})); },
+    // FLAVORS-SPEC.md CS-F3/CS-F4: optional third arg names a flavour
+    // explicitly (the install-flavour picker's resume POST, Actions.
+    // resumeJobWithFlavour) - always wins outright. Otherwise (CS-F4), every
+    // OTHER job kind except update-all-flavours and a genuine single-target
+    // CurseForge add/install/add-by-slug (isSkipFlavourGateKind above - that
+    // one must reach the server with no ?flavour= at all so its own S5.5
+    // ask/auto resolution can run) is auto-scoped to the active flavour once
+    // more than one is installed - every existing call site (checkForUpdates,
+    // updateAll, updateAndPlay, etc.) needs no change of its own. At n<=1
+    // flavour this is always undefined, so every URL/body stays exactly
+    // what it was before this change set.
+    postJob: function (kind, params, flavour) {
+      let effectiveFlavour = flavour;
+      if (effectiveFlavour === undefined && kind !== "update-all-flavours" && Store.hasMultipleFlavours() && !isSkipFlavourGateKind(kind, params)) {
+        effectiveFlavour = Store.state.activeFlavour;
+      }
+      return request("POST", "/api/jobs" + qs({ flavour: effectiveFlavour }), Object.assign({ kind: kind }, params || {}));
+    },
     getJob: function (id) { return request("GET", "/api/jobs/" + encodeURIComponent(id)); },
     listJobs: function () { return request("GET", "/api/jobs"); },
 
@@ -1590,10 +1796,45 @@ const Store = (function () {
     // keeps both in sync from one shared fetch).
     protocol: null,
     protocolLoading: false,
-    protocolBusy: false        // true while a register/unregister call is in flight (disables the toggle)
+    protocolBusy: false,        // true while a register/unregister call is in flight (disables the toggle)
+
+    // FLAVORS-SPEC.md CS-F4 (section 5.2): describe the MACHINE, not one
+    // flavour - present on every /api/state response regardless of
+    // ?flavour= (even a single-entry array at n=1), read here from that same
+    // response (App.reloadState). {id,label,addonsPath,clientBuild,
+    // clientInterface,buildInfoMissing} per entry, §2.1 order.
+    installedFlavours: [],
+    activeFlavour: null,
+
+    // Security-review fix: a machine-wide (not flavour-scoped) job in
+    // state "awaiting_flavour" the server wants surfaced regardless of
+    // which flavour is active right now - see reloadState's own comment.
+    pendingFlavourChoice: null
   };
 
   function set(patch) { Object.assign(state, patch); }
+
+  // FLAVORS-SPEC.md CS-F4/S5.1: mirrors the exact gate addon-server.ps1
+  // itself uses ((installed).Count -gt 1) for "does an addon-scoped request
+  // need ?flavour=" - the RAW installed count, never the test-realms-
+  // filtered one below. Getting this wrong in either direction either 400s
+  // every request on a machine with a hidden PTR client, or silently omits
+  // ?flavour= on a machine the server considers multi-flavour.
+  function hasMultipleFlavours() { return state.installedFlavours.length > 1; }
+
+  // FLAVORS-SPEC.md CS-F4 (section 2.5): PTR/XPTR/Beta are detected but
+  // excluded from the switcher/Update All/job-badge gating by default - a
+  // SEPARATE, smaller count than hasMultipleFlavours() above, which must
+  // stay keyed off the raw count. A machine with just Retail+PTR (raw count
+  // 2, showTestRealms off) has exactly one VISIBLE flavour, so every piece
+  // of UI gated on ">1 flavour" (the switcher itself, Update All, badges)
+  // renders nothing, even though the server-facing ?flavour= param is still
+  // required for its requests.
+  const HIDDEN_FLAVOUR_IDS = { ptr: true, xptr: true, beta: true };
+  function visibleFlavours() {
+    const showTest = !!(state.settings && state.settings.showTestRealms);
+    return state.installedFlavours.filter(function (f) { return showTest || !HIDDEN_FLAVOUR_IDS[f.id]; });
+  }
 
   // E7: sets and persists the My Addons column sort so it survives a reload.
   function setMyAddonsSort(sort) {
@@ -1752,7 +1993,8 @@ const Store = (function () {
 
   return {
     state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor,
-    isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons
+    isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons,
+    hasMultipleFlavours: hasMultipleFlavours, visibleFlavours: visibleFlavours
   };
 })();
 
@@ -2219,6 +2461,62 @@ Components.Freshness = (function () {
     }
     if (d.clause) parts.push(Utils.el("span", { class: "freshness-clause" }, [" · " + d.clause]));
     box.appendChild(Utils.el("div", { class: "freshness-row" }, parts));
+  }
+
+  return { render: render };
+})();
+
+/* ==========================================================================
+   FLAVORS-SPEC.md CS-F4 (section 6.1): the WoW-flavour switcher pill row,
+   mounted once right after #flavour-switcher-anchor (inside the sidebar's
+   <nav>, index.html). Entirely absent from the DOM (inserted/removed
+   wholesale, never just display:none) whenever fewer than two flavours are
+   VISIBLE (Store.visibleFlavours - PTR/XPTR/Beta stay excluded unless
+   Settings' "Show test realms" is on, section 2.5) - a single-flavour
+   machine's sidebar is byte-for-byte what it is today (principle 2). Also
+   owns the "Update All" bulk button (section 6.3) - gated on the exact same
+   visible-count condition, since both only make sense together.
+   ========================================================================== */
+Components.Switcher = (function () {
+  function render() {
+    const anchor = Utils.qs("#flavour-switcher-anchor");
+    if (!anchor) return;
+    const visible = Store.visibleFlavours();
+    let node = Utils.qs("#flavour-switcher");
+    if (visible.length <= 1) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = Utils.el("div", { class: "flavour-switcher", id: "flavour-switcher" }, []);
+      anchor.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = "";
+
+    const active = Store.state.activeFlavour;
+    const pills = Utils.el("div", { class: "flavour-pills", role: "tablist", "aria-label": "WoW version" },
+      visible.map(function (f) {
+        // section 2.7: Classic Era's realm explanation lives ONLY in a
+        // tooltip/aria-label here, never inline in the pill's own label.
+        const subtitle = f.id === "classic_era" ? "Includes Hardcore & Anniversary realms" : null;
+        return Utils.el("button", {
+          type: "button", class: "flavour-pill" + (f.id === active ? " is-active" : ""),
+          role: "tab", "aria-selected": f.id === active ? "true" : "false",
+          title: subtitle || undefined, "aria-label": subtitle ? (f.label + ". " + subtitle) : undefined,
+          onclick: function () { Actions.setActiveFlavour(f.id); }
+        }, [f.label]);
+      }));
+    node.appendChild(pills);
+
+    // section 6.3: a separate, always-visible bulk action - never gated on
+    // whether the ACTIVE flavour has updates, since it targets every
+    // installed, non-hidden flavour at once regardless of which pill is
+    // selected right now.
+    node.appendChild(Utils.el("button", {
+      type: "button", class: "btn btn-outline btn-block flavour-update-all",
+      disabled: Store.isBusy() || undefined,
+      onclick: function () { if (!Store.isBusy()) Actions.updateAllFlavours(); }
+    }, ["Update All"]));
   }
 
   return { render: render };
@@ -2886,7 +3184,11 @@ Components.Drawer = (function () {
 
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
     const table = Utils.el("table", { class: "versions-table" }, [
-      Utils.el("thead", {}, [Utils.el("tr", {}, ["Version", "Channel", "Retail Patches", "Date", "", ""].map(function (h) { return Utils.el("th", {}, [h]); }))]),
+      // FLAVORS-SPEC.md CS-F4 (copy table): "Retail Patches" -> "Patches" -
+      // was already wrong-by-name for any non-Retail addon; renamed
+      // regardless of flavour count since this drawer's data source is
+      // touched anyway.
+      Utils.el("thead", {}, [Utils.el("tr", {}, ["Version", "Channel", "Patches", "Date", "", ""].map(function (h) { return Utils.el("th", {}, [h]); }))]),
       Utils.el("tbody", {}, d.wagoReleases.map(function (r) { return wagoVersionRow(r, addon); }))
     ]);
     panel.appendChild(table);
@@ -3307,6 +3609,22 @@ Components.JobPanel = (function () {
     return map[job.kind] || "Working…";
   }
 
+  // FLAVORS-SPEC.md CS-F4 (section 5.4/6.2): the job title's flavour badge -
+  // reuses the switcher's own pill look (.flavour-pill), a plain label only
+  // (never the era subtitle - word budget, same as the switcher itself).
+  function hideJobFlavourBadge() {
+    const badge = Utils.qs("#job-flavour-badge");
+    if (badge) badge.hidden = true;
+  }
+  function renderJobFlavourBadge(job) {
+    const badge = Utils.qs("#job-flavour-badge");
+    if (!badge) return;
+    if (!Store.hasMultipleFlavours() || !job.flavour) { badge.hidden = true; return; }
+    const meta = Store.state.installedFlavours.filter(function (f) { return f.id === job.flavour; })[0];
+    badge.textContent = meta ? meta.label : job.flavour;
+    badge.hidden = false;
+  }
+
   // Review fix: the finished title used to reuse the running label verbatim
   // ("Done — Updating 3 addons"), a tense collision that reads as unfinished
   // text. titleFor()'s label is free-form (every Actions.startJob call site
@@ -3416,6 +3734,47 @@ Components.JobPanel = (function () {
     if (!job) return;
     const panel = Utils.qs("#job-panel");
     if (panel.hidden) panel.hidden = false;
+
+    // FLAVORS-SPEC.md CS-F3 S5.5 case 5 / S6.4: the server created this job
+    // but could not tell which installed WoW flavour it targets (a
+    // CurseForge file the account's client supports more than one of) -
+    // this same panel asks instead of the normal running/done/failed
+    // rendering below. Plain words, remembers nothing across jobs (no
+    // stored "last picked flavour") - a fresh pick every time this state
+    // is hit, per this round's own bar. Never reached on a single-flavour
+    // machine (the server-side resolution this state comes from only ever
+    // engages when more than one flavour is installed).
+    if (job.state === "awaiting_flavour") {
+      Utils.qs("#job-title").textContent = "Which version of WoW?";
+      // No single flavour to badge yet - this job belongs to none until one
+      // of the choices below is picked (see Get-CurrentOrLastJobSummary's
+      // own matching rule server-side).
+      hideJobFlavourBadge();
+      Utils.qs("#job-spinner").classList.add("is-done");
+      Utils.qs("#job-panel-close").hidden = false;
+      Utils.qs("#job-progress-wrap").hidden = true;
+      Utils.qs("#job-log").textContent = "";
+      const resultsBox = Utils.qs("#job-results");
+      resultsBox.textContent = "";
+      resultsBox.hidden = false;
+      resultsBox.appendChild(Utils.el("div", { class: "job-result-row" }, [
+        Utils.el("span", {}, ["This addon supports more than one of your installed WoW versions."])
+      ]));
+      // FLAVORS-SPEC.md CS-F4 (section 6.4): restyled to reuse the
+      // switcher's own pill look (.flavour-pill) instead of a plain
+      // btn-outline row, now that that styling exists - the underlying
+      // choices/onclick wiring CS-F3 built is unchanged.
+      resultsBox.appendChild(Utils.el("div", { class: "flavour-pills" }, (job.choices || []).map(function (c) {
+        return Utils.el("button", {
+          type: "button", class: "flavour-pill",
+          onclick: function () { Actions.resumeJobWithFlavour(job, c.id); }
+        }, [c.label]);
+      })));
+      const jobBody = Utils.qs("#job-panel-body");
+      jobBody.scrollTop = jobBody.scrollHeight;
+      return;
+    }
+
     const running = job.state === "running";
     // Review fix: the finished title is now tense-correct in both the Done
     // and Failed states ("Done — Updated 3 addons" / "Failed — Updated 3
@@ -3425,6 +3784,11 @@ Components.JobPanel = (function () {
     Utils.qs("#job-title").textContent = running
       ? titleFor(job)
       : (doneWithFailuresTitle || ((job.state === "failed" ? "Failed — " : "Done — ") + pastTenseLabel(titleFor(job))));
+    // FLAVORS-SPEC.md CS-F4 (section 5.4/6.2): a flavour badge next to the
+    // title, shown only once more than one flavour is installed and this
+    // job actually names one (every job does, except an unresolved
+    // awaiting_flavour one - handled in its own branch above).
+    renderJobFlavourBadge(job);
     Utils.qs("#job-spinner").classList.toggle("is-done", !running);
     Utils.qs("#job-panel-close").hidden = running;
 
@@ -3658,12 +4022,15 @@ function describeError(err) {
 const Actions = (function () {
 
   // Posts a job, seeds an optimistic "running" record into Store so the UI
-  // reacts instantly, then hands off to App's 800ms job poller.
-  async function startJob(kind, params, label) {
+  // reacts instantly, then hands off to App's 800ms job poller. -flavour
+  // (FLAVORS-SPEC.md CS-F3) is optional and only ever passed by
+  // resumeJobWithFlavour below - every existing caller keeps posting with
+  // no flavour, byte-identical to before this change set.
+  async function startJob(kind, params, label, flavour) {
     if (Store.isBusy()) { Components.Toast.show("Another task is running.", "warning"); return false; }
     Store.state.jobLabel = label || null;
     try {
-      const res = await Api.postJob(kind, params);
+      const res = await Api.postJob(kind, params, flavour);
       Store.state.job = { id: res.jobId, kind: kind, params: params || {}, state: "running", startedAt: new Date().toISOString(), finishedAt: null, exitCode: null, log: [], results: [], error: null };
       App.onJobStarted(res.jobId);
       return true;
@@ -3671,6 +4038,56 @@ const Actions = (function () {
       if (err.status === 409) Components.Toast.show("Another task is already running.", "warning");
       else Components.Toast.show("Couldn't start the job: " + describeError(err), "error");
       return false;
+    }
+  }
+
+  // FLAVORS-SPEC.md CS-F3 S5.5 case 5's resume: re-posts the SAME job kind
+  // and params an 'awaiting_flavour' job already carries, now with the
+  // user's chosen flavour explicit - the server's own resolution
+  // (addon-server.ps1 Start-Job) always honors an explicit ?flavour=
+  // outright with no re-check, so this always proceeds as a normal case-3
+  // "install there silently" job under a fresh job id (there is no
+  // "resume this exact job" endpoint - see that function's own comment).
+  function resumeJobWithFlavour(job, flavourId) {
+    return startJob(job.kind, job.params, "Installing addon", flavourId);
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 6.1): switches the active flavour pill.
+  // The switch itself is immediate and never blocked on the network -
+  // persisting the choice (settings.json's activeFlavour, S3.4) is a
+  // fire-and-forget PATCH that never blocks it either, and is deliberately
+  // non-load-bearing (an error here just means the next reload lands back
+  // on whatever flavour the server itself still remembers/defaults to).
+  function setActiveFlavour(flavourId) {
+    if (!flavourId || Store.state.activeFlavour === flavourId) return;
+    Store.state.activeFlavour = flavourId;
+    App.renderChrome(); // snaps the active pill immediately, before the refetch below resolves
+    Api.putSettings({ activeFlavour: flavourId }).catch(function () { /* S3.4: never load-bearing */ });
+    App.reloadState(true); // forces a repaint even if the newly-fetched flavour's data happens to diff-match
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 6.3/S5.4): the switcher's "Update All"
+  // bulk button - fans out into one sync job per installed, non-hidden
+  // flavour server-side (Handle-JobsPost's own update-all-flavours kind).
+  // Unlike every other job kind, this doesn't map onto a single job id the
+  // usual job panel can poll - only the ACTIVE flavour's own resulting job
+  // (if any) is attached to that panel, so its progress is still visible;
+  // the others just get a summarizing toast.
+  async function updateAllFlavours() {
+    try {
+      const res = await Api.postJob("update-all-flavours", {});
+      const jobs = res.jobs || [];
+      const started = jobs.filter(function (j) { return j.jobId && !j.error; });
+      const busy = jobs.filter(function (j) { return j.busy; });
+      const failed = jobs.filter(function (j) { return j.error; });
+      const mine = jobs.filter(function (j) { return j.flavour === Store.state.activeFlavour && j.jobId; })[0];
+      if (mine) App.attachToJob(mine.jobId);
+      let msg = started.length ? ("Updating " + started.length + " flavour" + (started.length === 1 ? "" : "s") + "…") : "Nothing to update.";
+      if (busy.length) msg += " (" + busy.length + " already running)";
+      if (failed.length) msg += " — " + failed.length + " couldn't start";
+      Components.Toast.show(msg, failed.length && !started.length ? "error" : "success");
+    } catch (err) {
+      Components.Toast.show("Couldn't start updates: " + describeError(err), "error");
     }
   }
 
@@ -3946,11 +4363,19 @@ const Actions = (function () {
   // to that one section; Components.Welcome's own separate "Adopt all"
   // first-run flow (Actions.adoptAll, untouched here) is CS5's own copy-
   // sweep territory per UX-SPEC.md section 10.
-  function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Taking over " + folder); }
+  // FLAVORS-SPEC.md CS-F4: -Scan (and so this folder) is already scoped to
+  // whichever flavour is currently active (S5.1) - naming that flavour
+  // explicitly here skips CS-F3's own CurseForge ambiguity picker, which
+  // would otherwise ask a question this call site already knows the answer
+  // to. Only passed once Store.hasMultipleFlavours() - undefined at n<=1,
+  // so the URL stays byte-identical there (Api.postJob's own qs() drops an
+  // undefined value).
+  function adoptFlavour() { return Store.hasMultipleFlavours() ? Store.state.activeFlavour : undefined; }
+  function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Taking over " + folder, adoptFlavour()); }
   // E12: one-click adoption from the Wago id/slug -Scan found in the
   // folder's own .toc (## X-Wago-ID) - same shape as installLatestWago,
   // just with a "Taking over..." label to match `adopt`'s.
-  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Taking over " + folder); }
+  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Taking over " + folder, adoptFlavour()); }
 
   // Round 5 fix: each individual Settings control (a release-channel radio,
   // the auto-update toggle) calls saveSettings independently, so flipping
@@ -4206,7 +4631,7 @@ const Actions = (function () {
   }
 
   return {
-    startJob: startJob, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
+    startJob: startJob, resumeJobWithFlavour: resumeJobWithFlavour, setActiveFlavour: setActiveFlavour, updateAllFlavours: updateAllFlavours, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
@@ -5176,8 +5601,7 @@ Views.settings = (function () {
     const s = Store.state.settings;
     if (!s) return;
 
-    Utils.qs("#settings-wow-root").textContent = s.wowRoot || "—";
-    Utils.qs("#settings-addons-path").textContent = s.addonsPath || "—";
+    renderGameFolders(s);
 
     // CS4 (UX-SPEC.md 6.1): the old 3-way release-channel radio is now two
     // independent toggles driven off the same releaseType value - "Include
@@ -5194,13 +5618,14 @@ Views.settings = (function () {
     // relocated here, matching the "kept, just relocated" pattern used for
     // every other row in that table. Store.state.clientBuild is delivered on
     // /api/state (see the reloadState diff below, ~line 6093).
-    Utils.qs("#about-client-build").textContent = Store.state.clientBuild || "—";
+    renderAboutClientBuild();
     const uptime = App.getServerUptime();
     Utils.qs("#about-uptime").textContent = uptime !== null ? formatUptime(uptime) : "—";
     // CS4: "Port" is dropped from the visible About list (UX-SPEC.md 6.2) -
     // it still goes out in Diagnostics' "Copy report" text, see
     // diagnosticsReportText() below, which reads s.port directly.
 
+    renderFlavourSettings(s);
     renderBrowsing(s);
     renderBackgroundUpdates(s);
     Components.ProtocolControl.render("settings-protocol-control");
@@ -5211,6 +5636,63 @@ Views.settings = (function () {
     const reinstall = Utils.qs("#btn-force-reinstall");
     reinstall.disabled = busy;
     if (busy) reinstall.title = "Another task is running"; else reinstall.removeAttribute("title");
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 6.2/copy table): today's exact two rows
+  // (#settings-game-single), untouched, at <=1 installed flavour; one row
+  // per installed flavour (#settings-game-multi) once there's more than one.
+  // The per-flavour "Open" button passes its own flavour along (Actions.
+  // openWhat's extra arg) for forward-compatibility - the server's own
+  // /api/open 'folder' target has no per-flavour resolution yet (untouched
+  // by this change set, addon-server.ps1 is outside CS-F4's file list), so
+  // every row's button currently opens the same default flavour's folder
+  // until a future round wires that up; see this function's own notesForNext.
+  function renderGameFolders(s) {
+    // Deliberately the RAW installed count, not visibleFlavours() - this is
+    // an informational/troubleshooting list (like About's build list below),
+    // not the switcher, so a detected-but-hidden PTR/XPTR/Beta client still
+    // earns its own row here.
+    const multi = Store.state.installedFlavours.length > 1;
+    Utils.qs("#settings-game-single").hidden = multi;
+    const box = Utils.qs("#settings-game-multi");
+    box.hidden = !multi;
+    if (!multi) { Utils.qs("#settings-wow-root").textContent = s.wowRoot || "—"; Utils.qs("#settings-addons-path").textContent = s.addonsPath || "—"; return; }
+    box.textContent = "";
+    Store.state.installedFlavours.forEach(function (f) {
+      box.appendChild(Utils.el("div", { class: "settings-row" }, [
+        Utils.el("div", { class: "settings-row-text" }, [
+          Utils.el("div", { class: "settings-row-label" }, [f.label]),
+          Utils.el("div", { class: "settings-row-value" }, [f.addonsPath || "—"])
+        ]),
+        Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openWhat("folder", { flavour: f.id }); } }, ["Open"])
+      ]));
+    });
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 6.2): a small per-flavour list only once
+  // more than one flavour is installed - single-flavour machines keep
+  // today's exact single line, unchanged.
+  function renderAboutClientBuild() {
+    const dd = Utils.qs("#about-client-build");
+    const visible = Store.state.installedFlavours;
+    if (visible.length <= 1) { dd.textContent = Store.state.clientBuild || "—"; return; }
+    dd.textContent = "";
+    visible.forEach(function (f, i) {
+      if (i > 0) dd.appendChild(Utils.el("br", {}, []));
+      const build = f.buildInfoMissing || !f.clientBuild ? "— version unknown (launch this client once)" : f.clientBuild;
+      dd.appendChild(Utils.el("span", {}, [f.label + " — " + build]));
+    });
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 2.5/6.5): only shown at all when a PTR/
+  // XPTR/Beta client is actually detected - a machine that never sees one
+  // gets no clutter for a setting that would otherwise do nothing.
+  const HIDDEN_FLAVOUR_IDS = { ptr: true, xptr: true, beta: true };
+  function renderFlavourSettings(s) {
+    const section = Utils.qs("#settings-flavours");
+    const hasTestRealm = Store.state.installedFlavours.some(function (f) { return HIDDEN_FLAVOUR_IDS[f.id]; });
+    section.hidden = !hasTestRealm;
+    if (hasTestRealm) Utils.qs("#toggle-show-test-realms").checked = !!s.showTestRealms;
   }
 
   function formatUptime(seconds) {
@@ -5595,6 +6077,11 @@ Views.settings = (function () {
       Actions.saveSettings({ releaseType: alpha ? 3 : (beta ? 2 : 1) });
     });
     Utils.qs("#toggle-autoupdate").addEventListener("change", function (ev) { Actions.saveSettings({ autoUpdateOnLaunch: ev.target.checked }); });
+    // FLAVORS-SPEC.md CS-F4 (section 2.5/6.5): saveSettings' own
+    // App.renderChrome() call already repaints the switcher (Store.
+    // visibleFlavours() reads this same setting), so PTR/XPTR/Beta appear
+    // or disappear from the pill row the instant this toggle is flipped.
+    Utils.qs("#toggle-show-test-realms").addEventListener("change", function (ev) { Actions.saveSettings({ showTestRealms: ev.target.checked }); });
     // E19: only visible/enabled while renderBrowsing() has shown the row
     // (the native host is running) - see that function's comment.
     Utils.qs("#toggle-adfilter").addEventListener("change", function (ev) { Actions.saveSettings({ adFilter: ev.target.checked }); });
@@ -5943,6 +6430,12 @@ const Host = (function () {
 const App = (function () {
   let idleTimer = null;
   let jobPollTimer = null;
+  // Security-review fix: id of the last machine-wide awaiting_flavour job
+  // (data.pendingFlavourChoice) this client auto-surfaced the picker for -
+  // see reloadState's own comment. Lets a user who closes the panel keep it
+  // closed across idle polls instead of it reopening every 5s, while still
+  // surfacing a genuinely NEW ask.
+  let pendingFlavourChoiceShownId = null;
   let autoCheckTimer = null;
   let uptimeTimer = null;
   let serverVersion = null;
@@ -6034,8 +6527,27 @@ const App = (function () {
     renderConnectivity();
     Components.Freshness.render("sidebar-freshness", { dotOnly: true });
     renderUpdateAllButton();
+    // FLAVORS-SPEC.md CS-F4: the switcher/Update All pair (zero DOM at <=1
+    // visible flavour) and the "Update & Play" label (section 6.3).
+    Components.Switcher.render();
+    renderUpdatePlayButton();
     applyBusyToStaticButtons();
     Components.Drawer.refresh();
+  }
+
+  // FLAVORS-SPEC.md CS-F4 (section 6.3/copy table): unchanged text/toast at
+  // <=1 VISIBLE flavour (principle 2) - "Update & Play [Label]" for Retail,
+  // "Update & Open Battle.net [Label]" for every other flavour once the
+  // switcher exists, reflecting whichever pill is currently active.
+  function renderUpdatePlayButton() {
+    const btn = Utils.qs("#btn-update-play");
+    const span = btn && btn.querySelector("span");
+    if (!span) return;
+    const visible = Store.visibleFlavours();
+    if (visible.length <= 1) { span.textContent = "Update & Play"; return; }
+    const active = Store.state.activeFlavour;
+    const meta = visible.filter(function (f) { return f.id === active; })[0] || visible[0];
+    span.textContent = (!meta || meta.id === "retail") ? ("Update & Play " + (meta ? meta.label : "Retail")) : ("Update & Open Battle.net " + meta.label);
   }
 
   // CS2 (UX-SPEC.md section 2.1): connectivity ("can the UI reach the local
@@ -6169,6 +6681,11 @@ const App = (function () {
         renderChrome();
         renderCurrentView();
         if (job.state === "running") { pollJob(jobId); return; }
+        // FLAVORS-SPEC.md CS-F3: awaiting_flavour is a dead end until the
+        // user picks one of the panel's choices (JobPanel.update just
+        // rendered the picker above) - never a finished-job toast, and
+        // nothing to reload yet since no addon has actually changed.
+        if (job.state === "awaiting_flavour") return;
         await reloadState(true);
         // Review fix (UX-SPEC.md 7 copy table / acceptance checklist item 8):
         // this toast used to be "Failed: " + raw job.error - the exact
@@ -6177,7 +6694,15 @@ const App = (function () {
         // job panel (Components.JobPanel.wholeJobFailureReason), and the
         // toast itself is just a transient nudge to look at the panel - the
         // raw text stays reachable only behind that panel's own Details.
-        const summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job) : Components.JobPanel.summarize(job.results);
+        // FLAVORS-SPEC.md CS-F4 (section 6.3/copy table): a non-Retail
+        // launch's own honest toast - never a silent "Launching WoW…"
+        // overpromise, per section 4.7's launch-reliability caveat. Retail
+        // (job.flavour is 'retail', or absent on a single-flavour machine)
+        // keeps today's exact wording via the unchanged summarize() branch.
+        const summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job)
+          : (job.kind === "launch" && job.flavour && job.flavour !== "retail")
+            ? "Addons updated. Check Battle.net — you may need to press Play."
+            : Components.JobPanel.summarize(job.results);
         Components.Toast.show(summary, job.state === "failed" ? "error" : "success");
         notifyIfUpdatesFound(job);
       } catch (err) {
@@ -6205,6 +6730,25 @@ const App = (function () {
       const nextFreshness = data.freshness || null;
       const nextLastCheckFailed = !!data.lastCheckFailed;
       const nextLastCheckError = data.lastCheckError || null;
+      // FLAVORS-SPEC.md CS-F4 (S5.2): the two fields present on every
+      // response regardless of ?flavour= - describe the MACHINE, not one
+      // flavour's data. installedFlavours always has at least one entry;
+      // activeFlavour falls back to its own id when the server ever omits
+      // it (should not happen, but keeps Store.state.activeFlavour from
+      // going null and silently disabling every flavour-scoped request).
+      const nextInstalledFlavours = data.installedFlavours || [];
+      const nextActiveFlavour = data.activeFlavour || data.flavour || (nextInstalledFlavours[0] && nextInstalledFlavours[0].id) || Store.state.activeFlavour;
+      // Security-review fix: a job in state "awaiting_flavour" is never
+      // attributed to any one flavour (Get-CurrentOrLastJobSummary skips
+      // it deliberately), so a CurseForge install link that lands in this
+      // state - curseforge-handler.vbs, run from the OS protocol handler,
+      // never reads the /api/jobs response body at all - used to leave the
+      // user with nothing visible: no picker, no toast, no error, the job
+      // just sat unresolved forever. The server now surfaces that same job
+      // machine-wide as data.pendingFlavourChoice regardless of which
+      // flavour is active; picked up here so it renders through the
+      // already-built awaiting_flavour picker (Components.JobPanel).
+      const nextPendingFlavourChoice = data.pendingFlavourChoice || null;
 
       // Round 4 fix: the idle poll (every 5s, see scheduleIdlePoll below) used
       // to call renderCurrentView() unconditionally on every tick, even when
@@ -6225,16 +6769,35 @@ const App = (function () {
         || nextClientBuild !== Store.state.clientBuild
         || nextFreshness !== Store.state.freshness
         || nextLastCheckFailed !== Store.state.lastCheckFailed
-        || nextLastCheckError !== Store.state.lastCheckError;
+        || nextLastCheckError !== Store.state.lastCheckError
+        || JSON.stringify(nextInstalledFlavours) !== JSON.stringify(Store.state.installedFlavours)
+        || nextActiveFlavour !== Store.state.activeFlavour
+        || JSON.stringify(nextPendingFlavourChoice) !== JSON.stringify(Store.state.pendingFlavourChoice);
 
       Store.set({
         addons: nextAddons, settings: nextSettings, lastRun: nextLastRun,
         job: nextJob, updatesCheckedAt: nextCheckedAt,
         clientBuild: nextClientBuild, clientInterface: nextClientInterface,
         freshness: nextFreshness, lastCheckFailed: nextLastCheckFailed, lastCheckError: nextLastCheckError,
+        installedFlavours: nextInstalledFlavours, activeFlavour: nextActiveFlavour,
+        pendingFlavourChoice: nextPendingFlavourChoice,
         loadingState: false, stateError: null
       });
       if (!afterJob) resumeJobPollingIfNeeded();
+      // Security-review fix: surface a newly-discovered pending
+      // awaiting_flavour job's picker exactly once (tracked by job id) -
+      // never re-forces the panel open on every idle poll if the user
+      // already closed it, but a genuinely different pending ask (a new
+      // id) still gets shown. Only auto-shown while no OTHER job is
+      // actively running, so it never steals the panel from a sync/install
+      // the user is already watching.
+      if (nextPendingFlavourChoice && nextPendingFlavourChoice.id !== pendingFlavourChoiceShownId
+        && (!nextJob || nextJob.state !== "running")) {
+        pendingFlavourChoiceShownId = nextPendingFlavourChoice.id;
+        Components.JobPanel.show(nextPendingFlavourChoice);
+      } else if (!nextPendingFlavourChoice) {
+        pendingFlavourChoiceShownId = null;
+      }
       if (changed) renderCurrentView();
       // Round 18 (tray stage B): the background-tray status line
       // (Views.settings) is fed by a separate endpoint (/api/tray/status,

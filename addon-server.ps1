@@ -41,6 +41,16 @@
                         Default: the .build.info next to the resolved AddOns
                         path's game root. Intended for tests - never reads
                         the real WoW folder when given.
+   -WowRoot <path>     FLAVORS-SPEC.md CS-F2: overrides multi-flavour
+                        detection's WoW root (Get-InstalledFlavours), the same
+                        way addon-sync.ps1's own -WowRoot does - used to point
+                        this server at the FLAVORS-SPEC.md section 8 synthetic
+                        fixture for local dev/test runs. Default: walk up from
+                        -Root the same way Resolve-EffectiveAddonsPath already
+                        does (parent leaf must be one of the six known
+                        flavour folder names) - never touches the real WoW
+                        folder unless -Root's own real deployment path leads
+                        there, unchanged from today.
 =====================================================================
 #>
 
@@ -50,7 +60,8 @@ param(
     [string]$AddonsPath,
     [int]$IdleMinutes = 20,
     [switch]$OpenBrowser,
-    [string]$BuildInfoPath
+    [string]$BuildInfoPath,
+    [string]$WowRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -217,6 +228,783 @@ function Get-StaticFilePath {
 }
 
 # =====================================================================
+# FLAVORS-SPEC.md CS-F2: multi-flavour detection + resolution tables.
+# Duplicated verbatim from addon-sync.ps1 (existing established
+# duplication pattern - this script never dot-sources the CLI, same as
+# Resolve-EffectiveAddonsPath/Get-PresentAddonFolders/Get-MissingDeps/the
+# compat-audit functions already are). Any future edit to one of these
+# names in addon-sync.ps1 (a new flavour, a new progression row) must be
+# mirrored here in the same change set - see that file's own doc comments
+# for the full rationale; kept terse here.
+# =====================================================================
+
+$Script:FlavourDefs = @(
+    [PSCustomObject]@{ Id = 'retail';      Folder = '_retail_';      Label = 'Retail';      Product = 'wow' }
+    [PSCustomObject]@{ Id = 'classic';     Folder = '_classic_';     Label = 'Classic';     Product = 'wow_classic' }
+    [PSCustomObject]@{ Id = 'classic_era'; Folder = '_classic_era_'; Label = 'Classic Era'; Product = 'wow_classic_era' }
+    [PSCustomObject]@{ Id = 'ptr';         Folder = '_ptr_';         Label = 'PTR';          Product = 'wowt' }
+    [PSCustomObject]@{ Id = 'xptr';        Folder = '_xptr_';        Label = 'PTR (2)';      Product = 'wowxptr' }
+    [PSCustomObject]@{ Id = 'beta';        Folder = '_beta_';        Label = 'Beta';         Product = 'wow_beta' }
+)
+$Script:FlavourFolderSet = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($fd in $Script:FlavourDefs) { [void]$Script:FlavourFolderSet.Add($fd.Folder) }
+
+$Script:TocEraSelectors = [ordered]@{
+    'retail'      = [PSCustomObject]@{ XFlavorTag = 'Mainline'; Suffixes = @('_Mainline', '-Mainline') }
+    'classic_era' = [PSCustomObject]@{ XFlavorTag = 'Vanilla';  Suffixes = @('_Vanilla', '_Classic', '-Classic') }
+    'tbc'         = [PSCustomObject]@{ XFlavorTag = 'TBC';      Suffixes = @('_TBC', '-BCC') }
+    'wrath'       = [PSCustomObject]@{ XFlavorTag = 'Wrath';    Suffixes = @('_Wrath', '-Wrath', '-WOTLKC') }
+    'cata'        = [PSCustomObject]@{ XFlavorTag = 'Cata';     Suffixes = @('_Cata') }
+    'mists'       = [PSCustomObject]@{ XFlavorTag = 'Mists';    Suffixes = @('_Mists') }
+}
+
+function Get-FlavourDef {
+    <# Looks up one $Script:FlavourDefs entry by id. $null when unrecognized. #>
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    foreach ($def in $Script:FlavourDefs) {
+        if ($def.Id -eq $Id) { return $def }
+    }
+    return $null
+}
+
+function ConvertTo-InterfaceNumber {
+    <# "12.1.0.69587" -> 120100 (major*10000 + minor*100 + patch). $null when unparsable. #>
+    param([string]$VersionText)
+
+    if (-not $VersionText) { return $null }
+    $parts = $VersionText -split '\.'
+    if ($parts.Count -lt 3) { return $null }
+    $maj = 0
+    $min = 0
+    $pat = 0
+    if ([int]::TryParse($parts[0], [ref]$maj) -and [int]::TryParse($parts[1], [ref]$min) -and [int]::TryParse($parts[2], [ref]$pat)) {
+        return ($maj * 10000) + ($min * 100) + $pat
+    }
+    return $null
+}
+
+function Get-BuildInfoRows {
+    <# Parses every data row of a pipe-delimited, typed-header .build.info file into {Product; Version} objects. Never throws. #>
+    param([string]$BuildInfoPath)
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $BuildInfoPath -or -not (Test-Path -LiteralPath $BuildInfoPath -PathType Leaf)) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $BuildInfoPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+    if (-not $lines -or $lines.Count -lt 2) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+
+    $headerCols = $lines[0] -split '\|'
+    $versionIdx = -1
+    $productIdx = -1
+    for ($i = 0; $i -lt $headerCols.Count; $i++) {
+        $colName = ($headerCols[$i] -split '!')[0].Trim()
+        if ($colName -eq 'Version') { $versionIdx = $i }
+        if ($colName -eq 'Product') { $productIdx = $i }
+    }
+    if ($versionIdx -lt 0 -or $productIdx -lt 0) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+
+    for ($r = 1; $r -lt $lines.Count; $r++) {
+        $line = $lines[$r]
+        if (-not $line -or $line.Trim().Length -eq 0) { continue }
+        $cols = $line -split '\|'
+        if ($cols.Count -le $productIdx -or $cols.Count -le $versionIdx) { continue }
+        $rows.Add([PSCustomObject]@{ Product = $cols[$productIdx].Trim(); Version = $cols[$versionIdx].Trim() })
+    }
+    Write-Output -NoEnumerate $rows
+}
+
+function Resolve-ClassicProgressionTypeId {
+    <# FLAVORS-SPEC S2.4's appendable Interface-range -> TypeId/Wago-value/version-prefix table. Falls back to Retail's row. #>
+    param($Interface = $null)
+
+    $ranges = @(
+        [PSCustomObject]@{ Min = 11500;  Max = 11599;  EraKey = 'classic_era'; EraLabel = 'Classic Era (Vanilla)';   TypeId = 67408; WagoValue = 'classic'; VersionPrefix = '1.15.' }
+        [PSCustomObject]@{ Min = 20500;  Max = 20599;  EraKey = 'tbc';         EraLabel = 'Burning Crusade Classic';  TypeId = 73246; WagoValue = 'bc';      VersionPrefix = '2.5.' }
+        [PSCustomObject]@{ Min = 30400;  Max = 30699;  EraKey = 'wrath';       EraLabel = 'Wrath Classic';            TypeId = 73713; WagoValue = 'wotlk';   VersionPrefix = '3.4.' }
+        [PSCustomObject]@{ Min = 38000;  Max = 38099;  EraKey = 'wrath';       EraLabel = 'Wrath Classic';            TypeId = 73713; WagoValue = 'wotlk';   VersionPrefix = '3.4.' }
+        [PSCustomObject]@{ Min = 40400;  Max = 40499;  EraKey = 'cata';        EraLabel = 'Cataclysm Classic';        TypeId = 77522; WagoValue = 'cata';    VersionPrefix = '4.4.' }
+        [PSCustomObject]@{ Min = 50500;  Max = 50599;  EraKey = 'mists';       EraLabel = 'Mists Classic';            TypeId = 79434; WagoValue = 'mop';     VersionPrefix = '5.5.' }
+        [PSCustomObject]@{ Min = 120000; Max = 129999; EraKey = 'retail';      EraLabel = 'Retail';                   TypeId = 517;   WagoValue = 'retail';  VersionPrefix = '12.' }
+    )
+
+    $ival = $null
+    if ($null -ne $Interface) {
+        try { $ival = [int]$Interface } catch { $ival = $null }
+    }
+
+    if ($null -ne $ival -and $ival -ne 0) {
+        foreach ($row in $ranges) {
+            if (($ival -ge $row.Min) -and ($ival -le $row.Max)) {
+                return [PSCustomObject]@{ EraKey = $row.EraKey; EraLabel = $row.EraLabel; TypeId = $row.TypeId; WagoValue = $row.WagoValue; VersionPrefix = $row.VersionPrefix }
+            }
+        }
+        # Security-review fix (mirrors addon-sync.ps1's copy exactly): a
+        # REAL, non-zero Interface matching no known range is a future
+        # Classic expansion this table doesn't cover yet - NOT the same as
+        # a missing/unreadable .build.info. Return the 'unknown' sentinel
+        # rather than silently falling through to Retail's TypeId/WagoValue.
+        return [PSCustomObject]@{ EraKey = 'unknown'; EraLabel = 'Unrecognized Classic client version'; TypeId = $null; WagoValue = $null; VersionPrefix = $null }
+    }
+    return [PSCustomObject]@{ EraKey = 'retail'; EraLabel = 'Retail'; TypeId = 517; WagoValue = 'retail'; VersionPrefix = '12.' }
+}
+
+function Get-CfFlavourMapping {
+    <# Centralizes S4.4 (CurseForge TypeId + gameVersions prefix) and S4.6 (Wago game_version field) for one -Flavor. #>
+    param([string]$Flavor = 'retail', $InstalledInterface = $null)
+
+    switch ($Flavor) {
+        'retail'      { return [PSCustomObject]@{ TypeId = 517; VersionPrefix = '12.'; WagoField = 'retail'; EraLabel = 'Retail'; EraKey = 'retail' } }
+        'classic_era' { return [PSCustomObject]@{ TypeId = 67408; VersionPrefix = '1.15.'; WagoField = 'classic'; EraLabel = 'Classic Era (Vanilla)'; EraKey = 'classic_era' } }
+        'classic' {
+            $prog = Resolve-ClassicProgressionTypeId -Interface $InstalledInterface
+            return [PSCustomObject]@{ TypeId = $prog.TypeId; VersionPrefix = $prog.VersionPrefix; WagoField = $prog.WagoValue; EraLabel = $prog.EraLabel; EraKey = $prog.EraKey }
+        }
+        default { return [PSCustomObject]@{ TypeId = 517; VersionPrefix = '12.'; WagoField = 'retail'; EraLabel = 'Retail'; EraKey = 'retail' } }
+    }
+}
+
+function Resolve-CfInstallFlavour {
+    <#
+      FLAVORS-SPEC.md CS-F3 S5.5: determines which of -InstalledFlavours a
+      CurseForge target actually supports, via its gameVersionTypeIds:
+        - -FileId given (the embedded-site/Get-New-Addons "Install" button
+          and any fileId-carrying deep link already know the exact file) -
+          fetches that ONE file's own gameVersionTypeIds.
+        - -FileId omitted (a bare add - Select-CfFile will pick the actual
+          file per flavour later, inside the CLI) - fetches the project's
+          recent files and unions their gameVersionTypeIds, since the
+          question here is only "does this project support installed
+          flavour X AT ALL", not "which exact file".
+      Keyless (no API key - same as every other CurseForge call in this
+      file); headers/user-agent mirror Test-DiagCfReachability's own
+      duplicated copy of addon-sync.ps1's Invoke-CfRequest (this script
+      never dot-sources the CLI).
+
+      Returns {MatchingFlavourIds = string[]; FetchError = <text-or-null>}.
+      FetchError set (network/parse failure) means MatchingFlavourIds is
+      meaningless and the caller must not treat an empty array as "case 4,
+      zero matches" - that failure mode is reported to the caller as a
+      distinct job-start error instead.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int64]$ProjectId,
+        $FileId,
+        [Parameter(Mandatory = $true)]$InstalledFlavours
+    )
+
+    $headers = @{ 'Accept' = 'application/json'; 'Referer' = 'https://www.curseforge.com/' }
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+
+    $typeIdSet = New-Object 'System.Collections.Generic.HashSet[int64]'
+    try {
+        if ($FileId) {
+            $uri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files/$FileId"
+            $resp = Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent $userAgent -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            $json = $resp.Content | ConvertFrom-Json
+            if ($json -and $json.data -and $json.data.gameVersionTypeIds) {
+                foreach ($t in $json.data.gameVersionTypeIds) { [void]$typeIdSet.Add([int64]$t) }
+            }
+        } else {
+            $uri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files?pageIndex=0&pageSize=20&sort=dateCreated&sortDescending=true&removeAlphas=true"
+            $resp = Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent $userAgent -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            $json = $resp.Content | ConvertFrom-Json
+            if ($json -and $json.data) {
+                foreach ($f in $json.data) {
+                    if ($f.gameVersionTypeIds) {
+                        foreach ($t in $f.gameVersionTypeIds) { [void]$typeIdSet.Add([int64]$t) }
+                    }
+                }
+            }
+        }
+    } catch {
+        return [PSCustomObject]@{ MatchingFlavourIds = @(); FetchError = "Could not check this addon's supported WoW versions: $($_.Exception.Message)" }
+    }
+
+    $matching = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($f in $InstalledFlavours) {
+        $mapping = Get-CfFlavourMapping -Flavor $f.id -InstalledInterface $f.clientInterface
+        if ($typeIdSet.Contains([int64]$mapping.TypeId)) {
+            [void]$matching.Add($f.id)
+        }
+    }
+    return [PSCustomObject]@{ MatchingFlavourIds = $matching.ToArray(); FetchError = $null }
+}
+
+function Get-TocXFlavorTag {
+    <# Reads a .toc's "## X-Flavor: <Tag>" line, trimmed, or $null. Never throws. #>
+    param([Parameter(Mandatory = $true)][string]$TocPath)
+
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $TocPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\s*##\s*X-Flavor\s*:\s*(.+?)\s*$') {
+            return $Matches[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Resolve-TocEraKey {
+    <# Maps -Flavor (+, for 'classic', -InstalledInterface) to one of $Script:TocEraSelectors' keys. #>
+    param([string]$Flavor = 'retail', $InstalledInterface = $null)
+
+    switch ($Flavor) {
+        'retail'      { return 'retail' }
+        'classic_era' { return 'classic_era' }
+        'classic' {
+            $ival = 0
+            if ($null -ne $InstalledInterface) {
+                try { $ival = [int]$InstalledInterface } catch { $ival = 0 }
+            }
+            return (Resolve-ClassicProgressionTypeId -Interface $ival).EraKey
+        }
+        default { return 'retail' }
+    }
+}
+
+function Get-InstalledFlavours {
+    <#
+      FLAVORS-SPEC S2.3: returns the WoW client flavours actually present
+      under $WowRoot, in S2.1's fixed order. "Installed" means
+      <WowRoot>\<folder>\Interface\AddOns exists. .build.info is
+      corroboration only. Never throws. -WowRoot, when given, is used
+      as-is (S8's fixture path included); omitted, it is resolved by
+      walking up from -ScriptRoot (default $PSScriptRoot) the same way
+      Resolve-EffectiveAddonsPath's own walk-up does, generalized from
+      "parent leaf must be _retail_" to "parent leaf must be one of S2.1's
+      known flavour folder names."
+    #>
+    param(
+        [string]$WowRoot,
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $result = New-Object 'System.Collections.Generic.List[object]'
+
+    $resolvedWowRoot = $WowRoot
+    if (-not $resolvedWowRoot -or $resolvedWowRoot.Trim().Length -eq 0) {
+        if ($ScriptRoot) {
+            $leaf = Split-Path -Path $ScriptRoot -Leaf
+            $parentDir = Split-Path -Path $ScriptRoot -Parent
+            if (($leaf -eq 'AddonSync') -and $parentDir) {
+                $parentLeaf = Split-Path -Path $parentDir -Leaf
+                if ($Script:FlavourFolderSet.Contains($parentLeaf)) {
+                    $resolvedWowRoot = Split-Path -Path $parentDir -Parent
+                }
+            }
+        }
+    }
+
+    if (-not $resolvedWowRoot -or -not (Test-Path -LiteralPath $resolvedWowRoot -PathType Container)) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+
+    $buildInfoPath = Join-Path -Path $resolvedWowRoot -ChildPath '.build.info'
+    $buildInfoRows = Get-BuildInfoRows -BuildInfoPath $buildInfoPath
+
+    foreach ($def in $Script:FlavourDefs) {
+        $folderPath = Join-Path -Path $resolvedWowRoot -ChildPath $def.Folder
+        $addonsPath = Join-Path -Path $folderPath -ChildPath 'Interface\AddOns'
+        if (-not (Test-Path -LiteralPath $addonsPath -PathType Container)) {
+            continue
+        }
+        $row = $null
+        foreach ($r in $buildInfoRows) {
+            if ($r.Product -eq $def.Product) { $row = $r; break }
+        }
+        $clientBuild = $null
+        $clientInterface = $null
+        if ($row) {
+            $clientBuild = $row.Version
+            $clientInterface = ConvertTo-InterfaceNumber -VersionText $row.Version
+        }
+        $result.Add([PSCustomObject]@{
+                id               = $def.Id
+                folder           = $def.Folder
+                label            = $def.Label
+                addonsPath       = $addonsPath
+                clientBuild      = $clientBuild
+                clientInterface  = $clientInterface
+                buildInfoRow     = $row
+                buildInfoMissing = ($null -eq $row)
+            })
+    }
+
+    $claimedProducts = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($def in $Script:FlavourDefs) { [void]$claimedProducts.Add($def.Product) }
+    try {
+        $subDirs = Get-ChildItem -LiteralPath $resolvedWowRoot -Directory -ErrorAction SilentlyContinue
+        foreach ($dir in $subDirs) {
+            if ($Script:FlavourFolderSet.Contains($dir.Name)) { continue }
+            $candidateAddons = Join-Path -Path $dir.FullName -ChildPath 'Interface\AddOns'
+            if (-not (Test-Path -LiteralPath $candidateAddons -PathType Container)) { continue }
+            $matchRow = $null
+            foreach ($r in $buildInfoRows) {
+                if (-not $claimedProducts.Contains($r.Product)) { $matchRow = $r; break }
+            }
+            if ($matchRow) {
+                $result.Add([PSCustomObject]@{
+                        id               = $matchRow.Product
+                        folder           = $dir.Name
+                        label            = $matchRow.Product
+                        addonsPath       = $candidateAddons
+                        clientBuild      = $matchRow.Version
+                        clientInterface  = (ConvertTo-InterfaceNumber -VersionText $matchRow.Version)
+                        buildInfoRow     = $matchRow
+                        buildInfoMissing = $false
+                    })
+                [void]$claimedProducts.Add($matchRow.Product)
+            }
+        }
+    } catch {
+    }
+
+    Write-Output -NoEnumerate $result
+}
+
+function Get-MigrationHomeFlavour {
+    <# Which flavours\<id>\ subfolder this AddonSync install's own pre-flavour top-level files belong under. Falls back to 'retail'. #>
+    param([string]$RootPath)
+
+    try {
+        $parentDir = Split-Path -Path $RootPath -Parent
+        if ($parentDir) {
+            $parentLeaf = Split-Path -Path $parentDir -Leaf
+            foreach ($def in $Script:FlavourDefs) {
+                if ($def.Folder -eq $parentLeaf) { return $def.Id }
+            }
+        }
+    } catch {
+    }
+    return 'retail'
+}
+
+function Invoke-FlavourMigration {
+    <#
+      FLAVORS-SPEC S3.3: one-time, idempotent, zero-data-loss migration of a
+      pre-flavour install's top-level addons.json/state.json/backups\ into
+      flavours\<homeFlavour>\ - duplicated from addon-sync.ps1's identical
+      function (logging swapped for Write-ServerLog since this script never
+      dot-sources the CLI). Called once at server startup, before any path
+      resolution - CS-F1's own notesForNext flagged this file list gap
+      explicitly ("a server-only first run would never migrate"); this
+      change set closes it by duplicating the call here too, so a server
+      that runs before the CLI ever has still migrates the shared folder.
+      Never throws - every step is best-effort and logged.
+    #>
+    param([Parameter(Mandatory = $true)][string]$RootPath)
+
+    $settingsPath = Join-Path -Path $RootPath -ChildPath 'settings.json'
+    $schemaVersion = 1
+    $settingsObj = $null
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $raw = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 -ErrorAction Stop
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                $settingsObj = $raw | ConvertFrom-Json -ErrorAction Stop
+                if ($null -ne $settingsObj.schemaVersion) {
+                    $schemaVersion = [int]$settingsObj.schemaVersion
+                }
+            }
+        } catch {
+            Write-ServerLog "Flavour migration: failed to read settings.json, treating as pre-flavour: $($_.Exception.Message)"
+        }
+    }
+
+    if ($schemaVersion -ge 2) {
+        return
+    }
+
+    $homeFlavour = Get-MigrationHomeFlavour -RootPath $RootPath
+    $flavoursDir = Join-Path -Path $RootPath -ChildPath 'flavours'
+    $homeFlavourDir = Join-Path -Path $flavoursDir -ChildPath $homeFlavour
+    if (-not (Test-Path -LiteralPath $homeFlavourDir)) {
+        New-Item -ItemType Directory -Path $homeFlavourDir -Force | Out-Null
+    }
+
+    $addonsJsonPath = Join-Path -Path $RootPath -ChildPath 'addons.json'
+    $stateJsonPath = Join-Path -Path $RootPath -ChildPath 'state.json'
+    $backupsDirPath = Join-Path -Path $RootPath -ChildPath 'backups'
+    $hasAddonsJson = Test-Path -LiteralPath $addonsJsonPath -PathType Leaf
+    $hasStateJson = Test-Path -LiteralPath $stateJsonPath -PathType Leaf
+    $hasBackupsDir = Test-Path -LiteralPath $backupsDirPath -PathType Container
+
+    $existingBackups = $null
+    if (Test-Path -LiteralPath $flavoursDir -PathType Container) {
+        $existingBackups = Get-ChildItem -LiteralPath $flavoursDir -Directory -Filter '_migration-backup-*' -ErrorAction SilentlyContinue
+    }
+    if (($hasAddonsJson -or $hasStateJson -or $hasBackupsDir) -and (-not $existingBackups -or (@($existingBackups)).Count -eq 0)) {
+        try {
+            $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+            $backupDir = Join-Path -Path $flavoursDir -ChildPath ("_migration-backup-{0}" -f $stamp)
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+            if ($hasAddonsJson) {
+                Copy-Item -LiteralPath $addonsJsonPath -Destination (Join-Path -Path $backupDir -ChildPath 'addons.json') -Force
+            }
+            if ($hasStateJson) {
+                Copy-Item -LiteralPath $stateJsonPath -Destination (Join-Path -Path $backupDir -ChildPath 'state.json') -Force
+            }
+            if ($hasBackupsDir) {
+                Copy-Item -LiteralPath $backupsDirPath -Destination (Join-Path -Path $backupDir -ChildPath 'backups') -Recurse -Force
+            }
+            Write-ServerLog "Flavour migration: pre-move backup copied to $backupDir"
+        } catch {
+            Write-ServerLog "Flavour migration: failed to create pre-move backup: $($_.Exception.Message)"
+        }
+    }
+
+    $moveOk = $true
+    foreach ($name in @('addons.json', 'state.json', 'backups')) {
+        $sourcePath = Join-Path -Path $RootPath -ChildPath $name
+        $destPath = Join-Path -Path $homeFlavourDir -ChildPath $name
+        if (Test-Path -LiteralPath $destPath) {
+            continue
+        }
+        if (Test-Path -LiteralPath $sourcePath) {
+            try {
+                Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
+                Write-ServerLog "Flavour migration: moved $name into $homeFlavourDir"
+            } catch {
+                $moveOk = $false
+                Write-ServerLog "Flavour migration: failed to move $name into $homeFlavourDir : $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if (-not $moveOk) {
+        return
+    }
+
+    $newSettings = $settingsObj
+    if (-not $newSettings) {
+        $newSettings = [PSCustomObject]@{}
+    }
+    if ($newSettings.PSObject.Properties.Match('schemaVersion').Count -gt 0) {
+        $newSettings.schemaVersion = 2
+    } else {
+        $newSettings | Add-Member -MemberType NoteProperty -Name 'schemaVersion' -Value 2
+    }
+    try {
+        $json = ConvertTo-Json -InputObject $newSettings -Depth 10
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $tmpPath = "$settingsPath.tmp"
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $settingsPath -Force
+        Write-ServerLog 'Flavour migration: schemaVersion set to 2'
+    } catch {
+        Write-ServerLog "Flavour migration: failed to write schemaVersion to settings.json: $($_.Exception.Message)"
+    }
+}
+
+# =====================================================================
+# FLAVORS-SPEC.md CS-F2: per-request flavour resolution.
+#
+# This server is a single-threaded HttpListener request loop (see the
+# file's own header comment) - exactly one request's handler ever runs at
+# a time. That makes it safe for Invoke-Route to resolve one flavour per
+# incoming request and stash it in $Script:CurrentFlavour /
+# $Script:AddonsJsonPath / $Script:BackupsPath / $Script:ClientBuildInfo
+# for the DURATION of that one handler call - every addon-scoped function
+# below (Get-AddonRecords, Resolve-EffectiveAddonsPath's own default,
+# Handle-Open's 'addons'/'backups' cases, etc.) keeps reading those same
+# script-scope variables completely unchanged; only the VALUE they hold
+# now varies per request instead of being fixed once at startup. A
+# long-running background job (Start-Job's actual CLI child process) is
+# unaffected by a LATER request changing this context, because its own
+# process argument list (New-CliProcessArgs) is built synchronously,
+# once, at the moment the job starts - see that function's own comment.
+# =====================================================================
+
+function Get-CurrentInstalledFlavours {
+    <#
+      Live per-request flavour detection (S8's acceptance bar: "detection is
+      live, not cached"). Cheap (a handful of Test-Path calls) - recomputed
+      on every request rather than cached at startup, so a flavour that
+      appears or disappears mid-session (installing/uninstalling a client)
+      is picked up on the very next request.
+    #>
+    return (Get-InstalledFlavours -WowRoot $Script:WowRootOverride -ScriptRoot $Script:Root)
+}
+
+function Get-DefaultFlavourId {
+    <#
+      FLAVORS-SPEC.md S4.1's default rule, server-side equivalent: 'retail'
+      when installed, else the first flavour Get-CurrentInstalledFlavours
+      returns, else 'retail' (byte-identical fallback when nothing at all
+      can be detected - e.g. a dev checkout with no real WoW folder nearby,
+      matching today's single-flavour-only behavior exactly).
+    #>
+    param($InstalledFlavours)
+
+    foreach ($f in $InstalledFlavours) {
+        if ($f.id -eq 'retail') { return 'retail' }
+    }
+    foreach ($f in $InstalledFlavours) {
+        return $f.id
+    }
+    return 'retail'
+}
+
+function Get-QueryFlavour {
+    <# Reads ?flavour= (preferred) or ?flavor= (alias, S5.1) from the request, trimmed/lowercased. $null when neither is present. #>
+    param($Context)
+
+    $q = $Context.Request.QueryString
+    $val = $q['flavour']
+    if (-not $val) { $val = $q['flavor'] }
+    if (-not $val) { return $null }
+    $val = $val.Trim().ToLowerInvariant()
+    if ($val.Length -eq 0) { return $null }
+    return $val
+}
+
+# FLAVORS-SPEC.md S5.1: the small, fixed set of addon-scoped endpoints that
+# 400 ("flavour required") when ?flavour= is omitted AND more than one
+# flavour is installed. Enumerated once here so the router and this list
+# stay the single source of truth, rather than an unenforced per-handler
+# convention - a missed call site would otherwise silently serve the wrong
+# flavour's data instead of failing loudly in dev. Keyed the same way
+# $Script:Routes is (Method + Pattern), so Invoke-Route can match against
+# it directly without a second, separately-maintained handler-name list.
+#
+# POST /api/jobs is deliberately NOT listed here even though it is
+# addon-scoped for every OTHER job kind - S5.4's {kind:"update-all-flavours"}
+# is a legitimate exception (it targets every installed flavour AT ONCE, by
+# definition, so requiring ?flavour= for it would be incoherent) and the
+# router cannot see the POST body's own `kind` field before dispatch to
+# decide which rule applies. Handle-JobsPost enforces the identical
+# "flavour required" 400 itself, for every kind EXCEPT update-all-flavours,
+# right after parsing `kind` from the body - see its own comment.
+#
+# GET /api/state is ALSO deliberately NOT listed here (verification-pass
+# fix), even though its addon-list payload is exactly as flavour-scoped as
+# every endpoint below it. It is the client's own bootstrap/discovery call:
+# a fresh SPA load starts with zero knowledge of which/how-many flavours
+# are installed (Store.installedFlavours is []), so it has no correct
+# ?flavour= value to send on its very first request - hard-400'ing that
+# first call created a permanent chicken-and-egg deadlock on any real (non
+# -mock) machine with more than one installed flavour: the client could
+# never learn it had multiple flavours because the one call that would
+# tell it always failed for omitting a param it did not yet know it needed.
+# Falling through to Resolve-RequestFlavour's own settings.activeFlavour-or-
+# default fallback (below) resolves this exactly the way principle 5
+# already intends for non-flavour-scoped endpoints: a pure UI-continuity
+# guess, never load-bearing, and self-correcting immediately - the
+# response's own installedFlavours/activeFlavour/flavour fields tell the
+# client exactly what flavour it just got, the client adopts that into
+# Store.state (see ui/app.js's reloadState), and every SUBSEQUENT call
+# (including the next /api/state poll) correctly carries an explicit
+# ?flavour= once Store.hasMultipleFlavours() can answer correctly.
+$Script:FlavourScopedEndpoints = @(
+    @{ Method = 'POST'; Pattern = '^/api/addons/(?<id>[^/]+)/ignore$' }
+    @{ Method = 'POST'; Pattern = '^/api/addons/(?<id>[^/]+)/unpin$' }
+    @{ Method = 'GET'; Pattern = '^/api/addons/(?<id>[^/]+)/files$' }
+    @{ Method = 'GET'; Pattern = '^/api/scan$' }
+    @{ Method = 'POST'; Pattern = '^/api/scan/delete$' }
+    @{ Method = 'GET'; Pattern = '^/api/export$' }
+    @{ Method = 'POST'; Pattern = '^/api/import$' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/search$' }
+)
+
+function Test-FlavourScopedEndpoint {
+    param([string]$Method, [string]$Path)
+
+    foreach ($e in $Script:FlavourScopedEndpoints) {
+        if ($e.Method -eq $Method -and $Path -match $e.Pattern) { return $true }
+    }
+    return $false
+}
+
+function Resolve-RequestFlavour {
+    <#
+      S5.1's explicit-query-param addressing, resolved once per request.
+      Returns {Ok; Flavor; StatusCode; Error}. Ok=$false means the caller
+      must 400 with Error and never dispatch to the matched handler at all.
+
+      - A ?flavour=/?flavor= value not among the CURRENTLY installed
+        flavours is always a clean 400 (whether or not the endpoint is in
+        $Script:FlavourScopedEndpoints) - never silently coerced to
+        something else.
+      - Omitted, with <=1 installed flavour: resolves to that one flavour
+        (or the S4.1 default when none at all could be detected) - a
+        single-flavour machine NEVER needs to send the param, so today's
+        UI/scripts/scheduled tasks work completely unchanged (principle 2).
+      - Omitted, with >1 installed: a flavour-scoped endpoint 400s
+        ("flavour required"); any other endpoint (this now explicitly
+        includes GET /api/state - see $Script:FlavourScopedEndpoints' own
+        comment for why the client's bootstrap call cannot be in that list)
+        falls back to settings.json's activeFlavour (or the S4.1 default)
+        as a pure UI-continuity convenience, never load-bearing for a data
+        operation (principle 5) - Get-Settings is cheap (a single small
+        JSON read).
+    #>
+    param($Context, [string]$Method, [string]$Path)
+
+    $installed = Get-CurrentInstalledFlavours
+    $requested = Get-QueryFlavour -Context $Context
+
+    if ($requested) {
+        # Security-review fix: validate the raw query value's SHAPE before
+        # anything else (defense in depth) - this is a raw, attacker-
+        # controlled string that Set-CurrentFlavourContext later feeds
+        # straight into Join-Path to build $Script:AddonsJsonPath/
+        # $Script:BackupsPath. Known flavour ids are always lowercase
+        # letters/digits/underscore; reject anything else outright rather
+        # than letting a path-traversal-shaped value (e.g. "..\..\Windows")
+        # reach that Join-Path call at all.
+        if ($requested -notmatch '^[a-z0-9_]+$') {
+            return [PSCustomObject]@{ Ok = $false; Flavor = $null; StatusCode = 400; Error = "flavour '$requested' is not installed" }
+        }
+
+        $isInstalled = $false
+        foreach ($f in $installed) {
+            if ($f.id -eq $requested) { $isInstalled = $true; break }
+        }
+        # Security-review fix: this 400 used to be gated on
+        # "(@($installed)).Count -gt 0", so a $requested value was let
+        # through UNVALIDATED whenever Get-CurrentInstalledFlavours
+        # returned zero flavours (a real, reachable state - a bad/dev
+        # -WowRoot override, or detection failing to find a real WoW
+        # folder) - Set-CurrentFlavourContext would then Join-Path that raw
+        # value straight into the addons.json/backups path with zero
+        # sanitization. A requested flavour that isn't in the CURRENTLY
+        # installed list must always 400, regardless of how many flavours
+        # were detected.
+        if (-not $isInstalled) {
+            return [PSCustomObject]@{ Ok = $false; Flavor = $null; StatusCode = 400; Error = "flavour '$requested' is not installed" }
+        }
+        return [PSCustomObject]@{ Ok = $true; Flavor = $requested; StatusCode = 200; Error = $null }
+    }
+
+    if ((@($installed)).Count -le 1) {
+        return [PSCustomObject]@{ Ok = $true; Flavor = (Get-DefaultFlavourId -InstalledFlavours $installed); StatusCode = 200; Error = $null }
+    }
+
+    if (Test-FlavourScopedEndpoint -Method $Method -Path $Path) {
+        return [PSCustomObject]@{ Ok = $false; Flavor = $null; StatusCode = 400; Error = 'flavour required' }
+    }
+
+    $active = $null
+    try { $active = (Get-Settings).activeFlavour } catch { $active = $null }
+    if ($active) {
+        foreach ($f in $installed) {
+            if ($f.id -eq $active) { return [PSCustomObject]@{ Ok = $true; Flavor = $active; StatusCode = 200; Error = $null } }
+        }
+    }
+    return [PSCustomObject]@{ Ok = $true; Flavor = (Get-DefaultFlavourId -InstalledFlavours $installed); StatusCode = 200; Error = $null }
+}
+
+function Set-CurrentFlavourContext {
+    <#
+      Stashes the resolved flavour for the request currently in flight (see
+      this section's own header comment for why a script-scope variable is
+      safe here). $Script:AddonsJsonPath/$Script:BackupsPath move under
+      FLAVORS-SPEC.md S3.1's flavours\<id>\ subfolder - only that one
+      subfolder is ever created (by New-CliProcessArgs's underlying CLI
+      call, or by this function's own on-demand creation just below), never
+      every known flavour's. $Script:ClientBuildInfo is re-resolved against
+      THIS flavour's own .build.info row so /api/state's clientBuild/
+      clientInterface (and Get-AddonCompat's client-side comparison) are
+      always that flavour's own values, not always retail's.
+    #>
+    param([string]$Flavor)
+
+    if (-not $Flavor) { $Flavor = 'retail' }
+    $Script:CurrentFlavour = $Flavor
+
+    $flavourDir = Join-Path -Path (Join-Path -Path $Script:Root -ChildPath 'flavours') -ChildPath $Flavor
+    $Script:AddonsJsonPath = Join-Path -Path $flavourDir -ChildPath 'addons.json'
+    $Script:BackupsPath = Join-Path -Path $flavourDir -ChildPath 'backups'
+
+    $buildInfoPath = $Script:BuildInfoPathOverride
+    if (-not $buildInfoPath) {
+        $buildInfoPath = Get-DefaultBuildInfoPath -AddonsPathResolved (Resolve-EffectiveAddonsPath -Flavor $Flavor)
+    }
+    $Script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $buildInfoPath -Flavor $Flavor
+}
+
+function Get-FlavourUpdateAvailable {
+    <# The mutable per-flavour {key: {fileId, version}} hashtable for -Flavor, creating an empty one on first touch. #>
+    param([string]$Flavor)
+
+    if (-not $Script:UpdateAvailableByFlavour.ContainsKey($Flavor)) {
+        $Script:UpdateAvailableByFlavour[$Flavor] = @{}
+    }
+    return $Script:UpdateAvailableByFlavour[$Flavor]
+}
+
+function Get-FlavourLastRun {
+    param([string]$Flavor)
+    if ($Script:LastRunByFlavour.ContainsKey($Flavor)) { return $Script:LastRunByFlavour[$Flavor] }
+    return $null
+}
+
+function Get-FlavourUpdatesCheckedAt {
+    param([string]$Flavor)
+    if ($Script:UpdatesCheckedAtByFlavour.ContainsKey($Flavor)) { return $Script:UpdatesCheckedAtByFlavour[$Flavor] }
+    return $null
+}
+
+function Get-FlavourLastCheckFailed {
+    param([string]$Flavor)
+    if ($Script:LastCheckFailedByFlavour.ContainsKey($Flavor)) { return [bool]$Script:LastCheckFailedByFlavour[$Flavor] }
+    return $false
+}
+
+function Get-FlavourLastCheckError {
+    param([string]$Flavor)
+    if ($Script:LastCheckErrorByFlavour.ContainsKey($Flavor)) { return $Script:LastCheckErrorByFlavour[$Flavor] }
+    return $null
+}
+
+function Get-CurrentJobForFlavour {
+    <# The single "current" (in-flight) job for -Flavor, or $null - FLAVORS-SPEC.md CS-F2 S5.4's per-flavour Test-JobBusy scoping. #>
+    param([string]$Flavor)
+    if ($Script:CurrentJobByFlavour.ContainsKey($Flavor)) { return $Script:CurrentJobByFlavour[$Flavor] }
+    return $null
+}
+
+function Set-CurrentJobForFlavour {
+    param([string]$Flavor, $Job)
+    if ($null -eq $Job) {
+        if ($Script:CurrentJobByFlavour.ContainsKey($Flavor)) { $Script:CurrentJobByFlavour.Remove($Flavor) }
+    } else {
+        $Script:CurrentJobByFlavour[$Flavor] = $Job
+    }
+}
+
+function Clear-CurrentJobIfMatches {
+    <# Clears the current-job slot for $Job's OWN flavour, but only if it still holds exactly this job (never clobbers a different, later job that may already have started for that same flavour). #>
+    param($Job)
+    if (-not $Job) { return }
+    $existing = Get-CurrentJobForFlavour -Flavor $Job.flavour
+    if ($existing -and $existing.id -eq $Job.id) {
+        Set-CurrentJobForFlavour -Flavor $Job.flavour -Job $null
+    }
+}
+
+# =====================================================================
 # settings.json
 # =====================================================================
 
@@ -277,6 +1065,22 @@ function Get-DefaultSettings {
         backgroundUpdates          = $false
         backgroundIntervalMinutes  = 120
         runAtStartup               = $false
+        # FLAVORS-SPEC.md CS-F2 S3.4: schemaVersion 2 is what
+        # Invoke-FlavourMigration stamps once every existing top-level
+        # addons.json/state.json/backups\ has landed under flavours\<id>\ -
+        # a BRAND NEW install (no pre-existing settings.json at all) never
+        # needs migrating, so it starts at 2 directly, never 1. activeFlavour
+        # is a UI-continuity default only (S3.4 - "never consulted
+        # server-side to decide what a data-mutating request means"), read
+        # by Resolve-RequestFlavour's own non-flavour-scoped-endpoint
+        # fallback and nowhere else; 'retail' here is just the shape's own
+        # default value, not a claim that retail is installed - the actual
+        # default flavour for an omitted ?flavour= is always computed live
+        # (Get-DefaultFlavourId), never read from this field. showTestRealms
+        # (S2.5) is the "Show test realms (PTR/Beta)" toggle, off by default.
+        schemaVersion              = 2
+        activeFlavour              = 'retail'
+        showTestRealms             = $false
     }
 }
 
@@ -345,6 +1149,17 @@ function Get-Settings {
             $result.backgroundIntervalMinutes = $interval
         }
         if ($null -ne $obj.runAtStartup) { $result.runAtStartup = [bool]$obj.runAtStartup }
+        # FLAVORS-SPEC.md CS-F2 S3.4: schemaVersion is normally stamped
+        # directly by Invoke-FlavourMigration (a raw settings.json read/write,
+        # bypassing this function entirely - same reason hostWindow/hostTheme
+        # are host-written directly) rather than through Save-Settings, but
+        # is still read through here like every other field so GET
+        # /api/settings never has to special-case it. activeFlavour/
+        # showTestRealms are plain pass-throughs, same pattern as adFilter/
+        # cfFocus above.
+        if ($null -ne $obj.schemaVersion) { $result.schemaVersion = [int]$obj.schemaVersion }
+        if ($null -ne $obj.activeFlavour) { $result.activeFlavour = [string]$obj.activeFlavour }
+        if ($null -ne $obj.showTestRealms) { $result.showTestRealms = [bool]$obj.showTestRealms }
         # Round 16 (E22, 2026-09-04, at Eric's explicit request): the
         # CurseForge API key feature is removed entirely. An existing
         # settings.json from before this round may still carry a stored
@@ -400,6 +1215,15 @@ function Get-SettingsView {
         backgroundUpdates         = $Settings.backgroundUpdates
         backgroundIntervalMinutes = $Settings.backgroundIntervalMinutes
         runAtStartup              = $Settings.runAtStartup
+        # FLAVORS-SPEC.md CS-F2 S3.4/S5.2: pass through unmasked, same as
+        # adFilter/cfFocus - none of these are secrets. schemaVersion is
+        # informational only (never drives a client decision - S5.2's
+        # installedFlavours/addons already carry everything the UI needs);
+        # activeFlavour/showTestRealms are the two client-writable ones (see
+        # Handle-SettingsPut).
+        schemaVersion     = $Settings.schemaVersion
+        activeFlavour     = $Settings.activeFlavour
+        showTestRealms    = $Settings.showTestRealms
     }
 }
 
@@ -507,30 +1331,85 @@ function Get-AddonRecords {
 # =====================================================================
 
 function Resolve-EffectiveAddonsPath {
+    <#
+      FLAVORS-SPEC.md S4.2/CS-F2: gains -Flavor (default $Script:CurrentFlavour,
+      itself defaulting to 'retail' - see Set-CurrentFlavourContext), mirroring
+      addon-sync.ps1's identical Resolve-AddonsPath parameterization. The
+      -Root-parent walk-up is generalized from "leaf must equal _retail_" to
+      "leaf must be one of the six known flavour folder names"
+      ($Script:FlavourFolderSet) - this machine's own default call (-Flavor
+      omitted -> 'retail') resolves byte-identically to before, since
+      _retail_ is one of those six names. $Script:WowRootOverride (-WowRoot),
+      when set, is used directly instead of walking up from -Root at all -
+      the same fixture-testing override addon-sync.ps1's own -WowRoot gives.
+      -AddonsPathOverride (this script's own -AddonsPath) still wins outright
+      over everything, unchanged.
+    #>
+    param([string]$Flavor)
+
     if ($Script:AddonsPathOverride) {
         return $Script:AddonsPathOverride
     }
 
-    $leaf = Split-Path -Path $Script:Root -Leaf
-    $parentDir = Split-Path -Path $Script:Root -Parent
-    if (($leaf -eq 'AddonSync') -and $parentDir) {
-        $parentLeaf = Split-Path -Path $parentDir -Leaf
-        if ($parentLeaf -eq '_retail_') {
-            return Join-Path -Path $parentDir -ChildPath 'Interface\AddOns'
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
+    $def = Get-FlavourDef -Id $Flavor
+    if (-not $def) { return $null }
+
+    $resolvedWowRoot = $Script:WowRootOverride
+    if (-not $resolvedWowRoot -or $resolvedWowRoot.Trim().Length -eq 0) {
+        $leaf = Split-Path -Path $Script:Root -Leaf
+        $parentDir = Split-Path -Path $Script:Root -Parent
+        if (($leaf -eq 'AddonSync') -and $parentDir) {
+            $parentLeaf = Split-Path -Path $parentDir -Leaf
+            if ($Script:FlavourFolderSet.Contains($parentLeaf)) {
+                $resolvedWowRoot = Split-Path -Path $parentDir -Parent
+            }
         }
     }
-    return $null
+
+    if (-not $resolvedWowRoot) {
+        return $null
+    }
+
+    return Join-Path -Path (Join-Path -Path $resolvedWowRoot -ChildPath $def.Folder) -ChildPath 'Interface\AddOns'
 }
 
 function Get-WowRootPath {
-    $addonsPath = Resolve-EffectiveAddonsPath
+    <#
+      UNCHANGED return semantics from before this change set - despite the
+      name, this returns the FLAVOUR's own folder (e.g. <WowRoot>\_retail_),
+      one level above Interface\AddOns's parent - NOT the true grandparent
+      <WowRoot> (see Get-FlavourWowRootPath below for that). Kept exactly as
+      it was (byte-identical for -Flavor 'retail'/omitted, per this feature's
+      non-negotiable "zero behavior change at n=1" bar) - Get-SettingsView's
+      existing `wowRoot` field must not change shape for a single-flavour
+      machine. Now flavour-aware via Resolve-EffectiveAddonsPath's own
+      -Flavor param, for future multi-flavour callers.
+    #>
+    param([string]$Flavor)
+
+    $addonsPath = Resolve-EffectiveAddonsPath -Flavor $Flavor
     if (-not $addonsPath) {
         return $null
     }
     try {
         $interfaceDir = Split-Path -Path $addonsPath -Parent
-        $retailDir = Split-Path -Path $interfaceDir -Parent
-        return $retailDir
+        $flavourDir = Split-Path -Path $interfaceDir -Parent
+        return $flavourDir
+    } catch {
+        return $null
+    }
+}
+
+function Get-FlavourWowRootPath {
+    <# The true <WowRoot> (three levels above Interface\AddOns - the folder that would contain _retail_/_classic_/etc side by side). $null when unresolvable. #>
+    param([string]$Flavor)
+
+    $flavourDir = Get-WowRootPath -Flavor $Flavor
+    if (-not $flavourDir) { return $null }
+    try {
+        return (Split-Path -Path $flavourDir -Parent)
     } catch {
         return $null
     }
@@ -629,38 +1508,117 @@ function Split-TocDepList {
 
 function Get-PrimaryTocFile {
     <#
-      Fix pass: duplicate of addon-sync.ps1's identically-named function
-      (this script never dot-sources the CLI) - picks the .toc file WoW
-      retail actually loads for one installed folder, out of however many
-      game-flavor variants a package ships in the same folder (a base
-      "<folder>.toc" for one client, often NOT retail, alongside a
-      "<folder>_Mainline.toc"/"<folder>-Mainline.toc" specifically for
-      retail). Order: "<folder>_Mainline.toc", "<folder>-Mainline.toc",
-      "<folder>.toc", else the first .toc found. $null when there is none.
-      Never throws.
+      Duplicate of addon-sync.ps1's identically-named function (this script
+      never dot-sources the CLI) - picks the .toc file one flavour/era
+      actually loads for an installed folder, out of however many game-
+      flavor variants a package ships in the same folder.
+
+      FLAVORS-SPEC.md S4.5/CS-F2: gains -Flavor (default 'retail') and
+      -InstalledInterface (consulted only when -Flavor is 'classic', to
+      resolve which rolling-progression era's .toc to prefer, S2.4).
+      Selection order, primary signal first:
+        1. Any .toc in the folder carrying "## X-Flavor: <Tag>" whose value
+           matches the target flavour/era's tag - authoritative wherever
+           present, regardless of filename.
+        2. The target flavour/era's filename-suffix table
+           ($Script:TocEraSelectors), in try-order.
+        3. Bare "<FolderName>.toc" - owned by whichever of the three groups
+           (Retail / Classic Era / Classic's rolling progression) is the SOLE
+           one with no suffixed file present in this folder; bare defaults to
+           Retail whenever that is not exactly one group (S4.5's caveat).
+        4. First .toc file found (today's last-resort, unchanged).
+      Returns a FileInfo, or $null when the folder has no .toc file at all.
+      Never throws. Byte-identical to the pre-flavour selection for every
+      existing retail call site (-Flavor defaults to 'retail').
     #>
     param(
         [Parameter(Mandatory = $true)][string]$FolderPath,
-        [Parameter(Mandatory = $true)][string]$FolderName
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $tocFiles = Get-ChildItem -LiteralPath $FolderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
     if (-not $tocFiles) {
         return $null
     }
-    # Built with -f, not "$FolderName_Mainline.toc" - PowerShell would parse
-    # the latter as ${FolderName_Mainline} (underscore is a valid identifier
-    # character), not $FolderName followed by literal text.
-    $preferredNames = @(
-        ('{0}_Mainline.toc' -f $FolderName),
-        ('{0}-Mainline.toc' -f $FolderName),
-        ('{0}.toc' -f $FolderName)
-    )
-    foreach ($preferredName in $preferredNames) {
-        foreach ($t in $tocFiles) {
-            if ($t.Name -eq $preferredName) { return $t }
+
+    $eraKey = Resolve-TocEraKey -Flavor $Flavor -InstalledInterface $InstalledInterface
+    $selector = $Script:TocEraSelectors[$eraKey]
+    if (-not $selector) {
+        # No real selector row for this era (e.g. an unrecognized future
+        # Classic-progression Interface range) - do NOT fall back to the
+        # Retail selector here, or an unrecognized Classic client would
+        # silently prefer a Retail-tagged/suffixed file over the correct
+        # Classic one in steps 1-2. Use a selector that can never match so
+        # selection falls through to step 3's bare-file group logic (which
+        # already folds 'unknown' into the 'classic' group correctly) and
+        # then step 4's first-found fallback.
+        $selector = [PSCustomObject]@{ XFlavorTag = $null; Suffixes = @() }
+    }
+
+    # 1. X-Flavor tag - authoritative wherever present.
+    foreach ($t in $tocFiles) {
+        $tag = Get-TocXFlavorTag -TocPath $t.FullName
+        if ($tag -and ($tag -eq $selector.XFlavorTag)) {
+            return $t
         }
     }
+
+    # 2. Filename-suffix table for the target flavour/era. Built with -f
+    # rather than "$FolderName_Mainline.toc" - PowerShell would parse the
+    # latter as the variable ${FolderName_Mainline} (underscore is a valid
+    # identifier character), not $FolderName followed by literal text.
+    foreach ($suffix in $selector.Suffixes) {
+        $preferredName = '{0}{1}.toc' -f $FolderName, $suffix
+        foreach ($t in $tocFiles) {
+            if ($t.Name -eq $preferredName) {
+                return $t
+            }
+        }
+    }
+
+    # 3. Bare "<FolderName>.toc" - S4.5's caveat, implemented exactly: build
+    # the suffix-to-flavour map for the THREE first-class groups (Retail;
+    # Classic Era; Classic's rolling progression collapsed into one group),
+    # scan which groups have a matching suffixed file present in THIS
+    # folder, and only attribute the bare file to a non-retail group when it
+    # is the SOLE unclaimed one of the three - else bare always means retail.
+    $bareGroupClaimed = @{
+        'retail'      = $false
+        'classic_era' = $false
+        'classic'     = $false
+    }
+    foreach ($otherKey in $Script:TocEraSelectors.Keys) {
+        $group = 'classic'
+        if ($otherKey -eq 'retail') { $group = 'retail' }
+        elseif ($otherKey -eq 'classic_era') { $group = 'classic_era' }
+        $otherSelector = $Script:TocEraSelectors[$otherKey]
+        foreach ($suffix in $otherSelector.Suffixes) {
+            $otherName = '{0}{1}.toc' -f $FolderName, $suffix
+            foreach ($t in $tocFiles) {
+                if ($t.Name -eq $otherName) { $bareGroupClaimed[$group] = $true }
+            }
+        }
+    }
+    $unclaimedGroups = @($bareGroupClaimed.Keys | Where-Object { -not $bareGroupClaimed[$_] })
+    $bareOwnerGroup = 'retail'
+    if ($unclaimedGroups.Count -eq 1) {
+        $bareOwnerGroup = $unclaimedGroups[0]
+    }
+    $targetGroup = 'classic'
+    if ($eraKey -eq 'retail') { $targetGroup = 'retail' }
+    elseif ($eraKey -eq 'classic_era') { $targetGroup = 'classic_era' }
+    if ($bareOwnerGroup -eq $targetGroup) {
+        $bareName = '{0}.toc' -f $FolderName
+        foreach ($t in $tocFiles) {
+            if ($t.Name -eq $bareName) {
+                return $t
+            }
+        }
+    }
+
+    # 4. First .toc found - today's last-resort, unchanged.
     foreach ($t in $tocFiles) { return $t }
     return $null
 }
@@ -683,7 +1641,9 @@ function Get-TocInterfaceValues {
     #>
     param(
         [string]$AddonsPath,
-        [Parameter(Mandatory = $true)][string]$FolderName
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $result = New-Object 'System.Collections.Generic.List[object]'
@@ -696,7 +1656,7 @@ function Get-TocInterfaceValues {
         Write-Output -NoEnumerate $result
         return
     }
-    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName -Flavor $Flavor -InstalledInterface $InstalledInterface
     if (-not $chosen) {
         Write-Output -NoEnumerate $result
         return
@@ -711,7 +1671,7 @@ function Get-TocInterfaceValues {
     $mainlineValues = New-Object 'System.Collections.Generic.List[object]'
     $plainValues = New-Object 'System.Collections.Generic.List[object]'
     foreach ($line in $lines) {
-        if ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$') {
+        if (($Flavor -eq 'retail') -and ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$')) {
             foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
                 $ival = [int64]0
                 if ([int64]::TryParse($piece, [ref]$ival)) { $mainlineValues.Add([int64]$ival) }
@@ -733,7 +1693,7 @@ function Get-TocInterfaceValues {
 
 function Get-PackageTocInterfaces {
     <# Unions Get-TocInterfaceValues across every folder of a record, deduped. #>
-    param($AddonsPath, $Folders)
+    param($AddonsPath, $Folders, [string]$Flavor = 'retail', $InstalledInterface = $null)
 
     $seen = New-Object 'System.Collections.Generic.HashSet[int64]'
     $result = New-Object 'System.Collections.Generic.List[object]'
@@ -742,7 +1702,7 @@ function Get-PackageTocInterfaces {
     # $Folders is a JSON-parsed record property here (never a List[object]
     # in practice), but there is no reason to risk it.
     foreach ($folderName in $Folders) {
-        foreach ($v in (Get-TocInterfaceValues -AddonsPath $AddonsPath -FolderName $folderName)) {
+        foreach ($v in (Get-TocInterfaceValues -AddonsPath $AddonsPath -FolderName $folderName -Flavor $Flavor -InstalledInterface $InstalledInterface)) {
             if ($seen.Add([int64]$v)) { $result.Add([int64]$v) }
         }
     }
@@ -795,13 +1755,30 @@ function Get-AddonCompat {
 }
 
 function Get-ClientBuildInfo {
-    <# Reads .build.info's "wow" (retail) row -> {clientBuild; clientInterface}. See addon-sync.ps1's identical function for the full contract; never throws. #>
-    param([string]$BuildInfoPath)
+    <#
+      Reads .build.info's row matching -Product (or, when omitted, -Flavor's
+      own S2.1 mapping - 'wow' for retail, unchanged from today's hardcode)
+      -> {clientBuild; clientInterface}. FLAVORS-SPEC.md S4.3/CS-F2: gains
+      -Flavor (default 'retail') and -Product, mirroring addon-sync.ps1's
+      identical function. Never throws.
+    #>
+    param(
+        [string]$BuildInfoPath,
+        [string]$Flavor = 'retail',
+        [string]$Product
+    )
 
     $result = [PSCustomObject]@{ clientBuild = $null; clientInterface = $null }
     if (-not $BuildInfoPath -or -not (Test-Path -LiteralPath $BuildInfoPath -PathType Leaf)) {
         return $result
     }
+
+    $expectedProduct = $Product
+    if (-not $expectedProduct) {
+        $def = Get-FlavourDef -Id $Flavor
+        if ($def) { $expectedProduct = $def.Product } else { $expectedProduct = 'wow' }
+    }
+
     $lines = $null
     try {
         $lines = Get-Content -LiteralPath $BuildInfoPath -Encoding UTF8 -ErrorAction Stop
@@ -825,18 +1802,10 @@ function Get-ClientBuildInfo {
         if (-not $line -or $line.Trim().Length -eq 0) { continue }
         $cols = $line -split '\|'
         if ($cols.Count -le $productIdx -or $cols.Count -le $versionIdx) { continue }
-        if ($cols[$productIdx].Trim() -eq 'wow') {
+        if ($cols[$productIdx].Trim() -eq $expectedProduct) {
             $versionText = $cols[$versionIdx].Trim()
             $result.clientBuild = $versionText
-            $parts = $versionText -split '\.'
-            if ($parts.Count -ge 3) {
-                $maj = 0
-                $min = 0
-                $pat = 0
-                if ([int]::TryParse($parts[0], [ref]$maj) -and [int]::TryParse($parts[1], [ref]$min) -and [int]::TryParse($parts[2], [ref]$pat)) {
-                    $result.clientInterface = ($maj * 10000) + ($min * 100) + $pat
-                }
-            }
+            $result.clientInterface = ConvertTo-InterfaceNumber -VersionText $versionText
             break
         }
     }
@@ -983,11 +1952,27 @@ function New-CliProcessArgs {
       the only caller that ever passes it (sync/check/add/install job kinds
       per UX-SPEC.md section 4.2; every other caller of this function omits
       it, and addon-sync.ps1 already no-ops cleanly when it is absent).
+
+      FLAVORS-SPEC.md CS-F2: gains -Flavor (default $Script:CurrentFlavour,
+      the request currently in flight - see Set-CurrentFlavourContext),
+      threaded straight through to addon-sync.ps1's own -Flavor param -
+      every CLI invocation this server makes (jobs AND the synchronous
+      fast-ops via Invoke-Cli) is now flavour-scoped, matching whichever
+      flavour the caller resolved via Resolve-RequestFlavour. Also threads
+      -WowRoot when this server was itself pointed at a fixture
+      ($Script:WowRootOverride, CS-F2's own -WowRoot) so the CLI child
+      process resolves against the SAME fixture, never the real WoW folder.
+      -Flavor 'retail' is never sent explicitly (it's the CLI's own
+      default) so a single-flavour machine's CLI invocations are
+      byte-identical to before this change set.
     #>
     param(
         [System.Collections.Generic.List[object]]$CliArgs,
-        [string]$ProgressPath
+        [string]$ProgressPath,
+        [string]$Flavor
     )
+
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
 
     $psArgs = New-Object 'System.Collections.Generic.List[object]'
     $psArgs.Add('-NoProfile')
@@ -1003,6 +1988,14 @@ function New-CliProcessArgs {
         $psArgs.Add('-AddonsPath')
         $psArgs.Add('"' + $Script:AddonsPathOverride + '"')
     }
+    if ($Flavor -and $Flavor -ne 'retail') {
+        $psArgs.Add('-Flavor')
+        $psArgs.Add($Flavor)
+    }
+    if ($Script:WowRootOverride) {
+        $psArgs.Add('-WowRoot')
+        $psArgs.Add('"' + $Script:WowRootOverride + '"')
+    }
     if ($ProgressPath) {
         $psArgs.Add('-ProgressPath')
         $psArgs.Add('"' + $ProgressPath + '"')
@@ -1013,17 +2006,27 @@ function New-CliProcessArgs {
 function Test-JobBusy {
     <#
       True (and, if -Context given, writes a 409 busy response) when a job is
-      currently running. Refreshes the current job's state first so a job
-      that just finished is not reported busy.
+      currently running FOR -Flavor (default $Script:CurrentFlavour - the
+      request currently in flight, per Set-CurrentFlavourContext).
+      FLAVORS-SPEC.md CS-F2 S5.4: scoped per flavour, not global - a Retail
+      sync and a Classic Era sync may run concurrently; two Retail syncs
+      still can't (the per-flavour slot Get-CurrentJobForFlavour reads
+      already enforces that on its own). Refreshes the current job's state
+      first so a job that just finished is not reported busy.
     #>
-    param($Context)
+    param($Context, [string]$Flavor)
 
-    if ($Script:CurrentJob -and $Script:CurrentJob.state -eq 'running') {
-        Update-JobStatus -Job $Script:CurrentJob | Out-Null
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
+
+    $current = Get-CurrentJobForFlavour -Flavor $Flavor
+    if ($current -and $current.state -eq 'running') {
+        Update-JobStatus -Job $current | Out-Null
     }
-    if ($Script:CurrentJob -and $Script:CurrentJob.state -eq 'running') {
+    $current = Get-CurrentJobForFlavour -Flavor $Flavor
+    if ($current -and $current.state -eq 'running') {
         if ($Context) {
-            Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy'; jobId = $Script:CurrentJob.id }
+            Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy'; jobId = $current.id }
         }
         return $true
     }
@@ -1032,19 +2035,41 @@ function Test-JobBusy {
 
 function Start-Job {
     <#
-      Starts one job (spec section 2, "Jobs" table). Returns a hashtable:
-        Busy  = $true  -> a job is already running (Job holds it)
+      Starts one job (spec section 2, "Jobs" table) for the flavour named by
+      -Flavor (default $Script:CurrentFlavour, per FLAVORS-SPEC.md CS-F2
+      S5.4's job.flavour field). Returns a hashtable:
+        Busy  = $true  -> a job is already running for that flavour (Job holds it)
         Error = <text> -> could not start (bad params, process launch failed)
         Job   = <job>  -> started (or, for launch/no-update, already finished)
     #>
     param(
         [string]$Kind,
-        $Params
+        $Params,
+        [string]$Flavor,
+        # FLAVORS-SPEC.md CS-F3 S5.5: true only when the CALLER'S request
+        # named an explicit ?flavour=/?flavor= (Handle-JobsPost's own
+        # Get-QueryFlavour read, threaded through here) - NOT whether
+        # -Flavor itself is non-empty, since -Flavor is always resolved to
+        # something (the request's default/active flavour) by the time
+        # Start-Job is called. An explicit flavour always wins outright, no
+        # ambiguity re-check (principle 5); an omitted one is what lets the
+        # CurseForge install-flavour resolution below engage at all.
+        [bool]$FlavourExplicit = $false
     )
 
-    if (Test-JobBusy) {
-        return @{ Busy = $true; Job = $Script:CurrentJob }
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
+
+    if (Test-JobBusy -Flavor $Flavor) {
+        return @{ Busy = $true; Job = (Get-CurrentJobForFlavour -Flavor $Flavor) }
     }
+
+    # FLAVORS-SPEC.md CS-F3: remembered so the CurseForge install-flavour
+    # resolution below (which can reassign $Flavor to the one flavour that
+    # actually matches) can re-check Test-JobBusy for the NEW flavour - the
+    # busy check just above only ever covered the flavour this request
+    # originally defaulted/resolved to.
+    $originalRequestFlavor = $Flavor
 
     $jobId = New-JobId
     $startedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -1063,6 +2088,8 @@ function Start-Job {
             log           = New-Object 'System.Collections.Generic.List[object]'
             results       = New-Object 'System.Collections.Generic.List[object]'
             error         = $null
+            # FLAVORS-SPEC.md CS-F2 S5.4: every job carries its own flavour.
+            flavour       = $Flavor
             Process       = $null
             OutFile       = $null
             ErrFile       = $null
@@ -1070,7 +2097,7 @@ function Start-Job {
             LaunchAfter   = $false
         }
         Add-JobToHistory -Job $job
-        $Script:CurrentJob = $job
+        Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
         try {
             Start-Process -FilePath 'C:\Program Files (x86)\Battle.net\Battle.net.exe' -ArgumentList '--exec="launch WoW"' | Out-Null
             $job.results.Add([PSCustomObject]@{ status = 'Launched'; name = 'World of Warcraft' })
@@ -1081,7 +2108,7 @@ function Start-Job {
             $job.error = $_.Exception.Message
         }
         $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $Script:CurrentJob = $null
+        Set-CurrentJobForFlavour -Flavor $Flavor -Job $null
         # Round 3: this synchronous launch-without-update path completes
         # entirely within this function and never goes through
         # Update-JobStatus (there is no CLI child process behind it, so
@@ -1097,14 +2124,14 @@ function Start-Job {
     # started entirely by its own helper instead of falling through to
     # Build-CliArgs/New-CliProcessArgs here.
     if ($Kind -eq 'import') {
-        return (Start-ImportJob -JobId $jobId -StartedAt $startedAt -Params $Params)
+        return (Start-ImportJob -JobId $jobId -StartedAt $startedAt -Params $Params -Flavor $Flavor)
     }
 
     # E12: switch-source (uninstall the tracked addon, then add it fresh from
     # the OTHER source) is, like import, a multi-phase job - see
     # Start-SwitchSourceJob/Complete-SwitchSourcePhase.
     if ($Kind -eq 'switch-source') {
-        return (Start-SwitchSourceJob -JobId $jobId -StartedAt $startedAt -Params $Params)
+        return (Start-SwitchSourceJob -JobId $jobId -StartedAt $startedAt -Params $Params -Flavor $Flavor)
     }
 
     # E19: add-by-slug {slug, fileId?} - the native host's CurseForge-tab
@@ -1141,6 +2168,7 @@ function Start-Job {
                 log           = New-Object 'System.Collections.Generic.List[object]'
                 results       = New-Object 'System.Collections.Generic.List[object]'
                 error         = "No CurseForge addon found for slug '$slug' (404)"
+                flavour       = $Flavor
                 Process       = $null
                 OutFile       = $null
                 ErrFile       = $null
@@ -1153,6 +2181,145 @@ function Start-Job {
         }
         $Kind = 'add'
         $Params = Add-Member -InputObject $Params -NotePropertyName 'projectId' -NotePropertyValue $entry.id -Force -PassThru
+    }
+
+    # FLAVORS-SPEC.md CS-F3 S5.5: CurseForge install-flavour resolution.
+    # Only engages for a genuine, SINGLE-target CurseForge add/install
+    # (add-by-slug has already been normalized into 'add' with a resolved
+    # numeric projectId by this point) when the caller did NOT name an
+    # explicit ?flavour= and more than one flavour is installed - a
+    # single-flavour machine can never hit this ambiguity (Get-CfFlavourMapping
+    # already resolves correctly at n=1, so the count check below is a
+    # no-op there - "invisible at one flavour" preserved), and an explicit
+    # ?flavour= (including the picker's own resume POST, case 5 below)
+    # always wins outright with no re-check (principle 5). Never engages
+    # for a Wago target (source=wago+slug, or an already-tracked Wago
+    # addon's projectId of the form "wago:<slug>") - Wago's one flavour is
+    # already resolved by the search's own game_version param (S6.4), so
+    # there is nothing ambiguous to ask about. A bulk add (projectIds[])
+    # never reaches here either - $Params.projectId is only ever set for
+    # the single-target path, so a bulk add still 400s upstream in
+    # Handle-JobsPost exactly as before this change set (silently guessing
+    # a flavour for several addons at once is not this feature's job).
+    if (($Kind -eq 'add' -or $Kind -eq 'install') -and (-not $FlavourExplicit) -and $Params -and $Params.projectId) {
+        $isWagoTarget = [bool](
+            ($Params.source -and (([string]$Params.source).ToLowerInvariant() -eq 'wago') -and $Params.slug) -or
+            (([string]$Params.projectId).ToLowerInvariant().StartsWith('wago:'))
+        )
+        if (-not $isWagoTarget) {
+            $installedForResolve = Get-CurrentInstalledFlavours
+            if ((@($installedForResolve)).Count -gt 1) {
+                $numericProjectId = 0L
+                $isNumericProjectId = [int64]::TryParse([string]$Params.projectId, [ref]$numericProjectId)
+                if ($isNumericProjectId) {
+                    $settingsForResolve = Get-Settings
+                    $showTestForResolve = [bool]$settingsForResolve.showTestRealms
+                    $visibleFlavoursForResolve = New-Object 'System.Collections.Generic.List[object]'
+                    foreach ($f in $installedForResolve) {
+                        if ((-not $showTestForResolve) -and (@('ptr', 'xptr', 'beta') -contains $f.id)) { continue }
+                        $visibleFlavoursForResolve.Add($f)
+                    }
+                    $resolveFileId = $null
+                    if ($Params.fileId) { $resolveFileId = $Params.fileId }
+                    $resolution = Resolve-CfInstallFlavour -ProjectId $numericProjectId -FileId $resolveFileId -InstalledFlavours $visibleFlavoursForResolve
+
+                    if ($resolution.FetchError) {
+                        # A gameVersionTypeIds fetch failure (network hiccup, bad
+                        # projectId/fileId, CurseForge unreachable) - report exactly
+                        # like any other job-start failure; no job created.
+                        return @{ Busy = $false; Error = $resolution.FetchError }
+                    }
+
+                    $matchIds = @($resolution.MatchingFlavourIds)
+                    if ($matchIds.Count -eq 0) {
+                        # S5.5 case 4: zero matches - a real job, immediately
+                        # failed, the same "404-style failed job" pattern the
+                        # add-by-slug unresolved-slug branch above uses (a plain
+                        # message, not an HTTP-level error, so the panel that
+                        # already shows every other failure shows this one too).
+                        $finishedAtZero = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        $zeroJob = [PSCustomObject]@{
+                            id            = $jobId
+                            kind          = $Kind
+                            params        = $Params
+                            state         = 'failed'
+                            startedAt     = $startedAt
+                            finishedAt    = $finishedAtZero
+                            exitCode      = 422
+                            log           = New-Object 'System.Collections.Generic.List[object]'
+                            results       = New-Object 'System.Collections.Generic.List[object]'
+                            error         = "This addon doesn't support your installed WoW versions."
+                            flavour       = $null
+                            Process       = $null
+                            OutFile       = $null
+                            ErrFile       = $null
+                            SyncLogOffset = 0
+                            LaunchAfter   = $false
+                        }
+                        Add-JobToHistory -Job $zeroJob
+                        Save-CheckState
+                        return @{ Busy = $false; Job = $zeroJob }
+                    } elseif ($matchIds.Count -eq 1) {
+                        # S5.5 case 3: exactly one match - install there
+                        # silently, no prompt. Overrides $Flavor to the ONE
+                        # matching flavour (which may differ from whatever this
+                        # request defaulted to) - the busy re-check just below
+                        # this whole block covers the case where that flavour
+                        # differs from $originalRequestFlavor.
+                        $Flavor = $matchIds[0]
+                    } else {
+                        # S5.5 case 5: more than one match - create the job in
+                        # a new 'awaiting_flavour' state instead of dispatching
+                        # to the CLI at all; the SPA's picker (ui/app.js
+                        # Components.JobPanel) resumes by re-POSTing the
+                        # IDENTICAL body with ?flavour=<chosen> set, which then
+                        # carries FlavourExplicit=$true and skips this whole
+                        # block outright (case 3's silent path, effectively).
+                        $choices = New-Object 'System.Collections.Generic.List[object]'
+                        foreach ($mid in $matchIds) {
+                            $def = Get-FlavourDef -Id $mid
+                            $lbl = $mid
+                            if ($def) { $lbl = $def.Label }
+                            $choices.Add([PSCustomObject]@{ id = $mid; label = $lbl })
+                        }
+                        $askJob = [PSCustomObject]@{
+                            id            = $jobId
+                            kind          = $Kind
+                            params        = $Params
+                            state         = 'awaiting_flavour'
+                            startedAt     = $startedAt
+                            finishedAt    = $null
+                            exitCode      = $null
+                            log           = New-Object 'System.Collections.Generic.List[object]'
+                            results       = New-Object 'System.Collections.Generic.List[object]'
+                            error         = $null
+                            flavour       = $null
+                            choices       = $choices.ToArray()
+                            Process       = $null
+                            OutFile       = $null
+                            ErrFile       = $null
+                            SyncLogOffset = 0
+                            LaunchAfter   = $false
+                        }
+                        Add-JobToHistory -Job $askJob
+                        Save-CheckState
+                        return @{ Busy = $false; Job = $askJob }
+                    }
+                }
+            }
+        }
+    }
+
+    # A case-3 auto-resolution just above may have reassigned $Flavor to a
+    # DIFFERENT flavour than the one Test-JobBusy already checked at the top
+    # of this function - re-check the new flavour's own busy slot before
+    # dispatching to it. When $Flavor never changed (every other path
+    # through this function), this is a no-op re-check of the same flavour
+    # already known free.
+    if ($Flavor -ne $originalRequestFlavor) {
+        if (Test-JobBusy -Flavor $Flavor) {
+            return @{ Busy = $true; Job = (Get-CurrentJobForFlavour -Flavor $Flavor) }
+        }
     }
 
     $cliKind = $Kind
@@ -1206,7 +2373,7 @@ function Start-Job {
         $progressPath = Join-Path -Path $Script:JobsDir -ChildPath "$jobId.progress.json"
     }
 
-    $psArgs = New-CliProcessArgs -CliArgs $cliArgs -ProgressPath $progressPath
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs -ProgressPath $progressPath -Flavor $Flavor
 
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
@@ -1230,6 +2397,8 @@ function Start-Job {
         log           = New-Object 'System.Collections.Generic.List[object]'
         results       = New-Object 'System.Collections.Generic.List[object]'
         error         = $null
+        # FLAVORS-SPEC.md CS-F2 S5.4: every job carries its own flavour.
+        flavour       = $Flavor
         Process       = $proc
         OutFile       = $outFile
         ErrFile       = $errFile
@@ -1241,7 +2410,7 @@ function Start-Job {
         ProgressPath  = $progressPath
     }
     Add-JobToHistory -Job $job
-    $Script:CurrentJob = $job
+    Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
     return @{ Busy = $false; Job = $job }
 }
 
@@ -1408,7 +2577,7 @@ function Start-ImportPhase {
     $outFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).out"
     $errFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).err"
 
-    $psArgs = New-CliProcessArgs -CliArgs $cliArgs
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs -Flavor $Job.flavour
 
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
@@ -1437,8 +2606,12 @@ function Start-ImportJob {
     param(
         [string]$JobId,
         [string]$StartedAt,
-        $Params
+        $Params,
+        [string]$Flavor
     )
+
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
 
     $importAddons = @()
     if ($Params -and ($null -ne $Params.addons)) { $importAddons = @($Params.addons) }
@@ -1468,6 +2641,7 @@ function Start-ImportJob {
         log           = New-Object 'System.Collections.Generic.List[object]'
         results       = New-Object 'System.Collections.Generic.List[object]'
         error         = $null
+        flavour       = $Flavor
         Process       = $null
         OutFile       = $null
         ErrFile       = $null
@@ -1497,14 +2671,14 @@ function Start-ImportJob {
     }
 
     Add-JobToHistory -Job $job
-    $Script:CurrentJob = $job
+    Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
 
     $started = Start-ImportPhase -Job $job
     if (-not $started) {
         $job.state = 'failed'
         $job.error = 'Failed to start import'
         $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $Script:CurrentJob = $null
+        Set-CurrentJobForFlavour -Flavor $Flavor -Job $null
         Save-CheckState
     }
     return @{ Busy = $false; Job = $job }
@@ -1516,17 +2690,30 @@ function Start-ImportJob {
 
 function Save-CheckState {
     <#
-      Persists $Script:UpdatesCheckedAt + $Script:UpdateAvailable (E2) and,
-      as of Round 3, $Script:LastRun + the last 20 completed jobs to
-      ROOT\state.json, so the "n updates" badge, the My Addons "Last run"
-      line (/api/state.lastRun), the rollback tooltip / job history
-      (/api/state.job, /api/jobs) all survive a server restart instead of
-      resetting to null/empty. Jobs are serialized via Get-JobStatusView -
-      plain data (id/kind/params/state/.../log[]/results[]/error), never the
-      raw Job objects, which carry a live System.Diagnostics.Process handle
-      that cannot be (and must never be) JSON-serialized. Best-effort: a
-      write failure is logged, never thrown (must not abort the
-      job-completion path that calls this).
+      Persists $Script:UpdatesCheckedAtByFlavour + $Script:UpdateAvailable-
+      ByFlavour (E2, made per-flavour by FLAVORS-SPEC.md CS-F2 S5.3) and, as
+      of Round 3, $Script:LastRunByFlavour + the last 20 completed jobs
+      (shared across every flavour, each carrying its own .flavour field per
+      S5.4) to ROOT\state.json, so the "n updates" badge, the My Addons
+      "Last run" line (/api/state.lastRun), the rollback tooltip / job
+      history (/api/state.job, /api/jobs) all survive a server restart
+      instead of resetting to null/empty. Jobs are serialized via
+      Get-JobStatusView - plain data (id/kind/params/state/.../log[]/
+      results[]/error/flavour), never the raw Job objects, which carry a
+      live System.Diagnostics.Process handle that cannot be (and must never
+      be) JSON-serialized. Best-effort: a write failure is logged, never
+      thrown (must not abort the job-completion path that calls this).
+
+      CS-F2 deliberately keeps ONE state.json at the shared root rather than
+      splitting it under flavours\<id>\ the way FLAVORS-SPEC.md S3.1's
+      literal file-tree diagram shows addons.json/backups\ - job history is
+      one shared, flavour-tagged list by S5.4's own description ("a flavour
+      badge... only when more than one flavour installed", implying one
+      list, not N), and splitting the freshness bookkeeping too would need a
+      materially larger restart-time merge across N per-flavour files for no
+      behavioral gain this change set's verify bar calls for. Flagged
+      explicitly in this change set's notesForNext for whoever next touches
+      this area.
     #>
     $jobViews = New-Object 'System.Collections.Generic.List[object]'
     foreach ($j in $Script:Jobs) {
@@ -1534,9 +2721,9 @@ function Save-CheckState {
     }
 
     $body = [PSCustomObject]@{
-        updatesCheckedAt   = $Script:UpdatesCheckedAt
-        updateAvailable    = $Script:UpdateAvailable
-        lastRun            = $Script:LastRun
+        updatesCheckedAt   = $Script:UpdatesCheckedAtByFlavour
+        updateAvailable    = $Script:UpdateAvailableByFlavour
+        lastRun            = $Script:LastRunByFlavour
         jobs               = $jobViews.ToArray()
         # E12: persists the Wago Inertia asset version across a restart, per
         # SPEC's documented "cache the version in state.json" - saves the
@@ -1561,10 +2748,19 @@ function Save-CheckState {
 function Load-CheckState {
     <#
       Loads updatesCheckedAt/updateAvailable/lastRun/jobs from ROOT\state.json
-      at startup into $Script:UpdatesCheckedAt / $Script:UpdateAvailable /
-      $Script:LastRun / $Script:Jobs. Tolerates a missing, empty, or corrupt
-      file (leaves the caller's already-initialized defaults/empty list in
-      place).
+      at startup into the per-flavour ...ByFlavour dictionaries and
+      $Script:Jobs. Tolerates a missing, empty, or corrupt file (leaves the
+      caller's already-initialized defaults/empty list in place).
+
+      FLAVORS-SPEC.md CS-F2: also tolerates a PRE-flavour state.json (one
+      written before this change set - updatesCheckedAt/updateAvailable/
+      lastRun as flat scalars/objects, no per-flavour nesting, jobs with no
+      .flavour field) by detecting the old flat shape and adopting it as the
+      'retail' flavour's own bucket - a restart right after upgrading to
+      this build never loses a pre-existing single-flavour install's
+      freshness/job history. A job loaded with no .flavour field at all
+      (same pre-upgrade file) defaults to 'retail', matching S4.1's own
+      "existing single-flavour behavior, unchanged" bar.
 
       Round 3: a persisted job can never be reloaded as 'running' - the
       System.Diagnostics.Process behind it belonged to the PREVIOUS server
@@ -1590,18 +2786,67 @@ function Load-CheckState {
             return
         }
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+
+        # updatesCheckedAt: new shape is an object keyed by flavour id; the
+        # pre-flavour shape was a bare string - a string has no
+        # .PSObject.Properties worth iterating (Get-Member would show only
+        # String's own members), so this old-shape check is simply "is it a
+        # string at all".
         if ($null -ne $obj.updatesCheckedAt) {
-            $Script:UpdatesCheckedAt = [string]$obj.updatesCheckedAt
+            if ($obj.updatesCheckedAt -is [string]) {
+                $Script:UpdatesCheckedAtByFlavour = @{ retail = [string]$obj.updatesCheckedAt }
+            } else {
+                $map = @{}
+                foreach ($p in $obj.updatesCheckedAt.PSObject.Properties) {
+                    $map[$p.Name] = [string]$p.Value
+                }
+                $Script:UpdatesCheckedAtByFlavour = $map
+            }
         }
         if ($null -ne $obj.updateAvailable) {
-            $map = @{}
+            # New shape: {flavour: {key: {fileId, version}}}. Old shape:
+            # {key: {fileId, version}} directly - distinguished by whether
+            # any top-level property's own value looks like an
+            # updateAvailable entry (has a fileId or version member) rather
+            # than another nested flavour bucket (which would not).
+            $looksOldShape = $false
             foreach ($p in $obj.updateAvailable.PSObject.Properties) {
-                $map[$p.Name] = @{ fileId = $p.Value.fileId; version = $p.Value.version }
+                if ($null -ne $p.Value -and (($null -ne $p.Value.fileId) -or ($null -ne $p.Value.version))) {
+                    $looksOldShape = $true
+                }
+                break
             }
-            $Script:UpdateAvailable = $map
+            if ($looksOldShape) {
+                $map = @{}
+                foreach ($p in $obj.updateAvailable.PSObject.Properties) {
+                    $map[$p.Name] = @{ fileId = $p.Value.fileId; version = $p.Value.version }
+                }
+                $Script:UpdateAvailableByFlavour = @{ retail = $map }
+            } else {
+                $outer = @{}
+                foreach ($fp in $obj.updateAvailable.PSObject.Properties) {
+                    $inner = @{}
+                    foreach ($p in $fp.Value.PSObject.Properties) {
+                        $inner[$p.Name] = @{ fileId = $p.Value.fileId; version = $p.Value.version }
+                    }
+                    $outer[$fp.Name] = $inner
+                }
+                $Script:UpdateAvailableByFlavour = $outer
+            }
         }
         if ($null -ne $obj.lastRun) {
-            $Script:LastRun = $obj.lastRun
+            # New shape: {flavour: {timestamp, summary, rows}}. Old shape:
+            # {timestamp, summary, rows} directly - distinguished by the
+            # presence of a .timestamp member (a per-flavour bucket's OWN
+            # entries are further-nested objects, none of which is itself
+            # named "timestamp" at this level).
+            if ($null -ne $obj.lastRun.timestamp) {
+                $Script:LastRunByFlavour = @{ retail = $obj.lastRun }
+            } else {
+                $map = @{}
+                foreach ($p in $obj.lastRun.PSObject.Properties) { $map[$p.Name] = $p.Value }
+                $Script:LastRunByFlavour = $map
+            }
         }
         if ($null -ne $obj.wagoInertiaVersion) {
             $Script:WagoInertiaVersion = [string]$obj.wagoInertiaVersion
@@ -1619,6 +2864,9 @@ function Load-CheckState {
                 $results = New-Object 'System.Collections.Generic.List[object]'
                 foreach ($r in @($jv.results)) { $results.Add($r) }
 
+                $jobFlavour = 'retail'
+                if ($jv.flavour) { $jobFlavour = [string]$jv.flavour }
+
                 $job = [PSCustomObject]@{
                     id            = [string]$jv.id
                     kind          = $jv.kind
@@ -1630,6 +2878,7 @@ function Load-CheckState {
                     log           = $log
                     results       = $results
                     error         = $jv.error
+                    flavour       = $jobFlavour
                     Process       = $null
                     OutFile       = $null
                     ErrFile       = $null
@@ -1657,7 +2906,7 @@ function Load-CheckState {
                 $Script:JobIdSeq = $maxId
             }
         }
-        Write-ServerLog "Loaded state.json: updatesCheckedAt=$($Script:UpdatesCheckedAt) updateAvailable entries=$($Script:UpdateAvailable.Count) jobs=$($Script:Jobs.Count)"
+        Write-ServerLog "Loaded state.json: flavours=$($Script:UpdatesCheckedAtByFlavour.Count) jobs=$($Script:Jobs.Count)"
     } catch {
         Write-ServerLog "Failed to read state.json, ignoring: $($_.Exception.Message)"
     }
@@ -1730,21 +2979,30 @@ function Apply-JobCompletionSideEffects {
       headline's own Retry action only re-runs a check and has nothing to
       do with an uninstall/rollback failure. Those failures still surface
       through their own job-panel/toast error, unaffected by this gate.
+
+      FLAVORS-SPEC.md CS-F2 S5.3: every field this function touches is now
+      keyed by $Job.flavour (defaulting to 'retail' for a pre-CS-F2 job
+      object with no such field) instead of one global scalar/hashtable -
+      so a Classic Era job's completion never updates Retail's own
+      freshness bookkeeping, or vice versa.
     #>
     param($Job, $Parsed)
 
+    $flavor = $Job.flavour
+    if (-not $flavor) { $flavor = 'retail' }
+
     if ($Job.state -eq 'failed') {
         if (@('sync', 'check', 'add', 'install', 'launch') -contains $Job.kind) {
-            $Script:LastCheckFailed = $true
+            $Script:LastCheckFailedByFlavour[$flavor] = $true
             $errMsg = $Job.error
             if (-not $errMsg) { $errMsg = 'Unknown error' }
-            $Script:LastCheckError = $errMsg
+            $Script:LastCheckErrorByFlavour[$flavor] = $errMsg
         }
         return
     }
 
-    $Script:LastCheckFailed = $false
-    $Script:LastCheckError = $null
+    $Script:LastCheckFailedByFlavour[$flavor] = $false
+    $Script:LastCheckErrorByFlavour[$flavor] = $null
 
     $action = $null
     if ($Parsed -and $Parsed.action) {
@@ -1754,16 +3012,18 @@ function Apply-JobCompletionSideEffects {
     $rows = New-Object 'System.Collections.Generic.List[object]'
     foreach ($r in $Job.results) { $rows.Add($r) }
 
+    $updateAvailable = Get-FlavourUpdateAvailable -Flavor $flavor
+
     if ($action -eq 'check') {
-        $Script:UpdatesCheckedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $Script:UpdateAvailable = @{}
+        $Script:UpdatesCheckedAtByFlavour[$flavor] = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $updateAvailable.Clear()
         foreach ($r in $rows) {
             if ($r.status -eq 'Would-update') {
                 # E12: keyed by projectId when present, else "wago:<slug>" -
                 # see Get-UpdateAvailableKeyForRow.
                 $key = Get-UpdateAvailableKeyForRow -Row $r
                 if ($key) {
-                    $Script:UpdateAvailable[$key] = @{ fileId = $r.fileId; version = $r.version }
+                    $updateAvailable[$key] = @{ fileId = $r.fileId; version = $r.version }
                 }
             }
         }
@@ -1782,8 +3042,8 @@ function Apply-JobCompletionSideEffects {
         foreach ($r in $rows) {
             if ($r.status -eq 'Updated' -or $r.status -eq 'Installed' -or $r.status -eq 'Pinned' -or $r.status -eq 'Rolled-back') {
                 $key = Get-UpdateAvailableKeyForRow -Row $r
-                if ($key -and $Script:UpdateAvailable.ContainsKey($key)) {
-                    $Script:UpdateAvailable.Remove($key)
+                if ($key -and $updateAvailable.ContainsKey($key)) {
+                    $updateAvailable.Remove($key)
                 }
             }
         }
@@ -1800,7 +3060,7 @@ function Apply-JobCompletionSideEffects {
         foreach ($k in $counts.Keys) {
             $summaryParts.Add("$k`: $($counts[$k])")
         }
-        $Script:LastRun = [PSCustomObject]@{
+        $Script:LastRunByFlavour[$flavor] = [PSCustomObject]@{
             timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             summary   = ($summaryParts -join '  ')
             rows      = $rows.ToArray()
@@ -1870,7 +3130,7 @@ function Complete-ImportPhase {
         if (-not $errMsg -and $parseError) { $errMsg = "Could not parse CLI output as JSON: $parseError" }
         if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
         $Job.error = "Import phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count) failed: $errMsg"
-        if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+        Clear-CurrentJobIfMatches -Job $Job
         Save-CheckState
         return $Job
     }
@@ -1887,7 +3147,7 @@ function Complete-ImportPhase {
             $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             $Job.state = 'failed'
             $Job.error = "Failed to start import phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count)"
-            if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+            Clear-CurrentJobIfMatches -Job $Job
             Save-CheckState
         }
         return $Job
@@ -1898,7 +3158,7 @@ function Complete-ImportPhase {
     $Job.state = 'done'
     Apply-JobCompletionSideEffects -Job $Job -Parsed ([PSCustomObject]@{ action = 'import' })
 
-    if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+    Clear-CurrentJobIfMatches -Job $Job
     Save-CheckState
     return $Job
 }
@@ -1927,7 +3187,7 @@ function Start-SwitchSourcePhase {
     $outFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).out"
     $errFile = Join-Path -Path $Script:JobsDir -ChildPath "$($Job.id)-$($Job.PhaseIndex).err"
 
-    $psArgs = New-CliProcessArgs -CliArgs $cliArgs
+    $psArgs = New-CliProcessArgs -CliArgs $cliArgs -Flavor $Job.flavour
 
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
@@ -1956,8 +3216,12 @@ function Start-SwitchSourceJob {
     param(
         [string]$JobId,
         [string]$StartedAt,
-        $Params
+        $Params,
+        [string]$Flavor
     )
+
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
 
     $currentTarget = [string]$Params.projectId
     $toSource = ([string]$Params.toSource).ToLowerInvariant()
@@ -1987,6 +3251,7 @@ function Start-SwitchSourceJob {
         log           = New-Object 'System.Collections.Generic.List[object]'
         results       = New-Object 'System.Collections.Generic.List[object]'
         error         = $null
+        flavour       = $Flavor
         Process       = $null
         OutFile       = $null
         ErrFile       = $null
@@ -2001,14 +3266,14 @@ function Start-SwitchSourceJob {
     }
 
     Add-JobToHistory -Job $job
-    $Script:CurrentJob = $job
+    Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
 
     $started = Start-SwitchSourcePhase -Job $job
     if (-not $started) {
         $job.state = 'failed'
         $job.error = 'Failed to start switch-source'
         $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $Script:CurrentJob = $null
+        Set-CurrentJobForFlavour -Flavor $Flavor -Job $null
         Save-CheckState
     }
     return @{ Busy = $false; Job = $job }
@@ -2058,7 +3323,7 @@ function Complete-SwitchSourcePhase {
         if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
         $phaseName = if ($Job.PhaseIndex -eq 0) { 'Remove' } else { 'Add' }
         $Job.error = "Switch-source phase $phaseName ($($Job.PhaseIndex + 1) of $($Job.Phases.Count)) failed: $errMsg"
-        if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+        Clear-CurrentJobIfMatches -Job $Job
         Save-CheckState
         return $Job
     }
@@ -2075,7 +3340,7 @@ function Complete-SwitchSourcePhase {
             $Job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             $Job.state = 'failed'
             $Job.error = "Failed to start switch-source phase $($Job.PhaseIndex + 1) of $($Job.Phases.Count)"
-            if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+            Clear-CurrentJobIfMatches -Job $Job
             Save-CheckState
         }
         return $Job
@@ -2086,7 +3351,7 @@ function Complete-SwitchSourcePhase {
     $Job.state = 'done'
     Apply-JobCompletionSideEffects -Job $Job -Parsed ([PSCustomObject]@{ action = 'switch-source' })
 
-    if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) { $Script:CurrentJob = $null }
+    Clear-CurrentJobIfMatches -Job $Job
     Save-CheckState
     return $Job
 }
@@ -2270,9 +3535,7 @@ function Update-JobStatus {
         if (Test-Path -LiteralPath $Job.ErrFile) { Remove-Item -LiteralPath $Job.ErrFile -Force -ErrorAction SilentlyContinue }
     } catch { }
 
-    if ($Script:CurrentJob -and $Script:CurrentJob.id -eq $Job.id) {
-        $Script:CurrentJob = $null
-    }
+    Clear-CurrentJobIfMatches -Job $Job
 
     # Round 3: persist lastRun + job history to state.json now that this
     # job's final state/results/error are all set (Apply-JobCompletionSideEffects,
@@ -2307,21 +3570,98 @@ function Get-JobStatusView {
         log        = $Job.log.ToArray()
         results    = $Job.results.ToArray()
         error      = $Job.error
+        # FLAVORS-SPEC.md CS-F2 S5.4: reading a NoteProperty that was never
+        # added (a job created before this change set - see Load-CheckState's
+        # own back-compat default) is always safe in PowerShell and returns
+        # $null; the job-panel/switcher UI (CS-F4) treats a $null flavour the
+        # same as 'retail'.
+        flavour    = $Job.flavour
         # CS1 (UX-SPEC.md section 4.2): whatever Update-JobStatus's
         # best-effort progress.json read last parsed, or $null - reading a
         # NoteProperty that was never added (a job kind with no
         # -ProgressPath, or one never polled while running) is always safe
         # in PowerShell, unlike writing one.
         progress   = $Job.progress
+        # FLAVORS-SPEC.md CS-F3 S5.5 case 5: {id,label} pairs for a job in
+        # state 'awaiting_flavour' - $null (safe NoteProperty read) for
+        # every other job, exactly like .progress above.
+        choices    = $Job.choices
     }
 }
 
 function Get-CurrentOrLastJobSummary {
-    if ($Script:CurrentJob) {
-        return Get-JobStatusView -Job (Update-JobStatus -Job $Script:CurrentJob)
+    <#
+      FLAVORS-SPEC.md CS-F2 S5.4: -Flavor (default $Script:CurrentFlavour)
+      scopes both halves of "current OR last job" to that one flavour - the
+      in-flight slot (Get-CurrentJobForFlavour) and, when nothing is
+      currently running for it, the most recent HISTORY entry that ALSO
+      belongs to that flavour (never an unrelated flavour's more-recent
+      job) - this is what makes /api/state's per-flavour `job`/freshness
+      correct on a multi-flavour machine.
+    #>
+    param([string]$Flavor)
+
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
+
+    $current = Get-CurrentJobForFlavour -Flavor $Flavor
+    if ($current) {
+        return Get-JobStatusView -Job (Update-JobStatus -Job $current)
     }
-    if ($Script:Jobs.Count -gt 0) {
-        return Get-JobStatusView -Job $Script:Jobs[$Script:Jobs.Count - 1]
+    for ($i = $Script:Jobs.Count - 1; $i -ge 0; $i--) {
+        $j = $Script:Jobs[$i]
+        # FLAVORS-SPEC.md CS-F3: an 'awaiting_flavour' job is, by
+        # construction, NOT resolved to any one flavour yet (its own
+        # .flavour is $null for exactly that reason) - skipped here rather
+        # than falling into the "no .flavour -> defaults to retail"
+        # back-compat rule just below, which exists for a pre-CS-F2 job
+        # loaded with no .flavour field at all and would otherwise
+        # incorrectly attribute this still-ambiguous job to Retail's own
+        # "last job" summary.
+        if ($j.state -eq 'awaiting_flavour') { continue }
+        $jFlavour = $j.flavour
+        if (-not $jFlavour) { $jFlavour = 'retail' }
+        if ($jFlavour -eq $Flavor) {
+            return Get-JobStatusView -Job $j
+        }
+    }
+    return $null
+}
+
+function Get-PendingFlavourChoiceJob {
+    <#
+      Security-review fix: a job in state 'awaiting_flavour' is, by design,
+      never attributed to (or surfaced through) any one flavour's own
+      /api/state.job field - Get-CurrentOrLastJobSummary explicitly skips
+      it (see its own comment) because it does not belong to any flavour
+      yet. That left a real gap: curseforge-handler.vbs (invoked by the
+      OS-registered curseforge:// protocol handler from the user's regular
+      browser, entirely separate from this SPA) POSTs /api/jobs and only
+      ever inspects the HTTP status code - never the response body's jobId
+      - so when the target addon matches more than one installed flavour
+      and the server creates an 'awaiting_flavour' job, NOTHING in this
+      codebase ever surfaced it: no picker, no toast, no error, the job
+      just sat unresolved forever while the user stared at a Furphy window
+      that appeared to do nothing.
+
+      This surfaces that same job machine-wide (regardless of the
+      request's own ?flavour=/active flavour) so the SPA's existing
+      /api/state polling (ui/app.js reloadState) can discover it and
+      render the already-built awaiting_flavour picker (Components.
+      JobPanel) no matter which flavour happens to be active. Deliberately
+      conservative about WHEN it reports one: only while that job is still
+      the very last entry in $Script:Jobs. Resuming it (Actions.
+      resumeJobWithFlavour re-POSTs the identical body with an explicit
+      ?flavour=, which always creates a BRAND NEW job per Start-Job's own
+      comment - there is no "resume this exact job" endpoint) appends a
+      newer job right after it, so this stops reporting the old one
+      automatically the moment it's acted on (or superseded by any other
+      job) - it can never resurface a resolved/abandoned ask indefinitely.
+    #>
+    if (-not $Script:Jobs -or $Script:Jobs.Count -eq 0) { return $null }
+    $last = $Script:Jobs[$Script:Jobs.Count - 1]
+    if ($last.state -eq 'awaiting_flavour') {
+        return Get-JobStatusView -Job $last
     }
     return $null
 }
@@ -2344,19 +3684,29 @@ function Get-ComputedFreshness {
       Handle-State already computes for its own "job" field - passed in
       rather than recomputed here so a single /api/state call never polls
       the running job's Update-JobStatus twice.
+
+      FLAVORS-SPEC.md CS-F2 S5.3: gains -Flavor (default
+      $Script:CurrentFlavour) - every field below is read from that ONE
+      flavour's own bucket, so a Retail sync running concurrently with a
+      Classic Era job never makes Classic Era's own freshness read
+      "checking" (or vice versa).
     #>
-    param($CurrentJobView)
+    param($CurrentJobView, [string]$Flavor)
+
+    if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
+    if (-not $Flavor) { $Flavor = 'retail' }
 
     if ($CurrentJobView -and $CurrentJobView.state -eq 'running' -and (@('sync', 'check', 'add', 'install', 'launch') -contains $CurrentJobView.kind)) {
         return 'checking'
     }
-    if ($Script:LastCheckFailed) {
+    if (Get-FlavourLastCheckFailed -Flavor $Flavor) {
         return 'check_failed'
     }
-    if (-not $Script:UpdatesCheckedAt) {
+    if (-not (Get-FlavourUpdatesCheckedAt -Flavor $Flavor)) {
         return 'not_checked'
     }
-    if ($Script:UpdateAvailable -and $Script:UpdateAvailable.Count -gt 0) {
+    $upd = Get-FlavourUpdateAvailable -Flavor $Flavor
+    if ($upd -and $upd.Count -gt 0) {
         return 'updates_available'
     }
     return 'up_to_date'
@@ -2725,7 +4075,17 @@ function Handle-WagoSearch {
     $sort = $q['sort']
     $page = Get-QueryOrDefault -QueryString $q -Name 'page' -Default '1'
 
-    $uri = 'https://addons.wago.io/?game_version=retail&page=' + [System.Uri]::EscapeDataString($page)
+    # FLAVORS-SPEC.md CS-F2 S4.6/S6.4: game_version is resolved from this
+    # request's own flavour (Set-CurrentFlavourContext, via Invoke-Route)
+    # instead of the hardcoded 'retail' literal - Get-CfFlavourMapping's
+    # WagoField already centralizes the static retail/classic_era values and
+    # 'classic''s dynamic per-Interface resolution (S2.4). Byte-identical to
+    # today on a Retail-only machine (WagoField resolves to 'retail').
+    $wagoMapping = Get-CfFlavourMapping -Flavor $Script:CurrentFlavour -InstalledInterface $Script:ClientBuildInfo.clientInterface
+    $wagoGameVersion = $wagoMapping.WagoField
+    if (-not $wagoGameVersion) { $wagoGameVersion = 'retail' }
+
+    $uri = 'https://addons.wago.io/?game_version=' + [System.Uri]::EscapeDataString($wagoGameVersion) + '&page=' + [System.Uri]::EscapeDataString($page)
     if ($search) { $uri += '&search=' + [System.Uri]::EscapeDataString($search) }
     if ($categoryId) { $uri += '&category=' + [System.Uri]::EscapeDataString($categoryId) }
     if ($sort -eq 'name') { $uri += '&sort=name' }
@@ -3874,8 +5234,9 @@ function Test-DiagLastSync {
             return @{ ok = $false; detail = $_.Exception.Message }
         }
     }
-    if ($Script:LastRun -and $Script:LastRun.timestamp) {
-        return @{ ok = $true; detail = (Format-DiagTimestamp -Iso ([string]$Script:LastRun.timestamp)) }
+    $lastRun = Get-FlavourLastRun -Flavor $Script:CurrentFlavour
+    if ($lastRun -and $lastRun.timestamp) {
+        return @{ ok = $true; detail = (Format-DiagTimestamp -Iso ([string]$lastRun.timestamp)) }
     }
     return @{ ok = $true; detail = 'never' }
 }
@@ -4027,13 +5388,18 @@ function Handle-Ping {
 function Handle-State {
     param($Context, $RouteMatch)
 
+    $flavor = $Script:CurrentFlavour
+    if (-not $flavor) { $flavor = 'retail' }
+    $installedFlavours = Get-CurrentInstalledFlavours
+    $updateAvailable = Get-FlavourUpdateAvailable -Flavor $flavor
+
     $records = Get-AddonRecords
     # E3: computed once per /api/state call and shared across every record,
     # rather than re-listing the AddOns directory per addon.
     $presentFolders = Get-PresentAddonFolders
     # E13: likewise computed once and shared - each record's own toc parse
     # still happens per addon, but resolving the AddOns path itself does not.
-    $compatAddonsPath = Resolve-EffectiveAddonsPath
+    $compatAddonsPath = Resolve-EffectiveAddonsPath -Flavor $flavor
     $addonsOut = New-Object 'System.Collections.Generic.List[object]'
     foreach ($r in $records) {
         # E12: updateAvailable is keyed by the numeric CurseForge project id
@@ -4041,8 +5407,8 @@ function Handle-State {
         # all), by "wago:<slug>" - see Get-UpdateAvailableKeyForRecord.
         $upd = $null
         $key = Get-UpdateAvailableKeyForRecord -Record $r
-        if ($key -and $Script:UpdateAvailable.ContainsKey($key)) {
-            $u = $Script:UpdateAvailable[$key]
+        if ($key -and $updateAvailable.ContainsKey($key)) {
+            $u = $updateAvailable[$key]
             $upd = [PSCustomObject]@{ fileId = $u.fileId; version = $u.version }
         }
         $clone = [PSCustomObject]@{}
@@ -4061,7 +5427,9 @@ function Handle-State {
         $clone | Add-Member -MemberType NoteProperty -Name 'missingOptionalDeps' -Value $missingOptionalDeps.ToArray()
         # E13: tocInterfaces/compat computed live the same way missingDeps
         # just above is - never stored, recomputed every /api/state call.
-        $tocIfaces = Get-PackageTocInterfaces -AddonsPath $compatAddonsPath -Folders $r.folders
+        # FLAVORS-SPEC.md CS-F2: -Flavor/-InstalledInterface thread through so
+        # a package's toc selection matches THIS flavour's own era.
+        $tocIfaces = Get-PackageTocInterfaces -AddonsPath $compatAddonsPath -Folders $r.folders -Flavor $flavor -InstalledInterface $Script:ClientBuildInfo.clientInterface
         $compat = Get-AddonCompat -TocInterfaces $tocIfaces -LatestGameVersions $r.latestGameVersions -ClientInterface $Script:ClientBuildInfo.clientInterface
         $clone | Add-Member -MemberType NoteProperty -Name 'tocInterfaces' -Value $tocIfaces.ToArray()
         $clone | Add-Member -MemberType NoteProperty -Name 'compat' -Value $compat
@@ -4069,25 +5437,57 @@ function Handle-State {
     }
 
     $settings = Get-Settings
-    $currentJobView = Get-CurrentOrLastJobSummary
+    $currentJobView = Get-CurrentOrLastJobSummary -Flavor $flavor
+
+    # FLAVORS-SPEC.md CS-F2 S5.2: installedFlavours/activeFlavour are the
+    # only two fields present regardless of ?flavour= - they describe the
+    # MACHINE, not one flavour's data. Built from Get-CurrentInstalledFlavours
+    # (live detection) rather than cached, per S8's own "detection is live,
+    # not cached" acceptance bar.
+    $installedFlavoursOut = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($f in $installedFlavours) {
+        $installedFlavoursOut.Add([PSCustomObject]@{
+                id               = $f.id
+                label            = $f.label
+                addonsPath       = $f.addonsPath
+                clientBuild      = $f.clientBuild
+                clientInterface  = $f.clientInterface
+                buildInfoMissing = $f.buildInfoMissing
+            })
+    }
+
     $body = [PSCustomObject]@{
+        # S5.2: additive-only fields, present on every response regardless of
+        # ?flavour= - a single-flavour machine's payload differs from before
+        # this change set ONLY by these three top-level fields, per the
+        # feature's own "zero behavior change at n=1" bar.
+        installedFlavours = $installedFlavoursOut.ToArray()
+        activeFlavour     = $flavor
+        flavour           = $flavor
+        # Security-review fix (curseforge-handler.vbs gap): a machine-wide,
+        # not-yet-flavour-attributed 'awaiting_flavour' job, if one is
+        # still outstanding - see Get-PendingFlavourChoiceJob's own comment.
+        # $null on every request when none is pending (the common case).
+        pendingFlavourChoice = (Get-PendingFlavourChoiceJob)
         addons           = $addonsOut.ToArray()
         settings         = Get-SettingsView -Settings $settings
-        lastRun          = $Script:LastRun
+        lastRun          = (Get-FlavourLastRun -Flavor $flavor)
         job              = $currentJobView
-        updatesCheckedAt = $Script:UpdatesCheckedAt
+        updatesCheckedAt = (Get-FlavourUpdatesCheckedAt -Flavor $flavor)
         # CS1 (UX-SPEC.md sections 2.1/4.2): the one computed freshness enum
         # (see Get-ComputedFreshness) plus the two raw fields it (and a
         # failed-check Retry flow) read from - lastCheckFailed/lastCheckError
         # persist across polls in-memory only (Apply-JobCompletionSideEffects'
         # failure branch sets them; a later success clears them), so a failed
         # check stays visible after reload instead of being silently
-        # overwritten by the old "checked X ago" timestamp.
-        freshness        = (Get-ComputedFreshness -CurrentJobView $currentJobView)
-        lastCheckFailed  = [bool]$Script:LastCheckFailed
-        lastCheckError   = $Script:LastCheckError
-        # E13: read once at startup (Script:ClientBuildInfo) - see the
-        # Startup section - not re-read from disk on every /api/state poll.
+        # overwritten by the old "checked X ago" timestamp. FLAVORS-SPEC.md
+        # CS-F2 S5.3: all scoped to THIS flavour only - see Get-ComputedFreshness.
+        freshness        = (Get-ComputedFreshness -CurrentJobView $currentJobView -Flavor $flavor)
+        lastCheckFailed  = [bool](Get-FlavourLastCheckFailed -Flavor $flavor)
+        lastCheckError   = (Get-FlavourLastCheckError -Flavor $flavor)
+        # E13: re-resolved per request now (Set-CurrentFlavourContext, called
+        # from Invoke-Route before this handler runs) rather than once at
+        # server startup - see that function's own doc comment.
         clientBuild      = $Script:ClientBuildInfo.clientBuild
         clientInterface  = $Script:ClientBuildInfo.clientInterface
     }
@@ -4110,11 +5510,100 @@ function Handle-JobsPost {
     }
 
     $kind = [string]$body.kind
-    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source', 'add-by-slug')
+    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source', 'add-by-slug', 'update-all-flavours')
     if (-not ($validKinds -contains $kind)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: unknown kind '$kind'" }
         return
     }
+
+    # FLAVORS-SPEC.md S5.1: whether THIS request named an explicit
+    # ?flavour=/?flavor= - read once, here, since both the gate below and
+    # the Start-Job call at the end of this function need it (Start-Job's
+    # own S5.5 CurseForge install-flavour resolution must never engage when
+    # the caller already made an explicit choice - see its own comment).
+    $flavourGiven = [bool](Get-QueryFlavour -Context $Context)
+
+    # E12: a NEW Wago add (no existing record, so no projectId-equivalent key
+    # yet) is posted as {source:'wago', slug} instead of projectId - either
+    # is accepted here.
+    $hasWagoSourceSlug = [bool]($body.source -and $body.slug)
+    # E18: bulk adopt (the Welcome dialog's "Adopt all") posts projectIds
+    # (array of already-normalized tokens) instead of a single projectId -
+    # same three-way either/or as 'remove' below.
+    $hasMultiAdd = $body.projectIds -and (@($body.projectIds).Count -gt 0)
+
+    # FLAVORS-SPEC.md CS-F2 S5.1 (narrowed by CS-F3 S5.5): POST /api/jobs is
+    # addon-scoped for every kind EXCEPT update-all-flavours (see
+    # $Script:FlavourScopedEndpoints' own comment for why that one kind is
+    # excluded from the router-level check) - so this handler enforces the
+    # identical "flavour required" 400 itself, here, on a multi-flavour
+    # machine that omitted ?flavour=/?flavor=. A request naming an
+    # unrecognized/not-installed flavour has already been rejected by
+    # Invoke-Route's own Resolve-RequestFlavour call before this handler
+    # ever ran, regardless of any of this.
+    #
+    # CS-F3 carves out one exception: a genuine, SINGLE-target CurseForge
+    # add/install/add-by-slug (never a bulk add, never a Wago target) skips
+    # this blanket 400 and falls through to Start-Job's own S5.5
+    # auto/refuse/ask resolution instead - the protocol handler and the
+    # embedded CurseForge site's Install button have no concept of Furphy's
+    # flavours at all, so they can never send ?flavour=, and 400ing them
+    # outright on a multi-flavour machine would make CurseForge installs
+    # simply not work there. A bulk add (projectIds[]) and every Wago
+    # add/install still 400 here exactly as before this change set - Wago
+    # already names its one flavour through the search's own game_version
+    # param (S6.4), and silently guessing a flavour for several addons at
+    # once is not this feature's job.
+    $bodyHasSingleProjectId = [bool]$body.projectId
+    $isSingleCfInstallKind = (
+        ($kind -eq 'add' -and $bodyHasSingleProjectId -and (-not $hasMultiAdd)) -or
+        ($kind -eq 'install') -or
+        ($kind -eq 'add-by-slug')
+    )
+    $targetsWago = $false
+    if ($isSingleCfInstallKind) {
+        $bodyProjectIdText = [string]$body.projectId
+        $targetsWago = $hasWagoSourceSlug -or ($bodyProjectIdText -and $bodyProjectIdText.ToLowerInvariant().StartsWith('wago:'))
+    }
+    $skipFlavourGate = ($isSingleCfInstallKind -and (-not $targetsWago))
+    if ($kind -ne 'update-all-flavours' -and (-not $skipFlavourGate)) {
+        $installedForThisJob = Get-CurrentInstalledFlavours
+        if ((@($installedForThisJob)).Count -gt 1 -and (-not $flavourGiven)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'flavour required' }
+            return
+        }
+    }
+
+    # FLAVORS-SPEC.md CS-F2 S5.4/S5.6: a bulk sync fanning out into one
+    # per-flavour 'sync' job (reusing the ordinary per-flavour update-all
+    # logic, looped) - what the tray's scheduled tick (S5.6, once built)
+    # posts, and what CS-F4's "Update All" button (S6.3) fires. Excludes
+    # PTR/XPTR/Beta unless Settings' "Show test realms" (S2.5/S3.4) is on.
+    # This kind never uses ?flavour= (it targets every installed flavour at
+    # once, by definition) - Resolve-RequestFlavour's own default handling
+    # for a non-flavour-scoped POST /api/jobs is irrelevant here since this
+    # branch returns before Start-Job's own single-flavour Params dispatch.
+    if ($kind -eq 'update-all-flavours') {
+        $installedForBulk = Get-CurrentInstalledFlavours
+        $bulkSettings = Get-Settings
+        $showTestRealms = [bool]$bulkSettings.showTestRealms
+        $hiddenIds = @('ptr', 'xptr', 'beta')
+        $jobsOut = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($f in $installedForBulk) {
+            if ((-not $showTestRealms) -and ($hiddenIds -contains $f.id)) { continue }
+            $r = Start-Job -Kind 'sync' -Params ([PSCustomObject]@{}) -Flavor $f.id
+            if ($r.Busy) {
+                $jobsOut.Add([PSCustomObject]@{ flavour = $f.id; jobId = $r.Job.id; busy = $true })
+            } elseif ($r.Error) {
+                $jobsOut.Add([PSCustomObject]@{ flavour = $f.id; error = $r.Error })
+            } else {
+                $jobsOut.Add([PSCustomObject]@{ flavour = $f.id; jobId = $r.Job.id })
+            }
+        }
+        Send-Json -Context $Context -StatusCode 202 -Body @{ kind = 'update-all-flavours'; jobs = $jobsOut.ToArray() }
+        return
+    }
+
     # E19: the native host's CurseForge-tab install-link interception
     # (host\FurphyHost.cs HandleSlugInstall, for /wow/addons/<slug>/install/
     # <fileId> links, which carry a slug but no numeric projectId) - see
@@ -4124,14 +5613,8 @@ function Handle-JobsPost {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: slug required' }
         return
     }
-    # E12: a NEW Wago add (no existing record, so no projectId-equivalent key
-    # yet) is posted as {source:'wago', slug} instead of projectId - either
-    # is accepted here.
-    $hasWagoSourceSlug = [bool]($body.source -and $body.slug)
-    # E18: bulk adopt (the Welcome dialog's "Adopt all") posts projectIds
-    # (array of already-normalized tokens) instead of a single projectId -
-    # same three-way either/or as 'remove' below.
-    $hasMultiAdd = $body.projectIds -and (@($body.projectIds).Count -gt 0)
+    # $hasWagoSourceSlug/$hasMultiAdd were already computed above, alongside
+    # the flavour-gate skip decision that also needs them.
     if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug) -and (-not $hasMultiAdd)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId or projectIds required' }
         return
@@ -4169,7 +5652,7 @@ function Handle-JobsPost {
         return
     }
 
-    $result = Start-Job -Kind $kind -Params $body
+    $result = Start-Job -Kind $kind -Params $body -FlavourExplicit $flavourGiven
     if ($result.Busy) {
         Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy'; jobId = $result.Job.id }
         return
@@ -4200,8 +5683,12 @@ function Handle-JobsGetOne {
 function Handle-JobsGetAll {
     param($Context, $RouteMatch)
 
-    if ($Script:CurrentJob) {
-        Update-JobStatus -Job $Script:CurrentJob | Out-Null
+    # FLAVORS-SPEC.md CS-F2 S5.4: this listing is shared across every
+    # flavour (each job carries its own .flavour field), so every flavour's
+    # currently-running job (not just the request's own resolved flavour)
+    # needs a fresh poll before the listing below is built.
+    foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+        if ($cj) { Update-JobStatus -Job $cj | Out-Null }
     }
     $out = New-Object 'System.Collections.Generic.List[object]'
     foreach ($j in $Script:Jobs) {
@@ -4522,6 +6009,32 @@ function Handle-SettingsPut {
     }
     if ($null -ne $body.runAtStartup) {
         $settings.runAtStartup = [bool]$body.runAtStartup
+    }
+    # FLAVORS-SPEC.md CS-F2 S3.4: activeFlavour is a pure UI-continuity
+    # default (S5.1's principle 5 - "never load-bearing for a data
+    # operation") - validated against the CURRENTLY installed flavours so a
+    # stale/bogus value can never get written, but never rejected as a 400
+    # the way releaseType's out-of-range check is, since getting this one
+    # wrong only affects which flavour's view loads after a reload, nothing
+    # destructive. showTestRealms (S2.5) is a plain bool, same pattern as
+    # adFilter/cfFocus. schemaVersion is intentionally NOT accepted here -
+    # it is migration-owned (Invoke-FlavourMigration writes it directly) and
+    # must never be client-settable.
+    if ($null -ne $body.activeFlavour) {
+        $candidateFlavour = ([string]$body.activeFlavour).Trim().ToLowerInvariant()
+        if ($candidateFlavour.Length -gt 0) {
+            $installedForActiveFlavour = Get-CurrentInstalledFlavours
+            $isKnownFlavour = $false
+            foreach ($f in $installedForActiveFlavour) {
+                if ($f.id -eq $candidateFlavour) { $isKnownFlavour = $true; break }
+            }
+            if ($isKnownFlavour) {
+                $settings.activeFlavour = $candidateFlavour
+            }
+        }
+    }
+    if ($null -ne $body.showTestRealms) {
+        $settings.showTestRealms = [bool]$body.showTestRealms
     }
 
     try {
@@ -4931,7 +6444,11 @@ function Handle-Open {
                 # present) rather than something external whose absence is an error
                 # condition, so - unlike 'folder'/'addons'/'lastrun' above - a missing
                 # backups\ is created on the spot instead of failing the request.
-                $backupsPath = Join-Path -Path $Script:Root -ChildPath 'backups'
+                # FLAVORS-SPEC.md CS-F2: backups\ moved under
+                # flavours\<flavour>\ (S3.1/S3.5) - $Script:BackupsPath is
+                # already scoped to the request's own resolved flavour by
+                # Set-CurrentFlavourContext.
+                $backupsPath = $Script:BackupsPath
                 if (-not (Test-Path -LiteralPath $backupsPath)) {
                     try {
                         New-Item -ItemType Directory -Path $backupsPath -Force | Out-Null
@@ -5036,10 +6553,18 @@ function Handle-Open {
 function Handle-Shutdown {
     param($Context, $RouteMatch)
 
-    if ($Script:CurrentJob) {
-        Update-JobStatus -Job $Script:CurrentJob | Out-Null
+    # FLAVORS-SPEC.md CS-F2 S5.4: refuse shutdown while ANY flavour has a job
+    # running, not just the request's own resolved flavour - a background
+    # Classic Era sync must still block a shutdown triggered from a Retail
+    # browser tab.
+    $anyRunning = $false
+    foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+        if ($cj) {
+            $refreshed = Update-JobStatus -Job $cj
+            if ($refreshed -and $refreshed.state -eq 'running') { $anyRunning = $true }
+        }
     }
-    if ($Script:CurrentJob -and $Script:CurrentJob.state -eq 'running') {
+    if ($anyRunning) {
         Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy: a job is running' }
         return
     }
@@ -5122,7 +6647,20 @@ function Invoke-Route {
         }
 
         if ($matchedHandler) {
-            & $matchedHandler $Context $routeMatch
+            # FLAVORS-SPEC.md CS-F2 S5.1: resolve this ONE request's flavour
+            # before the handler ever runs, and stash it script-scope for the
+            # handler to read (see that section's own header comment for why
+            # this is safe on a single-threaded request loop). A resolution
+            # failure (missing ?flavour= on a flavour-scoped endpoint while
+            # >1 flavour is installed, or an unrecognized/not-installed
+            # value) 400s here and never reaches the handler at all.
+            $flavourResult = Resolve-RequestFlavour -Context $Context -Method $method -Path $path
+            if (-not $flavourResult.Ok) {
+                Send-Json -Context $Context -StatusCode $flavourResult.StatusCode -Body @{ error = $flavourResult.Error }
+            } else {
+                Set-CurrentFlavourContext -Flavor $flavourResult.Flavor
+                & $matchedHandler $Context $routeMatch
+            }
         } elseif ($method -eq 'GET' -and (-not $path.StartsWith('/api/'))) {
             # E19: the native host (host\FurphyHost.cs) navigates its Furphy
             # tab to "http://localhost:<port>/?host=webview2" on first load;
@@ -5174,6 +6712,25 @@ $Script:SettingsPath = Join-Path -Path $Script:Root -ChildPath 'settings.json'
 $Script:StatePath = Join-Path -Path $Script:Root -ChildPath 'state.json'
 $Script:AddonsJsonPath = Join-Path -Path $Script:Root -ChildPath 'addons.json'
 $Script:ServerLogPath = Join-Path -Path $Script:Root -ChildPath 'server.log'
+
+# FLAVORS-SPEC.md CS-F2 S5.1: startup self-check - every entry in
+# $Script:FlavourScopedEndpoints (defined above, alongside $Script:Routes)
+# must match a REAL registered route, so a typo'd Method/Pattern here (or a
+# route renamed/removed without updating this list) fails loudly at startup
+# instead of silently never 400ing a flavour-scoped call. Logged (now that
+# $Script:ServerLogPath is finally set), not thrown - a startup log line a
+# developer will actually see beats a hard crash for what is fundamentally a
+# dev-time consistency check, not a user-facing failure mode.
+foreach ($fse in $Script:FlavourScopedEndpoints) {
+    $matched = $false
+    foreach ($route in $Script:Routes) {
+        if ($route.Method -eq $fse.Method -and $route.Pattern -eq $fse.Pattern) { $matched = $true; break }
+    }
+    if (-not $matched) {
+        Write-ServerLog "STARTUP SELF-CHECK FAILED: FlavourScopedEndpoints entry '$($fse.Method) $($fse.Pattern)' matches no registered route in `$Script:Routes"
+    }
+}
+
 $Script:SyncLogPath = Join-Path -Path $Script:Root -ChildPath 'sync.log'
 $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
 # E19 (script itself is E17's, unchanged) - Invoke-ProtocolScript's target.
@@ -5190,12 +6747,16 @@ $Script:AddonRadarCacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'addon-
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 $Script:BuildInfoPathOverride = $BuildInfoPath
+# FLAVORS-SPEC.md CS-F2: overrides Get-InstalledFlavours'/Resolve-
+# EffectiveAddonsPath's own WoW-root detection (S8's fixture path), the same
+# way addon-sync.ps1's own -WowRoot does.
+$Script:WowRootOverride = $WowRoot
 $Script:AppName = 'Furphy Addon Manager'
 # E18: the shipped version lives in one place - ROOT\VERSION (a bare string,
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.5.0'
+$Script:Version = '1.6.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -5211,17 +6772,29 @@ $Script:LastResponseStatus = $null
 
 $Script:Jobs = New-Object 'System.Collections.Generic.List[object]'
 $Script:JobIdSeq = 0
-$Script:CurrentJob = $null
-$Script:UpdateAvailable = @{}
-$Script:LastRun = $null
-$Script:UpdatesCheckedAt = $null
+# FLAVORS-SPEC.md CS-F2 S5.4: Test-JobBusy's single-job-at-a-time guard
+# becomes PER-FLAVOUR scoped (a Retail sync and a Classic Era sync may run
+# concurrently; two Retail syncs still can't) - $Script:CurrentJob (a single
+# scalar) becomes a dictionary keyed by flavour id. $Script:Jobs (the shared
+# rolling 20-job HISTORY, above) stays ONE list across every flavour, each
+# job object now carrying its own .flavour field (S5.4) - only the "is a
+# job currently running FOR THIS FLAVOUR" tracking is split out.
+$Script:CurrentJobByFlavour = @{}
+# FLAVORS-SPEC.md CS-F2 S5.3: freshness is computed "exactly the way today's
+# single headline is, once per flavour" - so the bookkeeping that headline
+# reads from becomes per-flavour too (keyed by flavour id), rather than one
+# global scalar/hashtable shared across every flavour's addons.json.
+$Script:UpdateAvailableByFlavour = @{}
+$Script:LastRunByFlavour = @{}
+$Script:UpdatesCheckedAtByFlavour = @{}
 # CS1 (UX-SPEC.md section 4.2): in-memory only, never persisted to
 # state.json (Save-CheckState is intentionally untouched by this pass) - a
 # server restart forgets a stale failure, which is the right default: the
 # freshness headline should reflect "have we actually seen a failure since
-# this server came up", not resurrect one from a previous run.
-$Script:LastCheckFailed = $false
-$Script:LastCheckError = $null
+# this server came up", not resurrect one from a previous run. Per-flavour
+# for the same S5.3 reason as the three dictionaries just above.
+$Script:LastCheckFailedByFlavour = @{}
+$Script:LastCheckErrorByFlavour = @{}
 $Script:LastRequestTime = Get-Date
 # E19: see Invoke-Route's static-file branch / Handle-Ping - flips to
 # 'webview2' the first time the native host's Furphy tab loads.
@@ -5253,18 +6826,61 @@ $Script:AddonRadarSearchCache = @{}
 $Script:WagoAutoMatchCache = @{}
 $Script:LastAddonRadarRequestTime = [DateTime]::MinValue
 
-# E13 (compatibility audit): resolved once at server startup, not re-read
-# from disk on every /api/state or /api/diagnostics call - -BuildInfoPath
-# overrides everything (never touches the real WoW folder when given, per
-# this build's test requirement); otherwise the .build.info sitting next to
-# whatever AddOns path resolves at startup. A server restart is required to
-# pick up a changed patch's .build.info, which is an acceptable tradeoff for
-# not hitting the filesystem on every poll (this app's own game-launch flow
-# already restarts the server on every "Update & Play" desktop-shortcut run).
-$Script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $(
-    if ($Script:BuildInfoPathOverride) { $Script:BuildInfoPathOverride }
-    else { Get-DefaultBuildInfoPath -AddonsPathResolved (Resolve-EffectiveAddonsPath) }
-)
+# FLAVORS-SPEC.md CS-F2 S3.3: runs once, before any addons.json/state.json/
+# backups\ path is resolved - moves a pre-flavour install's top-level files
+# into flavours\<homeFlavour>\ (copy-first, idempotent - see the function's
+# own doc comment). CS-F1's own notesForNext flagged this file explicitly
+# ("a server-only first run would never migrate") - this closes that gap by
+# duplicating the same call addon-sync.ps1's Main makes. Never throws on its
+# own (see its doc comment) - wrapped anyway as an extra safety net, per
+# that same note, since nothing here may ever block startup.
+try {
+    Invoke-FlavourMigration -RootPath $Script:Root
+} catch {
+    Write-ServerLog "Flavour migration failed: $($_.Exception.Message)"
+}
+
+# FLAVORS-SPEC.md CS-F2: Invoke-FlavourMigration (shared, duplicated
+# verbatim from addon-sync.ps1 per the established pattern - see that
+# function's own doc comment) moves a pre-flavour install's top-level
+# state.json into flavours\<homeFlavour>\ along with addons.json/backups\,
+# per S3.1's literal file-tree diagram. This server deliberately keeps
+# state.json at the SHARED root instead (see Save-CheckState's own doc
+# comment for why) - so on an upgrade from a pre-CS-F2 install, the
+# just-migrated flavours\<home>\state.json is adopted back up as the shared
+# root's state.json, exactly once (guarded on the shared file not already
+# existing), before Load-CheckState ever reads it - otherwise an existing
+# user's lastRun/updatesCheckedAt/job history would silently vanish behind
+# a file this server's own Load-CheckState never looks at. Never touches
+# the pre-move backup Invoke-FlavourMigration already made.
+if (-not (Test-Path -LiteralPath $Script:StatePath)) {
+    $homeFlavourForState = Get-MigrationHomeFlavour -RootPath $Script:Root
+    $migratedStatePath = Join-Path -Path (Join-Path -Path (Join-Path -Path $Script:Root -ChildPath 'flavours') -ChildPath $homeFlavourForState) -ChildPath 'state.json'
+    if (Test-Path -LiteralPath $migratedStatePath -PathType Leaf) {
+        try {
+            Move-Item -LiteralPath $migratedStatePath -Destination $Script:StatePath -Force
+            Write-ServerLog "Flavour migration: adopted migrated flavours\$homeFlavourForState\state.json as the shared state.json"
+        } catch {
+            Write-ServerLog "Flavour migration: failed to adopt migrated state.json: $($_.Exception.Message)"
+        }
+    }
+}
+
+# FLAVORS-SPEC.md CS-F2: seeds $Script:CurrentFlavour/$Script:AddonsJsonPath/
+# $Script:BackupsPath/$Script:ClientBuildInfo with the S4.1 default flavour
+# (retail when installed, else the first detected, else 'retail') before the
+# first request ever arrives - every later request re-resolves and
+# re-stashes its OWN flavour via Invoke-Route/Set-CurrentFlavourContext (see
+# that function's own doc comment), so this seed only matters for whatever
+# runs between here and the first request (Load-CheckState's per-flavour
+# state.json read, immediately below). $Script:ClientBuildInfo itself is
+# still resolved fresh per request thereafter, not cached across the
+# process's lifetime the way the old single-flavour code path was - E13's
+# "server restart required to pick up a changed .build.info" tradeoff no
+# longer applies once multiple flavours exist, since a request for a
+# DIFFERENT flavour must never return the STARTUP flavour's stale build info.
+$Script:InstalledFlavoursAtStartup = Get-CurrentInstalledFlavours
+Set-CurrentFlavourContext -Flavor (Get-DefaultFlavourId -InstalledFlavours $Script:InstalledFlavoursAtStartup)
 
 # E2/Round 3: reload the last check results, last run summary, and job
 # history (if any) so the "n updates" badge, the My Addons "Last run" line,

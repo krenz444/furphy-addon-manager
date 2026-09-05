@@ -132,7 +132,20 @@ param(
     [switch]$Launcher,
     [string[]]$Rollback,
     [string]$BuildInfoPath,
-    [string]$ProgressPath
+    [string]$ProgressPath,
+    # FLAVORS-SPEC S4.1: which installed WoW client this run targets.
+    # Omitted -> 'retail' when _retail_ is installed (byte-identical to
+    # every existing invocation, script, and scheduled task); otherwise the
+    # first flavour Get-InstalledFlavours returns (S2.1 order). Validated
+    # against the live Get-InstalledFlavours result in Main below - an
+    # unrecognized or not-installed value is a clean, existing-style fatal
+    # error (exit 2), never a crash.
+    [string]$Flavor,
+    # FLAVORS-SPEC S2.3/S8: overrides the WoW root Get-InstalledFlavours/
+    # Resolve-AddonsPath resolve against, instead of walking up from this
+    # script's own folder. Never touches the real WoW folder when given -
+    # this is how the synthetic test fixture is pointed at.
+    [string]$WowRoot
 )
 
 $ProgressPreference = 'SilentlyContinue'
@@ -140,6 +153,43 @@ $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 
 $script:CfUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+
+# =====================================================================
+# Flavours (FLAVORS-SPEC.md S2.1) - static tables, defined once at script
+# scope so every function below (and addon-server.ps1's duplicate) reads
+# the exact same fixed order and folder/product mapping. Appending a 7th
+# flavour, or a future expansion's progression row (S2.4, in
+# Resolve-ClassicProgressionTypeId below), only ever touches this section.
+# =====================================================================
+
+# Fixed render order (S2.1) - every list/switcher iterates $Script:FlavourDefs
+# directly rather than re-sorting, so this array's order IS the contract.
+$Script:FlavourDefs = @(
+    [PSCustomObject]@{ Id = 'retail';      Folder = '_retail_';      Label = 'Retail';      Product = 'wow' }
+    [PSCustomObject]@{ Id = 'classic';     Folder = '_classic_';     Label = 'Classic';     Product = 'wow_classic' }
+    [PSCustomObject]@{ Id = 'classic_era'; Folder = '_classic_era_'; Label = 'Classic Era'; Product = 'wow_classic_era' }
+    [PSCustomObject]@{ Id = 'ptr';         Folder = '_ptr_';         Label = 'PTR';          Product = 'wowt' }
+    [PSCustomObject]@{ Id = 'xptr';        Folder = '_xptr_';        Label = 'PTR (2)';      Product = 'wowxptr' }
+    [PSCustomObject]@{ Id = 'beta';        Folder = '_beta_';        Label = 'Beta';         Product = 'wow_beta' }
+)
+$Script:FlavourFolderSet = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($fd in $Script:FlavourDefs) { [void]$Script:FlavourFolderSet.Add($fd.Folder) }
+
+# S4.5's per-era .toc selection table: X-Flavor tag value (point 1,
+# authoritative wherever present) + filename-suffix try-order (point 2).
+# Bare "<FolderName>.toc" ownership (point 2's caveat) is NOT a per-era
+# property - it is determined per-call in Get-PrimaryTocFile from which of
+# the three groups (Retail / Classic Era / Classic's rolling progression,
+# tbc+wrath+cata+mists collapsed into one group for this purpose) has no
+# suffixed file present in that specific folder.
+$Script:TocEraSelectors = [ordered]@{
+    'retail'      = [PSCustomObject]@{ XFlavorTag = 'Mainline'; Suffixes = @('_Mainline', '-Mainline') }
+    'classic_era' = [PSCustomObject]@{ XFlavorTag = 'Vanilla';  Suffixes = @('_Vanilla', '_Classic', '-Classic') }
+    'tbc'         = [PSCustomObject]@{ XFlavorTag = 'TBC';      Suffixes = @('_TBC', '-BCC') }
+    'wrath'       = [PSCustomObject]@{ XFlavorTag = 'Wrath';    Suffixes = @('_Wrath', '-Wrath', '-WOTLKC') }
+    'cata'        = [PSCustomObject]@{ XFlavorTag = 'Cata';     Suffixes = @('_Cata') }
+    'mists'       = [PSCustomObject]@{ XFlavorTag = 'Mists';    Suffixes = @('_Mists') }
+}
 
 # =====================================================================
 # Logging
@@ -152,7 +202,13 @@ function Write-Log {
     )
 
     $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $line = "$timestamp [$Level] $Message"
+    # FLAVORS-SPEC S3.1: sync.log is shared across every flavour; lines gain
+    # a "[<flavour>]" prefix once Main resolves which flavour this run
+    # targets (empty/unset before then - e.g. during Invoke-FlavourMigration,
+    # which runs before flavour resolution - so this is never undefined).
+    $flavourPrefix = ''
+    if ($script:LogFlavourPrefix) { $flavourPrefix = $script:LogFlavourPrefix }
+    $line = "$timestamp [$Level] $flavourPrefix$Message"
     try {
         Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
     } catch {
@@ -460,14 +516,21 @@ function Test-FileHasTypeId {
     return $false
 }
 
-function Test-FileHasGameVersion12 {
-    param($File)
+function Test-FileHasGameVersionPrefix {
+    <#
+      FLAVORS-SPEC S4.4: was Test-FileHasGameVersion12 (literal "12."
+      only) - now parameterized by -Prefix so the same check serves every
+      flavour/era (e.g. "1.15." classic era, "5.5." Mists - S4.4's verified
+      TypeId/prefix table). Default preserves the old literal exactly for
+      every caller that doesn't pass -Prefix.
+    #>
+    param($File, [string]$Prefix = '12.')
 
     if (-not $File.gameVersions) {
         return $false
     }
     foreach ($g in $File.gameVersions) {
-        if ($g -and $g.ToString().StartsWith('12.')) {
+        if ($g -and $g.ToString().StartsWith($Prefix)) {
             return $true
         }
     }
@@ -477,29 +540,39 @@ function Test-FileHasGameVersion12 {
 function Select-CfFile {
     <#
       Picks the best file from a CurseForge file list:
-        1. Retail (517) with releaseType <= MaxReleaseType (the allowed
-           channel ceiling: 1 release only, 2 release+beta, 3 everything)
-        2. Retail (517), any release type
-        3. Any file whose gameVersions has an entry starting with "12."
+        1. The target flavour's TypeId (default 517, retail) with
+           releaseType <= MaxReleaseType (the allowed channel ceiling: 1
+           release only, 2 release+beta, 3 everything)
+        2. The target flavour's TypeId, any release type
+        3. Any file whose gameVersions has an entry starting with
+           -VersionPrefix (default "12.")
         4. $null if nothing matches
+
+      FLAVORS-SPEC S4.4: -TypeId/-VersionPrefix are resolved per flavour by
+      the caller (Get-CfFlavourMapping, static for retail/classic_era,
+      dynamic-from-Interface-number for classic via
+      Resolve-ClassicProgressionTypeId) - defaults here preserve today's
+      retail-only behaviour byte-for-byte for every existing call site.
     #>
     param(
         [Parameter(Mandatory = $true)]$Files,
-        [int]$MaxReleaseType = 1
+        [int]$MaxReleaseType = 1,
+        [int]$TypeId = 517,
+        [string]$VersionPrefix = '12.'
     )
 
     foreach ($f in $Files) {
-        if ((Test-FileHasTypeId -File $f -TypeId 517) -and ($f.releaseType -le $MaxReleaseType)) {
+        if ((Test-FileHasTypeId -File $f -TypeId $TypeId) -and ($f.releaseType -le $MaxReleaseType)) {
             return $f
         }
     }
     foreach ($f in $Files) {
-        if (Test-FileHasTypeId -File $f -TypeId 517) {
+        if (Test-FileHasTypeId -File $f -TypeId $TypeId) {
             return $f
         }
     }
     foreach ($f in $Files) {
-        if (Test-FileHasGameVersion12 -File $f) {
+        if (Test-FileHasGameVersionPrefix -File $f -Prefix $VersionPrefix) {
             return $f
         }
     }
@@ -800,18 +873,30 @@ function Select-WagoRelease {
     <#
       Picks the newest release (list assumed newest-first, Wago's own
       paginator order) whose stability is allowed by MaxReleaseType (1
-      stable, 2 stable+beta, 3 everything) AND whose supported_retail_patches
-      is non-empty; falls back to the newest allowed-stability release
-      regardless of patch list when nothing satisfies both. $null when
-      nothing is allowed at all.
+      stable, 2 stable+beta, 3 everything) AND whose
+      supported_<WagoField>_patches is non-empty; falls back to the newest
+      allowed-stability release regardless of patch list when nothing
+      satisfies both. $null when nothing is allowed at all.
+
+      FLAVORS-SPEC S4.6: -WagoField (default 'retail', preserving today's
+      literal supported_retail_patches check byte-for-byte) is resolved per
+      flavour by the caller via $Script:FlavourWagoField / Resolve-
+      ClassicProgressionTypeId's WagoValue - 'classic_era' -> 'classic',
+      classic's era resolved dynamically -> 'bc'|'wotlk'|'cata'|'mop'. Every
+      Wago release object carries all six supported_*_patches keys
+      regardless of which flavours it actually ships for - "supported"
+      means non-empty array, never key presence alone.
     #>
     param(
         [Parameter(Mandatory = $true)]$Releases,
-        [int]$MaxReleaseType = 1
+        [int]$MaxReleaseType = 1,
+        [string]$WagoField = 'retail'
     )
 
+    $propName = 'supported_{0}_patches' -f $WagoField
     foreach ($r in $Releases) {
-        if (((Get-WagoStabilityRank -Stability $r.stability) -le $MaxReleaseType) -and $r.supported_retail_patches -and (@($r.supported_retail_patches).Count -gt 0)) {
+        $patches = $r.$propName
+        if (((Get-WagoStabilityRank -Stability $r.stability) -le $MaxReleaseType) -and $patches -and (@($patches).Count -gt 0)) {
             return $r
         }
     }
@@ -964,6 +1049,51 @@ function Install-AddonPackage {
     Write-Output -NoEnumerate $installedFolders
 }
 
+function Get-TocXFlavorTag {
+    <#
+      FLAVORS-SPEC S4.5 point 1: reads a .toc's "## X-Flavor: <Tag>" line
+      (confirmed real and machine-readable - values seen live: Mainline,
+      Vanilla, TBC, Wrath, Cata, Mists, e.g. WeakAuras), trimmed, or $null
+      when absent/unreadable. Never throws.
+    #>
+    param([Parameter(Mandatory = $true)][string]$TocPath)
+
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $TocPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\s*##\s*X-Flavor\s*:\s*(.+?)\s*$') {
+            return $Matches[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Resolve-TocEraKey {
+    <#
+      Maps -Flavor (+, only for 'classic', -InstalledInterface) to one of
+      $Script:TocEraSelectors' keys - S2.4's dynamic resolution for the
+      rolling Classic client, static lookups for every other flavour.
+    #>
+    param([string]$Flavor = 'retail', $InstalledInterface = $null)
+
+    switch ($Flavor) {
+        'retail'      { return 'retail' }
+        'classic_era' { return 'classic_era' }
+        'classic' {
+            $ival = 0
+            if ($null -ne $InstalledInterface) {
+                try { $ival = [int]$InstalledInterface } catch { $ival = 0 }
+            }
+            return (Resolve-ClassicProgressionTypeId -Interface $ival).EraKey
+        }
+        default { return 'retail' }
+    }
+}
+
 function Get-PrimaryTocFile {
     <#
       Fix pass: picks the single .toc file WoW retail actually loads for one
@@ -974,20 +1104,34 @@ function Get-PrimaryTocFile {
       NOT retail - e.g. a Cataclysm-Classic build) plus a "<folder>_Mainline.
       toc" (or "<folder>-Mainline.toc") specifically for retail, alongside
       "_Vanilla"/"_Wrath"/"_Cata"/"_Mists" siblings that are never relevant
-      here. Every call site in this script used to pick ".toc whose basename
-      equals the folder name, else the first .toc found" - which silently
-      preferred the WRONG file whenever a same-named base .toc happened to
-      exist alongside the real "_Mainline" one (its Interface number
-      describes a different client entirely, a real source of false-positive
-      "stale" compatibility results before this fix). Order: "<folder>_
-      Mainline.toc", "<folder>-Mainline.toc", "<folder>.toc", else the first
-      .toc file found (preserves the old fallback for anything
-      unrecognized). Returns a FileInfo, or $null when the folder has no
-      .toc file at all. Never throws.
+      here.
+
+      FLAVORS-SPEC S4.5: gains -Flavor (default 'retail') and
+      -InstalledInterface (consulted only when -Flavor is 'classic', to
+      resolve which rolling-progression era's .toc to prefer, S2.4).
+      Selection order, primary signal first:
+        1. Any .toc in the folder carrying "## X-Flavor: <Tag>" whose value
+           matches the target flavour/era's tag - authoritative wherever
+           present, regardless of filename.
+        2. The target flavour/era's filename-suffix table
+           ($Script:TocEraSelectors), in try-order.
+        3. Bare "<FolderName>.toc" - owned by whichever of the three
+           groups (Retail / Classic Era / Classic's rolling progression)
+           is the SOLE one with no suffixed file present in this folder;
+           bare defaults to Retail whenever that is not exactly one group
+           (S4.5's caveat, implemented exactly - see the code comment
+           below for the worked-through reasoning).
+        4. First .toc file found (today's last-resort, unchanged).
+      Returns a FileInfo, or $null when the folder has no .toc file at all.
+      Never throws. Byte-identical to the pre-flavour selection for every
+      existing retail call site (-Flavor defaults to 'retail', whose
+      selector is exactly the old _Mainline/-Mainline/bare try-order).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$FolderPath,
-        [Parameter(Mandatory = $true)][string]$FolderName
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $tocFiles = Get-ChildItem -LiteralPath $FolderPath -Filter '*.toc' -File -ErrorAction SilentlyContinue
@@ -995,21 +1139,88 @@ function Get-PrimaryTocFile {
         return $null
     }
 
-    # Built with -f rather than "$FolderName_Mainline.toc" - PowerShell would
-    # parse the latter as the variable ${FolderName_Mainline} (underscore is
-    # a valid identifier character), not $FolderName followed by literal text.
-    $preferredNames = @(
-        ('{0}_Mainline.toc' -f $FolderName),
-        ('{0}-Mainline.toc' -f $FolderName),
-        ('{0}.toc' -f $FolderName)
-    )
-    foreach ($preferredName in $preferredNames) {
+    $eraKey = Resolve-TocEraKey -Flavor $Flavor -InstalledInterface $InstalledInterface
+    $selector = $Script:TocEraSelectors[$eraKey]
+    if (-not $selector) {
+        # No real selector row for this era (e.g. an unrecognized future
+        # Classic-progression Interface range) - do NOT fall back to the
+        # Retail selector here, or an unrecognized Classic client would
+        # silently prefer a Retail-tagged/suffixed file over the correct
+        # Classic one in steps 1-2. Use a selector that can never match so
+        # selection falls through to step 3's bare-file group logic (which
+        # already folds 'unknown' into the 'classic' group correctly) and
+        # then step 4's first-found fallback.
+        $selector = [PSCustomObject]@{ XFlavorTag = $null; Suffixes = @() }
+    }
+
+    # 1. X-Flavor tag - authoritative wherever present.
+    foreach ($t in $tocFiles) {
+        $tag = Get-TocXFlavorTag -TocPath $t.FullName
+        if ($tag -and ($tag -eq $selector.XFlavorTag)) {
+            return $t
+        }
+    }
+
+    # 2. Filename-suffix table for the target flavour/era. Built with -f
+    # rather than "$FolderName_Mainline.toc" - PowerShell would parse the
+    # latter as the variable ${FolderName_Mainline} (underscore is a valid
+    # identifier character), not $FolderName followed by literal text.
+    foreach ($suffix in $selector.Suffixes) {
+        $preferredName = '{0}{1}.toc' -f $FolderName, $suffix
         foreach ($t in $tocFiles) {
             if ($t.Name -eq $preferredName) {
                 return $t
             }
         }
     }
+
+    # 3. Bare "<FolderName>.toc" - S4.5's caveat, implemented exactly: build
+    # the suffix-to-flavour map for the THREE first-class groups (Retail;
+    # Classic Era; Classic's rolling progression - tbc/wrath/cata/mists
+    # collapsed into one "Classic" group for this determination, since a
+    # package ships one bare/suffixed set regardless of which era is
+    # currently live), scan which groups have a matching suffixed file
+    # present in THIS folder, and only attribute the bare file to a
+    # non-retail group when it is the SOLE unclaimed one of the three -
+    # else bare always means retail (today's behaviour, unchanged for the
+    # overwhelmingly common case: DBM-Core/Details/WeakAuras/AngryKeystones
+    # all ship bare=retail alongside _Classic/_TBC/_Wrath/_Cata/_Mists
+    # siblings, never the ambiguous case).
+    $bareGroupClaimed = @{
+        'retail'      = $false
+        'classic_era' = $false
+        'classic'     = $false
+    }
+    foreach ($otherKey in $Script:TocEraSelectors.Keys) {
+        $group = 'classic'
+        if ($otherKey -eq 'retail') { $group = 'retail' }
+        elseif ($otherKey -eq 'classic_era') { $group = 'classic_era' }
+        $otherSelector = $Script:TocEraSelectors[$otherKey]
+        foreach ($suffix in $otherSelector.Suffixes) {
+            $otherName = '{0}{1}.toc' -f $FolderName, $suffix
+            foreach ($t in $tocFiles) {
+                if ($t.Name -eq $otherName) { $bareGroupClaimed[$group] = $true }
+            }
+        }
+    }
+    $unclaimedGroups = @($bareGroupClaimed.Keys | Where-Object { -not $bareGroupClaimed[$_] })
+    $bareOwnerGroup = 'retail'
+    if ($unclaimedGroups.Count -eq 1) {
+        $bareOwnerGroup = $unclaimedGroups[0]
+    }
+    $targetGroup = 'classic'
+    if ($eraKey -eq 'retail') { $targetGroup = 'retail' }
+    elseif ($eraKey -eq 'classic_era') { $targetGroup = 'classic_era' }
+    if ($bareOwnerGroup -eq $targetGroup) {
+        $bareName = '{0}.toc' -f $FolderName
+        foreach ($t in $tocFiles) {
+            if ($t.Name -eq $bareName) {
+                return $t
+            }
+        }
+    }
+
+    # 4. First .toc found - today's last-resort, unchanged.
     foreach ($t in $tocFiles) {
         return $t
     }
@@ -1026,14 +1237,16 @@ function Get-TocTitle {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
-        [Parameter(Mandatory = $true)]$Folders
+        [Parameter(Mandatory = $true)]$Folders,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $candidates = New-Object 'System.Collections.Generic.List[object]'
     $tocByFolder = @{}
     foreach ($folderName in $Folders) {
         $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
-        $primaryToc = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName
+        $primaryToc = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName -Flavor $Flavor -InstalledInterface $InstalledInterface
         if ($primaryToc) {
             $candidates.Add($folderName)
             $tocByFolder[$folderName] = $primaryToc
@@ -1087,7 +1300,9 @@ function Get-FolderTocInfo {
       when there is none.
     #>
     param(
-        [Parameter(Mandatory = $true)][string]$FolderPath
+        [Parameter(Mandatory = $true)][string]$FolderPath,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     # E12: curseId/wagoId are additive - -Scan reports them per untracked
@@ -1097,7 +1312,7 @@ function Get-FolderTocInfo {
     $result = [PSCustomObject]@{ title = $null; version = $null; hasToc = $false; curseId = $null; wagoId = $null }
 
     $folderLeaf = Split-Path -Path $FolderPath -Leaf
-    $chosen = Get-PrimaryTocFile -FolderPath $FolderPath -FolderName $folderLeaf
+    $chosen = Get-PrimaryTocFile -FolderPath $FolderPath -FolderName $folderLeaf -Flavor $Flavor -InstalledInterface $InstalledInterface
     if (-not $chosen) {
         return $result
     }
@@ -1154,7 +1369,9 @@ function Get-TocCrossSourceIds {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
-        [Parameter(Mandatory = $true)]$Folders
+        [Parameter(Mandatory = $true)]$Folders,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $curseId = $null
@@ -1163,7 +1380,7 @@ function Get-TocCrossSourceIds {
         if ($curseId -and $wagoId) { break }
         $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
         if (-not (Test-Path -LiteralPath $folderPath)) { continue }
-        $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName
+        $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $folderName -Flavor $Flavor -InstalledInterface $InstalledInterface
         if (-not $chosen) { continue }
         $lines = $null
         try {
@@ -1292,7 +1509,12 @@ function Invoke-RollbackForRecord {
         [Parameter(Mandatory = $true)][string]$AddonsPath,
         [Parameter(Mandatory = $true)][string]$StagingPath,
         [Parameter(Mandatory = $true)][string]$BackupsRoot,
-        [switch]$DryRun
+        [switch]$DryRun,
+        # FLAVORS-SPEC S4: which installed client this rollback's re-parsed
+        # dependency/cross-source-id reads target (default 'retail'
+        # preserves today's only code path byte-for-byte).
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     # E12: source-generic identity key for backup-folder/staging paths and log
@@ -1375,7 +1597,7 @@ function Invoke-RollbackForRecord {
     # E3 (dependencies): the restored package's folders may declare a
     # different dependency list than the version just rolled back from, so
     # re-parse rather than leaving the previous version's deps in place.
-    $rollbackDeps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders
+    $rollbackDeps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
     $Record.requiredDeps = $rollbackDeps.required
     $Record.optionalDeps = $rollbackDeps.optional
 
@@ -1383,7 +1605,7 @@ function Invoke-RollbackForRecord {
     # RESTORED folder's .toc rather than left over from the version rolled
     # back from - same "always re-derive from what's actually on disk now"
     # treatment as requiredDeps/optionalDeps just above.
-    $rollbackTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders
+    $rollbackTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
     $Record.curseId = $rollbackTocIds.curseId
     $Record.wagoId = $rollbackTocIds.wagoId
 
@@ -1440,7 +1662,9 @@ function Get-TocDependencies {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
-        [Parameter(Mandatory = $true)][string]$FolderName
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $result = [PSCustomObject]@{
@@ -1453,7 +1677,7 @@ function Get-TocDependencies {
         return $result
     }
 
-    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName -Flavor $Flavor -InstalledInterface $InstalledInterface
     if (-not $chosen) {
         return $result
     }
@@ -1490,7 +1714,9 @@ function Get-PackageDependencies {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AddonsPath,
-        [Parameter(Mandatory = $true)]$Folders
+        [Parameter(Mandatory = $true)]$Folders,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $ownFolders = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -1504,7 +1730,7 @@ function Get-PackageDependencies {
     $optional = New-Object 'System.Collections.Generic.List[object]'
 
     foreach ($folderName in $Folders) {
-        $deps = Get-TocDependencies -AddonsPath $AddonsPath -FolderName $folderName
+        $deps = Get-TocDependencies -AddonsPath $AddonsPath -FolderName $folderName -Flavor $Flavor -InstalledInterface $InstalledInterface
         foreach ($name in $deps.required) {
             $key = $name.ToLowerInvariant()
             if ($ownFolders.Contains($key) -or $requiredSeen.Contains($key)) { continue }
@@ -1591,6 +1817,17 @@ function Get-TocInterfaceValues {
       describe a different client, not an additional retail value to union
       in) - previously both were unioned together indiscriminately, which
       could report a non-retail Interface number as if it were retail's own.
+
+      FLAVORS-SPEC S4.5: gains -Flavor (default 'retail') and
+      -InstalledInterface, threaded into Get-PrimaryTocFile so the correct
+      per-flavour file is read. The "## Interface-Mainline:" override tag
+      is a documented RETAIL-specific convention - it is only consulted
+      when -Flavor is 'retail' (byte-identical to today for every existing
+      caller); no confirmed real sample of an equivalent non-retail
+      override tag exists (S4.5's own flagged-unconfirmed note), so a
+      non-retail request reads that file's own plain "## Interface:" line
+      only - already correct, because Get-PrimaryTocFile already picked
+      THAT flavour's own file.
     #>
     param(
         # Not Mandatory (unlike Get-TocDependencies' identical-shaped param) -
@@ -1599,7 +1836,9 @@ function Get-TocInterfaceValues {
         # parameter-binding error on an explicit $null argument, distinct
         # from simply omitting it) rather than degrading gracefully.
         [string]$AddonsPath,
-        [Parameter(Mandatory = $true)][string]$FolderName
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $result = New-Object 'System.Collections.Generic.List[object]'
@@ -1613,7 +1852,7 @@ function Get-TocInterfaceValues {
         return
     }
 
-    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName
+    $chosen = Get-PrimaryTocFile -FolderPath $folderPath -FolderName $FolderName -Flavor $Flavor -InstalledInterface $InstalledInterface
     if (-not $chosen) {
         Write-Output -NoEnumerate $result
         return
@@ -1630,7 +1869,7 @@ function Get-TocInterfaceValues {
     $mainlineValues = New-Object 'System.Collections.Generic.List[object]'
     $plainValues = New-Object 'System.Collections.Generic.List[object]'
     foreach ($line in $lines) {
-        if ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$') {
+        if (($Flavor -eq 'retail') -and ($line -match '^\s*##\s*Interface-Mainline\s*:\s*(.*)$')) {
             foreach ($piece in (Split-TocDepList -Value $Matches[1])) {
                 $ival = [int64]0
                 if ([int64]::TryParse($piece, [ref]$ival)) {
@@ -1661,13 +1900,15 @@ function Get-PackageTocInterfaces {
         # forwards whatever it receives (including $null) to that function,
         # which already degrades to an empty result for it.
         [string]$AddonsPath,
-        $Folders
+        $Folders,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     $seen = New-Object 'System.Collections.Generic.HashSet[int64]'
     $result = New-Object 'System.Collections.Generic.List[object]'
     foreach ($folderName in $Folders) {
-        $vals = Get-TocInterfaceValues -AddonsPath $AddonsPath -FolderName $folderName
+        $vals = Get-TocInterfaceValues -AddonsPath $AddonsPath -FolderName $folderName -Flavor $Flavor -InstalledInterface $InstalledInterface
         foreach ($v in $vals) {
             if ($seen.Add([int64]$v)) {
                 $result.Add([int64]$v)
@@ -1703,22 +1944,316 @@ function Get-DefaultBuildInfoPath {
     }
 }
 
+function ConvertTo-InterfaceNumber {
+    <#
+      Shared by Get-ClientBuildInfo and Get-InstalledFlavours: a version
+      string "12.1.0.69587" -> Interface number 120100 (major*10000 +
+      minor*100 + patch). $null when unparsable or fewer than 3 dot-parts.
+    #>
+    param([string]$VersionText)
+
+    if (-not $VersionText) { return $null }
+    $parts = $VersionText -split '\.'
+    if ($parts.Count -lt 3) { return $null }
+    $maj = 0
+    $min = 0
+    $pat = 0
+    if ([int]::TryParse($parts[0], [ref]$maj) -and [int]::TryParse($parts[1], [ref]$min) -and [int]::TryParse($parts[2], [ref]$pat)) {
+        return ($maj * 10000) + ($min * 100) + $pat
+    }
+    return $null
+}
+
+function Get-BuildInfoRows {
+    <#
+      Parses every data row of a pipe-delimited, typed-header .build.info
+      file (S2.2/S8's exact confirmed format) into {Product; Version}
+      objects. Empty list when the file is missing, unreadable, has no
+      header, or the header lacks Product/Version columns. Never throws.
+    #>
+    param([string]$BuildInfoPath)
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $BuildInfoPath -or -not (Test-Path -LiteralPath $BuildInfoPath -PathType Leaf)) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+    $lines = $null
+    try {
+        $lines = Get-Content -LiteralPath $BuildInfoPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+    if (-not $lines -or $lines.Count -lt 2) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+
+    $headerCols = $lines[0] -split '\|'
+    $versionIdx = -1
+    $productIdx = -1
+    for ($i = 0; $i -lt $headerCols.Count; $i++) {
+        $colName = ($headerCols[$i] -split '!')[0].Trim()
+        if ($colName -eq 'Version') { $versionIdx = $i }
+        if ($colName -eq 'Product') { $productIdx = $i }
+    }
+    if ($versionIdx -lt 0 -or $productIdx -lt 0) {
+        Write-Output -NoEnumerate $rows
+        return
+    }
+
+    for ($r = 1; $r -lt $lines.Count; $r++) {
+        $line = $lines[$r]
+        if (-not $line -or $line.Trim().Length -eq 0) { continue }
+        $cols = $line -split '\|'
+        if ($cols.Count -le $productIdx -or $cols.Count -le $versionIdx) { continue }
+        $rows.Add([PSCustomObject]@{ Product = $cols[$productIdx].Trim(); Version = $cols[$versionIdx].Trim() })
+    }
+    Write-Output -NoEnumerate $rows
+}
+
+function Get-FlavourDef {
+    <# Looks up one $Script:FlavourDefs entry by id. $null when unrecognized. #>
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    foreach ($def in $Script:FlavourDefs) {
+        if ($def.Id -eq $Id) { return $def }
+    }
+    return $null
+}
+
+function Resolve-ClassicProgressionTypeId {
+    <#
+      FLAVORS-SPEC S2.4: _classic_ is a rolling progression client (Vanilla
+      -> TBC -> Wrath -> Cataclysm -> Mists, and it will advance again) -
+      never hardcode "Classic = <current expansion>". Resolves the live
+      era from the installed client's own Interface number (same
+      major*10000+minor*100+patch encoding ConvertTo-InterfaceNumber/
+      Get-ClientBuildInfo already produce) against this appendable range
+      table - appending one row (new Interface prefix, new TypeId once
+      CurseForge assigns one, new Wago value) is the ONLY code change a
+      future expansion bump needs. Falls back to Retail's row (517/retail)
+      when Interface is $null/0 or matches no known range - the safe
+      default S4.4's Resolve-CfTypeId also uses for ptr/xptr/beta.
+    #>
+    param($Interface = $null)
+
+    $ranges = @(
+        [PSCustomObject]@{ Min = 11500;  Max = 11599;  EraKey = 'classic_era'; EraLabel = 'Classic Era (Vanilla)';   TypeId = 67408; WagoValue = 'classic'; VersionPrefix = '1.15.' }
+        [PSCustomObject]@{ Min = 20500;  Max = 20599;  EraKey = 'tbc';         EraLabel = 'Burning Crusade Classic';  TypeId = 73246; WagoValue = 'bc';      VersionPrefix = '2.5.' }
+        [PSCustomObject]@{ Min = 30400;  Max = 30699;  EraKey = 'wrath';       EraLabel = 'Wrath Classic';            TypeId = 73713; WagoValue = 'wotlk';   VersionPrefix = '3.4.' }
+        [PSCustomObject]@{ Min = 38000;  Max = 38099;  EraKey = 'wrath';       EraLabel = 'Wrath Classic';            TypeId = 73713; WagoValue = 'wotlk';   VersionPrefix = '3.4.' }
+        [PSCustomObject]@{ Min = 40400;  Max = 40499;  EraKey = 'cata';        EraLabel = 'Cataclysm Classic';        TypeId = 77522; WagoValue = 'cata';    VersionPrefix = '4.4.' }
+        [PSCustomObject]@{ Min = 50500;  Max = 50599;  EraKey = 'mists';       EraLabel = 'Mists Classic';            TypeId = 79434; WagoValue = 'mop';     VersionPrefix = '5.5.' }
+        [PSCustomObject]@{ Min = 120000; Max = 129999; EraKey = 'retail';      EraLabel = 'Retail';                   TypeId = 517;   WagoValue = 'retail';  VersionPrefix = '12.' }
+    )
+
+    $ival = $null
+    if ($null -ne $Interface) {
+        try { $ival = [int]$Interface } catch { $ival = $null }
+    }
+
+    if ($null -ne $ival -and $ival -ne 0) {
+        foreach ($row in $ranges) {
+            if (($ival -ge $row.Min) -and ($ival -le $row.Max)) {
+                return [PSCustomObject]@{ EraKey = $row.EraKey; EraLabel = $row.EraLabel; TypeId = $row.TypeId; WagoValue = $row.WagoValue; VersionPrefix = $row.VersionPrefix }
+            }
+        }
+        # Security-review fix: a REAL, non-zero Interface that matches no
+        # known range is NOT the same as a missing/unreadable .build.info -
+        # it means a future Classic expansion bump this table simply
+        # doesn't cover yet. Returning Retail's TypeId/WagoValue here (as
+        # this function used to) let a Classic client's addon installs
+        # silently pick/install Retail-tagged files. Callers MUST treat
+        # EraKey='unknown' as a hard failure, not a usable mapping.
+        return [PSCustomObject]@{ EraKey = 'unknown'; EraLabel = 'Unrecognized Classic client version'; TypeId = $null; WagoValue = $null; VersionPrefix = $null }
+    }
+    # Unresolvable because the build info itself is missing/unreadable
+    # (Interface null or 0) - safe fallback, never a fatal error (S2.2/S4.4).
+    return [PSCustomObject]@{ EraKey = 'retail'; EraLabel = 'Retail'; TypeId = 517; WagoValue = 'retail'; VersionPrefix = '12.' }
+}
+
+function Resolve-CfTypeId {
+    <# FLAVORS-SPEC S4.4's exact resolver. #>
+    param([string]$Flavor, $InstalledInterface = $null)
+
+    switch ($Flavor) {
+        'retail'      { return 517 }
+        'classic_era' { return 67408 }
+        'classic'     { return (Resolve-ClassicProgressionTypeId -Interface $InstalledInterface).TypeId }
+        default       { return 517 }  # ptr/xptr/beta default to retail's TypeId, unconfirmed but safe (S2.5)
+    }
+}
+
+function Get-CfFlavourMapping {
+    <#
+      Centralizes S4.4 (CurseForge TypeId + gameVersions prefix) and S4.6
+      (Wago game_version field) for one -Flavor (+, for 'classic', its
+      resolved progression era). Returns {TypeId; VersionPrefix; WagoField;
+      EraLabel}. Defaults (retail) match today's only code path exactly.
+    #>
+    param([string]$Flavor = 'retail', $InstalledInterface = $null)
+
+    switch ($Flavor) {
+        'retail'      { return [PSCustomObject]@{ TypeId = 517; VersionPrefix = '12.'; WagoField = 'retail'; EraLabel = 'Retail'; EraKey = 'retail' } }
+        'classic_era' { return [PSCustomObject]@{ TypeId = 67408; VersionPrefix = '1.15.'; WagoField = 'classic'; EraLabel = 'Classic Era (Vanilla)'; EraKey = 'classic_era' } }
+        'classic' {
+            # Security-review fix: $prog.EraKey now propagates through
+            # (including the 'unknown' sentinel) so every caller can check
+            # $mapping.EraKey -eq 'unknown' rather than only inferring
+            # failure from a null TypeId.
+            $prog = Resolve-ClassicProgressionTypeId -Interface $InstalledInterface
+            return [PSCustomObject]@{ TypeId = $prog.TypeId; VersionPrefix = $prog.VersionPrefix; WagoField = $prog.WagoValue; EraLabel = $prog.EraLabel; EraKey = $prog.EraKey }
+        }
+        default { return [PSCustomObject]@{ TypeId = 517; VersionPrefix = '12.'; WagoField = 'retail'; EraLabel = 'Retail'; EraKey = 'retail' } }
+    }
+}
+
+function Get-InstalledFlavours {
+    <#
+      FLAVORS-SPEC S2.3: returns the WoW client flavours actually present
+      under $WowRoot, in S2.1's fixed order - {id; folder; label;
+      addonsPath; clientBuild; clientInterface; buildInfoRow;
+      buildInfoMissing}. "Installed" (S2.2) means <WowRoot>\<folder>\
+      Interface\AddOns exists (need not contain any addon yet). .build.info
+      is corroboration only, never load-bearing for the installed/not
+      decision - a missing/stale/unreadable .build.info, or no row whose
+      Product matches, never hides an otherwise-detected flavour;
+      buildInfoMissing is set instead. Never throws.
+
+      -WowRoot, when given, is used as-is (CLI/test override - S8's fixture
+      path included). Omitted, it is resolved by walking up from
+      -ScriptRoot (default $PSScriptRoot) the way Resolve-AddonsPath
+      already does, generalized from "parent leaf must be _retail_" to
+      "parent leaf must be one of S2.1's known flavour folder names" - this
+      is what unblocks a Classic-only machine (no _retail_ at all).
+      Returns @() only when $WowRoot can't be resolved at all (caller's
+      existing fatal exit-code-2 path is unchanged by this).
+    #>
+    param(
+        [string]$WowRoot,
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $result = New-Object 'System.Collections.Generic.List[object]'
+
+    $resolvedWowRoot = $WowRoot
+    if (-not $resolvedWowRoot -or $resolvedWowRoot.Trim().Length -eq 0) {
+        if ($ScriptRoot) {
+            $leaf = Split-Path -Path $ScriptRoot -Leaf
+            $parentDir = Split-Path -Path $ScriptRoot -Parent
+            if (($leaf -eq 'AddonSync') -and $parentDir) {
+                $parentLeaf = Split-Path -Path $parentDir -Leaf
+                if ($Script:FlavourFolderSet.Contains($parentLeaf)) {
+                    $resolvedWowRoot = Split-Path -Path $parentDir -Parent
+                }
+            }
+        }
+    }
+
+    if (-not $resolvedWowRoot -or -not (Test-Path -LiteralPath $resolvedWowRoot -PathType Container)) {
+        Write-Output -NoEnumerate $result
+        return
+    }
+
+    $buildInfoPath = Join-Path -Path $resolvedWowRoot -ChildPath '.build.info'
+    $buildInfoRows = Get-BuildInfoRows -BuildInfoPath $buildInfoPath
+
+    foreach ($def in $Script:FlavourDefs) {
+        $folderPath = Join-Path -Path $resolvedWowRoot -ChildPath $def.Folder
+        $addonsPath = Join-Path -Path $folderPath -ChildPath 'Interface\AddOns'
+        if (-not (Test-Path -LiteralPath $addonsPath -PathType Container)) {
+            continue
+        }
+        $row = $null
+        foreach ($r in $buildInfoRows) {
+            if ($r.Product -eq $def.Product) { $row = $r; break }
+        }
+        $clientBuild = $null
+        $clientInterface = $null
+        if ($row) {
+            $clientBuild = $row.Version
+            $clientInterface = ConvertTo-InterfaceNumber -VersionText $row.Version
+        }
+        $result.Add([PSCustomObject]@{
+                id               = $def.Id
+                folder           = $def.Folder
+                label            = $def.Label
+                addonsPath       = $addonsPath
+                clientBuild      = $clientBuild
+                clientInterface  = $clientInterface
+                buildInfoRow     = $row
+                buildInfoMissing = ($null -eq $row)
+            })
+    }
+
+    # S2.6: generic fallback for an unrecognized folder that still looks
+    # like a WoW client (Interface\AddOns present + an unclaimed
+    # .build.info Product row) - surfaced as an Unknown flavour. Disabling
+    # it by default (S2.5/2.6's toggle) is a UI/server concern; this
+    # function only ever reports detection.
+    $claimedProducts = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($def in $Script:FlavourDefs) { [void]$claimedProducts.Add($def.Product) }
+    try {
+        $subDirs = Get-ChildItem -LiteralPath $resolvedWowRoot -Directory -ErrorAction SilentlyContinue
+        foreach ($dir in $subDirs) {
+            if ($Script:FlavourFolderSet.Contains($dir.Name)) { continue }
+            $candidateAddons = Join-Path -Path $dir.FullName -ChildPath 'Interface\AddOns'
+            if (-not (Test-Path -LiteralPath $candidateAddons -PathType Container)) { continue }
+            $matchRow = $null
+            foreach ($r in $buildInfoRows) {
+                if (-not $claimedProducts.Contains($r.Product)) { $matchRow = $r; break }
+            }
+            if ($matchRow) {
+                $result.Add([PSCustomObject]@{
+                        id               = $matchRow.Product
+                        folder           = $dir.Name
+                        label            = $matchRow.Product
+                        addonsPath       = $candidateAddons
+                        clientBuild      = $matchRow.Version
+                        clientInterface  = (ConvertTo-InterfaceNumber -VersionText $matchRow.Version)
+                        buildInfoRow     = $matchRow
+                        buildInfoMissing = $false
+                    })
+                [void]$claimedProducts.Add($matchRow.Product)
+            }
+        }
+    } catch {
+    }
+
+    Write-Output -NoEnumerate $result
+}
+
 function Get-ClientBuildInfo {
     <#
       Reads the WoW client's build/version from .build.info (pipe-separated;
-      header row names columns including "Product" and "Version"; the row
-      whose Product is "wow" - retail - is the one that matters here, other
-      rows such as wow_classic/wowt/wow_beta are ignored). Returns
+      header row names columns including "Product" and "Version"). Returns
       {clientBuild (string, e.g. "12.1.0.69587"); clientInterface (int,
       major*10000 + minor*100 + patch, e.g. 120100)} - both $null when the
-      file is missing, unreadable, has no header, no "wow" row, or an
+      file is missing, unreadable, has no header, no matching row, or an
       unparsable Version. Never throws.
+
+      FLAVORS-SPEC S4.3: gains -Flavor (default 'retail') and -Product; the
+      row whose Product matches -Product (or, when omitted, -Flavor's own
+      S2.1 mapping - 'wow' for retail, unchanged from today's hardcode) is
+      the one that matters. Other rows are ignored.
     #>
-    param([string]$BuildInfoPath)
+    param(
+        [string]$BuildInfoPath,
+        [string]$Flavor = 'retail',
+        [string]$Product
+    )
 
     $result = [PSCustomObject]@{ clientBuild = $null; clientInterface = $null }
     if (-not $BuildInfoPath -or -not (Test-Path -LiteralPath $BuildInfoPath -PathType Leaf)) {
         return $result
+    }
+
+    $expectedProduct = $Product
+    if (-not $expectedProduct) {
+        $def = Get-FlavourDef -Id $Flavor
+        if ($def) { $expectedProduct = $def.Product } else { $expectedProduct = 'wow' }
     }
 
     $lines = $null
@@ -1748,18 +2283,10 @@ function Get-ClientBuildInfo {
         if (-not $line -or $line.Trim().Length -eq 0) { continue }
         $cols = $line -split '\|'
         if ($cols.Count -le $productIdx -or $cols.Count -le $versionIdx) { continue }
-        if ($cols[$productIdx].Trim() -eq 'wow') {
+        if ($cols[$productIdx].Trim() -eq $expectedProduct) {
             $versionText = $cols[$versionIdx].Trim()
             $result.clientBuild = $versionText
-            $parts = $versionText -split '\.'
-            if ($parts.Count -ge 3) {
-                $maj = 0
-                $min = 0
-                $pat = 0
-                if ([int]::TryParse($parts[0], [ref]$maj) -and [int]::TryParse($parts[1], [ref]$min) -and [int]::TryParse($parts[2], [ref]$pat)) {
-                    $result.clientInterface = ($maj * 10000) + ($min * 100) + $pat
-                }
-            }
+            $result.clientInterface = ConvertTo-InterfaceNumber -VersionText $versionText
             break
         }
     }
@@ -1858,10 +2385,12 @@ function Get-AddonCompatFields {
         # Not Mandatory - see Get-TocInterfaceValues's own note; -Status can
         # reach here with an unresolvable AddOns path ($null).
         [string]$AddonsPath,
-        $ClientInterface
+        $ClientInterface,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
-    $tocIfaces = Get-PackageTocInterfaces -AddonsPath $AddonsPath -Folders $Item.folders
+    $tocIfaces = Get-PackageTocInterfaces -AddonsPath $AddonsPath -Folders $Item.folders -Flavor $Flavor -InstalledInterface $InstalledInterface
     $compat = Get-AddonCompat -TocInterfaces $tocIfaces -LatestGameVersions $Item.latestGameVersions -ClientInterface $ClientInterface
     return [PSCustomObject]@{ tocInterfaces = $tocIfaces.ToArray(); compat = $compat }
 }
@@ -1877,10 +2406,12 @@ function Add-CompatFieldsToAddonClone {
         [Parameter(Mandatory = $true)]$Item,
         # Not Mandatory - see Get-TocInterfaceValues's own note.
         [string]$AddonsPath,
-        $ClientInterface
+        $ClientInterface,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
-    $compatFields = Get-AddonCompatFields -Item $Item -AddonsPath $AddonsPath -ClientInterface $ClientInterface
+    $compatFields = Get-AddonCompatFields -Item $Item -AddonsPath $AddonsPath -ClientInterface $ClientInterface -Flavor $Flavor -InstalledInterface $InstalledInterface
     $clone = [PSCustomObject]@{}
     foreach ($p in $Item.PSObject.Properties) {
         $clone | Add-Member -MemberType NoteProperty -Name $p.Name -Value $p.Value
@@ -2153,29 +2684,225 @@ function Get-EffectiveMaxReleaseType {
 function Resolve-AddonsPath {
     <#
       Returns the effective AddOns path. If -Provided is set it wins.
-      Otherwise, if ScriptRoot looks like <X>\_retail_\AddonSync, returns
-      <X>\_retail_\Interface\AddOns. Otherwise returns $null (caller must
-      treat that as a fatal configuration error).
+      Otherwise, if ScriptRoot looks like <X>\<flavour-folder>\AddonSync,
+      returns <X>\<folder-for-Flavor>\Interface\AddOns. Otherwise returns
+      $null (caller must treat that as a fatal configuration error).
+
+      FLAVORS-SPEC S4.2: gains -Flavor (default 'retail') and -WowRoot.
+      -WowRoot, when given, is used directly (S8's fixture path) instead of
+      walking up from -ScriptRoot. The walk-up itself is generalized from
+      "parent leaf must equal _retail_" to "parent leaf must be one of
+      S2.1's known flavour folder names" (S2.3 point 1) - this machine's
+      own default call (-Flavor omitted -> 'retail', -WowRoot omitted)
+      resolves byte-identically to before, since _retail_ is one of those
+      six names and the folder joined is still the one -Flavor names.
     #>
     param(
         [string]$Provided,
-        [string]$ScriptRoot
+        [string]$ScriptRoot,
+        [string]$Flavor = 'retail',
+        [string]$WowRoot
     )
 
     if ($Provided -and ($Provided.Trim().Length -gt 0)) {
         return $Provided
     }
 
-    $leaf = Split-Path -Path $ScriptRoot -Leaf
-    $parentDir = Split-Path -Path $ScriptRoot -Parent
-    if (($leaf -eq 'AddonSync') -and $parentDir) {
-        $parentLeaf = Split-Path -Path $parentDir -Leaf
-        if ($parentLeaf -eq '_retail_') {
-            return Join-Path -Path $parentDir -ChildPath 'Interface\AddOns'
+    $def = Get-FlavourDef -Id $Flavor
+    if (-not $def) {
+        return $null
+    }
+
+    $resolvedWowRoot = $WowRoot
+    if (-not $resolvedWowRoot -or $resolvedWowRoot.Trim().Length -eq 0) {
+        $leaf = Split-Path -Path $ScriptRoot -Leaf
+        $parentDir = Split-Path -Path $ScriptRoot -Parent
+        if (($leaf -eq 'AddonSync') -and $parentDir) {
+            $parentLeaf = Split-Path -Path $parentDir -Leaf
+            if ($Script:FlavourFolderSet.Contains($parentLeaf)) {
+                $resolvedWowRoot = Split-Path -Path $parentDir -Parent
+            }
         }
     }
 
-    return $null
+    if (-not $resolvedWowRoot) {
+        return $null
+    }
+
+    return Join-Path -Path (Join-Path -Path $resolvedWowRoot -ChildPath $def.Folder) -ChildPath 'Interface\AddOns'
+}
+
+function Get-MigrationHomeFlavour {
+    <#
+      Which flavours\<id>\ subfolder this AddonSync install's own pre-
+      flavour top-level addons.json/state.json/backups belong under -
+      derived the same way Resolve-AddonsPath's ScriptRoot walk-up
+      resolves a flavour folder name, from $RootPath's OWN parent (RootPath
+      IS the AddonSync folder, e.g. <WowRoot>\_retail_\AddonSync - its
+      parent is <WowRoot>\_retail_). Falls back to 'retail' when
+      unresolvable (e.g. a standalone copy of this folder used for a
+      migration-rehearsal test, S8) - matches S3.3's own worked example.
+    #>
+    param([string]$RootPath)
+
+    try {
+        $parentDir = Split-Path -Path $RootPath -Parent
+        if ($parentDir) {
+            $parentLeaf = Split-Path -Path $parentDir -Leaf
+            foreach ($def in $Script:FlavourDefs) {
+                if ($def.Folder -eq $parentLeaf) { return $def.Id }
+            }
+        }
+    } catch {
+    }
+    return 'retail'
+}
+
+function Invoke-FlavourMigration {
+    <#
+      FLAVORS-SPEC S3.3: one-time, idempotent, zero-data-loss migration of a
+      pre-flavour install's top-level addons.json/state.json/backups\ into
+      flavours\<homeFlavour>\. Runs once at CLI/server startup, before any
+      path resolution (Main calls this before computing $script:ConfigPath
+      etc.). Never throws - every step is best-effort and logged; Main
+      wraps this call in its own try/catch as an extra safety net.
+
+      Steps (exactly S3.3):
+        1. Read settings.json's schemaVersion. Absent or 1 = pre-flavour;
+           >= 2 = already migrated - immediate no-op (this is the primary
+           idempotency guard for an already-completed migration).
+        2. Create flavours\<homeFlavour>\ if pre-flavour.
+        3. BEFORE moving anything, copy (not move) addons.json/state.json/
+           backups\ into flavours\_migration-backup-<timestamp>\ - but only
+           when no such backup folder already exists. This second,
+           independent guard (rather than relying on schemaVersion alone)
+           is what keeps a crash-and-retry mid-move from ever creating a
+           SECOND backup folder: schemaVersion is only set in step 5,
+           AFTER every move succeeds, so a retry after a mid-move crash
+           still sees schemaVersion 1 and would otherwise re-copy.
+        4. Move each item, guarded individually by Test-Path on the
+           DESTINATION - an item already landed in flavours\<homeFlavour>\
+           is left untouched (retry-safe: never overwrites an already-
+           landed file with stale content, never re-moves what moved fine).
+        5. Set schemaVersion: 2 in settings.json only after every move in
+           step 4 completed without an exception escaping this far.
+        6/7 (list the backup folder in Settings > Advanced; documented
+           rollback) are UI/doc concerns, not this function's.
+    #>
+    param([Parameter(Mandatory = $true)][string]$RootPath)
+
+    $settingsPath = Join-Path -Path $RootPath -ChildPath 'settings.json'
+    $schemaVersion = 1
+    $settingsObj = $null
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $raw = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 -ErrorAction Stop
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                $settingsObj = $raw | ConvertFrom-Json -ErrorAction Stop
+                if ($null -ne $settingsObj.schemaVersion) {
+                    $schemaVersion = [int]$settingsObj.schemaVersion
+                }
+            }
+        } catch {
+            Write-Log -Level 'WARN' -Message "Flavour migration: failed to read settings.json, treating as pre-flavour: $($_.Exception.Message)"
+        }
+    }
+
+    if ($schemaVersion -ge 2) {
+        return
+    }
+
+    $homeFlavour = Get-MigrationHomeFlavour -RootPath $RootPath
+    $flavoursDir = Join-Path -Path $RootPath -ChildPath 'flavours'
+    $homeFlavourDir = Join-Path -Path $flavoursDir -ChildPath $homeFlavour
+    if (-not (Test-Path -LiteralPath $homeFlavourDir)) {
+        New-Item -ItemType Directory -Path $homeFlavourDir -Force | Out-Null
+    }
+
+    # Step 3: copy-first backup - guarded by "does a backup folder already
+    # exist", independent of schemaVersion (see doc comment above for why).
+    # Also skipped entirely when there is nothing at the top level to
+    # migrate at all (a brand-new install, never previously synced) - no
+    # data to protect, so no empty backup-folder cruft is left behind.
+    $addonsJsonPath = Join-Path -Path $RootPath -ChildPath 'addons.json'
+    $stateJsonPath = Join-Path -Path $RootPath -ChildPath 'state.json'
+    $backupsDirPath = Join-Path -Path $RootPath -ChildPath 'backups'
+    $hasAddonsJson = Test-Path -LiteralPath $addonsJsonPath -PathType Leaf
+    $hasStateJson = Test-Path -LiteralPath $stateJsonPath -PathType Leaf
+    $hasBackupsDir = Test-Path -LiteralPath $backupsDirPath -PathType Container
+
+    $existingBackups = $null
+    if (Test-Path -LiteralPath $flavoursDir -PathType Container) {
+        $existingBackups = Get-ChildItem -LiteralPath $flavoursDir -Directory -Filter '_migration-backup-*' -ErrorAction SilentlyContinue
+    }
+    if (($hasAddonsJson -or $hasStateJson -or $hasBackupsDir) -and (-not $existingBackups -or (@($existingBackups)).Count -eq 0)) {
+        try {
+            $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+            $backupDir = Join-Path -Path $flavoursDir -ChildPath ("_migration-backup-{0}" -f $stamp)
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+            if ($hasAddonsJson) {
+                Copy-Item -LiteralPath $addonsJsonPath -Destination (Join-Path -Path $backupDir -ChildPath 'addons.json') -Force
+            }
+            if ($hasStateJson) {
+                Copy-Item -LiteralPath $stateJsonPath -Destination (Join-Path -Path $backupDir -ChildPath 'state.json') -Force
+            }
+            if ($hasBackupsDir) {
+                Copy-Item -LiteralPath $backupsDirPath -Destination (Join-Path -Path $backupDir -ChildPath 'backups') -Recurse -Force
+            }
+            Write-Log -Level 'INFO' -Message "Flavour migration: pre-move backup copied to $backupDir"
+        } catch {
+            Write-Log -Level 'ERROR' -Message "Flavour migration: failed to create pre-move backup: $($_.Exception.Message)"
+        }
+    }
+
+    # Step 4: move, each item guarded individually by the DESTINATION
+    # already existing (retry-safe across a crash mid-move).
+    $moveOk = $true
+    foreach ($name in @('addons.json', 'state.json', 'backups')) {
+        $sourcePath = Join-Path -Path $RootPath -ChildPath $name
+        $destPath = Join-Path -Path $homeFlavourDir -ChildPath $name
+        if (Test-Path -LiteralPath $destPath) {
+            continue
+        }
+        if (Test-Path -LiteralPath $sourcePath) {
+            try {
+                Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
+                Write-Log -Level 'INFO' -Message "Flavour migration: moved $name into $homeFlavourDir"
+            } catch {
+                $moveOk = $false
+                Write-Log -Level 'ERROR' -Message "Flavour migration: failed to move $name into $homeFlavourDir : $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if (-not $moveOk) {
+        # Never stamp schemaVersion 2 on a partial migration - the next run
+        # retries the still-missing item(s) (step 4's per-item guard makes
+        # this safe), never both moving AND still being treated as v1 for
+        # some item that already truly landed.
+        return
+    }
+
+    $newSettings = $settingsObj
+    if (-not $newSettings) {
+        $newSettings = [PSCustomObject]@{}
+    }
+    if ($newSettings.PSObject.Properties.Match('schemaVersion').Count -gt 0) {
+        $newSettings.schemaVersion = 2
+    } else {
+        $newSettings | Add-Member -MemberType NoteProperty -Name 'schemaVersion' -Value 2
+    }
+    try {
+        $json = ConvertTo-Json -InputObject $newSettings -Depth 10
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $tmpPath = "$settingsPath.tmp"
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $settingsPath -Force
+        Write-Log -Level 'INFO' -Message 'Flavour migration: schemaVersion set to 2'
+    } catch {
+        Write-Log -Level 'ERROR' -Message "Flavour migration: failed to write schemaVersion to settings.json: $($_.Exception.Message)"
+    }
 }
 
 # =====================================================================
@@ -2211,7 +2938,13 @@ function Sync-SingleAddon {
         # sub-phases for the single addon it is currently processing, so it
         # needs those two numbers handed in rather than recomputing them.
         [int]$ProgressTotal = 0,
-        [int]$ProgressIndex = 0
+        [int]$ProgressIndex = 0,
+        # FLAVORS-SPEC S4: which installed client this sync targets (default
+        # 'retail' preserves today's only code path byte-for-byte).
+        # -InstalledInterface only matters for -Flavor 'classic' (S2.4's
+        # dynamic progression resolution).
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
     # E12: a Wago-sourced record is processed by its own function rather
@@ -2220,8 +2953,10 @@ function Sync-SingleAddon {
     # caller of Sync-SingleAddon (the main sync loop) is unchanged; this
     # dispatch is the only new code path they see.
     if ($Record.source -eq 'wago') {
-        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex
+        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface
     }
+
+    $cfMapping = Get-CfFlavourMapping -Flavor $Flavor -InstalledInterface $InstalledInterface
 
     $projectId = [int]$Record.projectId
     $displayLabel = $Record.name
@@ -2238,6 +2973,18 @@ function Sync-SingleAddon {
         if ($Record.ignoreUpdates -and (-not $Force) -and (-not $ExplicitTarget)) {
             Write-Log -Level 'INFO' -Message "Ignored: project $projectId ($displayLabel) has ignoreUpdates set"
             return [PSCustomObject]@{ Status = 'Ignored'; Name = $displayLabel; Version = $Record.version }
+        }
+
+        # Security-review fix: Resolve-ClassicProgressionTypeId now returns
+        # EraKey='unknown' (TypeId/VersionPrefix/WagoField all $null) for a
+        # real, non-zero Classic Interface that matches no known
+        # progression range - a future expansion bump the table simply
+        # doesn't cover yet. This MUST be a hard per-addon failure, never a
+        # silent fall-through to Retail's TypeId (which could select and
+        # install a Retail-tagged CurseForge file into a Classic folder).
+        if ($cfMapping.EraKey -eq 'unknown') {
+            Write-Log -Level 'ERROR' -Message "Unrecognized Classic client version for project $projectId ($displayLabel) - Furphy does not yet know this Classic client's expansion era. Update Furphy or file a bug."
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
         $currentFileId = $null
@@ -2283,10 +3030,10 @@ function Sync-SingleAddon {
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
             $files = Get-CfFiles -ProjectId $projectId -MaxReleaseType $maxReleaseType
-            $selected = Select-CfFile -Files $files -MaxReleaseType $maxReleaseType
+            $selected = Select-CfFile -Files $files -MaxReleaseType $maxReleaseType -TypeId $cfMapping.TypeId -VersionPrefix $cfMapping.VersionPrefix
 
             if (-not $selected) {
-                Write-Log -Level 'WARN' -Message "No retail file found for project $projectId ($displayLabel)"
+                Write-Log -Level 'WARN' -Message "No $Flavor file found for project $projectId ($displayLabel)"
                 return [PSCustomObject]@{ Status = 'Skipped'; Name = $displayLabel; Version = $Record.version }
             }
         }
@@ -2324,7 +3071,7 @@ function Sync-SingleAddon {
             # whichever of the two is still missing; never overwrites an
             # existing value. Same DryRun gate as author/latestGameVersions.
             if ((-not $DryRun) -and $AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
-                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders
+                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders -Flavor $Flavor -InstalledInterface $InstalledInterface
                 if ((-not $Record.curseId) -and $backfillTocIds.curseId) {
                     $Record.curseId = $backfillTocIds.curseId
                 }
@@ -2379,7 +3126,7 @@ function Sync-SingleAddon {
             return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
-        $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders
+        $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $finalName = $Record.name
         if ($title) {
             $finalName = $title
@@ -2432,7 +3179,7 @@ function Sync-SingleAddon {
         # on disk. Always recomputed from scratch (not merged with whatever
         # was there before) since a new version's dependency list replaces
         # the old one outright.
-        $deps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders
+        $deps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $Record.requiredDeps = $deps.required
         $Record.optionalDeps = $deps.optional
 
@@ -2440,7 +3187,7 @@ function Sync-SingleAddon {
         # regardless of source, so a CurseForge-sourced record can surface
         # "Also on Wago" (and vice versa, for the Wago path below) once the
         # UI has both ids to compare.
-        $tocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders
+        $tocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $Record.curseId = $tocIds.curseId
         $Record.wagoId = $tocIds.wagoId
 
@@ -2508,9 +3255,13 @@ function Sync-SingleWagoAddon {
         [switch]$ExplicitTarget,
         # CS1: see Sync-SingleAddon's identical params for why.
         [int]$ProgressTotal = 0,
-        [int]$ProgressIndex = 0
+        [int]$ProgressIndex = 0,
+        # FLAVORS-SPEC S4.6: see Sync-SingleAddon's identical params for why.
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null
     )
 
+    $cfMapping = Get-CfFlavourMapping -Flavor $Flavor -InstalledInterface $InstalledInterface
     $slug = $Record.slug
     $displayLabel = $Record.name
     if (-not $displayLabel) {
@@ -2523,6 +3274,16 @@ function Sync-SingleWagoAddon {
         if ($Record.ignoreUpdates -and (-not $Force) -and (-not $ExplicitTarget)) {
             Write-Log -Level 'INFO' -Message "Ignored: wago:$slug ($displayLabel) has ignoreUpdates set"
             return [PSCustomObject]@{ Status = 'Ignored'; Name = $displayLabel; Version = $Record.version }
+        }
+
+        # Security-review fix: see Sync-SingleAddon's identical check for
+        # why - a real, non-zero Classic Interface outside every known
+        # progression range must hard-fail rather than silently fall
+        # through to Retail's WagoField ('retail'), which could select and
+        # install a Retail-tagged Wago release into a Classic folder.
+        if ($cfMapping.EraKey -eq 'unknown') {
+            Write-Log -Level 'ERROR' -Message "Unrecognized Classic client version for wago:$slug ($displayLabel) - Furphy does not yet know this Classic client's expansion era. Update Furphy or file a bug."
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
         $currentFileId = $null
@@ -2557,7 +3318,7 @@ function Sync-SingleWagoAddon {
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
             $releases = Get-WagoAllReleases -Slug $slug
-            $selected = Select-WagoRelease -Releases $releases -MaxReleaseType $maxReleaseType
+            $selected = Select-WagoRelease -Releases $releases -MaxReleaseType $maxReleaseType -WagoField $cfMapping.WagoField
 
             if (-not $selected) {
                 Write-Log -Level 'WARN' -Message "No allowed release found for wago:$slug ($displayLabel)"
@@ -2583,7 +3344,7 @@ function Sync-SingleWagoAddon {
             # Reads the installed folder's .toc directly, no network cost;
             # only fills whichever of the two is still missing.
             if ((-not $DryRun) -and $AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
-                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders
+                $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders -Flavor $Flavor -InstalledInterface $InstalledInterface
                 if ((-not $Record.curseId) -and $backfillTocIds.curseId) {
                     $Record.curseId = $backfillTocIds.curseId
                 }
@@ -2597,7 +3358,8 @@ function Sync-SingleWagoAddon {
             # already fetched, so recording its supported patches costs
             # nothing extra.
             if (-not $DryRun) {
-                if ($selected.supported_retail_patches) { $Record.latestGameVersions = $selected.supported_retail_patches } else { $Record.latestGameVersions = @() }
+                $selectedPatches = $selected.('supported_{0}_patches' -f $cfMapping.WagoField)
+                if ($selectedPatches) { $Record.latestGameVersions = $selectedPatches } else { $Record.latestGameVersions = @() }
                 if ($selected.created_at) { $Record.latestFileDate = $selected.created_at }
             }
             Write-Log -Level 'INFO' -Message "Up-to-date: wago:$slug ($displayLabel) release $currentFileId"
@@ -2631,7 +3393,7 @@ function Sync-SingleWagoAddon {
             return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
         }
 
-        $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders
+        $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $finalName = $Record.name
         if ($title) {
             $finalName = $title
@@ -2671,11 +3433,11 @@ function Sync-SingleWagoAddon {
         # wagoId is not tracked anywhere else in this codebase, so if the
         # installed package's .toc omits ## X-Wago-ID this simply stays/goes
         # $null rather than being guessed at.
-        $tocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders
+        $tocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $Record.curseId = $tocIds.curseId
         $Record.wagoId = $tocIds.wagoId
 
-        $deps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders
+        $deps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
         $Record.requiredDeps = $deps.required
         $Record.optionalDeps = $deps.optional
 
@@ -2998,17 +3760,100 @@ if (-not $scriptRootPath) {
     $scriptRootPath = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
 }
 
-$script:ConfigPath = Join-Path -Path $scriptRootPath -ChildPath 'addons.json'
 $script:StagingPath = Join-Path -Path $scriptRootPath -ChildPath 'staging'
 $script:LogPath = Join-Path -Path $scriptRootPath -ChildPath 'sync.log'
 $script:LastRunPath = Join-Path -Path $scriptRootPath -ChildPath 'last-run.txt'
 $script:SettingsPath = Join-Path -Path $scriptRootPath -ChildPath 'settings.json'
-$script:BackupsPath = Join-Path -Path $scriptRootPath -ChildPath 'backups'
+$script:LogFlavourPrefix = ''
 # CS1: -ProgressPath is an opt-in caller-supplied path (addon-server.ps1
 # threads one per job); Write-ProgressStep reads this script-scoped copy so
 # every call site just calls it with phase data, never re-threading the
 # path itself through every function signature.
 $script:ProgressPath = $ProgressPath
+
+# ---- FLAVORS-SPEC S3.3: one-time, idempotent migration - before ANY path
+#      resolution below. Never fatal: a migration failure logs and this run
+#      falls through to whatever paths already exist (today's Retail-only
+#      behaviour is unaffected either way, since a from-scratch environment
+#      has nothing to migrate). ----
+try {
+    Invoke-FlavourMigration -RootPath $scriptRootPath
+} catch {
+    Write-Log -Level 'ERROR' -Message "Flavour migration failed: $($_.Exception.Message)"
+}
+
+# ---- FLAVORS-SPEC S2.3/S4.1: detect installed flavours and resolve which
+#      one this run targets. -Flavor omitted -> 'retail' when installed
+#      (byte-identical to every existing invocation); otherwise the first
+#      flavour Get-InstalledFlavours returns. An unresolvable WoW root (no
+#      -WowRoot, and this script isn't sitting under a known flavour
+#      folder) degrades to the same 'retail' default today's sole code
+#      path always used - Resolve-AddonsPath's own fatal exit-2 further
+#      down is unchanged for that case. ----
+$script:InstalledFlavours = @()
+try {
+    $script:InstalledFlavours = Get-InstalledFlavours -WowRoot $WowRoot -ScriptRoot $scriptRootPath
+} catch {
+    Write-Log -Level 'WARN' -Message "Get-InstalledFlavours failed, falling back to retail-only: $($_.Exception.Message)"
+}
+
+$effectiveFlavor = 'retail'
+if ($Flavor -and $Flavor.Trim().Length -gt 0) {
+    $matchedFlavour = $null
+    foreach ($f in $script:InstalledFlavours) {
+        if ($f.id -eq $Flavor) { $matchedFlavour = $f; break }
+    }
+    if (-not $matchedFlavour) {
+        $installedIdsText = (($script:InstalledFlavours | ForEach-Object { $_.id }) -join ', ')
+        $msg = "Flavour '$Flavor' is not installed. Installed flavours: $installedIdsText"
+        Write-Log -Level 'ERROR' -Message $msg
+        if ($Json) {
+            Write-Host (ConvertTo-Json -InputObject @{ error = $msg } -Depth 5)
+        } elseif (-not $Quiet) {
+            Write-Host "ERROR: $msg"
+        }
+        exit 2
+    }
+    $effectiveFlavor = $Flavor
+} else {
+    $retailInstalled = $false
+    foreach ($f in $script:InstalledFlavours) {
+        if ($f.id -eq 'retail') { $retailInstalled = $true; break }
+    }
+    if ($retailInstalled -or ($script:InstalledFlavours.Count -eq 0)) {
+        $effectiveFlavor = 'retail'
+    } else {
+        $effectiveFlavor = $script:InstalledFlavours[0].id
+    }
+}
+$script:LogFlavourPrefix = "[$effectiveFlavor] "
+
+$effectiveInstalledInterface = $null
+foreach ($f in $script:InstalledFlavours) {
+    if ($f.id -eq $effectiveFlavor) { $effectiveInstalledInterface = $f.clientInterface; break }
+}
+# S4.4: resolved once here (TypeId/VersionPrefix/WagoField) for every call
+# site in Main that needs it directly (-Files' manual picker) rather than
+# threading -Flavor/-InstalledInterface everywhere; Sync-SingleAddon/
+# Sync-SingleWagoAddon compute their own copy the same way.
+$effectiveCfMapping = Get-CfFlavourMapping -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
+
+# ---- FLAVORS-SPEC S3.1/S3.5: per-flavour addons.json/state.json/backups
+#      nest under flavours\<id>\ - only the target flavour's subfolder is
+#      ever created (never every installed flavour's, so a single-flavour
+#      machine ends up with exactly one). Shared files (settings.json,
+#      staging\, sync.log, last-run.txt, cache\, jobs\) stay at
+#      $scriptRootPath, unchanged. ----
+$script:FlavourDir = Join-Path -Path (Join-Path -Path $scriptRootPath -ChildPath 'flavours') -ChildPath $effectiveFlavor
+if (-not (Test-Path -LiteralPath $script:FlavourDir)) {
+    try {
+        New-Item -ItemType Directory -Path $script:FlavourDir -Force | Out-Null
+    } catch {
+        Write-Log -Level 'ERROR' -Message "Failed to create flavour data folder ${script:FlavourDir}: $($_.Exception.Message)"
+    }
+}
+$script:ConfigPath = Join-Path -Path $script:FlavourDir -ChildPath 'addons.json'
+$script:BackupsPath = Join-Path -Path $script:FlavourDir -ChildPath 'backups'
 
 try {
     # ---- Load config ----
@@ -3054,10 +3899,10 @@ try {
     #      Get-AddonCompat already treats as 'unknown' rather than throwing. ----
     $effectiveBuildInfoPath = $BuildInfoPath
     if (-not $effectiveBuildInfoPath) {
-        $probeAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath
+        $probeAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath -Flavor $effectiveFlavor -WowRoot $WowRoot
         $effectiveBuildInfoPath = Get-DefaultBuildInfoPath -AddonsPathResolved $probeAddonsPath
     }
-    $script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $effectiveBuildInfoPath
+    $script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $effectiveBuildInfoPath -Flavor $effectiveFlavor
 
     # ---- -Launcher: gate on settings.autoUpdateOnLaunch, no network when disabled ----
     if ($Launcher) {
@@ -3068,7 +3913,7 @@ try {
         if (-not $autoUpdateOnLaunch) {
             Write-Log -Level 'INFO' -Message 'auto-update disabled'
             if ($Json) {
-                $jsonOut = [PSCustomObject]@{ action = 'sync'; results = @(); addons = $config.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
+                $jsonOut = [PSCustomObject]@{ action = 'sync'; flavour = $effectiveFlavor; installedFlavours = @($script:InstalledFlavours | ForEach-Object { $_.id }); results = @(); addons = $config.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
                 Write-Host (ConvertTo-Json -InputObject $jsonOut -Depth 10)
             } elseif (-not $Quiet) {
                 Write-Host 'Auto-update on launch is disabled; skipping sync.'
@@ -3090,7 +3935,7 @@ try {
         # the same way a sync would, but degrading to "every requiredDep
         # counts as missing" instead of erroring when it can't be resolved
         # or doesn't exist, keeps that no-path-required contract intact.
-        $statusAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath
+        $statusAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath -Flavor $effectiveFlavor -WowRoot $WowRoot
         $statusPresentFolders = Get-AddonsFolderSet -Path $statusAddonsPath
 
         # Fix pass: backfill wagoId/curseId toc-derived fields for records
@@ -3105,7 +3950,7 @@ try {
         if ($statusAddonsPath) {
             foreach ($item in $config) {
                 if ((-not $item.wagoId) -or (-not $item.curseId)) {
-                    $statusTocIds = Get-TocCrossSourceIds -AddonsPath $statusAddonsPath -Folders $item.folders
+                    $statusTocIds = Get-TocCrossSourceIds -AddonsPath $statusAddonsPath -Folders $item.folders -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
                     if ((-not $item.curseId) -and $statusTocIds.curseId) {
                         $item.curseId = $statusTocIds.curseId
                         $statusConfigChanged = $true
@@ -3133,14 +3978,14 @@ try {
             # E13 (compatibility audit): tocInterfaces/compat added to the same
             # clone missingDeps/missingOptionalDeps already build - see
             # Add-CompatFieldsToAddonClone's own doc comment.
-            $clone = Add-CompatFieldsToAddonClone -Item $item -AddonsPath $statusAddonsPath -ClientInterface $script:ClientBuildInfo.clientInterface
+            $clone = Add-CompatFieldsToAddonClone -Item $item -AddonsPath $statusAddonsPath -ClientInterface $script:ClientBuildInfo.clientInterface -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
             $clone | Add-Member -MemberType NoteProperty -Name 'missingDeps' -Value $missingDeps.ToArray()
             $clone | Add-Member -MemberType NoteProperty -Name 'missingOptionalDeps' -Value $missingOptionalDeps.ToArray()
             $statusAddons.Add($clone)
         }
 
         if ($Json) {
-            $jsonOut = [PSCustomObject]@{ action = 'status'; results = @(); addons = $statusAddons.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
+            $jsonOut = [PSCustomObject]@{ action = 'status'; flavour = $effectiveFlavor; installedFlavours = @($script:InstalledFlavours | ForEach-Object { $_.id }); results = @(); addons = $statusAddons.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
             Write-Host (ConvertTo-Json -InputObject $jsonOut -Depth 10)
         } elseif (-not $Quiet) {
             $statusRows = New-Object 'System.Collections.Generic.List[object]'
@@ -3289,7 +4134,7 @@ try {
                         fileLength   = $f.fileLength
                         downloads    = $f.totalDownloads
                         author       = $authorName
-                        retail       = (Test-FileHasTypeId -File $f -TypeId 517)
+                        retail       = (Test-FileHasTypeId -File $f -TypeId $effectiveCfMapping.TypeId)
                     })
             }
         } catch {
@@ -3345,7 +4190,7 @@ try {
     }
 
     # ---- Resolve and validate the AddOns path ----
-    $effectiveAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath
+    $effectiveAddonsPath = Resolve-AddonsPath -Provided $AddonsPath -ScriptRoot $scriptRootPath -Flavor $effectiveFlavor -WowRoot $WowRoot
     if (-not $effectiveAddonsPath) {
         $msg = 'AddonsPath was not specified and could not be inferred from the script location (expected <X>\_retail_\AddonSync). Pass -AddonsPath "<X>\_retail_\Interface\AddOns".'
         Write-Log -Level 'ERROR' -Message $msg
@@ -3388,7 +4233,7 @@ try {
             if ($ownedFolders.Contains($dir.Name.ToLowerInvariant())) {
                 continue
             }
-            $info = Get-FolderTocInfo -FolderPath $dir.FullName
+            $info = Get-FolderTocInfo -FolderPath $dir.FullName -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
             $untracked.Add([PSCustomObject]@{
                     folder  = $dir.Name
                     title   = $info.title
@@ -3651,7 +4496,7 @@ try {
                 }
             }
             if ($match) {
-                $rollbackResult = Invoke-RollbackForRecord -Record $match -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsRoot $script:BackupsPath -DryRun:$DryRun
+                $rollbackResult = Invoke-RollbackForRecord -Record $match -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsRoot $script:BackupsPath -DryRun:$DryRun -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
                 $rollbackFileId = $match.fileId
                 if (Get-Member -InputObject $rollbackResult -Name 'FileId' -MemberType NoteProperty) {
                     $rollbackFileId = $rollbackResult.FileId
@@ -3756,7 +4601,7 @@ try {
         }
         Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $progressLabel -Phase 'checking'
 
-        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex
+        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
 
         # For a real (non-DryRun) Installed/Updated row, Sync-SingleAddon
         # mutates $record.fileId in place before returning, so $record.fileId
@@ -3870,14 +4715,21 @@ try {
         # differs from what -Status would report for the same on-disk state.
         $jsonAddons = New-Object 'System.Collections.Generic.List[object]'
         foreach ($item in $config) {
-            $jsonAddons.Add((Add-CompatFieldsToAddonClone -Item $item -AddonsPath $effectiveAddonsPath -ClientInterface $script:ClientBuildInfo.clientInterface))
+            $jsonAddons.Add((Add-CompatFieldsToAddonClone -Item $item -AddonsPath $effectiveAddonsPath -ClientInterface $script:ClientBuildInfo.clientInterface -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface))
         }
+        # FLAVORS-SPEC S5.2: "flavour" (which one this output is scoped to)
+        # and "installedFlavours" (ids only - the CLI's own -Json output is
+        # not the server's /api/state, so this stays a plain id list rather
+        # than S5.2's fuller per-flavour object shape) are additive - every
+        # other field is unchanged.
         $jsonOut = [PSCustomObject]@{
-            action          = $actionLabel
-            results         = $jsonResults.ToArray()
-            addons          = $jsonAddons.ToArray()
-            clientBuild     = $script:ClientBuildInfo.clientBuild
-            clientInterface = $script:ClientBuildInfo.clientInterface
+            action            = $actionLabel
+            flavour           = $effectiveFlavor
+            installedFlavours = @($script:InstalledFlavours | ForEach-Object { $_.id })
+            results           = $jsonResults.ToArray()
+            addons            = $jsonAddons.ToArray()
+            clientBuild       = $script:ClientBuildInfo.clientBuild
+            clientInterface   = $script:ClientBuildInfo.clientInterface
         }
         Write-Host (ConvertTo-Json -InputObject $jsonOut -Depth 10)
     } elseif (-not $Quiet) {

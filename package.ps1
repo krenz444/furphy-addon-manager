@@ -10,6 +10,17 @@
  starting at 1.0.0) and is the same value addon-server.ps1's /api/ping
  reports, so the two never drift apart.
 
+ FLAVORS-SPEC S3.1: this build root's own flavours\ folder (each
+ installed flavour's addons.json/state.json/backups\ - state, exactly
+ like the top-level addons.json/settings.json/state.json/backups\ this
+ comment already calls out) is likewise never packaged. This already
+ holds by construction, not by an added exclude: $rootFiles below is an
+ explicit allow-list of individual files, and nothing in this script
+ recursively copies $Source's own root - only ui\ and host\ (each their
+ own named, non-state source folder) are ever recursed into. A future
+ editor adding a generic "copy everything else from $Source" step must
+ not do so without excluding flavours\ explicitly.
+
  Windows PowerShell 5.1 only. Pure ASCII.
 
  USAGE: package.ps1 [-Source <path>] [-DistDir <path>]

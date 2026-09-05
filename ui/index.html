@@ -86,6 +86,13 @@
         <svg class="icon nav-icon"><use href="#icon-gear"></use></svg>
         <span class="nav-label">Settings</span>
       </button>
+      <!-- FLAVORS-SPEC.md CS-F4 (section 6.1): a stable, empty marker - the
+           real switcher pill row is inserted right after this (Components.
+           Switcher, ui/app.js) only once more than one WoW flavour is
+           installed, and fully removed (not display:none) otherwise, so a
+           single-flavour machine's DOM is byte-for-byte what it is today
+           (principle 2). Never remove/rename this id. -->
+      <div id="flavour-switcher-anchor" hidden></div>
     </nav>
 
     <!-- Lofi Night only (E15b): pixel night cityscape along the bottom of
@@ -598,22 +605,48 @@
                 </div>
               </section>
 
+              <!-- FLAVORS-SPEC.md CS-F4 (section 2.5): only ever shown when a
+                   PTR/XPTR/Beta client is actually detected - a machine that
+                   has never seen one gets no clutter for a setting that would
+                   do nothing. -->
+              <section class="settings-group" id="settings-flavours" hidden>
+                <h3>WoW versions</h3>
+                <div class="settings-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Show test realms (PTR/Beta)</div>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-show-test-realms">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
+              </section>
+
               <section class="settings-group" id="settings-game">
                 <h3>Game folders</h3>
-                <div class="settings-row">
-                  <div class="settings-row-text">
-                    <div class="settings-row-label">World of Warcraft folder</div>
-                    <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
+                <!-- FLAVORS-SPEC.md CS-F4 (section 6.2): today's exact two
+                     rows, unchanged, at <=1 installed flavour. -->
+                <div id="settings-game-single">
+                  <div class="settings-row">
+                    <div class="settings-row-text">
+                      <div class="settings-row-label">World of Warcraft folder</div>
+                      <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
+                    </div>
+                    <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
                   </div>
-                  <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
-                </div>
-                <div class="settings-row">
-                  <div class="settings-row-text">
-                    <div class="settings-row-label">AddOns folder</div>
-                    <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
+                  <div class="settings-row">
+                    <div class="settings-row-text">
+                      <div class="settings-row-label">AddOns folder</div>
+                      <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
+                    </div>
+                    <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
                   </div>
-                  <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
                 </div>
+                <!-- One row per installed flavour, built by
+                     Views.settings.renderGameFolders() - only shown with
+                     more than one installed flavour (settings-game-single
+                     hides in that case instead). -->
+                <div id="settings-game-multi" hidden></div>
               </section>
 
               <!-- E19: ON by default as of 2026-09-04 (Eric's explicit
@@ -745,6 +778,10 @@
   <div class="job-panel-bar" id="job-panel-bar">
     <svg class="icon job-spinner" id="job-spinner"><use href="#icon-spinner"></use></svg>
     <span class="job-title" id="job-title">Working&hellip;</span>
+    <!-- FLAVORS-SPEC.md CS-F4 (section 5.4/6.2): a flavour label next to the
+         job title, shown only when more than one WoW flavour is installed
+         and this job actually names one (Components.JobPanel.update). -->
+    <span class="job-flavour-badge" id="job-flavour-badge" hidden></span>
     <span class="job-panel-spacer"></span>
     <button type="button" class="icon-btn" id="job-panel-collapse" aria-label="Collapse" title="Collapse">
       <svg class="icon"><use href="#icon-chevron-down"></use></svg>
