@@ -91,6 +91,10 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 - `@()` around a `List[object]` throws on some builds; use `.ToArray()` / `foreach` / `Write-Output -NoEnumerate`.
 - A single comma-joined token (`-Add 111,222`) survives `powershell.exe -File` argument binding intact; separate space-separated tokens do not collect into an array parameter the way an in-process call does.
 
+## Tests
+
+`tests\run-all.ps1` is the one entry point for the whole automated test suite (static checks, PS 5.1 unit tests, real server/CLI integration tests, the native host's `--selftest`/`--tray-selftest` markers, a headless-browser SPA harness plus a 14-theme contrast/screenshot audit, and a FLAVORS-SPEC section 8 acceptance pass) - run `tests\run-all.ps1 -Quick` for a sub-4-minute pass covering everything except real network installs and the full theme/fixture sweep, or plain `tests\run-all.ps1` for the complete run; both print a summary table and write `tests\last-report.json`/`tests\last-report.md`. `deploy.ps1` runs the Quick gate itself before touching a live install and refuses to proceed on a failure (`-SkipTests` overrides, loudly). See `tests\TESTING.md` for the full layer breakdown, the small set of testability hooks added to production files to make this possible, and how to add a new test.
+
 ## Status
 
 Actively iterated; see `CHANGELOG.md`, `SPEC.md` and `ROADMAP.md`.

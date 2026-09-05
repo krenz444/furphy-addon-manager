@@ -7073,4 +7073,19 @@ const App = (function () {
   };
 })();
 
-document.addEventListener("DOMContentLoaded", function () { App.init(); });
+document.addEventListener("DOMContentLoaded", function () {
+  const initPromise = App.init();
+  // T3 (tests\spa harness) testability hook: exposes App/Store plus an
+  // explicit "startup finished" flag to an out-of-process harness driving
+  // this page (via ?mock=1&test=1) inside an iframe. Active ONLY when
+  // ?test=1 is present - zero effect on any real/production load, and
+  // never touches anything the app itself reads. Documented in
+  // TESTING.md; see tests\spa\harness.js for the consumer.
+  if (new URLSearchParams(location.search).get("test") === "1") {
+    window.__furphyTest = window.__furphyTest || {};
+    window.__furphyTest.ready = false;
+    window.__furphyTest.App = App;
+    window.__furphyTest.Store = Store;
+    initPromise.then(function () { window.__furphyTest.ready = true; });
+  }
+});

@@ -11,12 +11,45 @@ param(
     # After a successful deploy, mirror code + docs into this git checkout and commit/push it.
     [string]$RepoPath = 'C:\Users\drops\Documents\furphy-addon-manager',
     [string]$Message = '',
-    [switch]$NoPush
+    [switch]$NoPush,
+    # T4: skip the tests\run-all.ps1 -Quick gate below (step 0). Off by
+    # default - a deploy normally REFUSES to proceed on a red gate. Every
+    # use of this switch prints a loud warning (see step 0) so a skipped
+    # gate is never silent in the console transcript.
+    [switch]$SkipTests
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $retail = Split-Path -Path $Dest -Parent
 $stamp = (Get-Date).ToString('yyyyMMdd-HHmm')
+
+# 0. Test gate: tests\run-all.ps1 -Quick must pass before touching the live
+# folder at all - step 1 below is the first thing that reaches outside this
+# build root. -SkipTests overrides (loud warning, never silent).
+$testsRunner = Join-Path -Path $Source -ChildPath 'tests\run-all.ps1'
+if ($SkipTests) {
+    Write-Host ''
+    Write-Host '########################################################' -ForegroundColor Red
+    Write-Host '# WARNING: -SkipTests was passed - tests\run-all.ps1 -Quick' -ForegroundColor Red
+    Write-Host '# was NOT run before this deploy. Proceeding unverified.' -ForegroundColor Red
+    Write-Host '########################################################' -ForegroundColor Red
+    Write-Host ''
+} elseif (Test-Path -LiteralPath $testsRunner -PathType Leaf) {
+    Write-Host ''
+    Write-Host '== Running tests\run-all.ps1 -Quick (deploy gate) ==' -ForegroundColor Cyan
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $testsRunner -Quick
+    if ($LASTEXITCODE -ne 0) {
+        $reportPath = Join-Path -Path $Source -ChildPath 'tests\last-report.md'
+        Write-Host ''
+        Write-Host "DEPLOY ABORTED: tests\run-all.ps1 -Quick failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        Write-Host "See: $reportPath" -ForegroundColor Red
+        Write-Host 'Pass -SkipTests to deploy anyway (loud warning, not recommended).' -ForegroundColor Red
+        exit 1
+    }
+    Write-Host '== Quick test gate passed =='
+} else {
+    Write-Host "WARNING: tests\run-all.ps1 not found at $testsRunner - skipping the test gate (nothing to run)." -ForegroundColor Yellow
+}
 
 function Get-LivePort {
     $p = 47831
@@ -142,6 +175,25 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
     New-Item -ItemType Directory -Force -Path $rh, (Join-Path $rh 'lib') | Out-Null
     foreach ($f in @('FurphyHost.cs', 'build-host.ps1', 'adfilter-hosts.txt', 'selftest.html')) { $s = Join-Path $Source "host\$f"; if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $rh $f) -Force } }
     Get-ChildItem -LiteralPath (Join-Path $Source 'host\lib') -File -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $rh 'lib') -Force
+
+    # T4: mirror tests\ SOURCES only - never tests\.tmp (scratch, cleaned
+    # after every run), tests\last-report.json/.md (this build root's own
+    # generated output, re-created by the next run-all.ps1 call), or
+    # tests\theme-screenshots (Run-ThemeAudit.ps1's own generated PNGs,
+    # cleared and re-populated at the start of every full run). Mirrors the
+    # same clear-then-copy pattern this script already uses for ui\ above.
+    $testsSrc = Join-Path $Source 'tests'
+    if (Test-Path -LiteralPath $testsSrc -PathType Container) {
+        $testsDst = Join-Path $RepoPath 'tests'
+        if (Test-Path -LiteralPath $testsDst) { Remove-Item -LiteralPath $testsDst -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $testsDst | Out-Null
+        $testsExclude = @('.tmp', 'last-report.json', 'last-report.md', 'theme-screenshots')
+        Get-ChildItem -LiteralPath $testsSrc -Force | Where-Object { $testsExclude -notcontains $_.Name } | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $testsDst -Recurse -Force
+        }
+        "copied tests\ ($((Get-ChildItem -LiteralPath $testsDst -File -Recurse | Measure-Object).Count) files, sources only)"
+    }
+
     Push-Location $RepoPath
     # git writes progress to stderr; under $ErrorActionPreference = 'Stop' PowerShell 5.1 would turn
     # that into a terminating error, so relax it for this block and rely on exit codes instead.

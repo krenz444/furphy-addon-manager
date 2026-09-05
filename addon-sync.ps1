@@ -9,8 +9,10 @@
 
  LAYOUT (relative to the folder this script lives in):
    addon-sync.ps1   this script
-   addons.json      config AND state (JSON array of addon records)
-   staging\         scratch folder for downloads/extraction
+   flavours\<id>\   per-flavour data: addons.json (config AND state,
+                    JSON array of addon records), backups\, and
+                    staging\ (scratch folder for downloads/extraction -
+                    per flavour so concurrent flavour syncs never share it)
    sync.log         append-only log
    last-run.txt     overwritten each run with the summary table
 
@@ -3749,6 +3751,28 @@ function Get-RecordBackupKey {
         return "wago-$safeSlug"
     }
     return [string][int]$Record.projectId
+}
+
+# =====================================================================
+# Dot-source guard (TESTING.md hook #1)
+#
+# Everything above this point (functions + the static $Script:FlavourDefs/
+# $Script:TocEraSelectors tables) is safe to define unconditionally - none
+# of it has a side effect. Everything below is the real "run the CLI" body:
+# it touches disk (sync.log, settings.json, addons.json), may hit the
+# network, and calls `exit`. A normal invocation
+# (`.\addon-sync.ps1 ...` / `powershell.exe -File addon-sync.ps1 ...`) must
+# run it exactly as before - this guard only short-circuits when the
+# script is DOT-SOURCED (". .\addon-sync.ps1" or ". $path"), which is how
+# tests\unit\*.Tests.ps1 loads these functions into Pester's scope without
+# triggering a real sync/exit. $MyInvocation.InvocationName is the literal
+# string "." when dot-sourced; the $MyInvocation.Line check is a fallback
+# for hosts that report InvocationName differently.
+# =====================================================================
+
+$script:FurphyDotSourced = ($MyInvocation.InvocationName -eq '.') -or ($MyInvocation.Line -match '^\s*\.\s')
+if ($script:FurphyDotSourced) {
+    return
 }
 
 # =====================================================================

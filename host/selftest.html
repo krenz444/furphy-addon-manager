@@ -10,8 +10,8 @@
 // exercising the page->host messages (contract E) that the host only ever
 // honors from that one webview: hello, theme, cf-show, cf-rect, cf-hide,
 // cf-nav. Sequence: hello, then a theme message (existing test palette),
-// then cf-show (rect + curseforge.com url), then after 2s a no-op cf-nav
-// back followed by cf-hide, then cf-show again.
+// then cf-show (rect + curseforge.com url), then at t=5s a no-op cf-nav
+// back followed by cf-hide, then cf-show again at t=5.5s.
 //
 // The curseforge:// deep-link interception path (HandleCurseforgeProtocol
 // -> POST /api/jobs, feeding the marker's `intercepted`/`jobPostStatus`
@@ -19,9 +19,15 @@
 // EnsureSelftestDeepLinkInjection injects a script into whatever document
 // the CF pane (_cfWebView) loads - i.e. the real curseforge.com page this
 // page's own cf-show above navigates it to - which fires a test
-// curseforge://install?... link a couple of seconds after that document
-// is created. CfWebView_NavigationStarting cancels and intercepts it
-// exactly like a real "Install" click would.
+// curseforge://install?... link shortly after that document is created.
+// CfWebView_NavigationStarting cancels and intercepts it exactly like a
+// real "Install" click would.
+//
+// Round-22 fix (T5): cf-hide was moved from t~3s to t~5s (and the
+// trailing cf-show from t=4s to t=5.5s) specifically to stop racing that
+// injected script's own fire time - see EnsureSelftestDeepLinkInjection's
+// comment in FurphyHost.cs for the full story. Capture (t=7s) and the
+// marker write (t=8s) both still have comfortable margin after t=5.5s.
 function postToHost(msg) {
     try {
         if (window.chrome && window.chrome.webview) {
@@ -66,9 +72,12 @@ setTimeout(function () {
 setTimeout(function () {
     // No-op: the pane has no back history yet from this one navigation,
     // so this just exercises the message path without changing anything.
+    // (Round-22: moved from t=3000 to t=5000 - see the header comment for
+    // why: this used to race EnsureSelftestDeepLinkInjection's injected
+    // deep-link script.)
     postToHost({ type: "cf-nav", action: "back" });
     postToHost({ type: "cf-hide" });
-}, 3000);
+}, 5000);
 
 setTimeout(function () {
     postToHost({
@@ -76,7 +85,7 @@ setTimeout(function () {
         rect: { x: 300, y: 120, w: 800, h: 600 },
         dpr: 1
     });
-}, 4000);
+}, 5500);
 </script>
 </body>
 </html>

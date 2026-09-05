@@ -21,6 +21,12 @@
  editor adding a generic "copy everything else from $Source" step must
  not do so without excluding flavours\ explicitly.
 
+ T4 (tests\run-all.ps1's own round): confirmed tests\ is never packaged,
+ by the same construction this comment already documents for flavours\ -
+ $rootFiles below never names anything under tests\, and ui\/host\ are
+ the only two folders ever recursed into. No change was needed here; this
+ line exists so that confirmation is recorded, not just implied.
+
  Windows PowerShell 5.1 only. Pure ASCII.
 
  USAGE: package.ps1 [-Source <path>] [-DistDir <path>]

@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Furphy SPA harness</title>
+<style>
+  body { font: 13px/1.4 monospace; margin: 0; padding: 8px; background: #111; color: #ddd; }
+  #status { margin-bottom: 8px; }
+  #frame-wrap { position: absolute; left: -3000px; top: 0; width: 1280px; height: 900px; }
+  iframe { width: 1280px; height: 900px; border: 1px solid #444; }
+  pre#results { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<div id="status">running...</div>
+<div id="frame-wrap"><iframe id="spa-frame"></iframe></div>
+<pre id="results">{}</pre>
+<script src="harness.js"></script>
+</body>
+</html>
