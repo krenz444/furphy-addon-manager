@@ -6,6 +6,10 @@ A self-contained World of Warcraft (retail) addon manager for Windows: silent up
 
 Everything works out of the box, with nothing to sign up for and nothing to configure: installing and updating addons from CurseForge and Wago Addons, searching Wago and browsing the real CurseForge.com from inside the app, versions, pin/ignore/rollback, dependency and compatibility checks, descriptions/changelogs/screenshots. There used to be an optional CurseForge API key that added a little extra official metadata - it was removed entirely (2026-09-04), since every one of those flows already worked just as well without it.
 
+## Multiple WoW versions
+
+Furphy also manages Classic and Classic Era addons, not just Retail — it detects whichever of Retail/Classic/Classic Era/PTR is actually installed on your machine and, once more than one is, shows a small switcher pill row so you can flip between them (each keeps its own addon list, freshness check, and an "Update All" button to sync everything at once); on a Retail-only machine like the one this app is usually installed on, none of that appears at all — every screen, file, and API response stays exactly as it is today. Classic's CurseForge/Wago version match is resolved live from your installed client's own build number, not hardcoded, so it keeps working correctly as Classic itself progresses through future expansions. See `FLAVORS-SPEC.md` for the full design if you're curious how it works.
+
 ## Requirements
 
 - Windows 10 or 11

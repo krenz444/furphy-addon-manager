@@ -961,6 +961,37 @@ button { font-family: inherit; }
 
 .sidebar-bottom { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 
+/* FLAVORS-SPEC.md CS-F4 (section 6.1): the WoW-flavour switcher - mounted
+   right under the nav row (inside <nav>, after #flavour-switcher-anchor),
+   entirely absent from the DOM below two VISIBLE installed flavours
+   (Components.Switcher, ui/app.js), so these rules only ever paint on a
+   multi-flavour machine. Pills reuse the same token-driven look as
+   .segmented/.source-switch below rather than inventing new colors, so
+   every theme (light/dark tokens, THEMES-SPEC.md's Set A/B) stays legible
+   with zero per-theme overrides. Also reused, unstyled, by the install-
+   flavour picker (job-panel, section 5.5) and the job-panel's own flavour
+   badge (job-flavour-badge, section 5.4).*/
+.flavour-switcher { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 12px; border-bottom: 1px solid var(--border); }
+.flavour-pills { display: flex; flex-wrap: wrap; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px; gap: 2px; }
+.flavour-pill {
+  flex: 1 1 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: calc(var(--radius) - 2px);
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--fast), color var(--fast);
+}
+.flavour-pill:hover { color: var(--text); }
+.flavour-pill.is-active { background: var(--bg-3); color: var(--text); }
+.flavour-pill:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.flavour-update-all { font-size: 12.5px; }
+.job-flavour-badge { font-size: 11px; font-weight: 600; color: var(--text-muted); background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+
 /* CS2 (UX-SPEC.md section 2.1): the freshness headline (Components.Freshness,
    its sidebar mount) - a separate line/fact from the connectivity dot below.
    Compact sizing to fit the sidebar; the My Addons mount (.myaddons-freshness)

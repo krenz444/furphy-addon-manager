@@ -88,6 +88,10 @@ Connectivity (can the UI reach the local server at all) is a **separate fact**, 
 ```
 "Adopt"/"Adopting" is renamed to "Take over" in every visible string and button (internal function/variable names may keep "adopt" — only display text changes).
 
+### 2.5 Multi-flavour switcher (Round 19, 2026-09-05)
+
+`FLAVORS-SPEC.md` section 6 is the authoritative design for this addition — full detail, mechanics and copy live there; this entry documents only how it sits inside the layout above. A compact pill row — `[ Retail ] [ Classic ] [ Classic Era ]` — mounts directly under the `My Addons | Get new addons | Settings` nav row, above the freshness headline, only when more than one flavour is installed. It is **entirely absent from the DOM** (not `display:none`) below two installed flavours — principle 2 applies here exactly as everywhere else: this machine's header is byte-for-byte what it is today. Clicking a pill re-fetches that flavour's state and swaps every downstream fact (freshness headline, addon table, updated button labels) in place, no full reload. A separate, always-visible **"Update All"** button sits at the end of the pill row (only rendered alongside the switcher, same visibility gate) and syncs every installed, non-hidden flavour in one action without launching anything.
+
 ---
 
 ## 3. Installed addon row, per-row menu, detail drawer
@@ -193,6 +197,7 @@ Only **All** and **Updates** are permanent. Every other status (Pinned, Ignored,
   - anything else → "Something went wrong" (generic fallback)
   - Raw exception text stays available behind that row's own "Details", never shown by default.
 - Table rows for in-flight addons show the identical phase word in their own Status cell live (§2.3) — same wording, same source data, intentionally kept.
+- **Round 19 (multi-flavour)** — the job panel gains a small flavour-label badge next to a job's title (reusing the switcher's own pill styling, §2.5), shown only when more than one flavour is installed — a Retail-only machine's panel is unchanged. A job the server can't yet assign to one flavour (an ambiguous CurseForge install, §5's install-flavour picker) shows no badge and instead renders the picker in place of the normal progress view until the player answers it.
 
 ### 4.4 Download byte-progress — feasibility note (fast-follow, not a blocker)
 
@@ -239,6 +244,10 @@ This supersedes §5.1's CS3-era merged CurseForge+Wago grid entirely. Two change
 
 The native host (`host\FurphyHost.cs`) previously showed a left-side WinForms panel with two tabs ("Furphy"/"CurseForge") and its own toolbar (back/forward/home/search) for the CurseForge `WebView2`. Round 15 deletes all of it: the native window becomes the SPA only, edge to edge — no tab strip, no WinForms toolbar. The CurseForge `WebView2` still exists inside the host, but it is now a plain positioned child control the *page* controls entirely (SPEC.md's new "E21" section has the full page↔host message contract: `cf-show`/`cf-rect`/`cf-hide`/`cf-nav` from the page, `host-ready`/`cf-state`/`cf-job` from the host). Everything else about the host — the ad filter, `curseforge://` link interception, theme/title-bar sync, DPI awareness, window-bounds persistence — is unchanged, just no longer anchored to a tab strip that no longer exists.
 
+### 5.3 Install-flavour picker (Round 19, 2026-09-05)
+
+On a multi-flavour machine, an ambiguous CurseForge install (a file that supports more than one installed flavour) surfaces a small modal reusing the switcher's own pill styling, title **"Which version of WoW?"**, one pill per matching flavour — picking one resumes the install for that flavour. A file supporting only one installed flavour installs there silently, no prompt; a file supporting none fails immediately with **"This addon doesn't support your installed WoW versions."** — full resolution logic in `FLAVORS-SPEC.md` section 5.5. This is the **only** new dialog this whole feature introduces anywhere in the install flow, and it never appears at all on a single-flavour machine.
+
 ---
 
 ## 6. Unified Settings
@@ -274,7 +283,9 @@ One page, two tiers: **Essentials** (always expanded, 2 groups, ≤ 60 words tot
 - **CurseForge install links** — the `curseforge://` toggle, its **one remaining home in the whole app** (removed from Browse — resolves the Map's flagged duplication). Label states its own status: "Let CurseForge.com's Install buttons open here — On/Off". No explainer sentence; the label already says what matters.
 - **Also include alpha/experimental versions** — the third release-channel option, demoted to its own toggle here.
 - ~~**WoW's out-of-date warning**~~ — **REMOVED Round 17** (2026-09-04, Eric: "WoW's out-of-date warning ... get rid of this it doesn't do anything"). Not demoted further, deleted outright — the section, its read-only row, and the server-side `checkAddonVersion` field behind it are all gone. Kept here only as a historical record of what used to occupy this spot, same convention as §6.1's struck-through CurseForge key group.
-- **Game folders** — WoW folder path + "Open folder"; AddOns folder path + "Open". Unchanged controls, relocated here (no daily need to see a filesystem path).
+- **Game folders** — WoW folder path + "Open folder"; AddOns folder path + "Open". Unchanged controls, relocated here (no daily need to see a filesystem path). **Round 19 (multi-flavour):** becomes one row per installed flavour — "Retail: `<path>` [ Open ]", "Classic: `<path>` [ Open ]", etc. — only when more than one flavour is installed; a single-flavour machine keeps today's exact one row. The About panel's client-build line gets the identical treatment (a small per-flavour list, e.g. "Retail — 12.1.0.69587" / "Classic Era — 1.15.9.xxxxx"; a flavour whose client hasn't been launched yet since install shows "— version unknown (launch this client once)" instead of a build number).
+- **Show test realms (PTR/Beta)** (multi-flavour, Round 19) — off by default, no explainer sentence (the label states its own effect); only appears in the Advanced disclosure when a PTR/XPTR/Beta client is actually detected on the machine. Turning it on surfaces those flavours in the switcher (§2.5) and in the tray's scheduled sync.
+- **Launch product code override** (multi-flavour, Round 19, advanced, empty by default) — the hedge against an unconfirmed non-Retail Battle.net launch-code ambiguity; only relevant if "Update & Open Battle.net" opens the wrong product for a given account. No explainer sentence beyond the label — this is a rare, advanced-only field.
 - **Ad filter** (native host only) — "Filter ads and trackers in the CurseForge tab", **ON by default as of 2026-09-04** (Eric's explicit request, SPEC E22 - supersedes the earlier "OFF by default, hard constraint" decision; existing installs keep whatever value is already in their `settings.json`, only a fresh install's default changed), disclosure sentence updated to match: "On by default. CurseForge is ad-funded and pays addon authors from that revenue; turn this off in Settings if you'd rather see it unfiltered." Plain-Edge-mode message ("Available in the Furphy desktop window.") unchanged.
 - **CurseForge focus view** (round 16) — right below the ad filter row, same section. "Show only search results on CurseForge," ON by default, no explainer sentence (see §5.1's focus-view bullet for what it does). Unlike the ad filter row, this one is never hidden in the plain Edge window — it still saves there, it just takes effect the next time the desktop window is used, since that's the only place with a CurseForge pane to trim.
 - **Folders Furphy doesn't manage yet** (renamed from "Untracked folders") — "Folders in your AddOns folder that Furphy doesn't manage yet." + Scan button + per-row Take over/Delete, unchanged behavior. Add the missing "find this on the addon's page" hint to the manual-ID row (Browse's equivalent already has it).
@@ -339,6 +350,24 @@ One page, two tiers: **Essentials** (always expanded, 2 groups, ≤ 60 words tot
 | Job result row (failure) | raw exception message | Plain phase-mapped sentence + inline Retry (§4.3) |
 | Job toast (failure) | "Failed: " + job.error | Same plain-language sentence, shown in the panel (persists), not just a transient toast |
 | Add addon dialog | "Enter a numeric CurseForge Project ID, a CurseForge addon URL (needs an API key), or a Wago addon URL / wago:<slug> (no key needed)." | "Paste an addon link (CurseForge or Wago), or type its ID number." |
+| Switcher pill — Round 19, new, multi-flavour only | — | "Retail" / "Classic" / "Classic Era" / "PTR" |
+| Switcher tooltip — Round 19, new | — | Classic Era pill only: "Includes Hardcore & Anniversary realms" |
+| Bulk sync button — Round 19, new, multi-flavour only | — | "Update All" |
+| Update & Play, single flavour (unchanged) | "Update & Play" | "Update & Play" |
+| Update & Play, multi-flavour, Retail pill — Round 19, new | — | "Update & Play Retail" |
+| Non-Retail play button — Round 19, new | — | "Update & Open Battle.net Classic" (label varies by flavour) |
+| Launch toast, Retail (unchanged) | "Launching WoW…" | "Launching WoW…" |
+| Launch toast, non-Retail — Round 19, new | — | "Addons updated. Check Battle.net — you may need to press Play." |
+| Settings > Advanced toggle — Round 19, new, multi-flavour only | — | "Show test realms (PTR/Beta)" |
+| Settings > Advanced field — Round 19, new | — | "Launch product code override (advanced, leave blank unless Launch opens the wrong game)" |
+| Settings > Advanced > Game folders row — Round 19, multi-flavour only | "WoW folder" / "AddOns folder" (single row) | "Retail: `<path>` [ Open ]" (one row per installed flavour) |
+| About, per-flavour build row — Round 19, multi-flavour only | one `<dd>` (single build number) | "Retail — 12.1.0.69587" (one row per installed flavour) |
+| About, missing build info — Round 19, new | — | "— version unknown (launch this client once)" |
+| Install-flavour picker title — Round 19, new | — | "Which version of WoW?" |
+| Install-flavour picker, no match — Round 19, new | — | "This addon doesn't support your installed WoW versions." |
+| First-run take-over dialog, per flavour — Round 19, multi-flavour only | "Found 6 addons in your AddOns folder" | "Found 4 addons in your Classic Era AddOns folder" (flavour name inserted only when more than one flavour's dialog shows in sequence) |
+| Wago drawer table header — Round 19, renamed regardless of flavour count (data source touched anyway) | "Retail Patches" | "Patches" |
+| Job panel flavour badge — Round 19, multi-flavour only | — | flavour label only, reuses the switcher pill style (§4.3) |
 
 ---
 
@@ -380,6 +409,7 @@ Nothing in this table loses capability — every row is a relocation or a merge,
 - **Existing job/API contracts** stay as-is except the additive fields named in §4: `job.progress` and `/api/state`'s `freshness`/`lastCheckFailed`/`lastCheckError`. The CLI's final `-Json` stdout contract is untouched.
 - **Confirm-dialog wording** (uninstall single/bulk, delete-untracked-folder, import, force-reinstall) — already plain and consequence-first per every Map pass; left as-is. (The "clear-key" dialog listed here in earlier rounds no longer exists — its whole feature was removed 2026-09-04, Expansion E23.)
 - **Kebab-menu contents and order**, the Versions tab, and the existing Install-button state machine (Install → Installing… → Installed) — already correct patterns, reused as-is, not rebuilt.
+- **Multi-flavour switcher, badges, per-flavour Game-folders/About rows, and "Update All"** (Round 19, `FLAVORS-SPEC.md`) — all render **zero DOM**, not `display:none`, on any machine with exactly one installed flavour, this one included; do not flag their absence there as a defect, and do not add a hidden-but-present container "for consistency" — the acceptance bar is genuine DOM absence, verified by inspecting the tree directly.
 
 ---
 
@@ -450,4 +480,7 @@ Each change set is sized for one focused agent. Verify with the Browser pane aga
 - [ ] Vaporwave is the default theme (Round 17); Lofi Night's cityscape/cats art is unchanged, just no longer default; Dark/Light/Lofi Night all still selectable; every new pill/bar/badge renders correctly (readable contrast, correct color) in all four themes.
 - [ ] Every capability listed in §8's "still reachable at" column is actually reachable by following that path in a live `?mock=1` session (manually click through each one).
 - [ ] The app works end-to-end (install, update, pin, rollback, search, install-by-link) with no CurseForge API key configured.
+- [ ] (Round 19) On a mocked single-flavour `/api/state`, the flavour switcher's DOM node does not exist anywhere in the page (inspect the tree directly, not just visual hiding) — every pixel and API shape stays byte-identical to today's Retail-only app.
+- [ ] (Round 19) On a mocked multi-flavour `/api/state`, the switcher shows exactly the mocked flavours in `FLAVORS-SPEC.md` section 2.1's fixed order; clicking a pill swaps My Addons' list/freshness without a full reload, and the active pill's highlight matches the flavour actually shown.
+- [ ] (Round 19) An ambiguous CurseForge install (mocked to match more than one installed flavour) shows the "Which version of WoW?" picker, never a silent install to the wrong flavour; a file matching zero installed flavours fails with the plain no-support message; a file matching exactly one installs silently, no prompt.
 - [ ] The final CLI `-Json` stdout contract is unchanged in shape (diff a pre-change and post-change run's JSON output for the same fixture).

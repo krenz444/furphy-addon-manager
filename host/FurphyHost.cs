@@ -3358,6 +3358,10 @@ boot();
             marker["failedNames"] = new List<string>();
             marker["jobId"] = null;
             marker["jobPostStatus"] = null;
+            // FLAVORS-SPEC.md CS-F6: same shape as the real marker below,
+            // reflecting "no jobs were ever created" for this (untested-by-
+            // design) mutex-busy case.
+            marker["flavourJobs"] = new List<object>();
             marker["serverStarted"] = false;
             marker["clickAction"] = null;
             marker["runValueWritten"] = null;
@@ -3383,11 +3387,65 @@ boot();
     // Outcome of one sync cycle, surfaced on the --tray-selftest marker
     // (jobId/jobPostStatus/serverStarted) in addition to updating the
     // TrayForm instance fields that feed tray-state.json and the tooltip.
+    // FLAVORS-SPEC.md CS-F6/S5.6: JobId stays the single job's id when the
+    // cycle produced exactly one flavour job (byte-identical marker shape
+    // to before this change set on a single-flavour machine); FlavourResults
+    // always carries one entry per flavour job the cycle actually created,
+    // for --tray-selftest to assert against on a multi-flavour fixture.
     internal class TrayCycleOutcome
     {
         public string JobId;
         public int? JobPostStatus;
         public bool ServerStarted;
+        public List<FlavourJobResult> FlavourResults = new List<FlavourJobResult>();
+    }
+
+    // FLAVORS-SPEC.md CS-F6: one installed flavour's own job from a
+    // {kind:"update-all-flavours"} fan-out (S5.4/S5.6). ErrorMessage set
+    // with State still null means the server never created/found a job for
+    // this flavour at all (JobId is null in that case) or the flavour's job
+    // finished in a job-level failure with no addon-level results (or timed
+    // out) - RunCycle/CompleteMultiFlavourCycle read that combination the
+    // same way the old single-job code read a job-level "failed" state with
+    // empty results.
+    internal class FlavourJobResult
+    {
+        public string FlavourId;
+        public string JobId;
+        public string ErrorMessage;
+        public bool Busy;
+        public string State;
+        public List<string> Updated = new List<string>();
+        public List<string> Failed = new List<string>();
+    }
+
+    // FLAVORS-SPEC.md S2.1's fixed label table, duplicated here the same
+    // way install.ps1 keeps its own small copy of $Script:FlavourDefs -
+    // the tray only ever needs a flavour's player-facing label for the
+    // multi-flavour tooltip breakdown, never the folder/Product mapping
+    // addon-sync.ps1/addon-server.ps1's own copies carry.
+    internal static class FlavourLabels
+    {
+        private static readonly Dictionary<string, string> Labels = BuildLabels();
+
+        private static Dictionary<string, string> BuildLabels()
+        {
+            Dictionary<string, string> d = new Dictionary<string, string>();
+            d["retail"] = "Retail";
+            d["classic"] = "Classic";
+            d["classic_era"] = "Classic Era";
+            d["ptr"] = "PTR";
+            d["xptr"] = "PTR (2)";
+            d["beta"] = "Beta";
+            return d;
+        }
+
+        public static string Get(string flavourId)
+        {
+            string label;
+            if (flavourId != null && Labels.TryGetValue(flavourId, out label)) return label;
+            return flavourId;
+        }
     }
 
     // The tray itself: a Form that is never shown (SetVisibleCore/
@@ -3831,8 +3889,16 @@ boot();
                 return outcome;
             }
 
-            // (c) POST /api/jobs {"kind":"sync"}.
-            HttpResult postResult = Http.PostJson(JobsUrl(), "{\"kind\":\"sync\"}", 10000);
+            // (c) POST /api/jobs {"kind":"update-all-flavours"} - fans out
+            // server-side (addon-server.ps1 Handle-JobsPost, FLAVORS-SPEC.md
+            // S5.4/S5.6) into one 'sync' job per installed, non-hidden
+            // flavour. On a single-flavour machine this still produces
+            // exactly one job for that one flavour - the per-addon sync
+            // behavior below is therefore unchanged from before this change
+            // set; only the outer response shape (a jobs[] fan-out instead
+            // of one bare job) is new, and only the "more than one flavour"
+            // branch further down changes the tooltip text at all.
+            HttpResult postResult = Http.PostJson(JobsUrl(), "{\"kind\":\"update-all-flavours\"}", 10000);
             outcome.JobPostStatus = postResult.StatusCode;
             if (postResult.StatusCode == 409)
             {
@@ -3849,23 +3915,35 @@ boot();
                     DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
                 return outcome;
             }
-            string jobId = ExtractJobId(postResult.Body);
-            outcome.JobId = jobId;
-            if (string.IsNullOrEmpty(jobId))
+
+            List<FlavourJobResult> flavourJobs = ExtractFlavourJobs(postResult.Body);
+            if (flavourJobs.Count == 0)
             {
-                LogHost("[tray] cycle error: POST /api/jobs returned no jobId");
+                LogHost("[tray] cycle error: POST /api/jobs returned no per-flavour jobs");
                 CompleteCycle("error", new List<string>(), new List<string>(),
                     "Furphy - Sync request failed",
                     DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
                 return outcome;
             }
+            if (flavourJobs.Count == 1) { outcome.JobId = flavourJobs[0].JobId; }
+            outcome.FlavourResults = flavourJobs;
 
-            // (d) poll GET /api/jobs/<id> every 2s, cap 15 minutes.
+            // (d) poll every flavour's own job (GET /api/jobs/<id> every
+            // 2s), one shared 15-minute cap across the whole cycle - a slow
+            // flavour does not get its own separate 15 minutes on top of
+            // the others, matching the pre-CS-F6 single-job contract.
             DateTime pollDeadline = DateTime.UtcNow.AddMinutes(15);
-            Dictionary<string, object> finalJob = null;
             bool interrupted = false;
-            while (DateTime.UtcNow < pollDeadline)
+            while (true)
             {
+                bool anyPending = false;
+                for (int i = 0; i < flavourJobs.Count; i++)
+                {
+                    if (flavourJobs[i].JobId != null && flavourJobs[i].State == null) { anyPending = true; break; }
+                }
+                if (!anyPending) break;
+                if (DateTime.UtcNow >= pollDeadline) break;
+
                 // Wait on the stop event instead of a blind sleep so
                 // Quit / a stage-B TrayStop signal during a sync is
                 // honored within ~2s instead of blocking exit for up to
@@ -3876,23 +3954,37 @@ boot();
                     interrupted = true;
                     break;
                 }
-                string body = Http.GetString(JobUrl(jobId), 5000);
-                if (string.IsNullOrEmpty(body)) continue;
-                Dictionary<string, object> job = MiniJson.Parse(body) as Dictionary<string, object>;
-                if (job == null) continue;
 
-                object progressObj;
-                if (job.TryGetValue("progress", out progressObj) && progressObj is Dictionary<string, object>)
+                for (int i = 0; i < flavourJobs.Count; i++)
                 {
-                    SetTooltip(BuildProgressTooltip((Dictionary<string, object>)progressObj));
-                }
+                    FlavourJobResult fr = flavourJobs[i];
+                    if (fr.JobId == null || fr.State != null) continue;
+                    string body = Http.GetString(JobUrl(fr.JobId), 5000);
+                    if (string.IsNullOrEmpty(body)) continue;
+                    Dictionary<string, object> job = MiniJson.Parse(body) as Dictionary<string, object>;
+                    if (job == null) continue;
 
-                object stateObj;
-                string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
-                if (state == "done" || state == "failed")
-                {
-                    finalJob = job;
-                    break;
+                    // Live per-job progress only makes sense to surface on
+                    // the tooltip when there is exactly one flavour job to
+                    // watch - a multi-flavour cycle's tooltip stays on
+                    // "Checking..." until the combined result is ready
+                    // (CompleteMultiFlavourCycle), never a single flavour's
+                    // own in-progress count.
+                    if (flavourJobs.Count == 1)
+                    {
+                        object progressObj;
+                        if (job.TryGetValue("progress", out progressObj) && progressObj is Dictionary<string, object>)
+                        {
+                            SetTooltip(BuildProgressTooltip((Dictionary<string, object>)progressObj));
+                        }
+                    }
+
+                    object stateObj;
+                    string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
+                    if (state == "done" || state == "failed")
+                    {
+                        ApplyFinishedJob(fr, job);
+                    }
                 }
             }
 
@@ -3904,20 +3996,79 @@ boot();
                 return outcome;
             }
 
-            if (finalJob == null)
+            // Anything still pending past the 15-minute cap becomes a
+            // per-flavour timeout, exactly like the pre-CS-F6 single-job
+            // "sync timed out" path.
+            for (int i = 0; i < flavourJobs.Count; i++)
             {
-                LogHost("[tray] cycle error: sync job did not finish within 15 minutes");
-                CompleteCycle("error", new List<string>(), new List<string>(),
-                    "Furphy - Sync timed out",
-                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
-                return outcome;
+                FlavourJobResult fr = flavourJobs[i];
+                if (fr.JobId != null && fr.State == null && fr.ErrorMessage == null)
+                {
+                    fr.ErrorMessage = "sync job did not finish within 15 minutes";
+                }
             }
 
-            // (e) classify results.
+            CompleteMultiFlavourCycle(flavourJobs, settings);
+            return outcome;
+        }
+
+        // Parses {kind:"update-all-flavours", jobs:[{flavour,jobId}|
+        // {flavour,error}|{flavour,jobId,busy:true}, ...]} (addon-server.ps1
+        // Handle-JobsPost, FLAVORS-SPEC.md S5.4/S5.6). A row with no jobId
+        // means the server could not create/find a job for that flavour at
+        // all (its own .error explains why) - never polled, just carried
+        // straight through as that flavour's ErrorMessage.
+        private static List<FlavourJobResult> ExtractFlavourJobs(string body)
+        {
+            List<FlavourJobResult> list = new List<FlavourJobResult>();
+            if (string.IsNullOrEmpty(body)) return list;
+            Dictionary<string, object> obj = MiniJson.Parse(body) as Dictionary<string, object>;
+            if (obj == null) return list;
+            object jobsObj;
+            if (!obj.TryGetValue("jobs", out jobsObj) || !(jobsObj is List<object>)) return list;
+            List<object> jobs = (List<object>)jobsObj;
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                Dictionary<string, object> row = jobs[i] as Dictionary<string, object>;
+                if (row == null) continue;
+                FlavourJobResult fr = new FlavourJobResult();
+                object flavourObj;
+                fr.FlavourId = (row.TryGetValue("flavour", out flavourObj) && flavourObj != null)
+                    ? Convert.ToString(flavourObj, CultureInfo.InvariantCulture)
+                    : "retail";
+                object jobIdObj;
+                fr.JobId = (row.TryGetValue("jobId", out jobIdObj) && jobIdObj != null)
+                    ? Convert.ToString(jobIdObj, CultureInfo.InvariantCulture)
+                    : null;
+                object errorObj;
+                if (row.TryGetValue("error", out errorObj) && errorObj != null)
+                {
+                    fr.ErrorMessage = Convert.ToString(errorObj, CultureInfo.InvariantCulture);
+                }
+                object busyObj;
+                fr.Busy = row.TryGetValue("busy", out busyObj) && JsonUtil.ToBool(busyObj, false);
+                list.Add(fr);
+            }
+            return list;
+        }
+
+        // Classifies one finished (state=="done"|"failed") job's results
+        // into fr.Updated/fr.Failed, exactly the way the pre-CS-F6 single-
+        // job RunCycle classified its one job - a hard job-level failure
+        // (sync CLI crashed, execution policy error, results never
+        // populated) comes back as state=="failed" with an empty results
+        // list, recorded as fr.ErrorMessage so CompleteMultiFlavourCycle
+        // never silently reads that as "up to date".
+        private static void ApplyFinishedJob(FlavourJobResult fr, Dictionary<string, object> job)
+        {
+            object stateObj;
+            string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
+            fr.State = state ?? "done";
+
             List<string> updated = new List<string>();
             List<string> failed = new List<string>();
             object resultsObj;
-            if (finalJob.TryGetValue("results", out resultsObj) && resultsObj is List<object>)
+            if (job.TryGetValue("results", out resultsObj) && resultsObj is List<object>)
             {
                 List<object> results = (List<object>)resultsObj;
                 for (int i = 0; i < results.Count; i++)
@@ -3940,59 +4091,132 @@ boot();
                     }
                 }
             }
+            fr.Updated = updated;
+            fr.Failed = failed;
 
-            // A hard job-level failure (sync CLI crashed, execution
-            // policy error, results never populated) comes back as
-            // state=="failed" with an empty results list - do not let
-            // that silently fall through to "up_to_date" below.
-            object jobStateObj;
-            string jobState = finalJob.TryGetValue("state", out jobStateObj) ? jobStateObj as string : null;
-            if (string.Equals(jobState, "failed", StringComparison.OrdinalIgnoreCase) &&
+            if (string.Equals(state, "failed", StringComparison.OrdinalIgnoreCase) &&
                 failed.Count == 0 && updated.Count == 0)
             {
                 object errObj;
-                string errMsg = (finalJob.TryGetValue("error", out errObj) && errObj != null)
+                fr.ErrorMessage = (job.TryGetValue("error", out errObj) && errObj != null)
                     ? Convert.ToString(errObj, CultureInfo.InvariantCulture)
                     : "sync job failed";
-                LogHost("[tray] cycle error: sync job failed: " + errMsg);
-                CompleteCycle("error", updated, failed,
-                    "Furphy - Sync failed: " + errMsg,
-                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
-                return outcome;
+            }
+        }
+
+        // Builds the combined tooltip/lastResult/balloon for the whole
+        // cycle. Exactly one flavour job (today's only case on this
+        // machine, and every single-flavour install): byte-identical text
+        // to the pre-CS-F6 single-job code - failed > updated > up_to_date,
+        // same three message strings. More than one: FLAVORS-SPEC.md S5.6 -
+        // a single combined line, never one sentence per flavour; "up to
+        // date" stays one line even when every flavour agrees, and a mixed
+        // result carries a "Label: count" breakdown for whichever flavours
+        // actually had updates.
+        private void CompleteMultiFlavourCycle(List<FlavourJobResult> flavourJobs, TrayBackgroundSettings settings)
+        {
+            string nowStamp = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture);
+
+            if (flavourJobs.Count <= 1)
+            {
+                FlavourJobResult fr = flavourJobs.Count == 1 ? flavourJobs[0] : new FlavourJobResult();
+
+                if (fr.ErrorMessage != null && fr.Updated.Count == 0 && fr.Failed.Count == 0)
+                {
+                    LogHost("[tray] cycle error: sync job failed: " + fr.ErrorMessage);
+                    CompleteCycle("error", fr.Updated, fr.Failed,
+                        "Furphy - Sync failed: " + fr.ErrorMessage,
+                        DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
+                    return;
+                }
+
+                string result;
+                string message;
+                bool balloon;
+                if (fr.Failed.Count > 0)
+                {
+                    result = "failed";
+                    message = (fr.Failed.Count == 1)
+                        ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
+                        : "Furphy - " + fr.Failed.Count.ToString(CultureInfo.InvariantCulture) +
+                            " addons failed to update at " + nowStamp + " - open for details";
+                    balloon = true;
+                }
+                else if (fr.Updated.Count > 0)
+                {
+                    result = "updated";
+                    message = "Furphy - Updated " + fr.Updated.Count.ToString(CultureInfo.InvariantCulture) +
+                        " at " + nowStamp + ": " + JoinNames(fr.Updated);
+                    balloon = true;
+                }
+                else
+                {
+                    result = "up_to_date";
+                    message = "Furphy - Everything's up to date - checked " + nowStamp;
+                    balloon = false;
+                }
+
+                LogHost("[tray] cycle done result=" + result +
+                    " updated=" + fr.Updated.Count.ToString(CultureInfo.InvariantCulture) +
+                    " failed=" + fr.Failed.Count.ToString(CultureInfo.InvariantCulture));
+                CompleteCycle(result, fr.Updated, fr.Failed, message, DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), balloon);
+                return;
             }
 
-            string nowStamp = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture);
-            string result;
-            string message;
-            bool balloon;
-            if (failed.Count > 0)
+            List<string> allUpdated = new List<string>();
+            List<string> allFailed = new List<string>();
+            List<string> breakdownParts = new List<string>();
+            int flavourErrorCount = 0;
+            for (int i = 0; i < flavourJobs.Count; i++)
             {
-                result = "failed";
-                message = (failed.Count == 1)
-                    ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
-                    : "Furphy - " + failed.Count.ToString(CultureInfo.InvariantCulture) +
-                        " addons failed to update at " + nowStamp + " - open for details";
-                balloon = true;
+                FlavourJobResult fr = flavourJobs[i];
+                allUpdated.AddRange(fr.Updated);
+                allFailed.AddRange(fr.Failed);
+                if (fr.Updated.Count > 0)
+                {
+                    breakdownParts.Add(FlavourLabels.Get(fr.FlavourId) + ": " +
+                        fr.Updated.Count.ToString(CultureInfo.InvariantCulture));
+                }
+                if (fr.ErrorMessage != null && fr.Updated.Count == 0 && fr.Failed.Count == 0)
+                {
+                    flavourErrorCount++;
+                    LogHost("[tray] cycle error (" + fr.FlavourId + "): " + fr.ErrorMessage);
+                }
             }
-            else if (updated.Count > 0)
+
+            string overallResult;
+            string overallMessage;
+            bool overallBalloon;
+            if (allFailed.Count > 0 || flavourErrorCount > 0)
             {
-                result = "updated";
-                message = "Furphy - Updated " + updated.Count.ToString(CultureInfo.InvariantCulture) +
-                    " at " + nowStamp + ": " + JoinNames(updated);
-                balloon = true;
+                overallResult = "failed";
+                int failCount = allFailed.Count + flavourErrorCount;
+                overallMessage = (failCount == 1)
+                    ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
+                    : "Furphy - " + failCount.ToString(CultureInfo.InvariantCulture) +
+                        " addons failed to update at " + nowStamp + " - open for details";
+                overallBalloon = true;
+            }
+            else if (allUpdated.Count > 0)
+            {
+                overallResult = "updated";
+                overallMessage = "Furphy - " + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
+                    " updates ready at " + nowStamp + " (" + JoinNames(breakdownParts) + ")";
+                overallBalloon = true;
             }
             else
             {
-                result = "up_to_date";
-                message = "Furphy - Everything's up to date - checked " + nowStamp;
-                balloon = false;
+                overallResult = "up_to_date";
+                overallMessage = "Furphy - Everything's up to date - checked " + nowStamp;
+                overallBalloon = false;
             }
 
-            LogHost("[tray] cycle done result=" + result +
-                " updated=" + updated.Count.ToString(CultureInfo.InvariantCulture) +
-                " failed=" + failed.Count.ToString(CultureInfo.InvariantCulture));
-            CompleteCycle(result, updated, failed, message, DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), balloon);
-            return outcome;
+            LogHost("[tray] cycle done (multi-flavour) result=" + overallResult +
+                " updated=" + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
+                " failed=" + allFailed.Count.ToString(CultureInfo.InvariantCulture) +
+                " flavours=" + flavourJobs.Count.ToString(CultureInfo.InvariantCulture));
+            CompleteCycle(overallResult, allUpdated, allFailed, overallMessage,
+                DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), overallBalloon);
         }
 
         private void CompleteCycle(string result, List<string> updated, List<string> failed, string message,
@@ -4039,19 +4263,6 @@ boot();
                     " of " + total.ToString(CultureInfo.InvariantCulture) + "...";
             }
             return "Furphy - Checking...";
-        }
-
-        private static string ExtractJobId(string body)
-        {
-            if (string.IsNullOrEmpty(body)) return null;
-            Dictionary<string, object> obj = MiniJson.Parse(body) as Dictionary<string, object>;
-            if (obj == null) return null;
-            object v;
-            if (obj.TryGetValue("jobId", out v) && v != null)
-            {
-                return Convert.ToString(v, CultureInfo.InvariantCulture);
-            }
-            return null;
         }
 
         private string PingUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping"; }
@@ -4239,6 +4450,7 @@ boot();
             marker["failedNames"] = new List<string>();
             marker["jobId"] = null;
             marker["jobPostStatus"] = null;
+            marker["flavourJobs"] = new List<object>();
             marker["serverStarted"] = false;
             marker["clickAction"] = null;
             marker["runValueWritten"] = null;
@@ -4311,6 +4523,27 @@ boot();
             marker["failedNames"] = failed;
             marker["jobId"] = outcome.JobId;
             marker["jobPostStatus"] = outcome.JobPostStatus.HasValue ? (object)(long)outcome.JobPostStatus.Value : null;
+            // FLAVORS-SPEC.md CS-F6: one row per flavour job the cycle
+            // actually created (S8's acceptance checklist proves this is
+            // exactly one row per installed, non-hidden flavour) - a
+            // harness asserts against this list's length/flavour ids rather
+            // than the single jobId/jobPostStatus fields above, which only
+            // ever describe the outer POST /api/jobs call.
+            List<object> flavourJobsMarker = new List<object>();
+            for (int fi = 0; fi < outcome.FlavourResults.Count; fi++)
+            {
+                FlavourJobResult fr = outcome.FlavourResults[fi];
+                Dictionary<string, object> row = new Dictionary<string, object>();
+                row["flavour"] = fr.FlavourId;
+                row["jobId"] = fr.JobId;
+                row["state"] = fr.State;
+                row["updatedNames"] = fr.Updated;
+                row["failedNames"] = fr.Failed;
+                row["error"] = fr.ErrorMessage;
+                row["busy"] = fr.Busy;
+                flavourJobsMarker.Add(row);
+            }
+            marker["flavourJobs"] = flavourJobsMarker;
             marker["serverStarted"] = outcome.ServerStarted;
             marker["clickAction"] = clickAction;
             marker["runValueWritten"] = runValueWritten;

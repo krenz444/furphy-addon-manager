@@ -1,5 +1,9 @@
 # Deploys the built Addon Manager from the scratch build root to the live _retail_\AddonSync folder.
-# Never overwrites user state (addons.json, settings.json, state.json, logs, jobs, backups).
+# Never overwrites user state (addons.json, settings.json, state.json, logs, jobs, backups) -
+# FLAVORS-SPEC S3.1's flavours\<id>\ subfolder (each installed flavour's own addons.json/
+# state.json/backups\) is state by the exact same rule: step 3 below only ever copies a fixed
+# code-file list plus ui\/host\, so flavours\ (never in that list) is never touched, deleted or
+# overwritten by a deploy - same as addons.json/settings.json/state.json/backups\ always were.
 param(
     [string]$Source = $PSScriptRoot,
     [string]$Dest = 'C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync',
@@ -38,10 +42,20 @@ if ($alive) {
 }
 
 # 2. Backup the live folder (code + state) before touching it.
+# FLAVORS-SPEC S3.1: per-flavour addons.json/state.json now live under
+# flavours\<id>\ - they're included in this backup same as the top-level
+# ones used to be. Their own re-downloadable backups\<id>\<id>.zip
+# folders (flavours\<id>\backups\) and the migration's own
+# flavours\_migration-backup-<stamp>\ safety copy are excluded, same
+# reasoning as the pre-existing top-level 'AddonSync/backups' exclude
+# (regenerable, would otherwise bloat every single deploy's backup zip).
+# Verified live (scratchpad\tar-exclude-test, deleted after): these two
+# glob patterns exclude flavours/*/backups and flavours/_migration-
+# backup-* while still keeping every flavour's own addons.json/state.json.
 if (Test-Path -LiteralPath $Dest) {
     $zip = Join-Path $retail "AddonSync-backup-$stamp.zip"
     Push-Location $retail
-    try { tar -a -c -f $zip --exclude 'AddonSync/jobs' --exclude 'AddonSync/staging' --exclude 'AddonSync/backups' 'AddonSync' } finally { Pop-Location }
+    try { tar -a -c -f $zip --exclude 'AddonSync/jobs' --exclude 'AddonSync/staging' --exclude 'AddonSync/backups' --exclude 'AddonSync/flavours/*/backups' --exclude 'AddonSync/flavours/_migration-backup-*' 'AddonSync' } finally { Pop-Location }
     "backup: $zip ($([math]::Round((Get-Item $zip).Length/1KB)) KB)"
 }
 
