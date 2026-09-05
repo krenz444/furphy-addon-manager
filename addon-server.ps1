@@ -6869,6 +6869,27 @@ function Invoke-Route {
 }
 
 # =====================================================================
+# Dot-source guard (TESTING.md hook #1)
+#
+# Everything above this point (functions + static script-scope tables) is
+# safe to define unconditionally - none of it has a side effect. Everything
+# below is the real "run the server" body: it touches disk, binds an
+# HttpListener socket, and blocks in the request loop. A normal invocation
+# (`.\addon-server.ps1 ...` / `powershell.exe -File addon-server.ps1 ...`)
+# must run it exactly as before - this guard only short-circuits when the
+# script is DOT-SOURCED (". .\addon-server.ps1" or ". $path"), which is how
+# tests\unit\*.Tests.ps1 loads these functions into Pester's scope without
+# starting a real listener. $MyInvocation.InvocationName is the literal
+# string "." when dot-sourced; the $MyInvocation.Line check is a fallback
+# for hosts that report InvocationName differently.
+# =====================================================================
+
+$script:FurphyDotSourced = ($MyInvocation.InvocationName -eq '.') -or ($MyInvocation.Line -match '^\s*\.\s')
+if ($script:FurphyDotSourced) {
+    return
+}
+
+# =====================================================================
 # Startup
 # =====================================================================
 
@@ -6928,7 +6949,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.7.0'
+$Script:Version = '1.8.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

@@ -16,7 +16,12 @@
 
   /* text */
   --text: #e7e7ea;
-  --text-muted: #9a9ca3;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #9a9ca3 - as
+     .chip-muted's text over --muted-tint composited on --bg-2 this
+     measured 4.26:1, just under WCAG AA's 4.5:1 floor. This value clears
+     4.61:1 on --bg-2 (5.31:1 on --bg-1) while staying the same neutral
+     grey. */
+  --text-muted: #a1a3a9;
   --text-faint: #999ba2; /* Review fix (V1): was #6d6f76 (3.36:1 vs --bg-1,
      2.53:1 vs --bg-3 - both failed WCAG AA's 4.5:1 floor). This value
      verified at 6.11:1 vs --bg-1, 4.57:1 vs --bg-3. */
@@ -32,9 +37,17 @@
      over --bg-0 was 4.33:1, just under WCAG AA's 4.5:1 for normal text;
      this brighter value clears ~4.70:1 in the same measurement while
      staying visually the same "danger red". --danger-hover/-text/-border
-     are unaffected (separate tokens). */
-  --danger: #f45454;
-  --info: #4a9eef;
+     are unaffected (separate tokens).
+     Round-22 contrast fix (T5, theme-audit finding): #f45454 itself still
+     only cleared 4.31:1 vs --bg-1 and 3.79:1 vs --bg-2 (chip backgrounds
+     the reviewer above didn't check) - nudged again to this value, which
+     clears 5.24:1 on --bg-1 and 4.61:1 on --bg-2. */
+  --danger: #f67373;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #4a9eef - as
+     .chip-info's text over --info-tint composited on --bg-2 this measured
+     4.19:1, just under WCAG AA's 4.5:1 floor. This value clears 4.62:1 on
+     --bg-2 (5.30:1 on --bg-1) while staying the same "info blue". */
+  --info: #5aa7f0;
 
   /* danger button's own hover/text shades, its outline variant's border, and
      the offline banner's border - factored out of what used to be hardcoded
@@ -125,7 +138,12 @@
   --accent-hover: #a83c16;
   --accent-text: #1a0e08;
   --success: #0f6b3c;
-  --warning: #8a5a00;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #8a5a00 - as
+     .chip-warning's text over --warning-tint composited on --bg-2 this
+     measured 4.42:1, just under WCAG AA's 4.5:1 floor. This value clears
+     4.62:1 on --bg-2 (5.23:1 on --bg-1) while staying the same brown-gold
+     "warning" hue. */
+  --warning: #865700;
   /* Review fix: nudged from #c62f2f - same .chip-danger contrast check as
      dark theme's own --danger comment above measured 4.31:1 here (text
      over --danger-tint composited over --bg-0), just under AA; this
@@ -183,7 +201,12 @@
   --accent-text: #1a0e2e;
   --success: #05ffa1;
   --warning: #fffb96;
-  --danger: #ff4f79;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #ff4f79 - as
+     .chip-danger's text over --danger-tint composited on --bg-2 this
+     measured 4.26:1, just under WCAG AA's 4.5:1 floor. This value clears
+     4.61:1 on --bg-2 (5.20:1 on --bg-1) while staying the same
+     hot-pink/red "danger" hue. */
+  --danger: #ff5e85;
   --info: #01cdfe;
 
   --secondary: #01cdfe;
@@ -434,7 +457,11 @@
   --success: #2fae6c;
   --warning: #e08a2e;
   --danger: #ff6e5f;
-  --info: #4f8fe0;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #4f8fe0 - as
+     .chip-info's text over --info-tint composited on --bg-2 this measured
+     4.24:1, just under WCAG AA's 4.5:1 floor. This value clears 4.62:1 on
+     --bg-2 (5.07:1 on --bg-1) while staying the same "info blue". */
+  --info: #5a96e2;
 
   --success-tint: rgba(47, 174, 108, .14);
   --warning-tint: rgba(224, 138, 46, .14);
@@ -700,7 +727,12 @@
   --border-hover: #545c66;
 
   --text: #e8eaed;
-  --text-muted: #a3aab3;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #a3aab3 - as
+     .chip-muted's text over --muted-tint composited on --bg-2 this
+     measured 4.42:1, just under WCAG AA's 4.5:1 floor. This value clears
+     4.61:1 on --bg-2 (5.34:1 on --bg-1) while staying the same neutral
+     grey. */
+  --text-muted: #a7aeb6;
   --text-faint: #9ba2ac;
 
   --accent: #4fa8e0;
@@ -710,7 +742,12 @@
 
   --success: #4cc38a;
   --warning: #f2b134;
-  --danger: #ff7a6b;
+  /* Round-22 contrast fix (T5, theme-audit finding): was #ff7a6b - as
+     .chip-danger's text over --danger-tint composited on --bg-2 this
+     measured 4.22:1, just under WCAG AA's 4.5:1 floor. This value clears
+     4.62:1 on --bg-2 (5.34:1 on --bg-1) while staying the same "danger
+     red". */
+  --danger: #ff887a;
   --info: #4fc3c7;
 
   --success-tint: rgba(76, 195, 138, .14);

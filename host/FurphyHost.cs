@@ -1934,9 +1934,12 @@ namespace Furphy
                 // capturePath's screenshot (WriteSelftestMarker) is taken
                 // ~1s before the marker is written, while the pane is
                 // visible - by 7s in, selftest.html's own timeline (hello/
-                // theme/cf-show around t=1s, cf-nav+cf-hide at t~3s,
-                // cf-show again shortly after) has already left the pane
-                // visible again.
+                // theme/cf-show around t=1s, cf-nav+cf-hide at t~5s,
+                // cf-show again at t~5.5s) has already left the pane
+                // visible again. (Round-22 fix: cf-hide was moved from
+                // t~3s to t~5s specifically to stop racing
+                // EnsureSelftestDeepLinkInjection's own fire time - see
+                // that method's comment.)
                 _selftestCaptureTimer = new System.Windows.Forms.Timer();
                 _selftestCaptureTimer.Interval = 7000;
                 _selftestCaptureTimer.Tick += new EventHandler(SelftestCaptureTimer_Tick);
@@ -2030,12 +2033,22 @@ namespace Furphy
         // during a --selftest run any more. This injects a tiny script
         // into whatever document the CF pane loads (mirroring
         // EnsureAdFilterInfra's ad-hiding CSS injection above) that
-        // fires a test curseforge:// deep link a couple of seconds after
-        // that document is created - the navigation gets cancelled by
+        // fires a test curseforge:// deep link shortly after that
+        // document is created - the navigation gets cancelled by
         // CfWebView_NavigationStarting exactly like a real "Install"
         // click's would, so the marker's `intercepted`/`jobPostStatus`
         // fields end up populated by a live run of this same
         // interception code, not by a special-cased test path.
+        //
+        // Round-22 fix (T5, was a T3-documented known finding): this used
+        // to fire 2000ms after document-created, which landed almost
+        // exactly on top of selftest.html's own cf-hide (also ~2000ms
+        // after cf-show) - a hidden WebView2 pane's pending page timer
+        // never resumed in time, so sawDeepLink was always false.
+        // Shortened to 500ms here (document-created follows cf-show by
+        // well under a second in every observed run) AND selftest.html's
+        // cf-hide was pushed out from t~3s to t~5s, so there is now a
+        // multi-second margin on both sides instead of a coincidence.
         private void EnsureSelftestDeepLinkInjection()
         {
             if (_cfSelftestDeepLinkInjected) return;
@@ -2045,7 +2058,7 @@ namespace Furphy
                 string script =
                     "(function(){try{setTimeout(function(){try{" +
                     "location.href='curseforge://install?addonId=999999001&fileId=999999002';" +
-                    "}catch(e){}}, 2000);}catch(e){}})();";
+                    "}catch(e){}}, 500);}catch(e){}})();";
                 System.Threading.Tasks.Task<string> scriptTask =
                     _cfWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(script);
                 GC.KeepAlive(scriptTask);
