@@ -17,7 +17,9 @@
   /* text */
   --text: #e7e7ea;
   --text-muted: #9a9ca3;
-  --text-faint: #6d6f76;
+  --text-faint: #999ba2; /* Review fix (V1): was #6d6f76 (3.36:1 vs --bg-1,
+     2.53:1 vs --bg-3 - both failed WCAG AA's 4.5:1 floor). This value
+     verified at 6.11:1 vs --bg-1, 4.57:1 vs --bg-3. */
 
   /* brand + semantic */
   --accent: #f16436;
@@ -109,7 +111,9 @@
 
   --text: #1b1c1f;
   --text-muted: #52545b;
-  --text-faint: #797b82;
+  --text-faint: #63656c; /* Review fix (V1): was #797b82 (4.22:1 vs --bg-1,
+     3.34:1 vs --bg-3 - both failed WCAG AA's 4.5:1 floor). This value
+     verified at 5.82:1 vs --bg-1, 4.61:1 vs --bg-3. */
 
   --accent: #d9531f;
   /* Review fix: nudged from #c2461a - .chip-busy (color: --accent-hover on
@@ -911,6 +915,7 @@ button { font-family: inherit; }
 }
 
 .brand {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -950,15 +955,6 @@ button { font-family: inherit; }
   min-width: 18px;
   text-align: center;
 }
-.nav-badge {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--accent-text);
-  background: var(--accent);
-  border-radius: 10px;
-  padding: 1px 7px;
-}
-
 .sidebar-bottom { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 
 /* FLAVORS-SPEC.md CS-F4 (section 6.1): the WoW-flavour switcher - mounted
@@ -1090,6 +1086,23 @@ button.freshness-headline:hover { color: var(--danger-hover); }
 
 .btn-block { width: 100%; }
 .btn-lg { height: 40px; font-size: 14px; }
+
+/* Review fix (F3): the sidebar's one accent CTA (FLAVORS-SPEC.md 6.3's
+   spec'd "Update & Open Battle.net Classic"/"...Classic Era" labels) can
+   overflow this button's own pill at the app's default window size once a
+   non-Retail flavour is active - let it wrap to two lines instead of
+   spilling text past the rounded edge. Scoped to this one button only
+   (shared .btn/.btn-lg are used elsewhere and must stay single-line).
+   .sidebar-bottom is a flex column with no fixed height, so a taller
+   button here just pushes "Launch WoW" down a few px - nothing overlaps. */
+#btn-update-play {
+  white-space: normal;
+  height: auto;
+  min-height: 40px;
+  line-height: 1.25;
+  text-align: center;
+  padding: 8px 14px;
+}
 
 .icon-btn {
   display: inline-flex;
@@ -2391,14 +2404,21 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 :root[data-theme="lofi"] .addon-row { box-shadow: 0 2px 8px rgba(10, 13, 30, 0.28); }
 
 /* Tiny curled cat next to the brand wordmark - hidden on every other theme
-   (default display:none below); sized to sit comfortably beside the 26px
-   brand icon without pushing the sidebar's own layout around. */
+   (default display:none below); positioned absolutely (not in the flex
+   flow) so it decorates the icon corner without ever competing with the
+   wordmark for width, since the brand row has no spare pixels to give at
+   the app's 1000px floor (Review fix V2: used to be display:block inside
+   the .brand flex row, which ate ~28px from .brand-name and truncated
+   "Furphy Addon Manager" to "Furphy Addon Ma…"). */
 .lofi-brand-cat { display: none; }
 :root[data-theme="lofi"] .lofi-brand-cat {
   display: block;
+  position: absolute;
   width: 18px;
   height: 14px;
-  flex: none;
+  left: 22px;
+  bottom: 2px;
+  pointer-events: none;
 }
 
 /* Pixel night cityscape along the bottom of the sidebar - positioned and

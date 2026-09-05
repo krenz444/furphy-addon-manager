@@ -113,7 +113,7 @@ Connectivity (can the UI reach the local server at all) is a **separate fact**, 
 |---|---|---|---|
 | 1 | **Couldn't update — Retry** | red | last attempt for this addon failed; Retry re-runs just this one |
 | 2 | **Needs: [Addon Name]** | red | a required dependency isn't installed; names it directly, no hover needed |
-| 3 | **Update** | amber, button | a newer version exists (the Version cell already shows the diff; this pill is the one-click fix) |
+| 3 | **Update** | amber, button | a newer version exists and the player hasn't chosen to ignore updates for it (the Version cell already shows the diff; this pill is the one-click fix) |
 | 4 | **Old patch** | amber | installed version predates the player's WoW patch, and no newer file exists to fix it |
 | 5 | **Won't work this patch** | red | addon has no version compatible with the client at all |
 | 6 | **Pinned · 424.3** | blue-grey | won't auto-update; version shown inline, no second pill |

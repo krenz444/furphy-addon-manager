@@ -76,7 +76,6 @@
         <svg class="icon nav-icon"><use href="#icon-list"></use></svg>
         <span class="nav-label">My Addons</span>
         <span class="nav-count" id="nav-count-total">0</span>
-        <span class="nav-badge" id="nav-count-updates" hidden>0</span>
       </button>
       <button type="button" class="nav-item" data-view="browse">
         <svg class="icon nav-icon"><use href="#icon-compass"></use></svg>
@@ -820,6 +819,7 @@
 <div class="dialog" id="dialog-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-add-title">
   <h3 id="dialog-add-title">Add addon</h3>
   <p class="muted-text">Paste a wago.io addon link, or type a CurseForge ID number.</p>
+  <p class="muted-text">Find the ID number in the About Project box on the addon's CurseForge page.</p>
   <form id="add-addon-form">
     <input type="text" id="add-addon-input" placeholder="1521253, or a wago.io URL" autocomplete="off">
     <p class="form-msg" id="add-addon-error" hidden></p>
