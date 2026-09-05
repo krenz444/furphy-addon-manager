@@ -5145,16 +5145,19 @@ Views.browse = (function () {
 
   async function searchWago(reset) {
     const b = Store.state.browse;
+    const query = b.query;
     if (reset) { b.wago.results = []; }
     b.wago.loading = true;
     b.wago.error = null;
     renderWagoResults();
     try {
-      const res = await Api.wagoSearch({ q: b.query, page: 1 });
+      const res = await Api.wagoSearch({ q: query, page: 1 });
+      if (Store.state.browse.query !== query) return;
       b.wago.results = res.items || [];
       b.wago.loaded = true;
       b.wago.loading = false;
     } catch (err) {
+      if (Store.state.browse.query !== query) return;
       b.wago.loading = false;
       b.wago.error = err;
     }

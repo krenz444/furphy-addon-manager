@@ -70,6 +70,26 @@ function Write-Warn2 {
     Write-Host "  WARNING: $Message" -ForegroundColor Yellow
 }
 
+# Round 20: independent, code-level heuristic (not caller discipline alone)
+# that a given path looks like a scratch/test root rather than a real
+# production install/WoW folder. Used only as a defense-in-depth guard
+# before -Uninstall's Desktop-shortcut removal (see the CS-F5 incident
+# note further down) - never used to change any other behavior.
+function Test-LooksLikeScratchRun {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    $p = $Path.ToLowerInvariant()
+    $tempDir = $null
+    try { $tempDir = [System.IO.Path]::GetTempPath() } catch { $tempDir = $null }
+    if ($tempDir) {
+        $tempDir = $tempDir.ToLowerInvariant().TrimEnd('\')
+        if ($p.StartsWith($tempDir)) { return $true }
+    }
+    if ($p -match '\\scratch(\\|$)') { return $true }
+    if ($p -match '\\fixtures\\wowroot(\\|$)') { return $true }
+    return $false
+}
+
 # =====================================================================
 # FLAVORS-SPEC S2.1: the same fixed-order table addon-sync.ps1/
 # addon-server.ps1 carry as $Script:FlavourDefs, duplicated here per the
@@ -326,6 +346,14 @@ if ($Uninstall) {
         }
     }
 
+    # Round 20: accumulate any file that could not be removed (locked by
+    # another process, e.g. AV/indexer/OneDrive/an open editor) across all
+    # three removal loops below, instead of letting $ErrorActionPreference
+    # = 'Stop' throw out of the first Remove-Item that hits a locked file
+    # and abort the uninstall mid-way, leaving a half-removed app with the
+    # game-launcher files already gone but the app's own code still there.
+    $failedRemovals = New-Object 'System.Collections.Generic.List[string]'
+
     # FLAVORS-SPEC S7.2: remove every possible shortcut name (today's
     # single unlabeled name plus every flavour's labeled variant) rather
     # than trying to infer which naming convention was used when this
@@ -340,7 +368,21 @@ if ($Uninstall) {
     # exact unscoped removal previously deleted this machine's two real
     # production desktop shortcuts during a scratch-fixture test run -
     # see the CS-F5 build-log incident note.
-    if (-not $NoShortcuts) {
+    #
+    # Round 20: -NoShortcuts is still the authoritative opt-out, but it is
+    # pure caller discipline - nothing stopped a caller who simply forgot
+    # the flag from reproducing the exact CS-F5 incident against a real
+    # Desktop. Test-LooksLikeScratchRun is an independent, code-level
+    # heuristic (never registry/config-based, no new persisted state) that
+    # catches the common case - a $wowRoot/$appDest under %TEMP%, a
+    # \scratch\ folder, or fixtures\wowroot - and skips the destructive
+    # removal with a warning instead of proceeding, even if -NoShortcuts
+    # was forgotten. It changes nothing for a genuine production install,
+    # which never sits under any of those paths.
+    $looksScratch = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScratchRun $appDest)
+    if ($looksScratch -and (-not $NoShortcuts)) {
+        Write-Warn2 'Target path looks like a scratch/test root but -NoShortcuts was not passed - skipping Desktop shortcut removal for safety. Pass -NoShortcuts explicitly if this really is production.'
+    } elseif (-not $NoShortcuts) {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $shortcutNames = New-Object 'System.Collections.Generic.List[string]'
         $shortcutNames.Add('Furphy Addon Manager.lnk')
@@ -351,8 +393,13 @@ if ($Uninstall) {
         foreach ($name in $shortcutNames) {
             $lnk = Join-Path -Path $desktop -ChildPath $name
             if (Test-Path -LiteralPath $lnk) {
-                Remove-Item -LiteralPath $lnk -Force
-                Write-Info "Removed shortcut: $name"
+                try {
+                    Remove-Item -LiteralPath $lnk -Force
+                    Write-Info "Removed shortcut: $name"
+                } catch {
+                    $failedRemovals.Add($lnk)
+                    Write-Warn2 "Could not remove shortcut (in use?): $name - $($_.Exception.Message)"
+                }
             }
         }
     } else {
@@ -369,8 +416,13 @@ if ($Uninstall) {
         foreach ($name in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
             $p = Join-Path -Path $flavourDir -ChildPath $name
             if (Test-Path -LiteralPath $p) {
-                Remove-Item -LiteralPath $p -Force
-                Write-Info "Removed launcher file: $($def.Label)\$name"
+                try {
+                    Remove-Item -LiteralPath $p -Force
+                    Write-Info "Removed launcher file: $($def.Label)\$name"
+                } catch {
+                    $failedRemovals.Add($p)
+                    Write-Warn2 "Could not remove launcher file (in use?): $($def.Label)\$name - $($_.Exception.Message)"
+                }
             }
         }
     }
@@ -386,12 +438,28 @@ if ($Uninstall) {
         # tracked-addon data on uninstall.)
         $keepDirs = @('jobs', 'backups', 'cache', 'staging', 'flavours')
         Get-ChildItem -LiteralPath $appDest -Force | ForEach-Object {
+            # Capture the pipeline item's Name/FullName BEFORE the try/catch:
+            # inside a catch block, $_ is rebound to the caught ErrorRecord,
+            # so referencing $_.Name/$_.FullName there would silently resolve
+            # to nothing rather than the file/folder being removed.
+            $itemName = $_.Name
+            $itemFullName = $_.FullName
             if ($_.PSIsContainer) {
-                if ($keepDirs -notcontains $_.Name) {
-                    Remove-Item -LiteralPath $_.FullName -Recurse -Force
+                if ($keepDirs -notcontains $itemName) {
+                    try {
+                        Remove-Item -LiteralPath $itemFullName -Recurse -Force
+                    } catch {
+                        $failedRemovals.Add($itemFullName)
+                        Write-Warn2 "Could not remove folder (in use?): $itemName - $($_.Exception.Message)"
+                    }
                 }
-            } elseif ($keepFiles -notcontains $_.Name) {
-                Remove-Item -LiteralPath $_.FullName -Force
+            } elseif ($keepFiles -notcontains $itemName) {
+                try {
+                    Remove-Item -LiteralPath $itemFullName -Force
+                } catch {
+                    $failedRemovals.Add($itemFullName)
+                    Write-Warn2 "Could not remove file (in use?): $itemName - $($_.Exception.Message)"
+                }
             }
         }
         Write-Info "App files removed from $appDest"
@@ -402,7 +470,13 @@ if ($Uninstall) {
 
     Write-Info "Your AddOns folder(s) were not touched."
     Write-Host ''
-    Write-Host 'Uninstall complete.' -ForegroundColor Green
+    if ($failedRemovals.Count -gt 0) {
+        Write-Warn2 "$($failedRemovals.Count) item(s) could not be removed because they were in use - close any running Furphy/CurseForge window or program holding them open and re-run -Uninstall:"
+        foreach ($f in $failedRemovals) { Write-Warn2 "  $f" }
+        Write-Host 'Uninstall completed with warnings.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Uninstall complete.' -ForegroundColor Green
+    }
     exit 0
 }
 

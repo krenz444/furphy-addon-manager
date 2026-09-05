@@ -181,6 +181,21 @@ function Read-Body {
         return $null
     }
 
+    # Round 20 (adversarial bug pass, security-2): a browser only sends a
+    # CORS preflight ahead of a cross-site request whose Content-Type is
+    # something other than the three CORS-"simple" values (text/plain,
+    # multipart/form-data, application/x-www-form-urlencoded). Requiring
+    # exactly application/json here means any cross-site POST/PUT carrying
+    # a JSON body now REQUIRES a preflight - which this server never
+    # answers with any Access-Control-Allow-* headers, so the browser
+    # itself blocks the follow-up request. The SPA (ui/app.js) always sends
+    # "application/json; charset=utf-8" for every call with a body, so this
+    # is a no-op for every legitimate caller.
+    $contentType = $request.ContentType
+    if ([string]::IsNullOrEmpty($contentType) -or -not $contentType.ToLowerInvariant().StartsWith('application/json')) {
+        throw 'bad request: Content-Type must be application/json'
+    }
+
     $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
     try {
         $text = $reader.ReadToEnd()
@@ -1944,6 +1959,44 @@ function Build-CliArgs {
     Write-Output -NoEnumerate $argsList
 }
 
+function ConvertTo-SafeProcessArg {
+    <#
+      Round 20 (adversarial bug pass, server-1): wraps a single command-line
+      argument in double quotes using CommandLineToArgvW-compatible
+      backslash/quote escaping, so a value containing a literal space (e.g.
+      an attacker-supplied projectId of "1 -Remove 999") can never be
+      re-split into extra argv tokens by the child process - Windows
+      PowerShell 5.1's Start-Process -ArgumentList joins array elements with
+      a bare, unquoted space before handing them to CreateProcess, so an
+      un-quoted element containing a space is indistinguishable from two
+      separate arguments once it reaches the child. Every element handed to
+      New-CliProcessArgs's $psArgs list is now passed through this (not just
+      the two or three that used to be hand-quoted for containing paths with
+      spaces), closing the same hole for every CLI argument, not just paths.
+    #>
+    param([string]$Value)
+
+    if ($null -eq $Value) { $Value = '' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $backslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $backslashes++
+        } elseif ($ch -eq '"') {
+            if ($backslashes -gt 0) { [void]$sb.Append('\', ($backslashes * 2 + 1)) } else { [void]$sb.Append('\') }
+            [void]$sb.Append('"')
+            $backslashes = 0
+        } else {
+            if ($backslashes -gt 0) { [void]$sb.Append('\', $backslashes); $backslashes = 0 }
+            [void]$sb.Append($ch)
+        }
+    }
+    if ($backslashes -gt 0) { [void]$sb.Append('\', ($backslashes * 2)) }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
 function New-CliProcessArgs {
     <#
       Full powershell.exe argument list for one addon-sync.ps1 invocation.
@@ -1978,27 +2031,31 @@ function New-CliProcessArgs {
     $psArgs.Add('-NoProfile')
     $psArgs.Add('-ExecutionPolicy')
     $psArgs.Add('Bypass')
-    # Start-Process joins -ArgumentList elements with spaces and does NOT quote
-    # them, so paths with spaces (C:\Program Files (x86)\...) must be quoted here.
+    # Round 20 (adversarial bug pass, server-1): every element below is now
+    # quoted via ConvertTo-SafeProcessArg, not just the paths that used to be
+    # hand-quoted here - Start-Process joins -ArgumentList elements with a
+    # bare, unquoted space, so ANY element containing a space (a path, or an
+    # attacker-supplied projectId/fileId flowing through $CliArgs) could
+    # otherwise be re-split into extra argv tokens by the child process.
     $psArgs.Add('-File')
-    $psArgs.Add('"' + $Script:CliPath + '"')
-    foreach ($a in $CliArgs) { $psArgs.Add($a) }
+    $psArgs.Add((ConvertTo-SafeProcessArg $Script:CliPath))
+    foreach ($a in $CliArgs) { $psArgs.Add((ConvertTo-SafeProcessArg ([string]$a))) }
     $psArgs.Add('-Json')
     if ($Script:AddonsPathOverride) {
         $psArgs.Add('-AddonsPath')
-        $psArgs.Add('"' + $Script:AddonsPathOverride + '"')
+        $psArgs.Add((ConvertTo-SafeProcessArg $Script:AddonsPathOverride))
     }
     if ($Flavor -and $Flavor -ne 'retail') {
         $psArgs.Add('-Flavor')
-        $psArgs.Add($Flavor)
+        $psArgs.Add((ConvertTo-SafeProcessArg $Flavor))
     }
     if ($Script:WowRootOverride) {
         $psArgs.Add('-WowRoot')
-        $psArgs.Add('"' + $Script:WowRootOverride + '"')
+        $psArgs.Add((ConvertTo-SafeProcessArg $Script:WowRootOverride))
     }
     if ($ProgressPath) {
         $psArgs.Add('-ProgressPath')
-        $psArgs.Add('"' + $ProgressPath + '"')
+        $psArgs.Add((ConvertTo-SafeProcessArg $ProgressPath))
     }
     Write-Output -NoEnumerate $psArgs
 }
@@ -5673,6 +5730,20 @@ function Handle-JobsGetOne {
         if ($j.id -eq $id) { $job = $j; break }
     }
     if (-not $job) {
+        # Round 20 (adversarial bug pass, server-6): $Script:Jobs is a
+        # 20-item rolling history (Add-JobToHistory evicts the oldest entry
+        # with no exemption for one still running), so a long-running job's
+        # own record can fall out of it while 20+ other jobs complete on
+        # other flavours - even though the SAME job object is still reachable
+        # via $Script:CurrentJobByFlavour the whole time. Fall back to that
+        # (the same source of truth Handle-JobsGetAll/Handle-Shutdown already
+        # use) before declaring 404, so the SPA's live-progress poll for a
+        # genuinely still-running job never loses it.
+        foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+            if ($cj -and $cj.id -eq $id) { $job = $cj; break }
+        }
+    }
+    if (-not $job) {
         Send-Json -Context $Context -StatusCode 404 -Body @{ error = 'job not found' }
         return
     }
@@ -5921,6 +5992,28 @@ function Handle-SettingsGet {
     Send-Json -Context $Context -StatusCode 200 -Body (Get-SettingsView -Settings $settings)
 }
 
+function ConvertTo-SettingsBool {
+    <#
+      Round 20 (adversarial bug pass): a bare [bool] cast treats ANY
+      non-empty string as truthy, so a JSON STRING "false" (a client bug,
+      not a real JSON boolean - the SPA itself always sends a real boolean)
+      silently coerced to $true, inverting the caller's intent. This keeps
+      the settings API's documented "no invalid boolean, always coerce"
+      permissiveness (SPEC.md 556/630 - these fields are never rejected with
+      a 400) for every other input shape, while recognizing the common
+      falsy-string spellings so "false"/"0"/etc. behave the way any
+      reasonable caller would expect instead of flipping the setting on.
+    #>
+    param($Value)
+    if ($Value -is [string]) {
+        $trimmed = $Value.Trim().ToLowerInvariant()
+        if ($trimmed -eq 'false' -or $trimmed -eq '0' -or $trimmed -eq 'no' -or $trimmed -eq 'off' -or $trimmed -eq '') {
+            return $false
+        }
+    }
+    return [bool]$Value
+}
+
 function Handle-SettingsPut {
     param($Context, $RouteMatch)
 
@@ -5938,7 +6031,17 @@ function Handle-SettingsPut {
 
     $settings = Get-Settings
     if ($null -ne $body.releaseType) {
-        $rt = [int]$body.releaseType
+        # Round 20 (adversarial bug pass, security-4/cli-2/server-4): a
+        # non-numeric value (e.g. the string "abc") used to hit the bare
+        # [int] cast below unguarded, throwing a FormatException that
+        # Invoke-Route's catch-all turned into a raw 500 with the internal
+        # .NET exception text as the body - a clean 400 is used instead,
+        # matching the out-of-range check just below it.
+        $rt = 0
+        if (-not [int]::TryParse([string]$body.releaseType, [ref]$rt)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'releaseType must be a number' }
+            return
+        }
         if ($rt -lt 1 -or $rt -gt 3) {
             Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'releaseType must be 1-3' }
             return
@@ -5946,10 +6049,16 @@ function Handle-SettingsPut {
         $settings.releaseType = $rt
     }
     if ($null -ne $body.autoUpdateOnLaunch) {
-        $settings.autoUpdateOnLaunch = [bool]$body.autoUpdateOnLaunch
+        $settings.autoUpdateOnLaunch = ConvertTo-SettingsBool $body.autoUpdateOnLaunch
     }
     if ($null -ne $body.port) {
-        $settings.port = [int]$body.port
+        # Round 20: same guarded-cast treatment as releaseType above.
+        $p = 0
+        if (-not [int]::TryParse([string]$body.port, [ref]$p)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'port must be a number' }
+            return
+        }
+        $settings.port = $p
     }
     # E19: adFilter (the CurseForge-tab ad/tracker filter toggle) and
     # hostWindow (the native host's window bounds) - see Get-DefaultSettings.
@@ -5959,7 +6068,7 @@ function Handle-SettingsPut {
     # endpoint entirely), but is still accepted here for completeness/so a
     # round-trip through the API never loses it.
     if ($null -ne $body.adFilter) {
-        $settings.adFilter = [bool]$body.adFilter
+        $settings.adFilter = ConvertTo-SettingsBool $body.adFilter
     }
     # Round 16 (E22): cfFocus (the CurseForge listing/search focus-view
     # trim toggle) - see Get-DefaultSettings. Settings > Advanced's
@@ -5968,7 +6077,7 @@ function Handle-SettingsPut {
     # which only does anything inside the host - cfFocus still saves here so
     # it applies next time the desktop window is used).
     if ($null -ne $body.cfFocus) {
-        $settings.cfFocus = [bool]$body.cfFocus
+        $settings.cfFocus = ConvertTo-SettingsBool $body.cfFocus
     }
     if ($null -ne $body.hostWindow) {
         $settings.hostWindow = $body.hostWindow
@@ -5999,16 +6108,22 @@ function Handle-SettingsPut {
     # five clamp-safe values (60/120/240/480/1440) so this path is a
     # defense-in-depth backstop, not something the normal UI can trigger.
     if ($null -ne $body.backgroundUpdates) {
-        $settings.backgroundUpdates = [bool]$body.backgroundUpdates
+        $settings.backgroundUpdates = ConvertTo-SettingsBool $body.backgroundUpdates
     }
     if ($null -ne $body.backgroundIntervalMinutes) {
-        $interval = [int]$body.backgroundIntervalMinutes
+        # Round 20: same guarded-cast treatment as releaseType/port above -
+        # a non-numeric value now 400s instead of throwing a raw 500.
+        $interval = 0
+        if (-not [int]::TryParse([string]$body.backgroundIntervalMinutes, [ref]$interval)) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'backgroundIntervalMinutes must be a number' }
+            return
+        }
         if ($interval -lt 30) { $interval = 30 }
         if ($interval -gt 1440) { $interval = 1440 }
         $settings.backgroundIntervalMinutes = $interval
     }
     if ($null -ne $body.runAtStartup) {
-        $settings.runAtStartup = [bool]$body.runAtStartup
+        $settings.runAtStartup = ConvertTo-SettingsBool $body.runAtStartup
     }
     # FLAVORS-SPEC.md CS-F2 S3.4: activeFlavour is a pure UI-continuity
     # default (S5.1's principle 5 - "never load-bearing for a data
@@ -6034,7 +6149,7 @@ function Handle-SettingsPut {
         }
     }
     if ($null -ne $body.showTestRealms) {
-        $settings.showTestRealms = [bool]$body.showTestRealms
+        $settings.showTestRealms = ConvertTo-SettingsBool $body.showTestRealms
     }
 
     try {
@@ -6487,25 +6602,44 @@ function Handle-Open {
                 # to Browse client-side instead). Restricted to the two addon
                 # marketplaces this app ever links to, so this endpoint can never be
                 # used to open an arbitrary URL in the user's default browser.
+                #
+                # Round 20 (adversarial bug pass, server-3): a plain
+                # StartsWith prefix check on the raw string is not enough -
+                # Open-InBrowser hands the whole string to Start-Process
+                # -ArgumentList as ONE unquoted argument, and Windows
+                # PowerShell 5.1 does not quote/escape it, so a URL like
+                # "https://www.curseforge.com/x --app=http://evil/phish"
+                # passes the StartsWith check yet still smuggles an extra
+                # msedge.exe command-line switch past the allowlist. Validate
+                # structurally instead (same pattern Open-CfSideWindow
+                # already uses): parse as an absolute URI and require an
+                # exact scheme+host match, then pass only the reparsed
+                # AbsoluteUri onward - it is guaranteed free of spaces/quotes/
+                # control characters, so it cannot inject extra argv tokens
+                # regardless of what the caller sent.
                 $url = $null
                 if ($body.url) { $url = [string]$body.url }
                 if (-not $url) {
                     Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url required' }
                     return
                 }
-                $allowedPrefixes = @('https://www.curseforge.com/', 'https://addons.wago.io/')
+                $parsedOpenUrl = $null
+                $isValidOpenUrl = [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$parsedOpenUrl)
+                $allowedOpenHosts = @('www.curseforge.com', 'addons.wago.io')
                 $allowed = $false
-                foreach ($prefix in $allowedPrefixes) {
-                    if ($url.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $allowed = $true
-                        break
+                if ($isValidOpenUrl -and $parsedOpenUrl.Scheme -eq 'https') {
+                    foreach ($allowedHost in $allowedOpenHosts) {
+                        if ($parsedOpenUrl.Host.Equals($allowedHost, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $allowed = $true
+                            break
+                        }
                     }
                 }
                 if (-not $allowed) {
                     Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url must start with https://www.curseforge.com/ or https://addons.wago.io/' }
                     return
                 }
-                Open-InBrowser -Url $url
+                Open-InBrowser -Url $parsedOpenUrl.AbsoluteUri
             }
             'cf-window' {
                 # Round 12 (E19b): the UI has posted this 'what' since round
@@ -6621,6 +6755,35 @@ $Script:Routes = @(
     @{ Method = 'POST'; Pattern = '^/api/shutdown$'; Handler = 'Handle-Shutdown' }
 )
 
+function Test-SameOriginRequest {
+    <#
+      Round 20 (adversarial bug pass, security-2): CSRF guard for every
+      state-changing (non-GET/HEAD) request. Modern browsers send an
+      Origin header on such requests even when same-origin (falls back to
+      Referer if Origin is somehow absent, e.g. an older client) - this
+      requires it to resolve to this server's own http://localhost:<port>
+      or http://127.0.0.1:<port> origin, so a page loaded from any other
+      site cannot drive a state-changing endpoint (including a bare
+      auto-submitting HTML form, which sends no body at all and so never
+      goes through Read-Body's Content-Type check). The SPA's own
+      same-origin fetch() calls always carry a matching Origin header, so
+      this is a no-op for every legitimate caller.
+    #>
+    param($Context)
+
+    $request = $Context.Request
+    $candidate = $request.Headers['Origin']
+    if ([string]::IsNullOrEmpty($candidate)) { $candidate = $request.Headers['Referer'] }
+    if ([string]::IsNullOrEmpty($candidate)) { return $false }
+
+    $parsedOrigin = $null
+    if (-not [System.Uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$parsedOrigin)) { return $false }
+    if ($parsedOrigin.Scheme -ne 'http') { return $false }
+    if ($parsedOrigin.Port -ne $Script:Port) { return $false }
+    $originHost = $parsedOrigin.Host.ToLowerInvariant()
+    return ($originHost -eq 'localhost' -or $originHost -eq '127.0.0.1')
+}
+
 function Invoke-Route {
     <# Dispatches one request; never throws (every path returns a JSON response and always closes it). #>
     param($Context)
@@ -6647,6 +6810,14 @@ function Invoke-Route {
         }
 
         if ($matchedHandler) {
+            # Round 20 (adversarial bug pass, security-2): every matched
+            # route past this point can change state (every GET route is
+            # read-only) - gate non-GET/HEAD methods on Test-SameOriginRequest
+            # before the handler ever runs, so no CSRF/foreign-origin request
+            # reaches a state-changing endpoint regardless of what it sends.
+            if ($method -ne 'GET' -and $method -ne 'HEAD' -and -not (Test-SameOriginRequest -Context $Context)) {
+                Send-Json -Context $Context -StatusCode 403 -Body @{ error = 'forbidden: origin not allowed' }
+            } else {
             # FLAVORS-SPEC.md CS-F2 S5.1: resolve this ONE request's flavour
             # before the handler ever runs, and stash it script-scope for the
             # handler to read (see that section's own header comment for why
@@ -6660,6 +6831,7 @@ function Invoke-Route {
             } else {
                 Set-CurrentFlavourContext -Flavor $flavourResult.Flavor
                 & $matchedHandler $Context $routeMatch
+            }
             }
         } elseif ($method -eq 'GET' -and (-not $path.StartsWith('/api/'))) {
             # E19: the native host (host\FurphyHost.cs) navigates its Furphy
@@ -6756,7 +6928,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.6.0'
+$Script:Version = '1.6.1'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -6929,8 +7101,29 @@ Remove-OldJobFiles
 Write-ServerLog "Starting addon-server on port $Script:Port, root $Script:Root"
 
 $listener = New-Object System.Net.HttpListener
-$prefix = "http://localhost:$Script:Port/"
+# Round 20 (adversarial bug pass, security-1): a bare "localhost" prefix
+# does not actually restrict http.sys to the loopback interface - it binds
+# 0.0.0.0/[::] and dispatches purely on the request's Host header text,
+# so any LAN client could reach this API by spoofing "Host: localhost"
+# against the machine's real IP. An IP-literal prefix (127.0.0.1) makes
+# http.sys bind and dispatch strictly on the loopback interface itself,
+# closing that off. $appUrl below (used only to launch a local browser)
+# is unaffected and deliberately left as "localhost".
+$prefix = "http://127.0.0.1:$Script:Port/"
 $listener.Prefixes.Add($prefix)
+# Round 20 follow-up: Windows resolves "localhost" to the IPv6 loopback
+# (::1) FIRST, so with only the 127.0.0.1 prefix every client that says
+# "localhost" (the SPA, the host window, the tray, the handler, deploy.ps1)
+# paid a refused-IPv6-connect fallback of 1-2 s per connection and health
+# checks with short timeouts failed outright. Listen on the IPv6 loopback
+# literal as well - still strictly loopback, the LAN stays closed. If the
+# stack has no IPv6 the extra prefix is simply skipped.
+$prefix6 = "http://[::1]:$Script:Port/"
+try {
+    if ([System.Net.Sockets.Socket]::OSSupportsIPv6) { $listener.Prefixes.Add($prefix6) }
+} catch {
+    Write-ServerLog "IPv6 loopback prefix not added: $($_.Exception.Message)"
+}
 
 try {
     $listener.Start()
@@ -6939,7 +7132,7 @@ try {
     throw
 }
 
-Write-ServerLog "Listening on $prefix"
+Write-ServerLog "Listening on $(($listener.Prefixes | ForEach-Object { $_ }) -join ' and ')"
 
 if ($OpenBrowser) {
     $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
@@ -6967,8 +7160,27 @@ try {
             if ($Script:IdleMinutes -gt 0) {
                 $idleSpan = (Get-Date) - $Script:LastRequestTime
                 if ($idleSpan.TotalMinutes -ge $Script:IdleMinutes) {
-                    Write-ServerLog "Idle for $($Script:IdleMinutes) minutes - shutting down"
-                    break
+                    # Round 20 (adversarial bug pass, server-2): unlike
+                    # Handle-Shutdown (the explicit POST /api/shutdown),
+                    # this idle-exit path used to only look at wall-clock
+                    # time, never at whether a job was still running - a
+                    # long sync left unattended past -IdleMinutes could get
+                    # the whole server (and the listener) torn down out
+                    # from under it, orphaning the CLI child process with
+                    # no owner. Mirror Handle-Shutdown's own check: skip
+                    # this idle break (re-checked every 2s regardless) while
+                    # any flavour still has a job running.
+                    $anyJobRunning = $false
+                    foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+                        if ($cj) {
+                            $refreshedJob = Update-JobStatus -Job $cj
+                            if ($refreshedJob -and $refreshedJob.state -eq 'running') { $anyJobRunning = $true }
+                        }
+                    }
+                    if (-not $anyJobRunning) {
+                        Write-ServerLog "Idle for $($Script:IdleMinutes) minutes - shutting down"
+                        break
+                    }
                 }
             }
             continue

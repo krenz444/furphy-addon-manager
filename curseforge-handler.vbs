@@ -131,6 +131,8 @@ Function HttpPost(target, payload)
     http.SetTimeouts 2000, 2000, 8000, 8000
     http.Open "POST", target, False
     http.SetRequestHeader "Content-Type", "application/json"
+    ' Round 20: the server rejects state-changing requests without a same-origin Origin/Referer (CSRF guard)
+    http.SetRequestHeader "Referer", target
     http.Send payload
     If Err.Number = 0 Then
         HttpPost = http.Status

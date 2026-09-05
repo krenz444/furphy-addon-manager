@@ -710,6 +710,16 @@ namespace Furphy
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "POST";
                 req.ContentType = "application/json";
+                // Round 20 (adversarial bug pass, security-2): addon-server.ps1
+                // now rejects any state-changing request whose Origin/Referer
+                // does not resolve to its own http://localhost:<port> origin
+                // (a CSRF guard - see Test-SameOriginRequest). This direct
+                // HttpWebRequest call (used by the tray to POST /api/jobs)
+                // never carried either header the way a browser fetch() does,
+                // so it would otherwise be rejected as a foreign origin -
+                // Referer is a trusted, dedicated HttpWebRequest property, so
+                // set it to this same request's own URL to satisfy that check.
+                req.Referer = url;
                 req.Timeout = timeoutMs;
                 req.ReadWriteTimeout = timeoutMs;
                 byte[] data = Encoding.UTF8.GetBytes(jsonBody);
@@ -960,6 +970,65 @@ namespace Furphy
         {
             base.OnHandleCreated(e);
             ApplyTitleBarColors();
+        }
+
+        // Round 20 fix (host-2): per-monitor-v2 awareness is declared
+        // (DpiAwareness.TryEnable) but nothing in this file ever handled
+        // WM_DPICHANGED, and there is no app.config opting into
+        // EnableWindowsFormsHighDpiAutoResizing, so WinForms never resized
+        // this window's physical bounds when it was dragged to a monitor
+        // with a different DPI - it kept its old pixel size instead of the
+        // OS-suggested one for the new monitor. Per Microsoft's documented
+        // per-monitor-v2 handling, WM_DPICHANGED's lParam carries the
+        // suggested new window rect; applying it here is the standard fix.
+        // Deliberately NOT touched: CoreWebView2Controller.RasterizationScale
+        // for either webview - both default to
+        // ShouldDetectMonitorScaleChanges=true (see
+        // Microsoft.Web.WebView2.Core.xml), so the runtime already retargets
+        // its own rendering scale to the new monitor DPI on its own; setting
+        // it manually here would fight that default instead of complementing
+        // it. Resizing the window (below) changes _contentPanel's
+        // (Dock=Fill) client size, which the SPA's existing
+        // ResizeObserver/'resize' listeners (ui/app.js ensureCfObservers)
+        // pick up exactly like any other resize and answer with a fresh
+        // cf-rect/cf-show carrying the new devicePixelRatio - so
+        // _cfWebView.Bounds re-syncs through the same page-driven ApplyCfRect
+        // path already used everywhere else, no new host->page channel
+        // needed.
+        private const int WM_DPICHANGED = 0x02E0;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int left;
+            public int top;
+            public int right;
+            public int bottom;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_DPICHANGED)
+            {
+                try
+                {
+                    int newDpi = m.WParam.ToInt32() & 0xFFFF;
+                    RECT suggested = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
+                    _effectiveDpi = newDpi;
+                    LogHost("WM_DPICHANGED: dpi=" + newDpi.ToString(CultureInfo.InvariantCulture) +
+                        " suggested=" + suggested.left.ToString(CultureInfo.InvariantCulture) +
+                        "," + suggested.top.ToString(CultureInfo.InvariantCulture) +
+                        " " + (suggested.right - suggested.left).ToString(CultureInfo.InvariantCulture) +
+                        "x" + (suggested.bottom - suggested.top).ToString(CultureInfo.InvariantCulture));
+                    SetBounds(suggested.left, suggested.top,
+                        suggested.right - suggested.left, suggested.bottom - suggested.top);
+                }
+                catch (Exception ex)
+                {
+                    LogHost("WM_DPICHANGED handling failed: " + ex.Message);
+                }
+            }
+            base.WndProc(ref m);
         }
 
         // -------------------------------------------------------- setup
@@ -2049,6 +2118,7 @@ namespace Furphy
             // ad-hiding injection is gated on the toggle.
             _adFilterEnabled = ReadAdFilterSetting();
             EnsureAdFilterInfra();
+            PushAdFilterCssLive(_adFilterEnabled);
 
             // Round 16 (E22): same re-read-on-every-navigation-start idea
             // as the ad filter above, but cfFocus can also change out from
@@ -2320,11 +2390,42 @@ namespace Furphy
             {
                 try
                 {
+                    // Round 20 fix (host-1): mirrors the cf-focus live-toggle
+                    // pattern (EnsureCfFocusInfra/PushCfFocusLive above) so
+                    // turning the setting off actually stops the CSS from
+                    // hiding matching elements, instead of the style staying
+                    // unconditionally active forever once ever injected.
+                    // The <style> element is still appended on every
+                    // document, but its `disabled` state now follows
+                    // window.localStorage['adFilterCssEnabled'] (falling
+                    // back to the enabled state baked in at first
+                    // registration), and PushAdFilterCssLive keeps that
+                    // localStorage value - and the currently loaded page's
+                    // style, via window.__adFilterCssSetEnabled - in sync
+                    // with settings.json on every navigation start.
+                    string enabledLiteral = _adFilterEnabled ? "true" : "false";
                     string css =
-                        "(function(){try{var s=document.createElement('style');" +
+                        "(function(){try{" +
+                        "var ENABLED=" + enabledLiteral + ";" +
+                        "function readStored(){try{var v=window.localStorage.getItem('adFilterCssEnabled');" +
+                        "if(v==='1'){return true;}if(v==='0'){return false;}}catch(e){}return ENABLED;}" +
+                        "ENABLED=readStored();" +
+                        "var s=document.createElement('style');" +
                         "s.textContent='[class*=\"adsbygoogle\"],[id*=\"adsbygoogle\"],[data-ad-slot]{" +
                         "display:none !important;visibility:hidden !important;}';" +
-                        "(document.head||document.documentElement).appendChild(s);}catch(e){}})();";
+                        // s.disabled must be set AFTER appendChild, not before -
+                        // setting it on a <style> element before it is connected
+                        // to the document does not reliably take effect (no
+                        // associated CSSStyleSheet yet to carry the flag),
+                        // verified against this WebView2 build's Chromium engine.
+                        "(document.head||document.documentElement).appendChild(s);" +
+                        "s.disabled=!ENABLED;" +
+                        "window.__adFilterCssSetEnabled=function(v){" +
+                        "ENABLED=!!v;" +
+                        "try{window.localStorage.setItem('adFilterCssEnabled',ENABLED?'1':'0');}catch(e){}" +
+                        "s.disabled=!ENABLED;" +
+                        "};" +
+                        "}catch(e){}})();";
                     System.Threading.Tasks.Task<string> scriptTask =
                         _cfWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(css);
                     GC.KeepAlive(scriptTask);
@@ -2335,6 +2436,34 @@ namespace Furphy
                 {
                     LogHost("failed to register ad filter CSS: " + ex.Message);
                 }
+            }
+        }
+
+        // Fire-and-forget ExecuteScriptAsync (never awaited, same shape as
+        // PushCfFocusLive below): pushes the current _adFilterEnabled value
+        // into the CF pane's own localStorage (picked up by the NEXT
+        // document-created run of the script above) and, if a document has
+        // already booted the script, flips its live style element via the
+        // exposed window.__adFilterCssSetEnabled so an already-open CF page
+        // reacts immediately without a reload. No-op if the persistent
+        // script was never registered (ad filter never turned on this
+        // webview lifetime) - harmless, since there is no CSS to toggle yet.
+        private void PushAdFilterCssLive(bool enabled)
+        {
+            if (_cfWebView.CoreWebView2 == null) return;
+            try
+            {
+                string storeVal = enabled ? "1" : "0";
+                string boolVal = enabled ? "true" : "false";
+                string script =
+                    "(function(){try{window.localStorage.setItem('adFilterCssEnabled','" + storeVal + "');" +
+                    "if(window.__adFilterCssSetEnabled){window.__adFilterCssSetEnabled(" + boolVal + ");}}catch(e){}})();";
+                System.Threading.Tasks.Task<string> execTask = _cfWebView.CoreWebView2.ExecuteScriptAsync(script);
+                GC.KeepAlive(execTask);
+            }
+            catch (Exception ex)
+            {
+                LogHost("ad filter CSS live push failed: " + ex.Message);
             }
         }
 
@@ -2529,11 +2658,11 @@ namespace Furphy
         // re-application at all - only the guard's PASS/FAIL verdict
         // ever needs re-deciding.
         //
-        // Live bidirectional toggle without a reload: unlike
-        // EnsureAdFilterInfra's CSS (purely additive, never turned back
-        // off once injected), this needs to flip on/off instantly while
-        // a CurseForge page is already showing (the SPA's Settings >
-        // Advanced toggle applies live). Re-registering (or removing) the
+        // Live bidirectional toggle without a reload: this needs to flip
+        // on/off instantly while a CurseForge page is already showing (the
+        // SPA's Settings > Advanced toggle applies live) - same requirement
+        // Round 20 gave EnsureAdFilterInfra's CSS above (PushAdFilterCssLive
+        // mirrors PushCfFocusLive below). Re-registering (or removing) the
         // AddScriptToExecuteOnDocumentCreatedAsync registration itself
         // would need its returned Task<string> id, and blocking on that
         // Task's result from this UI thread risks a classic WebView2

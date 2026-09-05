@@ -33,7 +33,7 @@ $alive = $false
 try { $null = Invoke-RestMethod -Uri "http://localhost:$port/api/ping" -TimeoutSec 2; $alive = $true } catch {}
 if ($alive) {
     try {
-        Invoke-RestMethod -Uri "http://localhost:$port/api/shutdown" -Method Post -TimeoutSec 5 | Out-Null
+        Invoke-RestMethod -Uri "http://localhost:$port/api/shutdown" -Method Post -Headers @{ Origin = "http://localhost:$port" } -TimeoutSec 5 | Out-Null
         "stopped live server on port $port"
         Start-Sleep -Seconds 2
     } catch {
@@ -113,7 +113,7 @@ if (-not $SkipServerCheck) {
     "server ok on port $port : state has $(@($state.addons).Count) addons, adFilter=$($state.settings.adFilter), cfFocus=$($state.settings.cfFocus)"
     $html = Invoke-WebRequest -Uri "http://localhost:$port/" -UseBasicParsing -TimeoutSec 10
     "ui ok: $($html.StatusCode), $($html.Content.Length) bytes"
-    try { Invoke-RestMethod -Uri "http://localhost:$port/api/shutdown" -Method Post -TimeoutSec 5 | Out-Null } catch {}
+    try { Invoke-RestMethod -Uri "http://localhost:$port/api/shutdown" -Method Post -Headers @{ Origin = "http://localhost:$port" } -TimeoutSec 5 | Out-Null } catch {}
     Start-Sleep -Seconds 1
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     "server shut down cleanly"
