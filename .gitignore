@@ -24,3 +24,7 @@ desktop.ini
 *.nupkg
 host/Smoke.exe
 host/smoke-result.txt
+
+# Keyless CurseForge catalogue cache (regenerated; never commit)
+cache/
+tray-state.json
