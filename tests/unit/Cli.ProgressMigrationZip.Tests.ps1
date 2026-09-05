@@ -68,7 +68,129 @@ Describe 'Write-ProgressStep' {
         $true | Should Be $true
     }
 
+    It 'always includes the tallies fields, defaulting to all-zero before any Update-ProgressTallies call' {
+        $root = New-TempRoot -Name 'progress-tallies-default'
+        $target = Join-Path $root 'progress.json'
+        $script:ProgressPath = $target
+        $script:ProgressTallies = $null
+        Write-ProgressStep -Total 3 -Index 0 -Phase 'queued'
+        $parsed = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+        $parsed.checked | Should Be 0
+        $parsed.updated | Should Be 0
+        $parsed.failed | Should Be 0
+        $parsed.upToDate | Should Be 0
+        $parsed.updatesFound | Should Be 0
+    }
+
+    It 'reflects whatever $script:ProgressTallies currently holds on every write' {
+        $root = New-TempRoot -Name 'progress-tallies-live'
+        $target = Join-Path $root 'progress.json'
+        $script:ProgressPath = $target
+        $script:ProgressTallies = @{ checked = 2; updated = 1; failed = 0; upToDate = 1; updatesFound = 1 }
+        Write-ProgressStep -Total 3 -Index 2 -Phase 'checking' -Addon 'Foo'
+        $parsed = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+        $parsed.checked | Should Be 2
+        $parsed.updated | Should Be 1
+        $parsed.upToDate | Should Be 1
+        $parsed.updatesFound | Should Be 1
+    }
+
     $script:ProgressPath = $null
+    $script:ProgressTallies = $null
+}
+
+Describe 'Update-ProgressTallies (pure)' {
+
+    It 'New-ProgressTallies returns all-zero' {
+        $t = New-ProgressTallies
+        $t.checked | Should Be 0
+        $t.updated | Should Be 0
+        $t.failed | Should Be 0
+        $t.upToDate | Should Be 0
+        $t.updatesFound | Should Be 0
+    }
+
+    It 'does not mutate the hashtable passed in (pure)' {
+        $original = New-ProgressTallies
+        $result = Update-ProgressTallies -Tallies $original -FinishedStatus 'Updated'
+        $original.checked | Should Be 0
+        $original.updated | Should Be 0
+        $result.checked | Should Be 1
+        $result.updated | Should Be 1
+    }
+
+    It '-FoundUpdate increments only updatesFound' {
+        $t = New-ProgressTallies
+        $t = Update-ProgressTallies -Tallies $t -FoundUpdate
+        $t.updatesFound | Should Be 1
+        $t.checked | Should Be 0
+        $t.updated | Should Be 0
+        $t.failed | Should Be 0
+        $t.upToDate | Should Be 0
+    }
+
+    It '-FoundUpdate is additive across repeated calls (one per addon that found an update)' {
+        $t = New-ProgressTallies
+        $t = Update-ProgressTallies -Tallies $t -FoundUpdate
+        $t = Update-ProgressTallies -Tallies $t -FoundUpdate
+        $t.updatesFound | Should Be 2
+    }
+
+    It '-FinishedStatus ''Up-to-date'' increments checked and upToDate only' {
+        $t = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Up-to-date'
+        $t.checked | Should Be 1
+        $t.upToDate | Should Be 1
+        $t.updated | Should Be 0
+        $t.failed | Should Be 0
+    }
+
+    It '-FinishedStatus ''Failed'' increments checked and failed only' {
+        $t = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Failed'
+        $t.checked | Should Be 1
+        $t.failed | Should Be 1
+        $t.updated | Should Be 0
+        $t.upToDate | Should Be 0
+    }
+
+    It '-FinishedStatus ''Installed'' and ''Updated'' both increment checked and updated' {
+        $tInstalled = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Installed'
+        $tInstalled.checked | Should Be 1
+        $tInstalled.updated | Should Be 1
+
+        $tUpdated = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Updated'
+        $tUpdated.checked | Should Be 1
+        $tUpdated.updated | Should Be 1
+    }
+
+    It '-FinishedStatus ''Skipped'' (launcher-budget skip) increments checked only' {
+        $t = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Skipped'
+        $t.checked | Should Be 1
+        $t.updated | Should Be 0
+        $t.failed | Should Be 0
+        $t.upToDate | Should Be 0
+    }
+
+    It '-FinishedStatus ''Ignored'' increments checked only (an ignoreUpdates addon still counts as finished)' {
+        $t = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Ignored'
+        $t.checked | Should Be 1
+        $t.updated | Should Be 0
+        $t.failed | Should Be 0
+        $t.upToDate | Should Be 0
+    }
+
+    It 'a full mixed run (2 up to date, 1 updated, 1 failed, 1 update-found-then-installing) tallies correctly' {
+        $t = New-ProgressTallies
+        $t = Update-ProgressTallies -Tallies $t -FinishedStatus 'Up-to-date'
+        $t = Update-ProgressTallies -Tallies $t -FinishedStatus 'Up-to-date'
+        $t = Update-ProgressTallies -Tallies $t -FoundUpdate
+        $t = Update-ProgressTallies -Tallies $t -FinishedStatus 'Updated'
+        $t = Update-ProgressTallies -Tallies $t -FinishedStatus 'Failed'
+        $t.checked | Should Be 4
+        $t.upToDate | Should Be 2
+        $t.updated | Should Be 1
+        $t.failed | Should Be 1
+        $t.updatesFound | Should Be 1
+    }
 }
 
 Describe 'Invoke-FlavourMigration' {

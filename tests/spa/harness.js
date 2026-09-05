@@ -286,16 +286,29 @@
       // 400ms check can reliably outrun.
       const progressDeadline = Date.now() + 4000;
       let sawProgress = false;
+      // Round 28 (SPEC.md section I): sample the running label's DISTINCT
+      // texts across the whole job, not just once - the mock's "sync" plan
+      // (Auctionator + Simple Damage Meter, one forced to fail) walks
+      // checking -> downloading -> installing -> a terminal phase per
+      // target, so a single snapshot could land on any one of those and
+      // miss the wording this round actually changed. labelSamples lets the
+      // checks below prove every phase this job passes through renders the
+      // new phase-aware text, and NEVER the old buggy "Updating i of N
+      // addons" line the tray-tooltip incident's own SPA-side copy of.
+      const labelSamples = [];
+      let lastLabel = null;
+      function sampleLabel() {
+        const t = text(q(win, "#job-progress-label"));
+        if (t && t !== lastLabel) { labelSamples.push(t); lastLabel = t; }
+      }
       while (Date.now() < progressDeadline) {
         const wrap = q(win, "#job-progress-wrap");
         const bar = q(win, "#job-progress-bar");
-        if (visible(wrap) && bar && bar.tagName === "PROGRESS" && bar.hasAttribute("value")) { sawProgress = true; break; }
+        if (visible(wrap) && bar && bar.tagName === "PROGRESS" && bar.hasAttribute("value")) sawProgress = true;
+        sampleLabel();
         await wait(150);
       }
       check("job panel shows a determinate <progress> bar mid-flight", sawProgress);
-      checkTry("job progress label reads 'Updating i of N addons'", function () {
-        return /Updating \d+ of \d+ addons/.test(text(q(win, "#job-progress-label")));
-      });
       checkTry("Details disclosure is collapsed by default", function () {
         const details = q(win, "#job-details");
         return details && !details.open;
@@ -306,11 +319,30 @@
       const jobDeadline = Date.now() + 9000;
       let done = false;
       while (Date.now() < jobDeadline) {
+        sampleLabel();
         const resultsBox = q(win, "#job-results");
         if (resultsBox && !resultsBox.hidden && resultsBox.children.length > 0) { done = true; break; }
-        await wait(250);
+        await wait(200);
       }
       checkTry("job reaches a done-with-failure state within 9s", function () { return done; });
+
+      // Round 28: the new phase-aware Job Panel wording (SPEC.md section I),
+      // asserted against the samples collected across the whole run above.
+      checkTry("job panel label reads 'Checking addons (N of M)' while phase is queued/checking", function () {
+        return labelSamples.some(function (t) { return /^Checking addons \(\d+ of \d+\)$/.test(t); });
+      });
+      checkTry("job panel label reads 'Checking addons (N of M) - K update(s) found so far' once an earlier addon updated", function () {
+        return labelSamples.some(function (t) { return /^Checking addons \(\d+ of \d+\) - \d+ updates? found so far$/.test(t); });
+      });
+      checkTry("job panel label reads 'Updating <Name> (K of K)' while phase is downloading/installing (k always equals m, and k>=1 - never '(0 of 0)', which would say 'Updating' while the numbers say zero updates)", function () {
+        return labelSamples.some(function (t) {
+          const m = /^Updating (.+) \((\d+) of (\d+)\)$/.exec(t);
+          return !!m && m[2] === m[3] && parseInt(m[2], 10) >= 1;
+        });
+      });
+      checkTry("job panel label never renders the old 'Updating i of N addons' wording (the tray-tooltip incident's SPA-side copy of the same bug)", function () {
+        return !labelSamples.some(function (t) { return /^Updating \d+ of \d+ addons/.test(t); });
+      });
       checkTry("results list has one failed row with an inline Retry (Mock.runProgressJob forces exactly one target to fail)", function () {
         const rowsR = qa(win, "#job-results .job-result-row");
         if (rowsR.length === 0) return false;
@@ -499,6 +531,30 @@
     checkTry("Advanced contains both flavour-era toggles (show-test-realms, alpha)", function () {
       return !!q(win, "#toggle-show-test-realms") && !!q(win, "#toggle-alpha");
     });
+
+    // Round 28 (SPEC.md section I): the Settings background-updates status
+    // line now reads the SAME core sentence the tray tooltip/menu use
+    // (Views.settings.backgroundStatusText's new computeCoreText branch),
+    // sourced from tray-state.json's new `status` field rather than the
+    // old lastResult-only text table. Off by default in a fresh mock
+    // profile; turning it on drives Mock's fabricated "done_clean" cycle
+    // (ui\app.js's /api/tray/start handler) through that exact code path.
+    checkTry("Background updates status line reads 'Background updates off' before enabling", function () {
+      return text(q(win, "#updates-background-status")) === "Background updates off";
+    });
+    const bgToggle = q(win, "#toggle-background-updates");
+    if (bgToggle) {
+      await clickAndSettle(win, bgToggle, 900);
+      checkTry("Settings status line uses the tray's status-driven core sentence ('Everything's up to date - checked HH:MM - next ...') after enabling background updates, matching the tooltip's own done_clean wording verbatim - never a second, independently-worded text table", function () {
+        const t = text(q(win, "#updates-background-status"));
+        return /^Everything's up to date - checked \d{2}:\d{2} - next (tomorrow )?\d{2}:\d{2}$/.test(t);
+      });
+      // Leave it off again so later phases (and a re-run of this same
+      // phase) start from the same fresh-profile baseline.
+      await clickAndSettle(win, bgToggle, 400);
+    } else {
+      check("Settings status line uses the tray's status-driven core sentence after enabling background updates", false, "#toggle-background-updates not found");
+    }
 
     checkTry("theme grid has 14 radios in THEMES-SPEC.md order, vaporwave checked on a fresh profile", function () {
       const expectedOrder = ["vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",

@@ -659,6 +659,24 @@ const Mock = (function () {
     return "done";
   }
 
+  // Round 28: mirrors addon-sync.ps1's Update-ProgressTallies exactly (same
+  // two event shapes, same bucket rules) so the mock's job.progress carries
+  // the same running tallies a real CLI run would - pure, no closure state,
+  // so it is trivially callable from a future test the same way the CLI's
+  // Pester tests call the PowerShell original.
+  function updateProgressTallies(tallies, opts) {
+    const t = { checked: tallies.checked, updated: tallies.updated, failed: tallies.failed, upToDate: tallies.upToDate, updatesFound: tallies.updatesFound };
+    if (opts && opts.foundUpdate) t.updatesFound++;
+    if (opts && opts.finishedStatus) {
+      t.checked++;
+      if (opts.finishedStatus === "Up-to-date") t.upToDate++;
+      else if (opts.finishedStatus === "Failed") t.failed++;
+      else if (opts.finishedStatus === "Installed" || opts.finishedStatus === "Updated") t.updated++;
+      // Ignored/Skipped/anything else: checked only, same as the CLI.
+    }
+    return t;
+  }
+
   function buildProgressPlan(kind, params) {
     let targets = [];
     let forcedFailMockKey = null;
@@ -728,7 +746,10 @@ const Mock = (function () {
     const plan = buildProgressPlan(kind, params);
     const targets = plan.targets;
     const total = targets.length;
-    job.progress = { total: total, index: 0, addon: null, phase: "queued" };
+    // Round 28: running tallies, mirroring addon-sync.ps1's
+    // $script:ProgressTallies - always present on every job.progress write.
+    let tallies = { checked: 0, updated: 0, failed: 0, upToDate: 0, updatesFound: 0 };
+    job.progress = { total: total, index: 0, addon: null, phase: "queued", checked: tallies.checked, updated: tallies.updated, failed: tallies.failed, upToDate: tallies.upToDate, updatesFound: tallies.updatesFound };
 
     if (total === 0) {
       setTimeout(function () { finishJob(job, kind, params, null); }, 300);
@@ -759,7 +780,8 @@ const Mock = (function () {
           // loop does right after Sync-SingleAddon returns.
           t++;
           const finalPhase = mapFinalPhase(target.status);
-          const finalWrite = { total: total, index: t, addon: target.label, phase: finalPhase };
+          tallies = updateProgressTallies(tallies, { finishedStatus: target.status });
+          const finalWrite = { total: total, index: t, addon: target.label, phase: finalPhase, checked: tallies.checked, updated: tallies.updated, failed: tallies.failed, upToDate: tallies.upToDate, updatesFound: tallies.updatesFound };
           // CS2: a forced-fail target also carries failPhase (UX-SPEC.md
           // section 4.1's CS1 addendum) - "downloading" exercises the
           // JobPanel's "Couldn't download the update" plain-language mapping
@@ -772,7 +794,21 @@ const Mock = (function () {
           return;
         }
         const phase = phaseSeq[p];
-        const write = { total: total, index: t, addon: target.label, phase: phase };
+        // Round 28 (fixed post-review): updatesFound fires once per target,
+        // the moment its "downloading" tick is reached - matching the real
+        // CLI's Update-ProgressTallies -FoundUpdate, which fires the instant
+        // a newer file is SELECTED for install, before the download/install
+        // is attempted. "an update was found" and "the install then
+        // succeeded" are two separate events - so this must fire for any
+        // target that actually attempts an install, including one the mock
+        // has forced to fail its download/install (target.status will end
+        // up "Failed"), not just eventual Installed/Updated. Only a target
+        // that never attempts an install at all (Up-to-date/Ignored/Skipped)
+        // is excluded.
+        if (phase === "downloading" && target.status !== "Up-to-date" && target.status !== "Ignored" && target.status !== "Skipped") {
+          tallies = updateProgressTallies(tallies, { foundUpdate: true });
+        }
+        const write = { total: total, index: t, addon: target.label, phase: phase, checked: tallies.checked, updated: tallies.updated, failed: tallies.failed, upToDate: tallies.upToDate, updatesFound: tallies.updatesFound };
         // Review fix (UX-SPEC.md 4.3/4.4): fake a partial byte count on the
         // "downloading" tick so ?mock=1 can exercise the client's new
         // "(NN%)" rendering - CS6's real writes are many throttled
@@ -1050,9 +1086,20 @@ const Mock = (function () {
         const now = new Date();
         const next = new Date(now.getTime() + mockSettings.backgroundIntervalMinutes * 60000);
         mockTray.running = true;
+        // Round 28: the fabricated cycle now carries the full status model
+        // (SPEC.md section A/H) - status/phase/currentAddon plus the five
+        // tallies - not just the pre-round-28 running/lastResult/message
+        // shape, so ?mock=1's Settings status line exercises the SAME
+        // status-driven ComputeCore-mirroring path (Views.settings.
+        // backgroundStatusText's computeCoreText) a real tray-state.json
+        // would drive, rather than only ever hitting the old lastResult
+        // fallback branch.
         mockTray.state = {
-          running: true, pid: 99999, lastRunAt: now.toISOString(), lastResult: "up_to_date",
-          updatedNames: [], failedNames: [], message: "Furphy - up to date", nextRunAt: next.toISOString()
+          running: true, pid: 99999, status: "done_clean", phase: null, currentAddon: null,
+          total: 34, checked: 34, updated: 0, failed: 0, upToDate: 34, updatesFound: 0,
+          lastRunAt: now.toISOString(), lastResult: "up_to_date",
+          updatedNames: [], failedNames: [],
+          message: "Furphy - Everything's up to date - checked - next", nextRunAt: next.toISOString()
         };
         return { __status: 202, ok: true };
       }
@@ -3843,7 +3890,37 @@ Components.JobPanel = (function () {
       } else {
         bar.classList.remove("is-indeterminate");
         bar.max = p.total; bar.value = p.index;
-        label.textContent = "Updating " + p.index + " of " + p.total + " addons…";
+        // Round 28 (SPEC.md section I): phase-aware, using the new tallies -
+        // this SPA-side copy of the exact same "Updating i of N addons"
+        // bug (today's line unconditionally said that for ANY non-check
+        // kind, the instant index caught up to total before the job itself
+        // flipped to done - the tray tooltip's own incident) is fixed the
+        // same way host\FurphyHost.cs's ComputeCore fixes it: branch on the
+        // phase actually in progress, never assume "index of total" means
+        // "updating".
+        if (p.phase === "queued" || p.phase === "checking") {
+          let posn = p.index + 1;
+          if (posn > p.total) posn = p.total;
+          if (posn < 1) posn = 1;
+          let t = "Checking addons (" + posn + " of " + p.total + ")";
+          if (p.updatesFound > 0) {
+            t += " - " + p.updatesFound + " update" + (p.updatesFound === 1 ? "" : "s") + " found so far";
+          }
+          label.textContent = t;
+        } else if (p.phase === "downloading" || p.phase === "installing") {
+          // k == m always (same running-count identity as the tray
+          // tooltip's "Updating {Name} (k of m updates)" - see SPEC.md
+          // section G's note on why this is correct, not a bug, for a
+          // strictly-sequential single-pass sync loop).
+          label.textContent = "Updating " + (p.addon || "addon") + " (" + p.updatesFound + " of " + p.updatesFound + ")";
+        } else {
+          // A terminal per-addon phase (up_to_date/done/failed) for an
+          // addon that isn't the last one, or the brief post-loop gap
+          // before the job itself finishes - never "N of N" text here,
+          // just the plain phase word already used elsewhere (Utils.
+          // phaseWord / the "current item" line just below).
+          label.textContent = phaseWord(p.phase);
+        }
       }
       // Review fix (UX-SPEC.md 4.3): "Downloading (+ % from bytesDone/
       // bytesTotal when present)" - CS6 (addon-sync.ps1) now populates real
@@ -5803,13 +5880,98 @@ Views.settings = (function () {
     return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   }
 
-  // One plain-words line, fed by /api/tray/status (Store.state.trayStatus) -
-  // the five shapes are exactly what the task brief specifies; anything else
-  // tray-state.json's lastResult could report (skipped_busy, error, or no
-  // cycle run yet) gets a same-style fallback rather than blank text.
+  // Round 28 (SPEC.md section A/I): first 4 names joined with ", ", then
+  // " +K more" if more remain - the exact JS mirror of host\FurphyHost.cs's
+  // JoinNamesTruncated, so the SPA's Settings status line never shows a
+  // longer/differently-capped name list than the tray tooltip does for the
+  // same cycle.
+  function joinNamesTruncated(names, cap) {
+    if (!names || !names.length) return "";
+    const shown = names.length < cap ? names.length : cap;
+    let s = names.slice(0, shown).join(", ");
+    const remaining = names.length - shown;
+    if (remaining > 0) s += " +" + remaining + " more";
+    return s;
+  }
+
+  // Round 28: JS mirror of FurphyHost.cs's FormatNextCheck - "HH:mm" local
+  // time if nextRunAt's local calendar date matches today, else
+  // "tomorrow HH:mm" (the background interval is clamped 30..1440 minutes
+  // server-side, so the next run is always within 24h - never a third case).
+  function formatNextCheck(nextRunAtIso) {
+    if (!nextRunAtIso) return "soon";
+    const d = new Date(nextRunAtIso);
+    if (isNaN(d.getTime())) return "soon";
+    const hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    const now = new Date();
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return hhmm;
+    return "tomorrow " + hhmm;
+  }
+
+  // Round 28 (SPEC.md section A): the SAME "core" sentence per status that
+  // host\FurphyHost.cs's ComputeCore builds for the tray tooltip/menu -
+  // reimplemented here (not shared code - the tray is C#, the SPA is JS) so
+  // the Settings status line is a structural mirror of that one function
+  // rather than its own, independently-drifting string table. Every branch
+  // here must read exactly like ComputeCore's own switch (see that
+  // function's comment for the SPEC.md table it realizes) - a future editor
+  // changing one wording without the other breaks the "tooltip/menu/SPA
+  // must agree" contract this round exists to guarantee.
+  function computeCoreText(state) {
+    const status = state.status;
+    const total = state.total || 0;
+    const checkedCount = state.checked || 0;
+    const updated = state.updated || 0;
+    const failed = state.failed || 0;
+    const updatesFound = state.updatesFound || 0;
+    const doneStamp = formatLocalTime(state.lastRunAt);
+    const updatedNames = state.updatedNames || [];
+    switch (status) {
+      case "idle":
+        return "Background updates on - next check " + formatNextCheck(state.nextRunAt);
+      case "checking":
+        if (total <= 0) return "Starting the updater...";
+        var p = checkedCount + 1;
+        if (p > total) p = total;
+        if (p < 1) p = 1;
+        return "Checking addons (" + p + " of " + total + ")...";
+      case "updating":
+        return "Updating " + (state.currentAddon || "addon") + " (" +
+          updatesFound + " of " + updatesFound + " updates)...";
+      case "finishing":
+        return "Finishing...";
+      case "done_clean":
+        return "Everything's up to date - checked " + doneStamp + " - next " + formatNextCheck(state.nextRunAt);
+      case "done_updated":
+        return "Updated " + updated + " at " + doneStamp + ": " + joinNamesTruncated(updatedNames, 4);
+      case "done_failed":
+        return failed + " addon" + (failed === 1 ? "" : "s") + " couldn't update at " + doneStamp + " - open Furphy for details";
+      case "waiting_game":
+        return "Waiting for WoW to close - next check after";
+      case "waiting_busy":
+        return "Waiting for the current task - retrying in 5 min";
+      case "unreachable":
+        return "Couldn't reach the updater - retrying in 5 min";
+      default:
+        return "Working...";
+    }
+  }
+
+  // One plain-words line, fed by /api/tray/status (Store.state.trayStatus).
+  // Round 28: when tray-state.json carries the new `status` field, this
+  // returns the SAME core sentence text as the tray tooltip/menu
+  // (computeCoreText above) verbatim, untruncated - the structural guarantee
+  // that "the SPA must agree with the tooltip" (SPEC.md section A). `status`
+  // absent (an old tray-state.json from before this round, or no cycle ever
+  // run) falls back to the pre-round-28 lastResult-only handling below,
+  // unchanged - the five shapes there are exactly what the original task
+  // brief specified; anything else lastResult could report (skipped_busy,
+  // error, or no cycle run yet) gets a same-style fallback rather than
+  // blank text.
   function backgroundStatusText(s, trayStatus) {
     if (!s || !s.backgroundUpdates) return "Background updates off";
     const state = trayStatus && trayStatus.state;
+    if (state && state.status) return computeCoreText(state);
     if (!state || !state.lastResult) return "Running - waiting for the first check";
     const time = formatLocalTime(state.lastRunAt);
     switch (state.lastResult) {

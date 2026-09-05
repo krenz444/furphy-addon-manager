@@ -694,3 +694,189 @@ Eric's rule, verbatim: "do a full performance tuning / pass, absolutely nothing 
 - `tests\static\Test-GitignoreCoverage.ps1` used to hardcode the repo mirror's path as a second, independent literal, duplicating `deploy.ps1`'s own `-RepoPath` default - two copies of the same path that could silently drift apart. It now reads the path straight out of `deploy.ps1`'s own default (a plain regex over that file's param block), falling back to the historical literal only if that read fails. Eric separately added `cache/` to the mirror's `.gitignore` by hand, closing the one remaining item in `tests\run-all.ps1`'s `$Script:KnownNonBlockingChecks` allowlist (now empty) from Round 22/23.
 
 ACCEPTANCE: `tests\run-all.ps1 -Quick` and a full run both green after this section (see `CHANGELOG.md`'s Round 25 entry for the exact counts/timings, including the new `perf` layer's own numbers). New unit coverage (P1): `Test-GameRunning`'s cache (a real, unmocked `-WowFakeProcessName` substitution - this process's own name for the true case, a name that cannot exist for the false case - proves both the fresh-probe and stale-cache-still-returns-old-answer behaviors), `gameRunning` present on `GET /api/ping`, `Get-StateUpdatesCheckedAtMinutesAgo` (missing/corrupt/empty file, current per-flavour shape, the pre-flavour flat-string shape and its retail-only scope, a flavour with no entry), and `Test-LauncherBudgetExceeded` (under/at/over the budget with synthetic timestamps, no real wait). New integration coverage (P1, real spawned CLI processes): `-Launcher` actually skips (empty results, "recently checked" logged, fast) when `state.json` says checked 2 minutes ago even with a real otherwise-checkable addon record on file, and does NOT skip (reaches the real per-addon path, one result row, no "recently checked" logged) when that timestamp is 30 minutes old. New `perf` layer (P3, real processes, full-run-only): the steady-state/resume/launch-budget Describes above. Measured live against a real `addon-server.ps1`/`FurphyHost.exe`/`--tray` (P1/P2/P3, real fake-`Wow.exe` process): a fresh server started with WoW already running correctly logs the catalogue-refresh skip and answers `gameRunning:true` on both endpoints; the host enters/exits background mode on minimize/restore (`PriorityClass` confirmed `BelowNormal`, `host.log`'s own "background mode entered"/"exited" lines confirmed); the tray's own first-skip transition writes `tray-state.json`/logs once, then a clean steady-state window shows effectively zero CPU/IO/network/log growth; stopping WoW and restoring the window produces a fresh server request within seconds, well inside the 60-second budget. `tests\perf\bench\` (P0's hand-run driver scripts and their JSON/MD output) is unchanged and still there for ad-hoc before/after comparisons - `Perf.Tests.ps1` is a separate, automated regression layer, not a replacement for those drivers.
+
+## Tray experience (round 28)
+
+**The incident this round fixes (Eric's machine, 2026-09-05 13:51-13:52):** background updates + Start with Windows were on; he clicked "Check for updates now"; the cycle ran 34 addons for 31s, updated 2 (MDT, Raider.IO), and finished correctly ("Furphy - Updated 2 at 13:52: MDT, Raider.IO"). But WHILE it ran the tooltip read "Updating 34 of 34" for a plain CHECK of 34 addons (`TrayForm.BuildProgressTooltip` renders "Updating {index} of {total}..." for ANY phase the instant `total > 0`, with no regard to which phase - so the tail end of a clean check, where `index` catches up to `total` before the job itself has flipped to `done`, reads as "Updating 34 of 34" even though nothing is downloading), and he clicked the icon three times in two seconds afterward (`host.log` shows three "activated existing window" lines - `WindowActivation.ActivateWindowByTitle`'s plain `SetForegroundWindow` call is not guaranteed to succeed from a background process, and today's code never checks whether it actually did).
+
+**The bar:** at every moment the tray must say, in plain words, exactly what is happening and what happened, with numbers that mean what they say; a glance (icon), a hover (tooltip), a right-click (menu), and (when the app is open) the Settings status line must all agree; a click must bring the app forward first time, every time; failures must be plain and say what happens next.
+
+**Scope of this section:** the design contract below is what the builders implement against - `addon-sync.ps1` (progress tallies), `addon-server.ps1` (unchanged - `progress` is already a raw passthrough of `progress.json`, so the new tally fields reach `job.progress` for free), `host\FurphyHost.cs` (`TrayForm`'s tooltip/icon/menu/balloon/click/state-file/selftest), and `ui\app.js` (`Views.settings.backgroundStatusText`, `Components.JobPanel`, `Mock`).
+
+### A. The status model
+
+`TrayForm` gains one coarse field and a few fine-grained companions, all persisted to `tray-state.json` and all driving the tooltip/icon/menu/SPA text from ONE source of truth (never four independent string-building call sites drifting apart):
+
+- **`status`** (string enum, NEW) - exactly one of: `idle`, `checking`, `updating`, `finishing`, `done_clean`, `done_updated`, `done_failed`, `waiting_game`, `waiting_busy`, `unreachable`. This is the field the tooltip, the menu's status line, the icon variant, and the SPA's Settings status line are ALL derived from - never re-derived independently in four places from four different heuristics.
+- **`phase`** (string|null, NEW) - a passthrough of the CURRENT flavour job's own `progress.phase` (`queued`/`checking`/`downloading`/`installing`/`up_to_date`/`done`/`failed`) while `status` is `checking` or `updating`; `null` at every other status (finishing/done_*/waiting_*/unreachable/idle never carry a CLI phase). Purely informational - `status` alone is what tooltip/icon/menu logic branches on; `phase` exists so a consumer that wants finer detail (e.g. "downloading" vs "installing") doesn't have to re-fetch the job.
+- **`currentAddon`** (string|null, NEW) - passthrough of `progress.addon` while checking/updating; `null` otherwise.
+- **`total` / `checked` / `updated` / `failed` / `upToDate` / `updatesFound`** (numbers, NEW) - the running tallies (section H below), passthrough of the same-named `progress.json` fields for the flavour job currently being watched; all `0` before the first cycle's first progress read ever lands.
+- Every EXISTING field is kept, unchanged in shape, for back-compat with the E25 server contract (`GET /api/tray/status`'s documented `lastResult` enum, `addon-server.ps1`'s `Get-TrayStatusView`): `running`, `pid`, `lastRunAt`, `lastResult` (`up_to_date|updated|failed|skipped_wow_running|skipped_busy|error`), `updatedNames[]`, `failedNames[]`, `message` (the exact current tooltip text), `nextRunAt`.
+
+**One core sentence per status, reused verbatim across every surface.** To make "tooltip/menu/SPA must agree" a structural guarantee instead of a hope, each status has exactly one "core" sentence (no "Furphy - " prefix): the tooltip is `"Furphy - " + core` (then run through the existing `TruncateTooltip` 118-char cap, unchanged); the menu's new disabled status line and the SPA's Settings status line are both the SAME `core` text, verbatim, untruncated (a context menu and a Settings page are not 118-char-constrained the way a tray tooltip is). One function builds `core` from `(status, phase, currentAddon, tallies, lastRunAt, nextRunAt, updatedNames, failedNames)`; the tooltip, menu, and `tray-state.json.message` all call it once per state change and never hand-format their own copy of the sentence.
+
+### B. Per-status table
+
+`{when}` = `FormatNextCheck(nextRunAtUtc)`: local time; `"HH:mm"` if the local calendar date matches today, else `"tomorrow HH:mm"` (the interval is clamped 30..1440 minutes, so the next run is always within 24h - never a third case). `{names}` = `JoinNamesTruncated(names, 4)`: first 4 names joined with ", ", then `" +K more"` if more than 4 remain (a NEW helper - today's `JoinNames` has no cap at all). `{HH:MM}` = local 24h clock, matches the existing `nowStamp` pattern already used in `CompleteMultiFlavourCycle`.
+
+| Status | Core text (tooltip = "Furphy - " + core; menu/SPA = core verbatim) | Icon | Balloon | Notes |
+|---|---|---|---|---|
+| **idle** (never ran) | `Background updates on - next check {when}` | Normal | none | Shown from the moment `TrayForm` starts through the end of the first ~90s pre-cycle wait (`WorkerLoop`'s `WaitForNextCycle(90)`) - i.e. whenever `lastResult` has never been set. `{when}` = the in-memory scheduled first-cycle time. |
+| **checking** (starting the server) | `Starting the updater...` | Busy | none | Sub-case of `checking`: `RunCycle`'s ping to `/api/ping` failed, `TryStartServer()` was just called, and the up-to-20s ping-retry loop is still running. `phase` = `null` (no job exists yet), `currentAddon` = `null`, `total` = `0`. Replaces today's generic `SetTooltip("Furphy - Checking...")` call for this specific window only. |
+| **checking** (per-addon) | `Checking addons ({p} of {N})...` | Busy | none | `N` = `progress.total`, `p` = `progress.index + 1` (clamped to `N`) - "index" is addons already finished, so the CURRENT one being checked is one past that. Covers CLI phases `queued` and `checking` identically (no user-visible difference between "about to check #1" and "checking #1"). Only rendered when exactly one flavour job exists (today's only real case) - a genuine multi-flavour cycle keeps the simpler `Checking...` (no counts) it already shows today, unchanged; combining N independent jobs' progress into one n-of-N line is out of scope this round. |
+| **updating** | `Updating {Name} ({k} of {m} updates)...` | Busy | none | Fires only when `progress.phase` is literally `downloading` or `installing` - never for `checking`/`queued`/a terminal per-addon phase. `Name` = `progress.addon`. `k` = `m` = the CURRENT `updatesFound` tally (both numbers are the same value, always - see section H's note on why this is correct, not a bug, in today's strictly-sequential single-pass loop). This is the exact fix for "never the word Updating unless a download/install is actually happening." |
+| **finishing** | `Finishing...` | Busy | none | Fires the instant `progress.index >= progress.total > 0` but the flavour job's own `state` has NOT yet flipped to `done`/`failed` on the server (CLI still flushing its final `-Json` stdout / exiting; `Update-JobStatus` hasn't observed `Process.HasExited` yet). **This is the direct fix for the incident**: today's `BuildProgressTooltip` has no such check and falls through to `"Updating 34 of 34..."` for this exact window; this status intercepts it first. Single-flavour only (see checking's multi-flavour note) - a multi-flavour cycle has no observable gap here today (`CompleteMultiFlavourCycle` runs synchronously the instant the poll loop's `anyPending` goes false), so it goes straight from `Checking...` to a `done_*` state, unchanged. |
+| **done_clean** (moment of completion) | `Everything's up to date - checked {HH:MM} - next {when}` | Normal | none | `updated.Count == 0 && failed.Count == 0`. |
+| **idle (after clean)** - resting, same status value `done_clean` | same as above, unchanged | Normal | none (already fired, was none) | The SAME persisted `status` as the row above - there is no separate value for "the moment of completion" vs "resting afterward" for a clean result, since no balloon ever fires either way. Listed as its own row only because the task asked for both labels; there is no observable difference. |
+| **done_updated** (moment of completion) | `Updated {N} at {HH:MM}: {names}` | Updated (dot) | **YES** - fires here, once | `N = updated.Count > 0`, `failed.Count == 0`. Replaces today's message wording 1:1 (was already `"Updated N at HH:MM: names"`, unchanged - `JoinNames` becomes `JoinNamesTruncated`, capping the name list). |
+| **idle (after updates)** - resting, same status value `done_updated` | same as above, unchanged | Updated (dot) | none (already fired) | Persists until: the user opens/activates the main window (`ActivateOrLaunch` succeeds), OR the next cycle completes `done_clean`. A second `done_updated` in a row does NOT clear the dot early. |
+| **done_failed** (moment of completion) | `{N} addon{s} couldn't update at {HH:MM} - open Furphy for details` | Failed (red dot) | **YES** - fires here, once | `failed.Count > 0` (failed beats updated - unchanged precedence). Wording change from today's `"N addons failed to update at HH:MM - open for details"` to the plainer `"couldn't update"` / `"open Furphy for details"`. Singular: `"1 addon couldn't update at HH:MM - open Furphy for details"`. |
+| **idle (after failed)** - resting, same status value `done_failed` | same as above, unchanged | Failed (red dot) | none (already fired) | Same clearing rule as done_updated: clears on window-open or the next `done_clean`. If the NEXT cycle is `done_updated` instead (some installed, none failed that time), the badge switches from red to the Updated dot - only a clean result clears it to Normal entirely. |
+| **waiting_game** | `Waiting for WoW to close - next check after` | Normal | none | `WowDetector.IsRunning(...)` is true. Text is the literal task-brief string (deliberately open-ended - there is no fixed clock time to give, since the next attempt is WoW-close-triggered, not schedule-triggered). Existing "first skip only" dedup (`CompleteCycleSkippedWow`, no tooltip/state-file/log rewrite on a REPEAT skip within the same WoW session) is unchanged - this is what makes a WoW session produce zero flicker. |
+| **waiting_busy** | `Waiting for the current task - retrying in 5 min` | Normal | none | `POST /api/jobs` returned 409. `nextRunAt` = +5 min (already the existing behavior - only the wording changes, from `"Waiting: another job is running"`). |
+| **unreachable** | `Couldn't reach the updater - retrying in 5 min` | Normal | none | Folds together THREE existing distinct error branches into one plain message: the `/api/ping` 20s timeout (was `"Could not reach the addon server"`, `nextRunAt` = +`IntervalMinutes`), `POST /api/jobs` network-error/non-202 (was `"Sync request failed"`, same old `nextRunAt`), and an empty `flavourJobs` response (was also `"Sync request failed"`). All three now use this ONE message AND `nextRunAt` = +5 min (not the full interval) - a real problem should be retried soon, not silently deferred until the next scheduled hour(s). |
+
+### C. Icon variants
+
+Four variants total (cheap - one 16px and one 32px GDI+-composited bitmap per non-Normal variant, drawn once per state CHANGE, not per tick):
+
+- **Normal** - `icon.ico` unmodified. Used for: idle, waiting_game, waiting_busy, unreachable (nothing actionable is in flight; a hover still explains the wait).
+- **Busy** - the normal icon plus a small badge dot in the app's accent color (THEMES-SPEC.md's existing accent token, not a new hex), drawn onto the icon at runtime; a static dot is enough ("keep it cheap" - an 800ms two-frame alternation is an acceptable enhancement, not required). Used for: checking, updating, finishing.
+- **Updated** - normal icon + a small dot in the app's success/info color. Used at rest after a `done_updated` cycle, until cleared (window-open or the next `done_clean`).
+- **Failed** - normal icon + a small dot in red/danger color. Used at rest after a `done_failed` cycle, same clearing rule.
+- Icon and tooltip change together, in the SAME `BeginInvoke` UI-thread marshal `SetTooltip` already uses - never a tick where one has updated and the other hasn't.
+
+### D. Context menu
+
+Order (top to bottom) - "Open Furphy Addon Manager" stays literally first per the task brief; the new status line is the next item down, i.e. "at the top" of everything below Open:
+
+1. **Open Furphy Addon Manager** (unchanged)
+2. **[disabled status line]** (NEW) - `ToolStripMenuItem`, `Enabled = false`, `Text` = the current status's `core` sentence (section A/B), refreshed in `Menu_Opening` (the existing handler that already refreshes `_startupMenuItem.Checked` on every open - extend it, don't add a second refresh path)
+3. **Check for updates now** (renamed from today's "Check now") - while `status` is `checking`/`updating`/`finishing`: `Enabled = false`, `Text = "Checking..."` (so a second click during a running cycle is structurally impossible, not just rate-limited); otherwise `Enabled = true`, `Text = "Check for updates now"`. Also refreshed in `Menu_Opening`.
+4. separator
+5. **Start with Windows** (unchanged)
+6. separator
+7. **Quit** (unchanged)
+
+### E. Balloon
+
+Exactly one balloon per cycle, only for `done_updated` or `done_failed`, fired from `CompleteCycle`/`CompleteMultiFlavourCycle` at the moment those states are entered (never re-fired on a later poll of the same resting state - `CompleteCycle` already only runs once per cycle, so no new dedup guard is needed beyond "only call `ShowBalloon` from inside the branches that produce `done_updated`/`done_failed`, never from the resting-state code path, which doesn't exist as a separate code path today anyway"). Duration 8s (unchanged - `ShowBalloonTip(8000)`). Title: the literal string `"Furphy"` - a NEW, shorter literal, deliberately NOT `AppConstants.WindowTitle` (`"Furphy Addon Manager"`), which must stay unchanged since `WindowActivation.ActivateWindowByTitle` matches windows by that exact string. Text: `JoinNamesTruncated(names, 4)` (same helper, same cap as the tooltip's name list) - `updatedNames` for `done_updated`, `failedNames` for `done_failed`. Icon: `ToolTipIcon.Info` for updated, `ToolTipIcon.Warning` for failed (unchanged).
+
+### F. Click-to-front algorithm
+
+Replaces `WindowActivation.ActivateWindowByTitle`'s body (P/Invoke additions: `GetWindowThreadProcessId`, `AttachThreadInput`, `AllowSetForegroundWindow`, `GetCurrentThreadId`, `FlashWindowEx` + `FLASHWINFO` struct, `BringWindowToTop`; all `user32.dll`):
+
+1. `FindWindow(null, AppConstants.WindowTitle)`. Not found -> return `false` (unchanged; caller's existing 5s-cooldown-guarded `StartMainProcess()` handles the launch case, unchanged).
+2. Found: if `IsIconic(hwnd)`, `ShowWindow(hwnd, SW_RESTORE)` (unchanged).
+3. `BringWindowToTop(hwnd)`.
+4. `uint targetThreadId = GetWindowThreadProcessId(hwnd, out uint targetPid)`; `uint currentThreadId = GetCurrentThreadId()`.
+5. If `targetThreadId != currentThreadId`: `AttachThreadInput(currentThreadId, targetThreadId, true)` (the tray's click handler runs on the tray's own UI thread, which received the mouse-click input and so plausibly already carries transient foreground rights - attaching input queues with the target window's thread is what lets that right actually transfer to `SetForegroundWindow` on the TARGET window rather than only working for the tray's own invisible form).
+6. `AllowSetForegroundWindow(targetPid)` (belt-and-suspenders - explicitly pre-authorizes the target process for a foreground change, regardless of whatever implicit rights step 5 did or didn't confer).
+7. `SetForegroundWindow(hwnd)`.
+8. If attached in step 5: `AttachThreadInput(currentThreadId, targetThreadId, false)` (always undo the attach, even if step 7 failed - in a `finally`).
+9. **Verify, don't trust the return value**: `bool ok = GetForegroundWindow() == hwnd`. `SetForegroundWindow`'s own bool return is not a reliable success signal (Windows can return `true` while still refusing under lock-timeout rules) - actually checking who is foreground afterward is what makes "first click, every time" provable rather than assumed.
+10. If `!ok`: fallback `FlashWindowEx` (`FLASHW_ALL | FLASHW_TIMERNOFG`, 3 flashes) - the window couldn't be forced forward, but the taskbar/border can still visibly demand attention rather than silently doing nothing.
+11. Log exactly one of: `"[tray] activated existing window - foreground ok"` or `"[tray] activated existing window - flashed"` (replaces today's single unconditional `"[tray] activated existing window"` line). `--tray-selftest`'s marker gains `clickOutcome` = `"foreground"` or `"flashed"` (was `"activate"`/`"launch"` only - keep those two top-level values for "did we activate or launch", and add this second, more specific field for which technique the activate branch actually used).
+12. Return `true` (unchanged - "a window was found" is still the contract regardless of whether the foreground-steal itself succeeded).
+
+Double-click debounce is UNCHANGED and correct as-is: `Icon_MouseClick` and `Icon_MouseDoubleClick` both call `ActivateOrLaunch(false)` (Windows fires both events for a double-click), but the existing `_lastLaunchAttemptUtc` 5-second cooldown inside the `lock (_launchLock)` block already prevents the second call from launching a SECOND process when no window exists yet (the second call finds `ActivateWindowByTitle` still `false` - the just-launched process's window doesn't exist yet - then hits the cooldown and returns `"launch"` without calling `StartMainProcess` again). Nothing here needs to change; do not "fix" this a second time.
+
+### G. Progress tally definitions (`addon-sync.ps1`)
+
+Five new running counters, script-scoped (`$script:ProgressChecked`, `$script:ProgressUpdated`, `$script:ProgressFailed`, `$script:ProgressUpToDate`, `$script:ProgressUpdatesFound`), reset to `0` once in the Main script body (after the dot-source guard, alongside the existing `$script:ProgressPath = $ProgressPath` assignment, ~line 4094) - BEFORE the first `Write-ProgressStep -Phase 'queued'` call (~line 4939). `Write-ProgressStep` itself (not its callers) reads these five script-scoped values and always includes them in `$obj` (unlike `bytesDone`/`bytesTotal`/`failPhase`, which stay conditional) - this means NO existing call site needs its own parameter list changed; only the two/three call sites below that actually increment a counter need a one-line addition right before their existing `Write-ProgressStep` call:
+
+- **`checked`** - incremented by 1 at every FINAL per-addon `Write-ProgressStep` call - i.e. exactly where `$progressIndex` is already bumped today: both the launcher-budget-exceeded `'skipped'` branch (~line 4982-4983) and the normal post-`Sync-SingleAddon` branch (~line 5049-5061). This is "addons finished so far, one way or another" - functionally a renamed mirror of `$progressIndex`, kept as its own named field per this round's contract rather than requiring `addon-server.ps1`/the tray/the SPA to know that `index` already means this.
+- **`updatesFound`** - incremented by 1 exactly once per addon, at the FIRST `Write-ProgressStep -Phase 'downloading'` call for that addon (`Sync-SingleAddon` ~line 3413-3414, and `Sync-SingleWagoAddon`'s own mirror ~line 3682-3683) - i.e. the instant `$needsInstall` is determined `true` and BEFORE the byte-level download itself starts. The repeated byte-progress `Write-ProgressStep -Phase 'downloading'` calls inside `Invoke-HttpDownloadWithProgress`/`Get-DownloadedZip` (throttled every 250ms/256KB) do NOT re-increment - they just re-serialize the counter's current (already-incremented) value along with the growing `bytesDone`, so no double-count guard is needed.
+- **`updated`** - incremented by 1 at the same final per-addon write as `checked`, only when `$rowResult.Status` is `'Installed'` or `'Updated'`.
+- **`failed`** - same site, only when `$rowResult.Status` is `'Failed'`.
+- **`upToDate`** - same site, only when `$rowResult.Status` is `'Up-to-date'`.
+- Every other status (`Ignored`/`Pinned`/`Skipped`/`Would-update`/launcher-`Skipped`) bumps `checked` only, no other bucket - it finished, but didn't fit "updated/failed/up to date" (an ignored or pinned addon isn't "up to date" in the sense the tooltip cares about, it just never needed checking against a target).
+
+**Why `k == m` always in the "updating" tooltip (section B):** `updatesFound` is a RUNNING count, incremented the instant a given addon's own download starts. Because `addon-sync.ps1` processes `$toSync` strictly one addon at a time (check, then download, then install, then move on - never two in flight), the moment addon P is downloading, every update found "so far" necessarily includes P itself as the most recent - so "this is update #k" and "k updates found so far" are the same number by construction. This stays true unless a future rewrite parallelizes downloads (not the case today) - worth a one-line comment at the increment site so a future editor doesn't "fix" the apparent redundancy.
+
+`addon-server.ps1` needs NO code change for any of this - `Update-JobStatus`'s existing `progress.json` read (`Add-Member -InputObject $Job -MemberType NoteProperty -Name 'progress' -Value $progressObj -Force`, ~line 3656-3667) is already a raw, unfiltered passthrough of whatever `ConvertFrom-Json` parses, so the five new fields reach `job.progress` automatically the moment `addon-sync.ps1` starts writing them. `Get-JobStatusView`'s `progress = $Job.progress` (~line 3802) needs no change either.
+
+### H. `tray-state.json` example (single-flavour, mid-cycle, updating)
+
+```json
+{
+  "running": true,
+  "pid": 12345,
+  "status": "updating",
+  "phase": "downloading",
+  "currentAddon": "MDT",
+  "total": 34,
+  "checked": 31,
+  "updated": 1,
+  "failed": 0,
+  "upToDate": 30,
+  "updatesFound": 2,
+  "lastRunAt": "2026-09-05T13:51:04Z",
+  "lastResult": null,
+  "updatedNames": [],
+  "failedNames": [],
+  "message": "Furphy - Updating MDT (2 of 2 updates)...",
+  "nextRunAt": null
+}
+```
+
+At rest after the incident's real cycle, this becomes:
+
+```json
+{
+  "running": true,
+  "pid": 12345,
+  "status": "done_updated",
+  "phase": null,
+  "currentAddon": null,
+  "total": 34,
+  "checked": 34,
+  "updated": 2,
+  "failed": 0,
+  "upToDate": 32,
+  "updatesFound": 2,
+  "lastRunAt": "2026-09-05T13:52:11Z",
+  "lastResult": "updated",
+  "updatedNames": ["MDT", "Raider.IO"],
+  "failedNames": [],
+  "message": "Furphy - Updated 2 at 13:52: MDT, Raider.IO",
+  "nextRunAt": "2026-09-06T13:52:11Z"
+}
+```
+
+### I. SPA - Settings status line and Job Panel
+
+**IMPLEMENTED (round 28, B3 build step).** `Views.settings.backgroundStatusText` gained a JS mirror of `ComputeCore` (`computeCoreText`, plus `joinNamesTruncated`/`formatNextCheck` mirrors of the C# helpers of the same name) and now branches on `trayStatus.state.status` first, falling back to the pre-round-28 `lastResult`-only table only when `status` is absent - exactly as specified below. `Components.JobPanel.update`'s running label is phase-aware per the bullets below, verbatim. `?mock=1`'s fabricated `/api/tray/start` cycle also carries the full status/tallies shape now (not just `running`/`lastResult`/`message`), so the Settings status line is exercisable under mock the same way a real tray-state.json drives it.
+
+**Settings status line** (`ui\app.js`'s `Views.settings.backgroundStatusText`, fed by `Store.state.trayStatus` from `GET /api/tray/status`): rewritten to switch on `trayStatus.state.status` (the new field) and return the SAME `core` sentence text as section A/B, verbatim (no re-derivation from `lastResult` the way today's function does) - this is what makes "the SPA must agree with the tooltip" a structural guarantee rather than two independently-maintained string tables. `status` absent (an old `tray-state.json` from before this round, or no cycle ever run) falls back to today's existing "Running - waiting for the first check" / "Background updates off" handling, unchanged.
+
+**Job Panel** (`Components.JobPanel`, a DIFFERENT surface - this drives off `job.progress` for WHATEVER job the SPA is currently watching, whether that's a job the SPA itself started or a tray-initiated `update-all-flavours` job the user happens to have the app open during): `update(job)`'s progress-label logic (today: `"Updating " + p.index + " of " + p.total + " addons..."` unconditionally for any non-`check` kind, the SPA's own copy of the exact same bug) becomes phase-aware, using the new tallies:
+- `p.phase` is `'queued'` or `'checking'`: `"Checking addons (" + (p.index + 1) + " of " + p.total + ")"` + (`p.updatesFound > 0` ? `" - " + p.updatesFound + " update" + (p.updatesFound === 1 ? "" : "s") + " found so far"` : `""`).
+- `p.phase` is `'downloading'` or `'installing'`: `"Updating " + p.addon + " (" + p.updatesFound + " of " + p.updatesFound + ")"` (same `k == m` identity as the tray tooltip, section G).
+- Any other phase (a terminal per-addon phase for an addon that isn't the last one, or the brief post-loop gap before the job itself finishes): keep today's bar-only rendering, no crash, no "Updating N of N" text - falls back to the plain phase word (`phaseWord`) already used elsewhere.
+- The done state (bar reaches 100%, panel collapses/shows results) is UNCHANGED - this round only touches the RUNNING label.
+
+**Mock's fake running job** (`ui\app.js`'s `runProgressJob`): already writes `{total, index, addon, phase[, bytesDone, bytesTotal, failPhase]}` on every tick (CS1) - extend the SAME object literal to also carry `updatesFound` (a running count, incremented the mock's own `nextPhase`/`nextTarget` closures track locally, exactly mirroring the CLI rule in section G: bump once when a target's planned phase sequence first reaches `"downloading"`) and `checked`/`updated`/`failed`/`upToDate` (bumped at the SAME final-write point the mock already has, `t++` / `finalWrite`, using `target.status` the same way the real CLI switches on `rowResult.Status`) - so `?mock=1` can exercise the new Job Panel wording with no real CLI process at all.
+
+### J. `--tray-selftest` marker + test assertions
+
+New marker fields (`WriteMarker`'s `Dictionary<string,object>`, alongside the existing `iconShown`/`tooltip`/`lastResult`/etc.):
+- **`tooltipHistory`** (string[]) - every DISTINCT tooltip text `SetTooltip`/`CompleteCycle` ever set during this run, in order (de-duplicated only when consecutive - i.e. the same text set twice in a row collapses to one entry, but the same text recurring later after a different one does not merge with the earlier occurrence). A real forced-update selftest cycle's `tooltipHistory` should read something like `["Furphy - Starting...", "Furphy - Checking addons (1 of 1)...", "Furphy - Updating <Name> (1 of 1 updates)...", "Furphy - Finishing...", "Furphy - Updated 1 at HH:MM: <Name>"]` and NEVER contain the string `"Updating"` anywhere in a run that had nothing to update.
+- **`iconStateHistory`** (string[]) - every DISTINCT icon variant name (`"normal"`/`"busy"`/`"updated"`/`"failed"`) set, same in-order/collapse-consecutive rule as `tooltipHistory`.
+- **`menuStatusText`** (string) - the disabled status line's text at the moment the marker is written (i.e. what `Menu_Opening` would currently produce).
+- **`balloonShown`** (bool) and **`balloonText`** (string|null) - whether `ShowBalloon` was called at all during this run, and its text if so.
+- **`clickOutcome`** (string) - unchanged top-level meaning (`"activate"`/`"launch"`), PLUS the new finer value from section F step 11 folded in as e.g. `"activate:foreground"` / `"activate:flashed"` / `"launch"` (a single string, colon-separated, so existing consumers checking for a leading `"activate"`/`"launch"` still work with a simple prefix check).
+
+**`tests\host\Host.Tests.ps1`** gains two new assertions (extending the existing "runs a real cycle" `It`, or as two new `It`s alongside it):
+- A plain check with nothing to update - `tooltipHistory` contains an entry matching `"Checking addons ("` and the LAST entry matches `"Everything's up to date"`; `tooltipHistory` never contains the substring `"Updating"` anywhere. **IMPLEMENTED (round 28) with one correction to this section's own wording**: "zero tracked addons" cannot actually produce `"Checking addons ("` - with truly zero `addons.json` records, `addon-sync.ps1`'s main loop writes its one `Write-ProgressStep('queued', Total=0)` and the per-addon loop body never runs, so the tray correctly shows `"Starting the updater..."` the whole time instead (`ComputeCore`'s own `total <= 0` branch) - never `"Checking addons ("`, which needs `total > 0`. The implemented test uses ONE real tracked addon instead (a plain `-Add` with no `-FileId` override, so it is genuinely up to date the moment the cycle re-checks it), matching this round's own B2 manual-verification notes, which independently found the same thing. Also needs a single-flavour root (`New-TrayTestLayout -OnlyFlavours @('_retail_')`, a new parameter added this round) - the per-addon wording never renders for a multi-flavour cycle (see this section's own multi-flavour carve-out); the pre-existing multi-flavour "runs a real cycle" `It` keeps its zero-tracked-addons shape unchanged and now additionally asserts `clickOutcome == "launch"` and the absence of the old `"Updating N of N"` text.
+- A forced-update cycle - `-Add <a real small addon's project id>` then `-FileId <an older file id>` via the CLI first (real network, tagged `Network`), unpin, THEN run `--tray-selftest`: `tooltipHistory` contains an entry matching `"Updating <Name> (1 of 1"` and the LAST entry matches `"Updated 1 at"`; `balloonShown` is `true` and `balloonText` contains `<Name>`. **IMPLEMENTED (round 28)** - project 2382 (BigWigs, retail-compatible, already used by `tests\perf\Setup-Baseline.ps1`), the older file id looked up live via a new `Get-OlderCurseForgeFileId` test helper (never hardcoded - this addon releases too often for a fixed id to stay valid).
+
+**SPA harness** (`tests\spa\harness.js` / whatever drives `?mock=1` assertions) gains a check that the Job Panel's running label reads `"Checking addons (N of M) - K updates found so far"` while the mock's phase is `checking` with `updatesFound > 0`, and `"Updating <Name> (K of K)"` while `downloading`/`installing`, sourced from the mock's now-tally-bearing `job.progress`. **IMPLEMENTED (round 28)** - the default phase's existing "Update all" mock job now samples the running label across the whole job (`labelSamples`) and asserts every shape above (plus the never-the-old-wording negative check); a second small block toggles background updates on in Settings and asserts the status line reads the tray's exact `done_clean` core sentence.
+
+**Pester unit coverage** (`tests\unit\`, if the tally bookkeeping ends up factored into a small pure function rather than inlined at each call site - preferred, for testability): a `Cli.ProgressTallies.Tests.ps1` Describe asserting the five counters' increment rules in isolation against synthetic `Sync-SingleAddon`-shaped result rows, without a real network call. **IMPLEMENTED (round 28, B1 build step)** as `tests\unit\Cli.ProgressMigrationZip.Tests.ps1`'s new `Update-ProgressTallies` Describe (see that file, not a separate `Cli.ProgressTallies.Tests.ps1`).
+
+### K. Mutex name (HARD RULE - not previously implemented)
+
+`TrayProgram.MutexName` is currently the single literal `"FurphyAddonManager.Tray"`, global to the Windows user session regardless of `--port`. This means a `--tray-selftest` run (even at `--port 47899`) and Eric's real live `--tray` (port 47831) fight over the SAME mutex today - whichever started first wins, the other silently no-ops via `WriteMutexBusyMarker`. Fix (required before any of the above can be tested safely alongside a real running tray, per this project's own hard rule of never touching the real tray or port 47831): `MutexName` becomes a function of the resolved port - `"FurphyAddonManager.Tray"` when `_port == 47831` (production, unchanged - a real user's tray must still single-instance against itself exactly as today), else `"FurphyAddonManager.Tray." + _port` (e.g. `"FurphyAddonManager.Tray.47899"` for every test run). `TrayProgram.Run` needs the resolved port BEFORE constructing the `Mutex` (today it constructs the mutex first, then `TrayForm`'s constructor resolves `_port` via `PortResolver.Resolve` - this ordering needs to flip, or `PortResolver.Resolve` needs to be called once in `TrayProgram.Run` itself and the result threaded into both the mutex name and `TrayForm`'s constructor instead of resolved twice).
+
+**HKCU Run value name**: `--tray-selftest` must never touch the real `"FurphyAddonManager"` Run value when a live tray/install already owns it. `StartupRegistry`'s `ValueName` constant becomes a per-instance value instead of a hardcoded const: production keeps `"FurphyAddonManager"` unchanged; `--tray-selftest` uses `"FurphyAddonManager.Test"` INSTEAD, and always removes that test-scoped value in its own cleanup (already-existing `finally` block in `RunSelftestSequence`) - never touching, reading, or racing the real value at all, not just "hoping it happens to already be absent." This is a slightly larger change than `Host.Tests.ps1`'s current approach (which registers/unregisters the REAL value name and asserts it round-trips) - the existing test's use of the real value name was a deliberate choice (see its own header comment: "mirrors what the exe itself does... always removes it in a finally block") and should stay as the ONE test that verifies the real production value name's exact contract string; every OTHER `--tray-selftest` invocation (the tooltip-history/icon-history/balloon assertions above) should use the test-scoped name so they can run concurrently with a real live tray without any risk of clobbering Eric's actual Start-with-Windows registration.

@@ -95,12 +95,27 @@
                             never reads the real WoW folder when given.
    -ProgressPath <path>    Optional. While a sync loop runs, atomically
                             writes a small JSON progress snapshot
-                            ({total,index,addon,phase[,bytesDone,
+                            ({total,index,addon,phase,checked,updated,
+                            failed,upToDate,updatesFound[,bytesDone,
                             bytesTotal,failPhase]}) to this path after every
                             phase change, for a caller (addon-server.ps1) to
                             poll mid-run. Absent -> every write is a no-op.
                             Purely additive telemetry; never changes what
                             gets synced or the final -Json stdout shape.
+                            checked/updated/failed/upToDate/updatesFound
+                            (round 28) are running tallies across the whole
+                            run, always present (unlike the optional
+                            bracketed fields): checked = addons finished so
+                            far (any terminal outcome); updated/failed/
+                            upToDate = of those, how many landed in each
+                            bucket; updatesFound = addons for which a newer
+                            file was selected so far, even before its
+                            download/install completes (so it can be ahead
+                            of updated mid-run). addon-server.ps1's job view
+                            (GET /api/jobs/<id>) passes this file through
+                            verbatim as the job's .progress field, so these
+                            tallies reach job.progress with no server-side
+                            change needed.
 
  WAGO ADDONS (E12): -Add, -Only, -Unpin, -Ignore, -Unignore, -Rollback,
    -Remove and -Files all also accept a Wago target in place of (or mixed
@@ -338,6 +353,85 @@ namespace Furphy {
     }
 }
 
+function New-ProgressTallies {
+    <#
+      Returns a fresh all-zero tallies hashtable - the shape
+      Update-ProgressTallies/Write-ProgressStep both expect. Called once per
+      run (script scope reset) so a stale count from a PREVIOUS -ProgressPath
+      run in the same process (there is none today - one process, one run -
+      but Pester loads this script once and calls into it many times) never
+      leaks into the next.
+    #>
+    return @{
+        checked      = 0
+        updated      = 0
+        failed       = 0
+        upToDate     = 0
+        updatesFound = 0
+    }
+}
+
+function Update-ProgressTallies {
+    <#
+      Pure (no globals, no I/O): given the current running tallies hashtable
+      and one terminal event, returns a NEW hashtable with the right counter
+      incremented - never mutates the input. This is what makes the tally
+      logic Pester-testable in isolation (a hashtable in, a hashtable out).
+
+      Two independent event shapes, both optional (a caller passes exactly
+      one per call):
+
+        -FoundUpdate: a newer file was just SELECTED for an addon and is
+         about to be downloaded (Sync-SingleAddon/Sync-SingleWagoAddon,
+         right before their first 'downloading' Write-ProgressStep call for
+         that addon) - increments updatesFound. This must fire exactly ONCE
+         per addon, from that one call site only - never from the
+         byte-level download-progress writes inside
+         Invoke-HttpDownloadWithProgress, which reuse the same 'downloading'
+         phase text many times per addon (every ~250ms/256KB) and would
+         wildly over-count updatesFound if it were derived from phase text
+         instead of this explicit, single-fire event.
+
+        -FinishedStatus <status>: an addon just reached a terminal outcome -
+         one of the same $rowResult.Status strings the main sync loop
+         already produces (Up-to-date / Installed / Updated / Failed /
+         Skipped). Always increments checked (an addon finished, one way or
+         another); Up-to-date also increments upToDate, Installed/Updated
+         also increments updated, Failed also increments failed. Skipped
+         (launcher-budget skip) and anything else increments checked only.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Tallies,
+        [switch]$FoundUpdate,
+        [string]$FinishedStatus = $null
+    )
+
+    $result = @{
+        checked      = [int]$Tallies['checked']
+        updated      = [int]$Tallies['updated']
+        failed       = [int]$Tallies['failed']
+        upToDate     = [int]$Tallies['upToDate']
+        updatesFound = [int]$Tallies['updatesFound']
+    }
+
+    if ($FoundUpdate) {
+        $result.updatesFound = $result.updatesFound + 1
+    }
+
+    if ($FinishedStatus) {
+        $result.checked = $result.checked + 1
+        switch ($FinishedStatus) {
+            'Up-to-date' { $result.upToDate = $result.upToDate + 1 }
+            'Failed'     { $result.failed = $result.failed + 1 }
+            'Installed'  { $result.updated = $result.updated + 1 }
+            'Updated'    { $result.updated = $result.updated + 1 }
+            default      { } # Skipped, Would-update (DryRun never wires -ProgressPath), etc: checked only.
+        }
+    }
+
+    return $result
+}
+
 function Write-ProgressStep {
     <#
       Mirrors Write-Log's "never abort the run" contract: serializes a small
@@ -357,6 +451,16 @@ function Write-ProgressStep {
       failure happened during (checking/downloading/installing), so a
       caller can map it to a plain-language reason without parsing
       exception text.
+
+      checked/updated/failed/upToDate/updatesFound (round 28) are the
+      running tallies from $script:ProgressTallies - ALWAYS included
+      (unlike the optional bytesDone/bytesTotal/failPhase fields above),
+      since a tray/UI consumer polling progress.json should never have to
+      special-case "tallies present vs absent". This function only reads
+      $script:ProgressTallies and serializes it; it never mutates it -
+      mutation happens exclusively via Update-ProgressTallies, called by
+      the main sync loop and Sync-SingleAddon/Sync-SingleWagoAddon at the
+      specific moments documented on that function.
     #>
     param(
         [int]$Total = 0,
@@ -373,11 +477,19 @@ function Write-ProgressStep {
     }
 
     try {
+        if (-not $script:ProgressTallies) {
+            $script:ProgressTallies = New-ProgressTallies
+        }
         $obj = [ordered]@{
-            total = $Total
-            index = $Index
-            addon = $Addon
-            phase = $Phase
+            total        = $Total
+            index        = $Index
+            addon        = $Addon
+            phase        = $Phase
+            checked      = [int]$script:ProgressTallies['checked']
+            updated      = [int]$script:ProgressTallies['updated']
+            failed       = [int]$script:ProgressTallies['failed']
+            upToDate     = [int]$script:ProgressTallies['upToDate']
+            updatesFound = [int]$script:ProgressTallies['updatesFound']
         }
         if ($null -ne $BytesDone) { $obj['bytesDone'] = $BytesDone }
         if ($null -ne $BytesTotal) { $obj['bytesTotal'] = $BytesTotal }
@@ -3411,6 +3523,12 @@ function Sync-SingleAddon {
         }
 
         $currentPhase = 'downloading'
+        # Round 28: exactly one updatesFound increment per addon, fired
+        # here (a newer file was just selected) and nowhere else - see
+        # Update-ProgressTallies's doc comment on why the repeated
+        # byte-level 'downloading' writes inside
+        # Invoke-HttpDownloadWithProgress must NOT also trigger this.
+        $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FoundUpdate
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'downloading'
         $zipPath = Get-DownloadedZip -ProjectId $projectId -SelectedFile $selected -StagingPath $StagingPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $displayLabel
 
@@ -3680,6 +3798,9 @@ function Sync-SingleWagoAddon {
         }
 
         $currentPhase = 'downloading'
+        # Round 28: same single-fire updatesFound increment as the
+        # CurseForge path above - see Update-ProgressTallies's doc comment.
+        $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FoundUpdate
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'downloading'
         $zipPath = Get-WagoDownloadedZip -Slug $slug -Release $selected -StagingPath $StagingPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $displayLabel
 
@@ -4092,6 +4213,10 @@ $script:LogFlavourPrefix = ''
 # every call site just calls it with phase data, never re-threading the
 # path itself through every function signature.
 $script:ProgressPath = $ProgressPath
+# Round 28: running tallies (checked/updated/failed/upToDate/updatesFound),
+# reset fresh for this run - see New-ProgressTallies/Update-ProgressTallies
+# and Write-ProgressStep's doc comment.
+$script:ProgressTallies = New-ProgressTallies
 
 # P1 perf pass (item 3): applied automatically whenever -Json or -Quiet is
 # set (every existing non-interactive caller already passes one of those -
@@ -4980,6 +5105,7 @@ try {
             Write-Log -Level 'WARN' -Message "Launcher budget ($($Script:LauncherBudgetSeconds)s) exceeded - skipping remaining addon check: $skipLabel"
             $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $record.name; Version = $record.version; ProjectId = $record.projectId; FileId = $record.fileId; WagoSlug = $record.slug })
             $progressIndex = $progressIndex + 1
+            $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FinishedStatus 'Skipped'
             Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $skipLabel -Phase 'skipped'
             continue
         }
@@ -5058,6 +5184,9 @@ try {
         if (Get-Member -InputObject $rowResult -Name 'FailPhase' -MemberType NoteProperty) {
             $rowFailPhase = $rowResult.FailPhase
         }
+        # Round 28: checked/updated/failed/upToDate tallies, from the same
+        # $rowResult.Status the mappedPhase switch above already used.
+        $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FinishedStatus $rowResult.Status
         Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $rowResult.Name -Phase $mappedPhase -FailPhase $rowFailPhase
     }
 

@@ -1,5 +1,77 @@
 # Furphy Addon Manager - changelog
 
+## Round 28 (tray experience)
+
+The incident this round fixes: a background cycle checking 34 addons (none
+of which needed updating until near the end) showed "Updating 34 of 34" in
+the tray tooltip for the entire tail of a plain CHECK - `BuildProgressTooltip`
+rendered "Updating {index} of {total}..." for ANY phase the instant `total
+> 0`, with no regard to which phase, so the moment a clean check's `index`
+caught up to `total` (before the job itself flipped to `done`) it read as
+an update in progress when nothing was downloading. The same user also
+clicked the tray icon three times in two seconds afterward because a plain
+`SetForegroundWindow` call from a background process is not guaranteed to
+succeed and nothing checked whether it actually had.
+
+**The fix, end to end**: one status model (`idle`/`checking`/`updating`/
+`finishing`/`done_clean`/`done_updated`/`done_failed`/`waiting_game`/
+`waiting_busy`/`unreachable`) now drives the tray tooltip, the context
+menu's new disabled status line, the icon variant, `tray-state.json`, and
+the SPA's Settings status line from ONE pure text builder per surface
+(`ComputeCore` in `host\FurphyHost.cs`, mirrored in JS as `computeCoreText`
+in `ui\app.js`) - never four independently hand-formatted copies of the
+same sentence. A dedicated `finishing` status intercepts the exact window
+the incident happened in, before the phase-based checking/updating branch
+ever gets a chance to misread a finished check as an update.
+
+- **`addon-sync.ps1`**: `progress.json` gains five running tallies -
+  `checked`/`updated`/`failed`/`upToDate`/`updatesFound` - written
+  unconditionally on every `Write-ProgressStep` call via a new pure
+  `Update-ProgressTallies` helper (never mutates its input; fully
+  Pester-testable in isolation). `addon-server.ps1` needed no code change -
+  its job view already passes `progress.json` through to `job.progress`
+  raw. `ui\app.js`'s Mock gained the same tallies via a JS mirror,
+  `updateProgressTallies`.
+- **`host\FurphyHost.cs`**: the full status model above, plus GDI+ badge
+  icon variants (busy/updated/failed dot, drawn once per state change and
+  cached), the `AttachThreadInput`/`AllowSetForegroundWindow`/verify/
+  `FlashWindowEx` click-to-front algorithm (verifies who is actually
+  foreground afterward rather than trusting `SetForegroundWindow`'s own
+  return value; falls back to a taskbar flash when the OS still refuses),
+  a disabled context-menu status line plus a "Checking..." disabled state
+  for "Check for updates now" while a cycle runs, and a once-per-cycle
+  balloon for `done_updated`/`done_failed` only. Two hard-rule fixes long
+  overdue: the single-instance Mutex name is now port-suffixed for any
+  port other than 47831 (`--tray-selftest` at 47899 can no longer fight
+  Eric's real live tray for the same mutex), and `--tray-selftest` always
+  registers/unregisters a test-scoped `"FurphyAddonManager.Test"` HKCU Run
+  value instead of the real `"FurphyAddonManager"` one a live install may
+  own.
+- **`ui\app.js`**: `Components.JobPanel`'s running label and
+  `Views.settings.backgroundStatusText` both became phase-aware/status-
+  driven using the same tallies and the same `computeCoreText` mirror of
+  `ComputeCore`, so the SPA agrees with the tray tooltip by construction
+  rather than by two independently-maintained string tables.
+- **Tests**: `--tray-selftest`'s marker gained `tooltipHistory`/
+  `iconStateHistory`/`menuStatusText`/`balloonShown`/`balloonText`/
+  `clickOutcome`. `tests\host\Host.Tests.ps1` gained a new
+  `New-TrayTestLayout -OnlyFlavours` parameter (a single-flavour root is
+  required for the per-addon "Checking addons (N of M)" wording to render
+  at all - a multi-flavour cycle keeps the simpler counts-free text, by
+  design) and two new `Network`-tagged Its against a real retail-only
+  root: a plain check with nothing to update, and a forced-update cycle
+  (`-Add <id> -FileId <a real older file, looked up live via a new
+  `Get-OlderCurseForgeFileId` helper> then `-Unpin`, then a real cycle)
+  proving the tooltip history, the balloon, and its name text end to end.
+  The pre-existing multi-flavour "runs a real cycle" It gained a
+  `clickOutcome == "launch"` assertion and a check that its tooltip
+  history never contains the old "Updating N of N" shape.
+  `tests\spa\harness.js` gained label-sampling assertions for the new
+  Job Panel wording and a Settings-status-line check. New unit coverage
+  for `Update-ProgressTallies` (`tests\unit\Cli.ProgressMigrationZip.Tests.ps1`)
+  and an integration Describe proving the CLI-to-server tally passthrough
+  against a real job (`tests\integration\Server.FreshnessAndFlavours.Tests.ps1`).
+
 ## Round 27 (review follow-up)
 
 Fixed a review finding against the Round 26/perf `-Launcher` wall-clock

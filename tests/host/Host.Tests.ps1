@@ -114,11 +114,33 @@ function New-TrayTestLayout {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$WowRoot,
-        [Parameter(Mandatory = $true)][int]$Port
+        [Parameter(Mandatory = $true)][int]$Port,
+        # Round 28: the tray's "Checking addons (N of M)"/"Updating <Name>
+        # (k of m)" per-addon tooltip wording (SPEC.md section B) only ever
+        # renders when exactly one flavour job exists for the cycle - a
+        # genuine multi-flavour cycle keeps the simpler counts-free
+        # "Checking..." text, by design (out of scope this round). Passing
+        # e.g. @('_retail_') strips every OTHER fixture flavour folder
+        # right after the copy, before Get-InstalledFlavours ever sees this
+        # root, so a test needing the per-addon wording gets a real
+        # single-flavour install instead of the default 3-flavour fixture.
+        # $null (the default) keeps every flavour, unchanged from before
+        # this parameter existed.
+        [string[]]$OnlyFlavours = $null
     )
 
     if (-not (Test-Path -LiteralPath (Join-Path $WowRoot '_retail_'))) {
         Copy-Fixture -Destination $WowRoot | Out-Null
+        if ($OnlyFlavours) {
+            foreach ($folder in @('_retail_', '_classic_', '_classic_era_', '_ptr_')) {
+                if ($OnlyFlavours -notcontains $folder) {
+                    $stripPath = Join-Path $WowRoot $folder
+                    if (Test-Path -LiteralPath $stripPath) {
+                        Remove-Item -LiteralPath $stripPath -Recurse -Force
+                    }
+                }
+            }
+        }
     }
 
     $addonSyncDir = Join-Path -Path $WowRoot -ChildPath '_retail_\AddonSync'
@@ -178,6 +200,30 @@ function Stop-Straggler-FurphyHost {
             try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
         }
     } catch { }
+}
+
+function Get-OlderCurseForgeFileId {
+    <#
+      Round 28: real network lookup (never hardcoded - BigWigs releases
+      often enough that a hand-typed file id would go stale within days)
+      of a file id for $ProjectId that is genuinely older than whatever
+      the CLI's own normal (unpinned) sync would pick as "latest" right
+      now - mirrors addon-sync.ps1's own Invoke-CfRequest file-list call
+      (same endpoint/query, newest-first) but stops at $BackIndex entries
+      back from the newest rather than index 0, so the forced-update test
+      below has a real gap for the subsequent unpinned check to close.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int64]$ProjectId,
+        [int]$BackIndex = 15
+    )
+
+    $uri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files?pageIndex=0&pageSize=50&sort=dateCreated&sortDescending=true"
+    $resp = Invoke-RestMethod -Uri $uri -Method Get -Headers @{ 'Referer' = 'https://www.curseforge.com/'; 'Accept' = 'application/json' } -TimeoutSec 30
+    $files = @($resp.data)
+    if ($files.Count -lt 2) { throw "Get-OlderCurseForgeFileId: project $ProjectId returned fewer than 2 files" }
+    $idx = [Math]::Min($BackIndex, $files.Count - 1)
+    return [int64]$files[$idx].id
 }
 
 Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
@@ -355,13 +401,28 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
         $markerPath = Join-Path $addonSyncDir ($needle + '.json')
         $hostProc = $null
         $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $valueName = 'FurphyAddonManager'
+        # Round 28 (SPEC.md section K, HARD RULE): --tray-selftest never
+        # touches the real "FurphyAddonManager" Run value any more (a live
+        # tray/install may own it) - it always registers/unregisters a
+        # test-scoped "FurphyAddonManager.Test" value instead, so this is
+        # the value name FurphyHost.exe itself actually writes now.
+        $valueName = 'FurphyAddonManager.Test'
         $preExisting = Get-ItemProperty -LiteralPath $keyPath -Name $valueName -ErrorAction SilentlyContinue
 
         try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $exePath
-            $psi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '"'
+            # --wow-fake with a name that cannot match a real process:
+            # this test's own WoW-running check must never depend on
+            # whether the machine running it happens to have a real WoW.exe
+            # open (round 28 investigation: a real WoW.exe running on the
+            # dev machine reproduces the exact "flavourJobs.Count is 0
+            # instead of 3" symptom a prior build step flagged as an
+            # unexplained pre-existing failure - RunCycle correctly takes
+            # the skipped_wow_running branch and never posts any jobs at
+            # all, which is not a product bug, just this test previously
+            # having no --wow-fake guard against real game state).
+            $psi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '" --wow-fake NoSuchFurphyHostTestProcess'
             $psi.UseShellExecute = $false
             $psi.WorkingDirectory = Split-Path -Path $exePath -Parent
             $hostProc = [System.Diagnostics.Process]::Start($psi)
@@ -390,6 +451,25 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
             $marker.runValueWritten | Should Be $expectedRunValue
             $marker.runValueRemoved | Should Be $true
 
+            # Round 28 (SPEC.md section F/J): --tray-selftest's own
+            # ActivateOrLaunch(true) call never actually starts a process
+            # (dryRun) - with no real "Furphy Addon Manager"-titled window
+            # anywhere on this machine, the only possible outcome is
+            # "launch" (an "activate:foreground"/"activate:flashed" value
+            # would mean this run somehow found and clicked a REAL live
+            # window, which must never happen from a test).
+            $marker.clickOutcome | Should Be 'launch'
+
+            # Round 28: a genuine 3-flavour cycle has no single-job n-of-N
+            # counts to show (SPEC.md section B's own multi-flavour carve-
+            # out) - the tooltip history for THIS shape stays the simple,
+            # counts-free "Starting the updater..." -> a done_* state, and
+            # must never show the old incident's "Updating 34 of 34"-style
+            # text for a plain check.
+            $tooltipHistory = @($marker.tooltipHistory)
+            $tooltipHistory.Count | Should BeGreaterThan 0
+            (@($tooltipHistory | Where-Object { $_ -match 'Updating \d+ of \d+' }).Count) | Should Be 0
+
             Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
 
             # Real registry check, independent of the marker's own claim.
@@ -408,6 +488,166 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
                 }
             } catch { }
             # Any orphaned self-started addon-server.ps1 for this cycle.
+            try {
+                Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -like ('*' + $addonSyncDir + '*addon-server.ps1*') } |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+            } catch { }
+        }
+    }
+}
+
+Describe 'Host --tray-selftest (tray) - single-flavour tooltip/icon/balloon history (Round 28)' -Tags 'Host', 'Network' {
+    # Round 28 (SPEC.md section B/J): the per-addon "Checking addons
+    # (N of M)"/"Updating <Name> (k of m)" tooltip wording only ever
+    # renders for a SINGLE-flavour cycle (a genuine multi-flavour cycle
+    # keeps the simpler counts-free text, by design - see the Describe
+    # above's own "runs a real cycle" It) - so both Its here build a
+    # retail-ONLY root (New-TrayTestLayout -OnlyFlavours '_retail_')
+    # rather than reusing the default 3-flavour fixture.
+    #
+    # DEVIATION FROM SPEC.md's OWN WORDING, found while implementing this:
+    # SPEC.md section J describes the "nothing to update" case as
+    # "today's existing scratch fixture, zero tracked addons" - but with
+    # truly zero addons.json records, addon-sync.ps1's main loop's own
+    # Write-ProgressStep('queued', Total=$toSync.Count) writes {total:0}
+    # ONCE and the per-addon loop body never runs at all (see addon-
+    # sync.ps1 ~line 5064) - so "Checking addons (" (which needs total>0)
+    # can NEVER appear for a zero-addon cycle; ComputeCore's own
+    # total<=0 branch ("Starting the updater...") is what actually shows
+    # instead, the whole time. Confirmed against B2's own manual
+    # verification notes (STATE TABLE), which used 2 REAL tracked addons
+    # for exactly this reason, not zero. Both Its below follow that same,
+    # actually-correct shape (one real tracked addon) rather than the
+    # zero-addon text in SPEC.md section J, which does not match the
+    # implemented behaviour.
+    $projectId = 2382 # BigWigs - retail-compatible, already used by
+                       # tests\perf\Setup-Baseline.ps1/Perf.Tests.ps1.
+
+    It 'a real single-flavour check with nothing to update: tooltipHistory shows "Checking addons (" then ends "Everything''s up to date", never "Updating"' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $wowRoot = New-TempRoot -Name 'host-tray-single-clean'
+        $addonSyncDir = New-TrayTestLayout -WowRoot $wowRoot -Port 47899 -OnlyFlavours @('_retail_')
+        $cliPath = Join-Path $addonSyncDir 'addon-sync.ps1'
+        $exePath = Join-Path $addonSyncDir 'host\bin\FurphyHost.exe'
+        $needle = 'trayclean-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path $addonSyncDir ($needle + '.json')
+        $hostProc = $null
+
+        try {
+            # Real network install (latest compatible file) - this addon
+            # is then genuinely up to date the moment the cycle checks it
+            # again a few seconds later.
+            $addResult = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 90 -ArgumentList @(
+                '-Add', $projectId, '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot)
+            $addResult.ExitCode | Should Be 0
+            $addedRow = @($addResult.Json.results) | Where-Object { [string]$_.projectId -eq [string]$projectId }
+            @($addedRow).Count | Should Be 1
+            $addedRow[0].status | Should Be 'Installed'
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exePath
+            $psi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '" --wow-fake NoSuchFurphyHostTestProcess'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exePath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 60
+            $marker | Should Not Be $null
+            [int]$marker.exitCode | Should Be 0
+
+            $flavourJobs = @($marker.flavourJobs)
+            $flavourJobs.Count | Should Be 1
+            $flavourJobs[0].flavour | Should Be 'retail'
+
+            $tooltipHistory = @($marker.tooltipHistory)
+            (@($tooltipHistory | Where-Object { $_ -match 'Checking addons \(' }).Count) | Should BeGreaterThan 0
+            $tooltipHistory[$tooltipHistory.Count - 1] | Should Match 'Everything.s up to date'
+            (@($tooltipHistory | Where-Object { $_ -match 'Updating' }).Count) | Should Be 0
+
+            $marker.balloonShown | Should Be $false
+            $marker.clickOutcome | Should Be 'launch'
+
+            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
+            Stop-Straggler-FurphyHost -Needle $needle
+            try {
+                Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -like ('*' + $addonSyncDir + '*addon-server.ps1*') } |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+            } catch { }
+        }
+    }
+
+    It 'a real single-flavour forced-update cycle: tooltipHistory shows "Updating <Name> (1 of 1" then ends "Updated 1 at", balloon names it' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $wowRoot = New-TempRoot -Name 'host-tray-single-update'
+        $addonSyncDir = New-TrayTestLayout -WowRoot $wowRoot -Port 47899 -OnlyFlavours @('_retail_')
+        $cliPath = Join-Path $addonSyncDir 'addon-sync.ps1'
+        $exePath = Join-Path $addonSyncDir 'host\bin\FurphyHost.exe'
+        $needle = 'trayupdate-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path $addonSyncDir ($needle + '.json')
+        $hostProc = $null
+
+        try {
+            # Install an OLDER real file explicitly (-FileId pins the
+            # record to it), then -Unpin so the next, unforced check is
+            # free to find and install whatever is actually newest.
+            $olderFileId = Get-OlderCurseForgeFileId -ProjectId $projectId -BackIndex 15
+            $addResult = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 90 -ArgumentList @(
+                '-Add', $projectId, '-FileId', $olderFileId, '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot)
+            $addResult.ExitCode | Should Be 0
+            $addedRow = @($addResult.Json.results) | Where-Object { [string]$_.projectId -eq [string]$projectId }
+            @($addedRow).Count | Should Be 1
+            $addedRow[0].status | Should Be 'Installed'
+            [int64]$addedRow[0].fileId | Should Be $olderFileId
+            $addonName = [string]$addedRow[0].name
+
+            $unpinResult = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 30 -ArgumentList @(
+                '-Unpin', $projectId, '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot)
+            $unpinResult.ExitCode | Should Be 0
+            $unpinRow = @($unpinResult.Json.results) | Where-Object { [string]$_.projectId -eq [string]$projectId }
+            @($unpinRow).Count | Should Be 1
+            $unpinRow[0].status | Should Be 'Unpinned'
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exePath
+            $psi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '" --wow-fake NoSuchFurphyHostTestProcess'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exePath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 60
+            $marker | Should Not Be $null
+            [int]$marker.exitCode | Should Be 0
+
+            $flavourJobs = @($marker.flavourJobs)
+            $flavourJobs.Count | Should Be 1
+            $flavourJobs[0].flavour | Should Be 'retail'
+            @($flavourJobs[0].updatedNames) -contains $addonName | Should Be $true
+
+            $tooltipHistory = @($marker.tooltipHistory)
+            $updatingPattern = 'Updating ' + [regex]::Escape($addonName) + ' \(1 of 1'
+            (@($tooltipHistory | Where-Object { $_ -match $updatingPattern }).Count) | Should BeGreaterThan 0
+            $tooltipHistory[$tooltipHistory.Count - 1] | Should Match 'Updated 1 at'
+
+            $marker.balloonShown | Should Be $true
+            [string]$marker.balloonText | Should Match ([regex]::Escape($addonName))
+            $marker.clickOutcome | Should Be 'launch'
+
+            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
+            Stop-Straggler-FurphyHost -Needle $needle
             try {
                 Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
                     Where-Object { $_.CommandLine -like ('*' + $addonSyncDir + '*addon-server.ps1*') } |

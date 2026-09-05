@@ -168,3 +168,55 @@ Describe 'update-all-flavours excludes ptr unless showTestRealms' {
         Stop-TestServer -Server $server
     }
 }
+
+Describe 'Round 28: progress.json tallies pass through to job.progress on a real check job' -Tags 'Network' {
+    <#
+      Same "real (fast-failing) CurseForge round trip" trick as the
+      'Freshness: checking' Describe above (bogus-but-numeric project ids -
+      each addon is tracked, so the check job actually iterates and reports
+      Failed for every one of them - never Up-to-date, since these ids do
+      not exist) - here used to prove addon-sync.ps1's new running tallies
+      (checked/updated/failed/upToDate/updatesFound) reach job.progress
+      with no server-side change, exactly as documented on -ProgressPath.
+    #>
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'fresh-tallies'
+    $server = $null
+    try {
+        $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot
+        $bogusIds = @(900000011, 900000012, 900000013)
+        Invoke-CliJson -ScriptPath (Join-Path $root 'addon-sync.ps1') `
+            -ArgumentList @('-Add', ($bogusIds -join ','), '-Json', '-WowRoot', $wowRoot, '-Flavor', 'retail') | Out-Null
+
+        It 'job.progress carries the tallies, ends checked=3 failed=3 updated=0 upToDate=0 updatesFound=0' {
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'check' }
+            $r.Ok | Should Be $true
+
+            # Confirm the tallies fields are present at least once WHILE the
+            # job is still running (not just after it lands), so a tray/UI
+            # poller mid-cycle genuinely has them to read - not merely a
+            # coincidence of the final snapshot.
+            $sawTalliesFieldsMidRun = $false
+            $deadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $deadline) {
+                $g = Invoke-Api -Port 47899 -Method Get -Path "/api/jobs/$($r.Body.jobId)"
+                if ($g.Body.progress -and ($g.Body.progress.PSObject.Properties.Name -contains 'checked')) {
+                    $sawTalliesFieldsMidRun = $true
+                }
+                if ($g.Body.state -ne 'running') { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $sawTalliesFieldsMidRun | Should Be $true
+
+            $done = Wait-JobDone -Port 47899 -JobId $r.Body.jobId -TimeoutSec 30
+            $done.Body.state | Should Be 'done'
+            $done.Body.progress.checked | Should Be 3
+            $done.Body.progress.failed | Should Be 3
+            $done.Body.progress.updated | Should Be 0
+            $done.Body.progress.upToDate | Should Be 0
+            $done.Body.progress.updatesFound | Should Be 0
+        }
+    } finally {
+        Stop-TestServer -Server $server
+    }
+}

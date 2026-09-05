@@ -3567,6 +3567,8 @@ boot();
     internal static class WindowActivation
     {
         private const int SW_RESTORE = 9;
+        private const uint FLASHW_ALL = 3;
+        private const uint FLASHW_TIMERNOFG = 12;
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
@@ -3580,97 +3582,186 @@ boot();
         [DllImport("user32.dll")]
         private static extern bool IsIconic(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("user32.dll")]
+        private static extern bool AllowSetForegroundWindow(uint dwProcessId);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
         public static bool WindowExists(string title)
         {
             try { return FindWindow(null, title) != IntPtr.Zero; }
             catch { return false; }
         }
 
-        // Finds a top-level window with the given exact title and, if one
-        // exists, restores it (if minimized) and brings it to the
-        // foreground. Returns true iff a window was found (regardless of
-        // whether SetForegroundWindow itself succeeded - Windows can
-        // refuse focus-stealing from a background process in ways that
-        // are not this tray's problem to solve).
-        public static bool ActivateWindowByTitle(string title)
+        // Round 28 (section F): replaces the old plain-SetForegroundWindow
+        // body. Finds a top-level window with the given exact title and,
+        // if one exists, restores it (if minimized), brings it to the top,
+        // then makes a real attempt to force it to the actual foreground
+        // using the AttachThreadInput/AllowSetForegroundWindow technique -
+        // the tray's click handler runs on the tray's own UI thread, which
+        // just received the mouse click and so plausibly carries transient
+        // foreground rights; attaching input queues with the target
+        // window's thread is what lets that right actually transfer to
+        // SetForegroundWindow on the TARGET window. The result is then
+        // VERIFIED (SetForegroundWindow's own bool return is not a
+        // reliable success signal - Windows can return true while still
+        // refusing under its foreground-lock-timeout rules) and, if the OS
+        // still refused, falls back to FlashWindowEx so the taskbar/border
+        // can still visibly demand attention. Returns null if no window
+        // was found by that title; otherwise "foreground" or "flashed"
+        // describing which outcome actually happened.
+        public static string ActivateWindowByTitle(string title)
         {
             IntPtr hwnd;
             try { hwnd = FindWindow(null, title); }
-            catch { return false; }
-            if (hwnd == IntPtr.Zero) return false;
+            catch { return null; }
+            if (hwnd == IntPtr.Zero) return null;
+
+            uint targetPid = 0;
+            uint targetThreadId = 0;
+            uint currentThreadId = 0;
+            bool attached = false;
+
+            try { if (IsIconic(hwnd)) { ShowWindow(hwnd, SW_RESTORE); } } catch { }
+            try { BringWindowToTop(hwnd); } catch { }
+            try { targetThreadId = GetWindowThreadProcessId(hwnd, out targetPid); } catch { }
+            try { currentThreadId = GetCurrentThreadId(); } catch { }
+
             try
             {
-                if (IsIconic(hwnd)) { ShowWindow(hwnd, SW_RESTORE); }
-                SetForegroundWindow(hwnd);
+                if (targetThreadId != 0 && currentThreadId != 0 && targetThreadId != currentThreadId)
+                {
+                    try { attached = AttachThreadInput(currentThreadId, targetThreadId, true); }
+                    catch { attached = false; }
+                }
+                try { if (targetPid != 0) { AllowSetForegroundWindow(targetPid); } } catch { }
+                try { SetForegroundWindow(hwnd); } catch { }
             }
-            catch { }
-            return true;
+            finally
+            {
+                if (attached)
+                {
+                    try { AttachThreadInput(currentThreadId, targetThreadId, false); } catch { }
+                }
+            }
+
+            bool ok;
+            try { ok = GetForegroundWindow() == hwnd; } catch { ok = false; }
+
+            if (!ok)
+            {
+                try
+                {
+                    FLASHWINFO fw = new FLASHWINFO();
+                    fw.cbSize = (uint)Marshal.SizeOf(typeof(FLASHWINFO));
+                    fw.hwnd = hwnd;
+                    fw.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+                    fw.uCount = 3;
+                    fw.dwTimeout = 0;
+                    FlashWindowEx(ref fw);
+                }
+                catch { }
+                return "flashed";
+            }
+            return "foreground";
         }
     }
 
     // HKCU\...\Run "FurphyAddonManager" = "<quoted exe path>" --tray - the
     // literal value text is part of the stage A/B contract (stage B's own
     // server endpoint writes the identical string), so BuildRunValue is
-    // the one place that format lives.
+    // the one place that format lives. Round 28 (section K, HARD RULE):
+    // every method now takes the value name as a parameter instead of a
+    // hardcoded const - production (a real --tray) always passes
+    // ProductionValueName; --tray-selftest always passes a test-scoped
+    // name instead (TrayForm._startupValueName), so a selftest run can
+    // never read, write, or remove the real value a live tray/install
+    // owns.
     internal static class StartupRegistry
     {
         private const string RunKeyPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-        private const string ValueName = "FurphyAddonManager";
+        public const string ProductionValueName = "FurphyAddonManager";
 
         public static string BuildRunValue(string exePath)
         {
             return "\"" + exePath + "\" --tray";
         }
 
-        public static bool Exists()
+        public static bool Exists(string valueName)
         {
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
                 {
                     if (key == null) return false;
-                    return key.GetValue(ValueName) != null;
+                    return key.GetValue(valueName) != null;
                 }
             }
             catch { return false; }
         }
 
-        public static string ReadValue()
+        public static string ReadValue(string valueName)
         {
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
                 {
                     if (key == null) return null;
-                    object v = key.GetValue(ValueName);
+                    object v = key.GetValue(valueName);
                     return v as string;
                 }
             }
             catch { return null; }
         }
 
-        public static bool Enable(string exePath)
+        public static bool Enable(string valueName, string exePath)
         {
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath))
                 {
-                    key.SetValue(ValueName, BuildRunValue(exePath), RegistryValueKind.String);
+                    key.SetValue(valueName, BuildRunValue(exePath), RegistryValueKind.String);
                 }
                 return true;
             }
             catch { return false; }
         }
 
-        public static bool Disable()
+        public static bool Disable(string valueName)
         {
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
                 {
-                    if (key != null && key.GetValue(ValueName) != null)
+                    if (key != null && key.GetValue(valueName) != null)
                     {
-                        key.DeleteValue(ValueName, false);
+                        key.DeleteValue(valueName, false);
                     }
                 }
                 return true;
@@ -3840,6 +3931,124 @@ boot();
         }
     }
 
+    // Round 28 (section C): the tray's four icon variants, drawn once per
+    // icon-state CHANGE (never per tick) and cached for the process's
+    // whole life since the base icon.ico bitmap never changes. Colors are
+    // Vaporwave's own tokens (THEMES-SPEC.md - Vaporwave is the default
+    // theme, per SPEC.md's "Vaporwave becomes the default again"). This
+    // tray process is native (WinForms/GDI+) and has no access to the
+    // SPA's own theme choice (stored in the browser's localStorage, a
+    // completely separate storage domain the host process cannot read),
+    // so a single fixed palette is used regardless of which theme the
+    // user has actually picked in Settings - a deliberate, documented
+    // simplification, not an oversight.
+    internal static class TrayIcons
+    {
+        private static readonly object Lock = new object();
+        private static Icon _base;
+        private static readonly Dictionary<string, Icon> Cache = new Dictionary<string, Icon>();
+
+        private static readonly Color AccentColor = ColorFromHex("#FF71CE");
+        private static readonly Color SuccessColor = ColorFromHex("#05FFA1");
+        private static readonly Color DangerColor = ColorFromHex("#FF5E85");
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr handle);
+
+        public static void Init(Icon baseIcon)
+        {
+            lock (Lock)
+            {
+                _base = baseIcon;
+                Cache.Clear();
+            }
+        }
+
+        // "normal"/"busy"/"updated"/"failed" - any other/unknown value
+        // falls back to "normal" so a bad string can never crash the tray.
+        public static Icon Get(string variant)
+        {
+            lock (Lock)
+            {
+                if (_base == null) return null;
+                if (string.IsNullOrEmpty(variant) || variant == "normal") return _base;
+
+                Icon cached;
+                if (Cache.TryGetValue(variant, out cached)) return cached;
+
+                Color dot;
+                if (variant == "updated") dot = SuccessColor;
+                else if (variant == "failed") dot = DangerColor;
+                else dot = AccentColor; // "busy"
+
+                Icon built;
+                try { built = BuildBadged(_base, dot); }
+                catch { built = _base; }
+                Cache[variant] = built;
+                return built;
+            }
+        }
+
+        private static Color ColorFromHex(string hex)
+        {
+            string h = hex.TrimStart('#');
+            int r = Convert.ToInt32(h.Substring(0, 2), 16);
+            int g = Convert.ToInt32(h.Substring(2, 2), 16);
+            int b = Convert.ToInt32(h.Substring(4, 2), 16);
+            return Color.FromArgb(r, g, b);
+        }
+
+        // Draws the base icon plus a small badge dot in the bottom-right
+        // corner (a thin dark ring behind it so the dot reads against any
+        // desktop taskbar color) onto a same-size bitmap, then converts
+        // back to an Icon via GetHicon(). Icon.FromHandle does not take
+        // ownership of the HICON it wraps, so this clones the result
+        // (which duplicates the underlying handle into one the clone
+        // itself owns) and explicitly destroys the original - this runs
+        // once per icon-state change, not once per tick, but leaking a
+        // GDI icon handle for the tray's whole (potentially very long)
+        // uptime is still worth avoiding.
+        private static Icon BuildBadged(Icon baseIcon, Color dotColor)
+        {
+            using (Bitmap bmp = baseIcon.ToBitmap())
+            using (Bitmap canvas = new Bitmap(bmp.Width, bmp.Height))
+            {
+                using (Graphics g = Graphics.FromImage(canvas))
+                {
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
+
+                    int d = (int)Math.Ceiling(bmp.Width * 0.42);
+                    if (d < 5) d = 5;
+                    int x = bmp.Width - d;
+                    int y = bmp.Height - d;
+
+                    using (SolidBrush ring = new SolidBrush(Color.FromArgb(255, 20, 20, 20)))
+                    {
+                        g.FillEllipse(ring, x - 1, y - 1, d + 2, d + 2);
+                    }
+                    using (SolidBrush fill = new SolidBrush(dotColor))
+                    {
+                        g.FillEllipse(fill, x, y, d, d);
+                    }
+                }
+
+                IntPtr hIcon = canvas.GetHicon();
+                try
+                {
+                    using (Icon fromHandle = Icon.FromHandle(hIcon))
+                    {
+                        return (Icon)fromHandle.Clone();
+                    }
+                }
+                finally
+                {
+                    try { DestroyIcon(hIcon); } catch { }
+                }
+            }
+        }
+    }
+
     // Process-level entry point for tray mode: owns the single-instance
     // mutex (contract: a second --tray exits immediately with code 0
     // after logging) and hands off to TrayForm, which does the real work
@@ -3848,16 +4057,46 @@ boot();
     // Control.Invoke marshaling from the background cycle thread).
     internal static class TrayProgram
     {
-        public const string MutexName = "FurphyAddonManager.Tray";
         public const string StopEventName = "FurphyAddonManager.TrayStop";
+        private const string ProductionMutexName = "FurphyAddonManager.Tray";
+        private const int ProductionPort = 47831;
+
+        // Round 28 (section K, HARD RULE): the mutex name is global to
+        // the Windows user session regardless of --port, which used to
+        // mean a --tray-selftest run (even at --port 47899) and Eric's
+        // real live --tray (port 47831) fought over the SAME mutex -
+        // whichever started first silently won, the other no-op'd. The
+        // mutex name is now a function of the resolved port: the
+        // production literal only when that port is really 47831
+        // (production, unchanged - a real user's tray must still
+        // single-instance against itself exactly as today), else a
+        // port-suffixed name so every test run (always some port other
+        // than 47831 per this project's own hard rule) gets its own
+        // mutex and can run concurrently with a real live tray with zero
+        // risk of collision.
+        public static string ResolveMutexName(int port)
+        {
+            if (port == ProductionPort) return ProductionMutexName;
+            return ProductionMutexName + "." + port.ToString(CultureInfo.InvariantCulture);
+        }
 
         public static int Run(HostOptions options, bool dpiAware)
         {
+            // Port must be resolved BEFORE the mutex is constructed (the
+            // mutex name now depends on it) - duplicates TrayForm's own
+            // exeDir/settingsPath lookup, but only for this one read; the
+            // resolved port is then handed straight into TrayForm's
+            // constructor so it is never resolved a second time.
+            string exeDir = HostFiles.ExeDir();
+            string settingsPath = HostFiles.FindUpward(exeDir, "settings.json", 4);
+            int port = PortResolver.Resolve(options, settingsPath);
+            string mutexName = ResolveMutexName(port);
+
             bool createdNew = false;
             Mutex mutex = null;
             try
             {
-                mutex = new Mutex(true, MutexName, out createdNew);
+                mutex = new Mutex(true, mutexName, out createdNew);
             }
             catch
             {
@@ -3867,11 +4106,9 @@ boot();
 
             if (mutex == null || !createdNew)
             {
-                string exeDir = HostFiles.ExeDir();
-                string settingsPath = HostFiles.FindUpward(exeDir, "settings.json", 4);
                 string logDir = settingsPath != null ? Path.GetDirectoryName(settingsPath) : exeDir;
                 LogWriter.Append(Path.Combine(logDir, "host.log"),
-                    "[tray] another tray instance already holds the mutex - exiting");
+                    "[tray] another tray instance already holds the mutex (" + mutexName + ") - exiting");
                 if (options.TraySelftestActive)
                 {
                     WriteMutexBusyMarker(options);
@@ -3882,7 +4119,7 @@ boot();
 
             try
             {
-                using (TrayForm form = new TrayForm(options, dpiAware))
+                using (TrayForm form = new TrayForm(options, dpiAware, port))
                 {
                     Application.Run(form);
                     return form.ExitCode;
@@ -3922,6 +4159,14 @@ boot();
             marker["stateFileWritten"] = false;
             marker["mutexHeld"] = false;
             marker["exitCode"] = (long)0;
+            // Round 28 (section J): same "always present, reflecting did
+            // nothing" convention for the new history/balloon/click fields.
+            marker["tooltipHistory"] = new List<string>();
+            marker["iconStateHistory"] = new List<string>();
+            marker["menuStatusText"] = null;
+            marker["balloonShown"] = false;
+            marker["balloonText"] = null;
+            marker["clickOutcome"] = null;
             try
             {
                 string json = MiniJson.Write(marker);
@@ -4006,6 +4251,27 @@ boot();
     // NotifyIcon, its ContextMenuStrip, and Control.Invoke marshaling a
     // real message loop, exactly like MainForm gets for the main window,
     // without ever creating a visible window of its own.
+    //
+    // Round 28 ("Tray experience") - the whole tooltip/icon/menu/balloon/
+    // click/tray-state.json surface is rebuilt around ONE status model
+    // (SPEC.md "Tray experience (round 28)", section A): every
+    // status/phase/tally change funnels through exactly one text builder
+    // (ComputeCore, a static pure function) whose output is stored once
+    // (_coreText, the untruncated "core" sentence) and reused verbatim by
+    // the tooltip (prefixed "Furphy - ", then truncated), the context
+    // menu's disabled status line, tray-state.json, and (via the same
+    // fields in tray-state.json) the SPA's Settings status line - never
+    // four independently hand-formatted copies of the same sentence
+    // drifting apart. This is the structural fix for the incident: the
+    // old BuildProgressTooltip rendered "Updating {index} of {total}..."
+    // for ANY phase the instant total>0, with no "is the job actually
+    // done yet" check, so the tail end of a clean 34-addon CHECK (index
+    // catching up to total before the server had flipped the job to
+    // done/failed) read as "Updating 34 of 34" even though nothing was
+    // downloading. The new model makes that window its own named status
+    // ("finishing") with its own fixed text ("Finishing..."), checked
+    // BEFORE the phase-based checking/updating branch, so it can never
+    // fall through to "Updating" again.
     internal class TrayForm : Form
     {
         private readonly HostOptions _options;
@@ -4018,10 +4284,13 @@ boot();
         private readonly string _trayStatePath;
         private readonly string _addonServerScriptPath;
         private readonly int _port;
+        private readonly string _startupValueName;
 
         private NotifyIcon _icon;
         private ContextMenuStrip _menu;
         private ToolStripMenuItem _startupMenuItem;
+        private ToolStripMenuItem _statusMenuItem;
+        private ToolStripMenuItem _checkNowMenuItem;
 
         private EventWaitHandle _stopEvent;
         private readonly AutoResetEvent _manualTrigger = new AutoResetEvent(false);
@@ -4030,8 +4299,25 @@ boot();
         private readonly object _launchLock = new object();
         private DateTime _lastLaunchAttemptUtc = DateTime.MinValue;
 
+        // -------------------------------------------------- status model
+        // (SPEC.md round 28, section A) - every field here is persisted to
+        // tray-state.json and is what the tooltip/menu/icon/SPA are ALL
+        // derived from; _coreText is the one "core sentence" ComputeCore
+        // produces per transition, reused verbatim by the menu/state file
+        // (the tooltip is just "Furphy - " + _coreText, truncated).
         private readonly object _stateLock = new object();
+        private string _status = "idle";
+        private string _phase;
+        private string _currentAddon;
+        private int _total;
+        private int _checked;
+        private int _updated;
+        private int _failed;
+        private int _upToDate;
+        private int _updatesFound;
+        private string _coreText = "";
         private string _tooltipCurrent;
+        private string _iconVariant = "normal";
         private string _lastResult;
         private List<string> _updatedNames = new List<string>();
         private List<string> _failedNames = new List<string>();
@@ -4040,9 +4326,17 @@ boot();
         private DateTime? _nextRunAtUtc;
         private bool _stateFileWritten;
 
+        // --tray-selftest-only history (section J) - never grown when
+        // _options.TraySelftestActive is false, so a real, long-running
+        // production tray never accumulates unbounded memory here.
+        private readonly List<string> _tooltipHistory = new List<string>();
+        private readonly List<string> _iconStateHistory = new List<string>();
+        private bool _balloonShown;
+        private string _balloonText;
+
         public int ExitCode;
 
-        public TrayForm(HostOptions options, bool dpiAware)
+        public TrayForm(HostOptions options, bool dpiAware, int resolvedPort)
         {
             _options = options;
             _dpiAware = dpiAware;
@@ -4071,7 +4365,21 @@ boot();
             _hostLogPath = Path.Combine(logDir, "host.log");
             _trayStatePath = Path.Combine(logDir, "tray-state.json");
             _addonServerScriptPath = HostFiles.FindUpward(_exeDir, "addon-server.ps1", 4);
-            _port = PortResolver.Resolve(_options, _settingsPath);
+            // Round 28 (section K): the port is now resolved ONCE, by
+            // TrayProgram.Run, before the single-instance mutex is even
+            // constructed (the mutex name depends on it) - handed straight
+            // in here instead of re-resolved a second time.
+            _port = resolvedPort;
+
+            // Round 28 (section K, HARD RULE): --tray-selftest must never
+            // touch the real "FurphyAddonManager" Run value a live tray/
+            // install already owns - every registry call in this class
+            // goes through _startupValueName instead of a hardcoded
+            // literal, and RunSelftestSequence always removes whatever it
+            // wrote in its own finally block.
+            _startupValueName = _options.TraySelftestActive
+                ? "FurphyAddonManager.Test"
+                : StartupRegistry.ProductionValueName;
 
             bool createdNewEvent;
             try
@@ -4094,6 +4402,10 @@ boot();
                 " port=" + _port.ToString(CultureInfo.InvariantCulture) +
                 " selftest=" + _options.TraySelftestActive.ToString());
 
+            // Round 28 (section B, "idle") - shown from process start
+            // through the end of the first ~90s pre-cycle wait; ~90s
+            // matches WorkerLoop's own WaitForNextCycle(90) below.
+            SetIdleStatus(DateTime.UtcNow.AddSeconds(90));
             WriteStateFile(true);
 
             FormClosing += new FormClosingEventHandler(TrayForm_FormClosing);
@@ -4157,19 +4469,22 @@ boot();
         {
             _icon = new NotifyIcon();
             string iconPath = HostFiles.FindUpward(_exeDir, "icon.ico", 1);
+            Icon baseIcon;
             if (iconPath != null)
             {
-                try { _icon.Icon = new Icon(iconPath); }
-                catch { _icon.Icon = SystemIcons.Application; }
+                try { baseIcon = new Icon(iconPath); }
+                catch { baseIcon = SystemIcons.Application; }
             }
             else
             {
-                _icon.Icon = SystemIcons.Application;
+                baseIcon = SystemIcons.Application;
             }
-            string startupText = TruncateTooltip("Furphy - Starting...");
-            _icon.Text = startupText;
-            _tooltipCurrent = startupText;
-            _message = startupText;
+            _icon.Icon = baseIcon;
+            // Round 28 (section C): builds/caches the busy/updated/failed
+            // badge variants of this same base icon on demand - SetIconVariant
+            // (called from SetIdleStatus right after this method returns)
+            // is what actually assigns _icon.Icon going forward.
+            TrayIcons.Init(baseIcon);
             _icon.MouseClick += new MouseEventHandler(Icon_MouseClick);
             _icon.MouseDoubleClick += new MouseEventHandler(Icon_MouseDoubleClick);
             _icon.Visible = true;
@@ -4183,15 +4498,22 @@ boot();
             openItem.Click += new EventHandler(MenuOpen_Click);
             _menu.Items.Add(openItem);
 
-            ToolStripMenuItem checkItem = new ToolStripMenuItem("Check now");
-            checkItem.Click += new EventHandler(MenuCheckNow_Click);
-            _menu.Items.Add(checkItem);
+            // Round 28 (section D) - disabled status line, mirroring the
+            // tooltip's core text verbatim (refreshed in Menu_Opening,
+            // never a second independent string).
+            _statusMenuItem = new ToolStripMenuItem("");
+            _statusMenuItem.Enabled = false;
+            _menu.Items.Add(_statusMenuItem);
+
+            _checkNowMenuItem = new ToolStripMenuItem("Check for updates now");
+            _checkNowMenuItem.Click += new EventHandler(MenuCheckNow_Click);
+            _menu.Items.Add(_checkNowMenuItem);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             _startupMenuItem = new ToolStripMenuItem("Start with Windows");
             _startupMenuItem.CheckOnClick = false;
-            _startupMenuItem.Checked = StartupRegistry.Exists();
+            _startupMenuItem.Checked = StartupRegistry.Exists(_startupValueName);
             _startupMenuItem.Click += new EventHandler(MenuStartup_Click);
             _menu.Items.Add(_startupMenuItem);
 
@@ -4206,7 +4528,21 @@ boot();
 
         private void Menu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            try { _startupMenuItem.Checked = StartupRegistry.Exists(); } catch { }
+            try { _startupMenuItem.Checked = StartupRegistry.Exists(_startupValueName); } catch { }
+
+            string status;
+            string core;
+            lock (_stateLock) { status = _status; core = _coreText; }
+
+            try { _statusMenuItem.Text = core; } catch { }
+
+            bool running = IsCycleRunning(status);
+            try
+            {
+                _checkNowMenuItem.Enabled = !running;
+                _checkNowMenuItem.Text = running ? "Checking..." : "Check for updates now";
+            }
+            catch { }
         }
 
         private void MenuOpen_Click(object sender, EventArgs e)
@@ -4216,24 +4552,34 @@ boot();
 
         private void MenuCheckNow_Click(object sender, EventArgs e)
         {
+            // Belt-and-suspenders on top of the menu item's own
+            // Enabled=false while a cycle is running (section D) - a
+            // second click cannot start a second cycle even if it somehow
+            // reaches this handler anyway.
+            string status;
+            lock (_stateLock) { status = _status; }
+            if (IsCycleRunning(status))
+            {
+                return;
+            }
             LogHost("[tray] check-now requested from menu");
             try { _manualTrigger.Set(); } catch { }
         }
 
         private void MenuStartup_Click(object sender, EventArgs e)
         {
-            bool currentlyOn = StartupRegistry.Exists();
+            bool currentlyOn = StartupRegistry.Exists(_startupValueName);
             if (currentlyOn)
             {
-                StartupRegistry.Disable();
+                StartupRegistry.Disable(_startupValueName);
                 LogHost("[tray] Start with Windows disabled via menu");
             }
             else
             {
-                StartupRegistry.Enable(_exePath);
+                StartupRegistry.Enable(_startupValueName, _exePath);
                 LogHost("[tray] Start with Windows enabled via menu");
             }
-            try { _startupMenuItem.Checked = StartupRegistry.Exists(); } catch { }
+            try { _startupMenuItem.Checked = StartupRegistry.Exists(_startupValueName); } catch { }
         }
 
         private void MenuQuit_Click(object sender, EventArgs e)
@@ -4264,15 +4610,25 @@ boot();
         // Process.Start returning and the new process's window actually
         // existing for FindWindow to see). dryRun (--tray-selftest) skips
         // the actual Process.Start but still reports what would happen.
+        // Round 28 (section F): the finer "foreground"/"flashed" outcome
+        // from WindowActivation.ActivateWindowByTitle is folded into the
+        // return value as "activate:foreground"/"activate:flashed" (a
+        // simple leading "activate"/"launch" prefix check still works for
+        // any existing consumer of the old two-value contract).
         private string ActivateOrLaunch(bool dryRun)
         {
             lock (_launchLock)
             {
-                bool activated = WindowActivation.ActivateWindowByTitle(AppConstants.WindowTitle);
-                if (activated)
+                // Round 28 (section C) - clicking/launching the app is one
+                // of the two ways the Updated/Failed badge dot clears.
+                ClearBadge();
+
+                string activateOutcome = WindowActivation.ActivateWindowByTitle(AppConstants.WindowTitle);
+                if (activateOutcome != null)
                 {
-                    LogHost("[tray] activated existing window");
-                    return "activate";
+                    LogHost("[tray] activated existing window - " +
+                        (activateOutcome == "foreground" ? "foreground ok" : "flashed"));
+                    return "activate:" + activateOutcome;
                 }
 
                 if (dryRun)
@@ -4431,7 +4787,15 @@ boot();
                 return outcome;
             }
 
-            SetTooltip("Furphy - Checking...");
+            // Round 28 (section B, "checking - starting the server") -
+            // the fixed "Starting the updater..." text for the gap before
+            // the first per-addon progress tick exists at all (whether
+            // because /api/ping actually failed and is being retried, or
+            // simply because the job was just posted and has not written
+            // its first progress.json yet - both are "the cycle has begun,
+            // no per-addon numbers exist yet", which is exactly this text's
+            // meaning).
+            SetCheckingStarting();
 
             // (b) ensure the server answers /api/ping, starting it if not.
             bool pingOk = Http.GetString(PingUrl(), 3000) != null;
@@ -4455,9 +4819,8 @@ boot();
             if (!pingOk)
             {
                 LogHost("[tray] cycle error: addon-server did not answer /api/ping");
-                CompleteCycle("error", new List<string>(), new List<string>(),
-                    "Furphy - Could not reach the addon server",
-                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                CompleteCycle("unreachable", "error", new List<string>(), new List<string>(),
+                    DateTime.UtcNow.AddMinutes(5), true);
                 return outcome;
             }
 
@@ -4475,16 +4838,15 @@ boot();
             if (postResult.StatusCode == 409)
             {
                 LogHost("[tray] cycle skipped: server busy (409)");
-                CompleteCycle("skipped_busy", new List<string>(), new List<string>(),
-                    "Furphy - Waiting: another job is running", DateTime.UtcNow.AddMinutes(5), false);
+                CompleteCycle("waiting_busy", "skipped_busy", new List<string>(), new List<string>(),
+                    DateTime.UtcNow.AddMinutes(5), true);
                 return outcome;
             }
             if (postResult.NetworkError || postResult.StatusCode != 202)
             {
                 LogHost("[tray] cycle error: POST /api/jobs status=" + postResult.StatusCode.ToString(CultureInfo.InvariantCulture));
-                CompleteCycle("error", new List<string>(), new List<string>(),
-                    "Furphy - Sync request failed",
-                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                CompleteCycle("unreachable", "error", new List<string>(), new List<string>(),
+                    DateTime.UtcNow.AddMinutes(5), true);
                 return outcome;
             }
 
@@ -4492,9 +4854,8 @@ boot();
             if (flavourJobs.Count == 0)
             {
                 LogHost("[tray] cycle error: POST /api/jobs returned no per-flavour jobs");
-                CompleteCycle("error", new List<string>(), new List<string>(),
-                    "Furphy - Sync request failed",
-                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
+                CompleteCycle("unreachable", "error", new List<string>(), new List<string>(),
+                    DateTime.UtcNow.AddMinutes(5), true);
                 return outcome;
             }
             if (flavourJobs.Count == 1) { outcome.JobId = flavourJobs[0].JobId; }
@@ -4536,24 +4897,29 @@ boot();
                     Dictionary<string, object> job = MiniJson.Parse(body) as Dictionary<string, object>;
                     if (job == null) continue;
 
-                    // Live per-job progress only makes sense to surface on
-                    // the tooltip when there is exactly one flavour job to
-                    // watch - a multi-flavour cycle's tooltip stays on
-                    // "Checking..." until the combined result is ready
-                    // (CompleteMultiFlavourCycle), never a single flavour's
-                    // own in-progress count.
+                    object stateObj;
+                    string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
+                    bool stillRunning = !(state == "done" || state == "failed");
+
+                    // Round 28 (section B) - live per-job progress (with
+                    // the new tallies) only makes sense to surface on the
+                    // tooltip when there is exactly one flavour job to
+                    // watch; a multi-flavour cycle's tooltip stays on
+                    // "Starting the updater..." (set by SetCheckingStarting
+                    // above and never touched again here) until the
+                    // combined result is ready (CompleteMultiFlavourCycle) -
+                    // combining N independent jobs' progress into one
+                    // n-of-N line is explicitly out of scope this round.
                     if (flavourJobs.Count == 1)
                     {
                         object progressObj;
                         if (job.TryGetValue("progress", out progressObj) && progressObj is Dictionary<string, object>)
                         {
-                            SetTooltip(BuildProgressTooltip((Dictionary<string, object>)progressObj));
+                            ApplyProgress((Dictionary<string, object>)progressObj, stillRunning);
                         }
                     }
 
-                    object stateObj;
-                    string state = job.TryGetValue("state", out stateObj) ? stateObj as string : null;
-                    if (state == "done" || state == "failed")
+                    if (!stillRunning)
                     {
                         ApplyFinishedJob(fr, job);
                     }
@@ -4676,19 +5042,96 @@ boot();
             }
         }
 
+        // Round 28 (section B/G) - applies one live progress.json read
+        // (via job.progress) for the single-flavour case: decides which
+        // of checking/updating/finishing applies THIS tick, updates the
+        // running tallies, and pushes the result through the same
+        // ComputeCore/SetTooltip/SetIconVariant/WriteStateFile path every
+        // other status change uses. stillRunning is the job's own
+        // state=="done"|"failed" check from the SAME poll tick, done by
+        // the caller (RunCycle) so both this method and ApplyFinishedJob
+        // see a consistent snapshot.
+        //
+        // "finishing" is checked FIRST, before the phase-based checking/
+        // updating branch - this is the direct fix for the incident: the
+        // CLI's very last per-addon progress write can already show
+        // checked>=total (addon-sync.ps1 finished its loop) before the
+        // server has observed the process actually exit and flipped the
+        // job to done/failed (Update-JobStatus's own polling lag), and the
+        // OLD code had no such check at all, so that exact window fell
+        // through to "Updating {index} of {total}...".
+        private void ApplyProgress(Dictionary<string, object> progress, bool stillRunning)
+        {
+            int total = GetProgressInt(progress, "total");
+            int checkedCount = GetProgressInt(progress, "checked");
+            string phase = GetProgressString(progress, "phase");
+            string addon = GetProgressString(progress, "addon");
+            int updated = GetProgressInt(progress, "updated");
+            int failed = GetProgressInt(progress, "failed");
+            int upToDate = GetProgressInt(progress, "upToDate");
+            int updatesFound = GetProgressInt(progress, "updatesFound");
+
+            string status;
+            if (stillRunning && total > 0 && checkedCount >= total)
+            {
+                status = "finishing";
+            }
+            else if (phase == "downloading" || phase == "installing")
+            {
+                status = "updating";
+            }
+            else
+            {
+                status = "checking";
+            }
+
+            string core = ComputeCore(status, phase, addon, total, checkedCount, updated, failed, upToDate, updatesFound,
+                null, null, null, null);
+            string message = "Furphy - " + core;
+
+            lock (_stateLock)
+            {
+                _status = status;
+                _phase = phase;
+                _currentAddon = addon;
+                _total = total;
+                _checked = checkedCount;
+                _updated = updated;
+                _failed = failed;
+                _upToDate = upToDate;
+                _updatesFound = updatesFound;
+                _coreText = core;
+            }
+
+            SetTooltip(message);
+            SetIconVariant(IconVariantForStatus(status));
+            WriteStateFile(true);
+        }
+
+        private static int GetProgressInt(Dictionary<string, object> progress, string key)
+        {
+            object v;
+            return progress.TryGetValue(key, out v) ? JsonUtil.ToInt(v, 0) : 0;
+        }
+
+        private static string GetProgressString(Dictionary<string, object> progress, string key)
+        {
+            object v;
+            return progress.TryGetValue(key, out v) ? v as string : null;
+        }
+
         // Builds the combined tooltip/lastResult/balloon for the whole
         // cycle. Exactly one flavour job (today's only case on this
-        // machine, and every single-flavour install): byte-identical text
-        // to the pre-CS-F6 single-job code - failed > updated > up_to_date,
-        // same three message strings. More than one: FLAVORS-SPEC.md S5.6 -
-        // a single combined line, never one sentence per flavour; "up to
-        // date" stays one line even when every flavour agrees, and a mixed
-        // result carries a "Label: count" breakdown for whichever flavours
-        // actually had updates.
+        // machine, and every single-flavour install): byte-identical
+        // classification to the pre-CS-F6 single-job code - failed >
+        // updated > up_to_date. More than one: every flavour's results are
+        // pooled into one combined name list (round 28 drops the old
+        // per-flavour "Label: count" breakdown text in favor of the SAME
+        // uniform "Updated {N} at {HH:MM}: {names}" template every other
+        // status uses - one core sentence, never a second hand-formatted
+        // copy just for the multi-flavour case).
         private void CompleteMultiFlavourCycle(List<FlavourJobResult> flavourJobs, TrayBackgroundSettings settings)
         {
-            string nowStamp = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture);
-
             if (flavourJobs.Count <= 1)
             {
                 FlavourJobResult fr = flavourJobs.Count == 1 ? flavourJobs[0] : new FlavourJobResult();
@@ -4696,99 +5139,74 @@ boot();
                 if (fr.ErrorMessage != null && fr.Updated.Count == 0 && fr.Failed.Count == 0)
                 {
                     LogHost("[tray] cycle error: sync job failed: " + fr.ErrorMessage);
-                    CompleteCycle("error", fr.Updated, fr.Failed,
-                        "Furphy - Sync failed: " + fr.ErrorMessage,
-                        DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
+                    CompleteCycle("unreachable", "error", new List<string>(), new List<string>(),
+                        DateTime.UtcNow.AddMinutes(5), true);
                     return;
                 }
 
-                string result;
-                string message;
-                bool balloon;
+                string status;
+                string lastResult;
                 if (fr.Failed.Count > 0)
                 {
-                    result = "failed";
-                    message = (fr.Failed.Count == 1)
-                        ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
-                        : "Furphy - " + fr.Failed.Count.ToString(CultureInfo.InvariantCulture) +
-                            " addons failed to update at " + nowStamp + " - open for details";
-                    balloon = true;
+                    status = "done_failed"; lastResult = "failed";
                 }
                 else if (fr.Updated.Count > 0)
                 {
-                    result = "updated";
-                    message = "Furphy - Updated " + fr.Updated.Count.ToString(CultureInfo.InvariantCulture) +
-                        " at " + nowStamp + ": " + JoinNames(fr.Updated);
-                    balloon = true;
+                    status = "done_updated"; lastResult = "updated";
                 }
                 else
                 {
-                    result = "up_to_date";
-                    message = "Furphy - Everything's up to date - checked " + nowStamp;
-                    balloon = false;
+                    status = "done_clean"; lastResult = "up_to_date";
                 }
 
-                LogHost("[tray] cycle done result=" + result +
+                LogHost("[tray] cycle done result=" + lastResult +
                     " updated=" + fr.Updated.Count.ToString(CultureInfo.InvariantCulture) +
                     " failed=" + fr.Failed.Count.ToString(CultureInfo.InvariantCulture));
-                CompleteCycle(result, fr.Updated, fr.Failed, message, DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), balloon);
+                CompleteCycle(status, lastResult, fr.Updated, fr.Failed,
+                    DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), false);
                 return;
             }
 
             List<string> allUpdated = new List<string>();
             List<string> allFailed = new List<string>();
-            List<string> breakdownParts = new List<string>();
-            int flavourErrorCount = 0;
             for (int i = 0; i < flavourJobs.Count; i++)
             {
                 FlavourJobResult fr = flavourJobs[i];
                 allUpdated.AddRange(fr.Updated);
                 allFailed.AddRange(fr.Failed);
-                if (fr.Updated.Count > 0)
-                {
-                    breakdownParts.Add(FlavourLabels.Get(fr.FlavourId) + ": " +
-                        fr.Updated.Count.ToString(CultureInfo.InvariantCulture));
-                }
                 if (fr.ErrorMessage != null && fr.Updated.Count == 0 && fr.Failed.Count == 0)
                 {
-                    flavourErrorCount++;
+                    // A whole flavour's job crashed/never finished - folded
+                    // into allFailed as a synthetic named entry so the
+                    // "done_failed" count (allFailed.Count) and the
+                    // balloon's name list both stay consistent with each
+                    // other without a separate tracked counter.
+                    allFailed.Add(FlavourLabels.Get(fr.FlavourId) + " (error)");
                     LogHost("[tray] cycle error (" + fr.FlavourId + "): " + fr.ErrorMessage);
                 }
             }
 
-            string overallResult;
-            string overallMessage;
-            bool overallBalloon;
-            if (allFailed.Count > 0 || flavourErrorCount > 0)
+            string overallStatus;
+            string overallLastResult;
+            if (allFailed.Count > 0)
             {
-                overallResult = "failed";
-                int failCount = allFailed.Count + flavourErrorCount;
-                overallMessage = (failCount == 1)
-                    ? "Furphy - 1 addon failed to update at " + nowStamp + " - open for details"
-                    : "Furphy - " + failCount.ToString(CultureInfo.InvariantCulture) +
-                        " addons failed to update at " + nowStamp + " - open for details";
-                overallBalloon = true;
+                overallStatus = "done_failed"; overallLastResult = "failed";
             }
             else if (allUpdated.Count > 0)
             {
-                overallResult = "updated";
-                overallMessage = "Furphy - Updated " + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
-                    " at " + nowStamp + " (" + JoinNames(breakdownParts) + ")";
-                overallBalloon = true;
+                overallStatus = "done_updated"; overallLastResult = "updated";
             }
             else
             {
-                overallResult = "up_to_date";
-                overallMessage = "Furphy - Everything's up to date - checked " + nowStamp;
-                overallBalloon = false;
+                overallStatus = "done_clean"; overallLastResult = "up_to_date";
             }
 
-            LogHost("[tray] cycle done (multi-flavour) result=" + overallResult +
+            LogHost("[tray] cycle done (multi-flavour) result=" + overallLastResult +
                 " updated=" + allUpdated.Count.ToString(CultureInfo.InvariantCulture) +
                 " failed=" + allFailed.Count.ToString(CultureInfo.InvariantCulture) +
                 " flavours=" + flavourJobs.Count.ToString(CultureInfo.InvariantCulture));
-            CompleteCycle(overallResult, allUpdated, allFailed, overallMessage,
-                DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), overallBalloon);
+            CompleteCycle(overallStatus, overallLastResult, allUpdated, allFailed,
+                DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
         }
 
         // P2 perf pass (item 4): "never touch tray-state.json unless
@@ -4817,54 +5235,245 @@ boot();
                 return;
             }
             LogHost("[tray] cycle skipped: WoW is running");
-            CompleteCycle("skipped_wow_running", new List<string>(), new List<string>(),
-                "Furphy - Waiting: WoW is running", nextRun, false);
+            CompleteCycle("waiting_game", "skipped_wow_running", new List<string>(), new List<string>(), nextRun, true);
         }
 
-        private void CompleteCycle(string result, List<string> updated, List<string> failed, string message,
-            DateTime nextRunAtUtc, bool balloon)
+        // Round 28 (section A/B) - the ONE place a terminal (cycle-ending
+        // or cycle-cannot-proceed) status transition happens: computes the
+        // core sentence once via ComputeCore, updates every status field,
+        // sets the tooltip/icon, writes tray-state.json, and (only for
+        // done_updated/done_failed) fires the balloon exactly once. resetTallies
+        // is true for every status that did NOT come from a real, watched,
+        // single-flavour job run to completion (waiting_*/unreachable, and
+        // a multi-flavour result, which never populates the single-job
+        // tallies in the first place) - false only for a single-flavour
+        // done_clean/done_updated/done_failed, which keeps whatever real
+        // tallies the last ApplyProgress tick already wrote.
+        private void CompleteCycle(string status, string lastResult, List<string> updatedNames, List<string> failedNames,
+            DateTime nextRunAtUtc, bool resetTallies)
         {
-            string truncated = TruncateTooltip(message);
+            string doneStamp = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture);
+
+            int total, checkedCount, updatedTally, failedTally, upToDateTally, updatesFoundTally;
             lock (_stateLock)
             {
-                _lastResult = result;
-                _updatedNames = updated;
-                _failedNames = failed;
-                _message = truncated;
+                total = _total; checkedCount = _checked; updatedTally = _updated;
+                failedTally = _failed; upToDateTally = _upToDate; updatesFoundTally = _updatesFound;
+            }
+            if (resetTallies)
+            {
+                total = 0; checkedCount = 0; updatedTally = 0; failedTally = 0; upToDateTally = 0; updatesFoundTally = 0;
+            }
+
+            int updatedCount = updatedNames != null ? updatedNames.Count : 0;
+            int failedCount = failedNames != null ? failedNames.Count : 0;
+
+            string core = ComputeCore(status, null, null, total, checkedCount, updatedCount, failedCount,
+                upToDateTally, updatesFoundTally, doneStamp, nextRunAtUtc, updatedNames, failedNames);
+            string message = "Furphy - " + core;
+
+            lock (_stateLock)
+            {
+                _status = status;
+                _phase = null;
+                _currentAddon = null;
+                if (resetTallies)
+                {
+                    _total = 0; _checked = 0; _updated = 0; _failed = 0; _upToDate = 0; _updatesFound = 0;
+                }
+                _coreText = core;
+                _lastResult = lastResult;
+                _updatedNames = updatedNames ?? new List<string>();
+                _failedNames = failedNames ?? new List<string>();
                 _lastRunAtUtc = DateTime.UtcNow;
                 _nextRunAtUtc = nextRunAtUtc;
             }
-            SetTooltip(truncated);
+
+            SetTooltip(message);
+            SetIconVariant(IconVariantForStatus(status));
             WriteStateFile(true);
-            if (balloon)
+
+            if (status == "done_updated" || status == "done_failed")
             {
-                ShowBalloon(result, truncated);
+                ShowBalloon(status, updatedNames, failedNames);
             }
         }
 
-        private static string JoinNames(List<string> names)
+        // -------------------------------------------------- core text (section A/B)
+
+        // Round 28 (section B) - the fixed 90s startup wait's scheduled
+        // first-cycle time (idle) plus the initial icon/tooltip.
+        private void SetIdleStatus(DateTime nextRunAtUtc)
         {
+            string core = ComputeCore("idle", null, null, 0, 0, 0, 0, 0, 0, null, nextRunAtUtc, null, null);
+            string message = "Furphy - " + core;
+            lock (_stateLock)
+            {
+                _status = "idle";
+                _phase = null;
+                _currentAddon = null;
+                _total = 0; _checked = 0; _updated = 0; _failed = 0; _upToDate = 0; _updatesFound = 0;
+                _coreText = core;
+                _nextRunAtUtc = nextRunAtUtc;
+            }
+            SetTooltip(message);
+            SetIconVariant("normal");
+        }
+
+        // Round 28 (section B, "checking - starting the server") - no
+        // per-addon progress exists yet.
+        private void SetCheckingStarting()
+        {
+            string core = ComputeCore("checking", null, null, 0, 0, 0, 0, 0, 0, null, null, null, null);
+            string message = "Furphy - " + core;
+            lock (_stateLock)
+            {
+                _status = "checking";
+                _phase = null;
+                _currentAddon = null;
+                _total = 0; _checked = 0; _updated = 0; _failed = 0; _upToDate = 0; _updatesFound = 0;
+                _coreText = core;
+            }
+            SetTooltip(message);
+            SetIconVariant("busy");
+            WriteStateFile(true);
+        }
+
+        private void ClearBadge()
+        {
+            string current;
+            lock (_stateLock) { current = _iconVariant; }
+            if (current == "updated" || current == "failed")
+            {
+                SetIconVariant("normal");
+            }
+        }
+
+        private static bool IsCycleRunning(string status)
+        {
+            return status == "checking" || status == "updating" || status == "finishing";
+        }
+
+        private static string IconVariantForStatus(string status)
+        {
+            switch (status)
+            {
+                case "checking":
+                case "updating":
+                case "finishing":
+                    return "busy";
+                case "done_updated":
+                    return "updated";
+                case "done_failed":
+                    return "failed";
+                default:
+                    return "normal";
+            }
+        }
+
+        // SPEC.md round 28, section B's per-status table, realized as one
+        // pure function - every tooltip/menu/state-file/SPA surface calls
+        // this (indirectly, via the small set of methods above that then
+        // store its result once) and never hand-formats its own copy of
+        // any of these sentences. doneStamp is the "HH:MM" wall-clock
+        // stamp baked in at the moment a terminal transition happened
+        // (null for every live/idle/waiting status, which do not reference
+        // it); nextRunAtUtc feeds FormatNextCheck for the two statuses
+        // that show a "next check" time.
+        private static string ComputeCore(
+            string status, string phase, string currentAddon,
+            int total, int checkedCount, int updated, int failed, int upToDate, int updatesFound,
+            string doneStamp, DateTime? nextRunAtUtc,
+            List<string> updatedNames, List<string> failedNames)
+        {
+            switch (status)
+            {
+                case "idle":
+                    return "Background updates on - next check " + FormatNextCheck(nextRunAtUtc);
+
+                case "checking":
+                    if (total <= 0)
+                    {
+                        return "Starting the updater...";
+                    }
+                    else
+                    {
+                        int p = checkedCount + 1;
+                        if (p > total) p = total;
+                        if (p < 1) p = 1;
+                        return "Checking addons (" + p.ToString(CultureInfo.InvariantCulture) +
+                            " of " + total.ToString(CultureInfo.InvariantCulture) + ")...";
+                    }
+
+                case "updating":
+                    return "Updating " + (currentAddon ?? "addon") + " (" +
+                        updatesFound.ToString(CultureInfo.InvariantCulture) + " of " +
+                        updatesFound.ToString(CultureInfo.InvariantCulture) + " updates)...";
+
+                case "finishing":
+                    return "Finishing...";
+
+                case "done_clean":
+                    return "Everything's up to date - checked " + doneStamp + " - next " + FormatNextCheck(nextRunAtUtc);
+
+                case "done_updated":
+                    return "Updated " + updated.ToString(CultureInfo.InvariantCulture) + " at " + doneStamp +
+                        ": " + JoinNamesTruncated(updatedNames, 4);
+
+                case "done_failed":
+                    {
+                        string plural = failed == 1 ? "" : "s";
+                        return failed.ToString(CultureInfo.InvariantCulture) + " addon" + plural +
+                            " couldn't update at " + doneStamp + " - open Furphy for details";
+                    }
+
+                case "waiting_game":
+                    return "Waiting for WoW to close - next check after";
+
+                case "waiting_busy":
+                    return "Waiting for the current task - retrying in 5 min";
+
+                case "unreachable":
+                    return "Couldn't reach the updater - retrying in 5 min";
+
+                default:
+                    return "Working...";
+            }
+        }
+
+        // "HH:mm" if nextRunAtUtc's local calendar date matches today,
+        // else "tomorrow HH:mm" - the interval is clamped 30..1440
+        // minutes (TraySettingsReader), so the next run is always within
+        // 24h and there is never a third case to handle.
+        private static string FormatNextCheck(DateTime? nextRunAtUtc)
+        {
+            if (!nextRunAtUtc.HasValue) return "soon";
+            DateTime local = nextRunAtUtc.Value.ToLocalTime();
+            string hhmm = local.ToString("HH:mm", CultureInfo.InvariantCulture);
+            if (local.Date == DateTime.Now.Date) return hhmm;
+            return "tomorrow " + hhmm;
+        }
+
+        // First `cap` names joined with ", ", then " +K more" if more
+        // remain - unlike the old JoinNames (no cap at all), this is what
+        // keeps a 30-addon update from blowing straight through the
+        // tooltip's 118-char TruncateTooltip cap with mid-word ellipsis.
+        private static string JoinNamesTruncated(List<string> names, int cap)
+        {
+            if (names == null || names.Count == 0) return "";
+            int shown = names.Count < cap ? names.Count : cap;
             StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < names.Count; i++)
+            for (int i = 0; i < shown; i++)
             {
                 if (i > 0) sb.Append(", ");
                 sb.Append(names[i]);
             }
-            return sb.ToString();
-        }
-
-        private static string BuildProgressTooltip(Dictionary<string, object> progress)
-        {
-            object indexObj;
-            object totalObj;
-            int index = progress.TryGetValue("index", out indexObj) ? JsonUtil.ToInt(indexObj, 0) : 0;
-            int total = progress.TryGetValue("total", out totalObj) ? JsonUtil.ToInt(totalObj, 0) : 0;
-            if (total > 0)
+            int remaining = names.Count - shown;
+            if (remaining > 0)
             {
-                return "Furphy - Updating " + index.ToString(CultureInfo.InvariantCulture) +
-                    " of " + total.ToString(CultureInfo.InvariantCulture) + "...";
+                sb.Append(" +" + remaining.ToString(CultureInfo.InvariantCulture) + " more");
             }
-            return "Furphy - Checking...";
+            return sb.ToString();
         }
 
         private string PingUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping"; }
@@ -4902,7 +5511,7 @@ boot();
             }
         }
 
-        // -------------------------------------------------- tooltip/state
+        // -------------------------------------------------- tooltip/icon/state
 
         private static string TruncateTooltip(string s)
         {
@@ -4913,11 +5522,26 @@ boot();
 
         // Marshals onto the UI thread since this is called from the
         // background worker/ThreadPool thread but NotifyIcon.Text must be
-        // set from the thread that owns its window.
+        // set from the thread that owns its window. Round 28 (section J):
+        // also appends to _tooltipHistory (collapsing consecutive
+        // duplicates only) when --tray-selftest is active, so a test can
+        // assert the exact sequence of distinct tooltip texts a run
+        // produced without polling the live icon.
         private void SetTooltip(string text)
         {
             string t = TruncateTooltip(text);
-            lock (_stateLock) { _tooltipCurrent = t; }
+            lock (_stateLock)
+            {
+                _tooltipCurrent = t;
+                _message = t;
+                if (_options.TraySelftestActive)
+                {
+                    if (_tooltipHistory.Count == 0 || _tooltipHistory[_tooltipHistory.Count - 1] != t)
+                    {
+                        _tooltipHistory.Add(t);
+                    }
+                }
+            }
             try
             {
                 if (IsHandleCreated)
@@ -4932,8 +5556,63 @@ boot();
             catch { }
         }
 
-        private void ShowBalloon(string result, string tooltipText)
+        // Round 28 (section C) - marshals the icon variant change onto the
+        // UI thread in the SAME manner as SetTooltip (never a tick where
+        // one has updated and the other hasn't - both are called back to
+        // back from every status-changing method above), and records
+        // _iconStateHistory the same way SetTooltip records
+        // _tooltipHistory.
+        private void SetIconVariant(string variant)
         {
+            lock (_stateLock)
+            {
+                _iconVariant = variant;
+                if (_options.TraySelftestActive)
+                {
+                    if (_iconStateHistory.Count == 0 || _iconStateHistory[_iconStateHistory.Count - 1] != variant)
+                    {
+                        _iconStateHistory.Add(variant);
+                    }
+                }
+            }
+            try
+            {
+                Icon icon = TrayIcons.Get(variant);
+                if (icon != null)
+                {
+                    if (IsHandleCreated)
+                    {
+                        BeginInvoke(new MethodInvoker(delegate() { try { _icon.Icon = icon; } catch { } }));
+                    }
+                    else
+                    {
+                        try { _icon.Icon = icon; } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Round 28 (section E) - fires exactly once per cycle, only for
+        // done_updated/done_failed, called only from CompleteCycle's own
+        // branch for those two statuses (never from a resting-state code
+        // path, which does not exist as a separate path today). Title is
+        // the literal "Furphy" (deliberately NOT AppConstants.WindowTitle,
+        // which must stay "Furphy Addon Manager" unchanged since
+        // WindowActivation.ActivateWindowByTitle matches windows by that
+        // exact string).
+        private void ShowBalloon(string status, List<string> updatedNames, List<string> failedNames)
+        {
+            List<string> names = (status == "done_failed") ? failedNames : updatedNames;
+            string text = JoinNamesTruncated(names, 4);
+            ToolTipIcon icon = (status == "done_failed") ? ToolTipIcon.Warning : ToolTipIcon.Info;
+
+            lock (_stateLock)
+            {
+                _balloonShown = true;
+                _balloonText = text;
+            }
+
             try
             {
                 if (IsHandleCreated)
@@ -4942,9 +5621,9 @@ boot();
                     {
                         try
                         {
-                            _icon.BalloonTipTitle = AppConstants.WindowTitle;
-                            _icon.BalloonTipText = tooltipText;
-                            _icon.BalloonTipIcon = (result == "failed") ? ToolTipIcon.Warning : ToolTipIcon.Info;
+                            _icon.BalloonTipTitle = "Furphy";
+                            _icon.BalloonTipText = text;
+                            _icon.BalloonTipIcon = icon;
                             _icon.ShowBalloonTip(8000);
                         }
                         catch { }
@@ -4957,20 +5636,32 @@ boot();
         // Rewrites tray-state.json atomically. Reuses HostFiles.
         // UpdateJsonObject's temp-file-then-move write by clearing the
         // dictionary it hands the mutator and refilling it from scratch -
-        // this file is a full snapshot each cycle, not a merge.
+        // this file is a full snapshot each cycle, not a merge. Round 28
+        // (section H) adds status/phase/currentAddon and the six running
+        // tallies alongside every pre-existing field, unchanged in shape,
+        // for back-compat with the E25 server contract.
         private void WriteStateFile(bool running)
         {
+            string status;
+            string phase;
+            string currentAddon;
+            int total, checkedCount, updatedTally, failedTally, upToDateTally, updatesFoundTally;
             string lastResult;
-            List<string> updated;
-            List<string> failed;
+            List<string> updatedNamesList;
+            List<string> failedNamesList;
             string message;
             DateTime? lastRunAtUtc;
             DateTime? nextRunAtUtc;
             lock (_stateLock)
             {
+                status = _status;
+                phase = _phase;
+                currentAddon = _currentAddon;
+                total = _total; checkedCount = _checked; updatedTally = _updated;
+                failedTally = _failed; upToDateTally = _upToDate; updatesFoundTally = _updatesFound;
                 lastResult = _lastResult;
-                updated = new List<string>(_updatedNames);
-                failed = new List<string>(_failedNames);
+                updatedNamesList = new List<string>(_updatedNames);
+                failedNamesList = new List<string>(_failedNames);
                 message = _message;
                 lastRunAtUtc = _lastRunAtUtc;
                 nextRunAtUtc = _nextRunAtUtc;
@@ -4979,10 +5670,19 @@ boot();
             Dictionary<string, object> snapshot = new Dictionary<string, object>();
             snapshot["running"] = running;
             snapshot["pid"] = (long)_pid;
+            snapshot["status"] = status;
+            snapshot["phase"] = phase;
+            snapshot["currentAddon"] = currentAddon;
+            snapshot["total"] = (long)total;
+            snapshot["checked"] = (long)checkedCount;
+            snapshot["updated"] = (long)updatedTally;
+            snapshot["failed"] = (long)failedTally;
+            snapshot["upToDate"] = (long)upToDateTally;
+            snapshot["updatesFound"] = (long)updatesFoundTally;
             snapshot["lastRunAt"] = lastRunAtUtc.HasValue ? (object)ToIso(lastRunAtUtc.Value) : null;
             snapshot["lastResult"] = lastResult;
-            snapshot["updatedNames"] = updated;
-            snapshot["failedNames"] = failed;
+            snapshot["updatedNames"] = updatedNamesList;
+            snapshot["failedNames"] = failedNamesList;
             snapshot["message"] = message;
             snapshot["nextRunAt"] = nextRunAtUtc.HasValue ? (object)ToIso(nextRunAtUtc.Value) : null;
 
@@ -5060,6 +5760,19 @@ boot();
             marker["stateFileWritten"] = _stateFileWritten;
             marker["mutexHeld"] = true;
             marker["exitCode"] = (long)1;
+            List<string> tooltipHistory;
+            List<string> iconStateHistory;
+            lock (_stateLock)
+            {
+                tooltipHistory = new List<string>(_tooltipHistory);
+                iconStateHistory = new List<string>(_iconStateHistory);
+            }
+            marker["tooltipHistory"] = tooltipHistory;
+            marker["iconStateHistory"] = iconStateHistory;
+            marker["menuStatusText"] = null;
+            marker["balloonShown"] = false;
+            marker["balloonText"] = null;
+            marker["clickOutcome"] = null;
             WriteMarker(marker);
         }
 
@@ -5075,18 +5788,20 @@ boot();
 
             // Toggle Start with Windows on, record the exact value text,
             // then always disable it again - the harness must not leave
-            // the Run value behind after a test run.
+            // the Run value behind after a test run. Round 28 (section K):
+            // always the test-scoped _startupValueName, never the real
+            // "FurphyAddonManager" value a live tray/install may own.
             string runValueWritten = null;
             bool runValueRemoved = false;
             try
             {
-                StartupRegistry.Enable(_exePath);
-                runValueWritten = StartupRegistry.ReadValue();
+                StartupRegistry.Enable(_startupValueName, _exePath);
+                runValueWritten = StartupRegistry.ReadValue(_startupValueName);
             }
             finally
             {
-                bool disabled = StartupRegistry.Disable();
-                runValueRemoved = disabled && !StartupRegistry.Exists();
+                bool disabled = StartupRegistry.Disable(_startupValueName);
+                runValueRemoved = disabled && !StartupRegistry.Exists(_startupValueName);
             }
             // Marshal onto the UI thread like SetTooltip/ShowBalloon do -
             // this runs on a ThreadPool thread and ToolStripMenuItem is
@@ -5096,7 +5811,7 @@ boot();
             {
                 if (IsHandleCreated)
                 {
-                    bool startupExists = StartupRegistry.Exists();
+                    bool startupExists = StartupRegistry.Exists(_startupValueName);
                     BeginInvoke(new MethodInvoker(delegate()
                     {
                         try { _startupMenuItem.Checked = startupExists; } catch { }
@@ -5109,12 +5824,22 @@ boot();
             string lastResult;
             List<string> updated;
             List<string> failed;
+            List<string> tooltipHistory;
+            List<string> iconStateHistory;
+            string menuStatusText;
+            bool balloonShown;
+            string balloonText;
             lock (_stateLock)
             {
                 tooltip = _tooltipCurrent;
                 lastResult = _lastResult;
                 updated = new List<string>(_updatedNames);
                 failed = new List<string>(_failedNames);
+                tooltipHistory = new List<string>(_tooltipHistory);
+                iconStateHistory = new List<string>(_iconStateHistory);
+                menuStatusText = _coreText;
+                balloonShown = _balloonShown;
+                balloonText = _balloonText;
             }
 
             Dictionary<string, object> marker = new Dictionary<string, object>();
@@ -5153,6 +5878,21 @@ boot();
             marker["stateFileWritten"] = _stateFileWritten;
             marker["mutexHeld"] = true;
             marker["exitCode"] = (long)0;
+
+            // Round 28 (section J) - the new tooltip/icon/menu/balloon/
+            // click history fields the "tooltip/icon/menu must agree,
+            // never flicker a wrong word" bar needs a test to actually
+            // prove against. clickOutcome carries the SAME value as the
+            // pre-existing clickAction field (kept for back-compat) - a
+            // single colon-separated string ("activate:foreground" /
+            // "activate:flashed" / "launch") so a simple leading
+            // "activate"/"launch" prefix check still works.
+            marker["tooltipHistory"] = tooltipHistory;
+            marker["iconStateHistory"] = iconStateHistory;
+            marker["menuStatusText"] = menuStatusText;
+            marker["balloonShown"] = balloonShown;
+            marker["balloonText"] = balloonText;
+            marker["clickOutcome"] = clickAction;
 
             WriteMarker(marker);
             // FinalizeExit() is called by RunSelftestSequenceSafe's
