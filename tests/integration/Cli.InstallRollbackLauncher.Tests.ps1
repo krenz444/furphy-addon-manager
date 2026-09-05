@@ -265,3 +265,74 @@ Describe '-Launcher does NOT skip when updatesCheckedAt is older than 10 minutes
         ($logText -like '*recently checked*') | Should Be $false
     }
 }
+
+Describe '-Launcher''s own second launch skips because ITS OWN first launch wrote updatesCheckedAt (Round 26 hardening, item 4)' -Tags 'Network' {
+    # Loose-end (4): the skip-if-recently-checked rule is documented as
+    # "checked by ANY means... the source doesn't matter, only recency" -
+    # this proves the "a previous -Launcher run" leg of that claim for
+    # real, with NO manually-seeded state.json at all (unlike the two
+    # Describes above, which seed state.json by hand to test the READ side
+    # in isolation). Two real, back-to-back -Launcher child processes
+    # against a completely fresh root: the first must actually perform a
+    # real check (one result row, a real - if fast-failing - CurseForge
+    # round trip for the bogus project id below) and, in doing so, write
+    # ROOT\state.json's updatesCheckedAt.retail itself; the second, fired
+    # immediately after with no other change, must then see ITS OWN
+    # sibling process's write and skip. If Save-LauncherUpdatesCheckedAt
+    # were ever removed/unwired again, this whole Describe fails at the
+    # first It (state.json never appears) rather than only at the second.
+    $wowRoot = Copy-Fixture
+    $tempRoot = New-TempRoot -Name 'cli-launcher-self-write'
+    $cliPath = Join-Path $tempRoot 'addon-sync.ps1'
+    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination $cliPath -Force
+
+    $settings = @{ releaseType = 1; autoUpdateOnLaunch = $true; port = 47831; schemaVersion = 2 }
+    ConvertTo-Json -InputObject $settings -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'settings.json') -Encoding UTF8
+
+    $flavourDir = Join-Path $tempRoot 'flavours\retail'
+    New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+    $record = [PSCustomObject]@{
+        name          = 'BogusAddonSelfWrite'
+        projectId     = 999999997
+        fileId        = 1000
+        version       = '1.0.0'
+        fileName      = 'BogusAddonSelfWrite-1.0.0.zip'
+        installedAt   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        folders       = @('BogusAddonSelfWrite')
+        author        = $null
+        ignoreUpdates = $false
+        pinnedFileId  = $null
+        releaseType   = $null
+        previousFileId  = $null
+        previousVersion = $null
+    }
+    ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
+
+    $statePath = Join-Path $tempRoot 'state.json'
+
+    It 'first launch: no state.json yet, reaches the real per-addon sync, and writes updatesCheckedAt itself' {
+        (Test-Path -LiteralPath $statePath) | Should Be $false
+
+        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 60 -ArgumentList @(
+            '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
+            '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns'))
+        $r.ExitCode | Should Be 0
+        @($r.Json.results).Count | Should Be 1
+
+        (Test-Path -LiteralPath $statePath) | Should Be $true
+        $obj = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        ([string]::IsNullOrWhiteSpace($obj.updatesCheckedAt.retail)) | Should Be $false
+    }
+
+    It 'second launch, fired immediately after: skips (empty results, "recently checked"), with no state.json edited by the test itself' {
+        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 15 -ArgumentList @(
+            '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
+            '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns'))
+        $r.ExitCode | Should Be 0
+        @($r.Json.results).Count | Should Be 0
+
+        $syncLog = Join-Path $tempRoot 'sync.log'
+        $logText = Get-Content -LiteralPath $syncLog -Raw
+        ($logText -like '*recently checked*') | Should Be $true
+    }
+}

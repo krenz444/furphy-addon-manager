@@ -246,7 +246,12 @@ function Invoke-CliProcess {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [string[]]$ArgumentList = @(),
-        [int]$TimeoutSec = 60
+        [int]$TimeoutSec = 60,
+        # Round 26 (hardening, item 2): extra environment variables for
+        # THIS child process only - never touches the test-runner's own
+        # process environment, so a caller setting FURPHY_TEST_CF_BASEURL/
+        # FURPHY_TEST_WAGO_BASEURL here cannot leak into any other test.
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
     $fullArgs = New-Object 'System.Collections.Generic.List[string]'
@@ -267,6 +272,9 @@ function Invoke-CliProcess {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
+    foreach ($key in $EnvironmentOverrides.Keys) {
+        $psi.EnvironmentVariables[$key] = [string]$EnvironmentOverrides[$key]
+    }
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -312,10 +320,11 @@ function Invoke-CliJson {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [string[]]$ArgumentList = @(),
-        [int]$TimeoutSec = 60
+        [int]$TimeoutSec = 60,
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
-    $r = Invoke-CliProcess -ScriptPath $ScriptPath -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec
+    $r = Invoke-CliProcess -ScriptPath $ScriptPath -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec -EnvironmentOverrides $EnvironmentOverrides
     try {
         $parsed = $r.StdOut | ConvertFrom-Json -ErrorAction Stop
     } catch {
@@ -382,8 +391,125 @@ function Stop-StaticServer {
 }
 
 # ---------------------------------------------------------------------
+# Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
+# connection and never reads or responds - used to prove addon-sync.ps1's
+# FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL override actually reaches
+# the real HTTP call sites, and that the -Launcher wall-clock budget cap
+# bounds a real launch chain even when every network call would otherwise
+# hang for its own -TimeoutSec.
+# ---------------------------------------------------------------------
+
+function Start-BlackHoleListener {
+    <#
+      Starts a plain System.Net.Sockets.TcpListener on -Port and returns it
+      immediately - deliberately NEVER calls AcceptTcpClient/reads/writes.
+      A real TCP connect against this port still succeeds (the OS completes
+      the handshake and queues the connection in the listen backlog the
+      moment Start() is called, with no application-level accept needed for
+      that), but no HTTP request sent over it ever gets a response - the
+      client's own request timeout is what eventually ends the call. Stop
+      with Stop-BlackHoleListener.
+    #>
+    param([int]$Port)
+
+    $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback, $Port)
+    $listener.Start()
+    if (-not (Test-PortOpen -Port $Port -TimeoutMs 2000)) {
+        try { $listener.Stop() } catch { }
+        throw "Start-BlackHoleListener: port $Port did not come up"
+    }
+    return $listener
+}
+
+function Stop-BlackHoleListener {
+    param($Listener)
+    if (-not $Listener) { return }
+    try { $Listener.Stop() } catch { }
+}
+
+# ---------------------------------------------------------------------
 # addon-server.ps1 test instance
 # ---------------------------------------------------------------------
+
+function Get-FurphyProcessCommandLine {
+    <#
+      Round 26 (hardening, item 1): returns the full command line of a live
+      process id via Win32_Process (Get-Process alone exposes no command
+      line), or $null if the process is gone/inaccessible. Used to tell a
+      genuine straggler addon-server.ps1 (ours - safe to force-stop) apart
+      from some unrelated process that just happens to be squatting on the
+      test port (never ours - must not be touched).
+    #>
+    param([int]$ProcessId)
+    try {
+        $wp = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if ($wp) { return [string]$wp.CommandLine }
+    } catch {
+    }
+    return $null
+}
+
+function Clear-StaleTestServerOnPort {
+    <#
+      Round 26 (hardening, item 1): if -Port is already answering a TCP
+      connect, look for the OWNING process and force-stop it ONLY when its
+      own command line clearly identifies it as one of ours (an
+      addon-server.ps1 invocation - matches this same pattern regardless of
+      which -Root/-Port a prior interrupted run used). A port held by
+      anything else (some unrelated process, or a process Win32_Process
+      could not be queried for) is left alone and Start-TestServer still
+      throws, same as before this fix - this only removes the one class of
+      stale-server false failure a crashed/Ctrl+C'd prior test run leaves
+      behind, never a blind "kill whatever is on the port".
+      Returns $true if the port was busy but is now confirmed free (or was
+      never busy to begin with), $false if it is still busy with something
+      this function declined to touch.
+    #>
+    param([int]$Port)
+
+    if (-not (Test-PortOpen -Port $Port -TimeoutMs 300)) { return $true }
+
+    $killedAny = $false
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        foreach ($c in @($conns)) {
+            $cmdLine = Get-FurphyProcessCommandLine -ProcessId $c.OwningProcess
+            if ($cmdLine -and $cmdLine -match 'addon-server\.ps1') {
+                Write-Host "  Start-TestServer: port $Port held by a straggler addon-server.ps1 (PID $($c.OwningProcess)) from an interrupted prior run - force-stopping it. Command line: $cmdLine" -ForegroundColor Yellow
+                try { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue } catch { }
+                $killedAny = $true
+            }
+        }
+    } catch {
+        # Get-NetTCPConnection unavailable/failed - fall through to the
+        # plain re-check below; Start-TestServer still throws its own clear
+        # error if the port is genuinely still busy.
+    }
+
+    if ($killedAny) {
+        # Give the OS a moment to actually release the socket.
+        $deadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $deadline) {
+            if (-not (Test-PortOpen -Port $Port -TimeoutMs 300)) { return $true }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+
+    return -not (Test-PortOpen -Port $Port -TimeoutMs 300)
+}
+
+function Get-LastLogLines {
+    <# Returns the last -Lines of -Path as a single newline-joined string, or a one-line "no log" note. Never throws. #>
+    param([string]$Path, [int]$Lines = 20)
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return "(no log at $Path)" }
+        $tail = Get-Content -LiteralPath $Path -Tail $Lines -ErrorAction Stop
+        if (-not $tail) { return "(log at $Path is empty)" }
+        return ($tail -join "`n")
+    } catch {
+        return "(could not read log at $Path : $($_.Exception.Message))"
+    }
+}
 
 function Start-TestServer {
     <#
@@ -392,6 +518,27 @@ function Start-TestServer {
       -Port (default 47899 per the task brief - never the real 47831).
       Waits for /api/ping to answer before returning. Returns an object
       Stop-TestServer accepts.
+
+      Round 26 (hardening, item 1): three reliability fixes to the readiness
+      wait, made after a full-suite run showed
+      "server on port 47899 did not answer /api/ping in time" fail once and
+      pass on rerun (real flakiness under combined load - headless Edge,
+      the perf layer, and many server starts contending for CPU/disk at
+      once can push a real cold start past the old, tight budget):
+        1. A stale port is no longer an automatic hard failure - see
+           Clear-StaleTestServerOnPort above, called before the port-busy
+           check below even throws.
+        2. The /api/ping wait now backs off (200ms up to a 2s ceiling,
+           doubling) instead of a fixed 250ms poll, and the combined
+           Wait-Port + ping-retry budget is 60 seconds (was effectively
+           ~20s: a 15s Wait-Port timeout plus 20 fixed 250ms-spaced
+           attempts) - long enough to absorb a genuinely slow cold start
+           instead of just a slightly-larger fixed one.
+        3. A timeout failure now includes the server's own last 20
+           server.log lines (Get-LastLogLines) in the thrown message, so a
+           real failure (a startup exception, a bind failure, a hung
+           migration) is diagnosable from the test output directly instead
+           of needing a separate manual repro.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -437,8 +584,8 @@ function Start-TestServer {
     # would appear to pass having exercised nothing it thought it was
     # exercising. Fail fast instead: refuse to even try if the port is
     # already answering.
-    if (Test-PortOpen -Port $Port -TimeoutMs 300) {
-        throw "Start-TestServer: port $Port already in use - stale server from an interrupted prior run? Stop it first (or run tests\run-all.ps1, whose hygiene sweep now also runs at the START of a run, not only in its trailing finally)."
+    if (-not (Clear-StaleTestServerOnPort -Port $Port)) {
+        throw "Start-TestServer: port $Port already in use by something that is NOT one of our own addon-server.ps1 processes - refusing to touch it. Stop whatever owns port $Port first (or run tests\run-all.ps1, whose hygiene sweep now also runs at the START of a run, not only in its trailing finally)."
     }
 
     $argList = New-Object 'System.Collections.Generic.List[string]'
@@ -455,21 +602,39 @@ function Start-TestServer {
 
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
 
+    # Round 26 (hardening, item 1): one 60-second overall budget covering
+    # both the TCP-level wait AND the ping-retry wait (was a fixed ~15s +
+    # ~20*0.25s split that could time out well before a genuinely slow
+    # cold start under heavy combined-suite load finished). Backs off
+    # 200ms -> 2s (doubling, capped) between attempts instead of a fixed
+    # 250ms poll, so a slow start does not burn the whole budget on
+    # excessive short-interval retries.
+    $overallDeadline = (Get-Date).AddSeconds(60)
+    $portReady = $false
+    while ((Get-Date) -lt $overallDeadline) {
+        if (Test-PortOpen -Port $Port -TimeoutMs 300) { $portReady = $true; break }
+        Start-Sleep -Milliseconds 200
+    }
+
     $up = $false
-    if (Wait-Port -Port $Port -TimeoutSec 15) {
-        for ($i = 0; $i -lt 20; $i++) {
+    if ($portReady) {
+        $backoffMs = 200
+        while ((Get-Date) -lt $overallDeadline) {
             try {
                 Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/ping" -Method Get -TimeoutSec 2 | Out-Null
                 $up = $true
                 break
             } catch {
-                Start-Sleep -Milliseconds 250
+                Start-Sleep -Milliseconds $backoffMs
+                $backoffMs = [Math]::Min($backoffMs * 2, 2000)
             }
         }
     }
     if (-not $up) {
         try { if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } } catch { }
-        throw "Start-TestServer: server on port $Port did not answer /api/ping in time"
+        $logPath = Join-Path -Path $Root -ChildPath 'server.log'
+        $tail = Get-LastLogLines -Path $logPath -Lines 20
+        throw "Start-TestServer: server on port $Port did not answer /api/ping in time (60s budget exhausted, portReady=$portReady). Last lines of $logPath :`n$tail"
     }
 
     return [PSCustomObject]@{ Process = $proc; Port = $Port; Root = $Root }

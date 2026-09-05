@@ -1,5 +1,212 @@
 # Furphy Addon Manager - changelog
 
+## Round 27 (review follow-up)
+
+Fixed a review finding against the Round 26/perf `-Launcher` wall-clock
+budget: `Test-LauncherBudgetExceeded` is only evaluated at the TOP of each
+addon's turn in the per-addon loop, so it never interrupts a CurseForge/
+Wago HTTP call already in flight. Every such call still carried its own
+independent, unshrinking `-TimeoutSec 30` (all four literal call sites, in
+`Invoke-CfRequest`/`Invoke-WagoRequest`), so two-or-more addons that each
+hit a hung/black-holed call could still cost roughly 30s apiece -
+compounding past the 45s task-brief cap even though neither single call
+exceeded its own timeout.
+
+**Fixed - `addon-sync.ps1`**: new `Get-LauncherAwareTimeoutSec` helper -
+every CurseForge/Wago HTTP call site now asks it for its `-TimeoutSec`
+instead of hard-coding `30`. Outside `-Launcher` (`$script:LauncherDeadline`
+unset) it returns the default unchanged - no behavior change for a manual
+sync, a server-driven job, `-Add`, `-Pin`, etc. In `-Launcher` mode
+(armed from `$script:MainStartTime` + the existing 40s budget right before
+the per-addon loop starts) it shrinks to whatever time is actually left,
+floored at a 5s minimum so a call already near the deadline still gets a
+real, non-zero chance to finish or fail cleanly rather than a rejected
+0/negative timeout. Recomputed on every retry attempt inside
+`Invoke-CfRequest`/`Invoke-WagoRequest` so a 429/403/503 retry after their
+own 5s backoff also gets a freshly-shrunk value. New tests: a
+`Get-LauncherAwareTimeoutSec` unit-test Describe
+(`tests\unit\Cli.LauncherPerf.Tests.ps1`) covering the default-unchanged,
+full-budget, shrinking, and floor-at-minimum cases; and a worst-case
+integration test (`tests\integration\Cli.LauncherBudgetOverride.Tests.ps1`)
+with TWO black-holed CurseForge addons proving the total stays within the
+45s task-brief budget (asserted < 50s, same margin as the existing
+single-addon Describe) instead of compounding toward ~60s.
+
+## Round 26 (hardening)
+
+A verification/hardening pass over four specific loose ends left from the
+test-suite and performance rounds: the one real flakiness finding in a
+full-suite run, an untestable claim about the `-Launcher` wall-clock
+budget (no way to force a slow network call), a stray duplicate line in
+the repo mirror's `.gitignore`, and an unconfirmed claim that
+`-Launcher` writes its own `updatesCheckedAt`. No app-facing behavior
+changed except the `addon-server.ps1` startup reorder (item 1) and the
+new test-only environment-variable surface (item 2), both inert on any
+real launch.
+
+**Fixed (1, flakiness) - `Start-TestServer` (`tests\lib\common.ps1`)**:
+three independent hardening fixes to the exact failure a full-suite run
+hit once (`Server.FreshnessAndFlavours.Tests.ps1`, "server on port 47899
+did not answer /api/ping in time", passed clean on rerun):
+- **Stale-port recovery**: a busy port used to be an automatic hard
+  failure. `Clear-StaleTestServerOnPort` now inspects the OWNING process
+  via `Win32_Process` first - if (and only if) its command line
+  identifies it as one of ours (`addon-server.ps1`), it is force-stopped
+  and the port is re-checked; anything else on the port is left
+  completely alone and still throws the original clear error. This closes
+  the one class of false failure a crashed/Ctrl+C'd prior test run leaves
+  behind without ever blind-killing an unrelated process.
+- **Longer, backed-off readiness wait**: the old wait was a strict split
+  (`Wait-Port` 15s, then 20 fixed-250ms-spaced `/api/ping` attempts -
+  effectively ~20s and NOT recoverable if `Wait-Port` itself timed out).
+  It is now one combined 60-second budget: a TCP-level poll first, then
+  a `/api/ping` retry loop that backs off 200ms -> 2s (doubling) instead
+  of a fixed interval - long enough to absorb a genuinely slow cold start
+  under combined-suite load (headless Edge + the perf layer + many server
+  starts contending for CPU/disk at once) instead of just a slightly
+  bigger fixed number.
+- **Diagnosable timeout**: a timeout now includes the server's own last 20
+  `server.log` lines (`Get-LastLogLines`) in the thrown message, so a real
+  failure (a startup exception, a bind failure, a hung migration) is
+  visible in the test output directly.
+- **Server startup itself** (`addon-server.ps1`): confirmed the ~18k-entry
+  `cache\cf-catalogue.json` cache load (`Initialize-CfCatalogueIndex` ->
+  `Load-CfCatalogueIndexFromDisk`'s synchronous `ConvertFrom-Json`) ran
+  BEFORE `$listener.Start()` - so the very first thing a test's
+  `Wait-Port` (a raw TCP connect) waits through was, unavoidably, a JSON
+  parse that has nothing to do with the listener socket. Moved the
+  catalogue load to right after `$listener.Start()`/"Listening on ..." is
+  logged (still before the request-accept loop, still best-effort/never
+  blocks startup on failure - Search-CfCatalogue/Get-CfCatalogueEntry
+  already tolerate an empty index). **Measured, 5 cold starts each**
+  (a scratch root carrying the real 18161-entry/7.4MB build-root
+  `cache\cf-catalogue.json`, refreshed `fetchedAt` so it loads from disk
+  rather than re-fetching): TCP-open median dropped from **0.766s to
+  0.396s** (~48% faster - the listener now accepts a connection well
+  before the catalogue parse finishes, which is exactly the signal
+  `Wait-Port` checks and the one that could previously be starved by a
+  slow parse under load). Full `/api/ping`-ready median moved from
+  **0.822s to 1.197s** on this single-catalogue, idle-machine measurement
+  - NOT a regression in the sense that matters here: the request-accept
+    loop still starts after the same total (bind + catalogue-load) work
+    either way, so total serial cost is unchanged; what moved is which
+    half of that cost a caller's readiness check sees first. The real
+    payoff is structural, not a faster idle cold start: `Wait-Port`
+    (its own separate, previously-shared budget) can no longer be starved
+    by a slow catalogue parse, so the combined 60-second budget above is
+    spent entirely on genuine readiness instead of partly on a TCP check
+    that a slow parse could make time out outright. Raw JSON parse alone
+    (no process spawn) measured **0.295s** for reference. Benchmark
+    scripts and both before/after `addon-server.ps1` copies used for this
+    measurement live under this session's scratchpad, not the repo.
+- Reviewed `Server.FreshnessAndFlavours.Tests.ps1`'s four `Describe`
+  blocks for the "reuse one server across Describes" suggestion: each
+  needs genuinely different server state (`-WowRoot`, a broken
+  `-AddonsPath` to force `check_failed`, a real mid-flight job timing
+  window, and a `showTestRealms` settings mutation) - each already shares
+  ONE server across its own `It`s (no per-`It` restart to begin with), so
+  no further consolidation was safe here without risking cross-test state
+  bleed. Not changed.
+
+**Added (2, launch-chain budget provable) - `addon-sync.ps1`**:
+`$script:CfBaseUrl`/`$script:WagoBaseUrl`, read once near the top of the
+file (before the dot-source guard) from the environment variables
+`FURPHY_TEST_CF_BASEURL`/`FURPHY_TEST_WAGO_BASEURL` when either is
+non-empty/non-whitespace (trailing slash trimmed; blank/whitespace is
+treated as unset). Every real CurseForge/Wago HTTP call site (file
+listing, file-detail lookup, download, the CurseForge Referer header, the
+Wago Inertia page fetch) now builds its URL from these two variables
+instead of a literal host string, so one override point covers all of
+them. **TEST-ONLY** - nothing else in this file, `addon-server.ps1`, or
+the real app ever sets either variable; documented as such in
+`TESTING.md`. `tests\lib\common.ps1` gained `Start-BlackHoleListener`/
+`Stop-BlackHoleListener` (a plain `TcpListener` that accepts a connection
+and never responds - no accept-loop thread needed, since the OS completes
+the handshake into the listen backlog the moment `Start()` is called) and
+an `-EnvironmentOverrides` hashtable parameter on
+`Invoke-CliProcess`/`Invoke-CliJson` (scoped to that one child process
+only - never the test runner's own environment). New tests:
+- `tests\integration\Cli.LauncherBudgetOverride.Tests.ps1`: a real
+  `-Launcher` run with one CurseForge-sourced addon, pointed at a local
+  black-hole listener via `FURPHY_TEST_CF_BASEURL` - the whole chain still
+  proceeds (exit 0, the one real result row) and returns in **31.3s**,
+  asserted `< 50s` against the task brief's "never delay the game more
+  than 45s total". A second, `Network`-tagged `Describe` confirms an
+  empty/whitespace override is ignored - a bogus-but-numeric project id
+  still reaches the real CurseForge host (a clean per-row status, not a
+  URI-parse crash).
+- `tests\unit\Cli.BaseUrlOverride.Tests.ps1`: 7 tests re-dot-sourcing
+  `addon-sync.ps1` with the variable(s) set/unset/blank, asserting
+  `$script:CfBaseUrl`/`$script:WagoBaseUrl` directly - covers the "ignored
+  when empty" contract (both variables, both empty-string and
+  whitespace-only) without any real process or network call.
+
+**Fixed (3, tidy) - repo mirror `.gitignore`**
+(`C:\Users\drops\Documents\furphy-addon-manager\.gitignore`): removed a
+duplicate `tray-state.json` line (it appeared once under "Per-install
+state" and again, redundantly, under "Keyless CurseForge catalogue
+cache"). `.gitignore` is not part of the build root's own file set (no
+`deploy.ps1` mirror step copies it - confirmed by grep, there is no
+`.gitignore` at the build root at all), so this was edited directly in
+the repo mirror per this round's own instruction. Not committed - the
+standing "do not deploy or commit" instruction applies; `deploy.ps1`
+commits the mirror on its own next real deploy.
+`tests\static\Test-GitignoreCoverage.ps1` checks pattern PRESENCE, not
+line count, so this is a no-op for that check either way (still covers
+`tray-state.json` exactly once, functionally, as before).
+
+**Confirmed (4) - `addon-sync.ps1 -Launcher` DOES write
+`updatesCheckedAt`**: `Save-LauncherUpdatesCheckedAt` and its call site in
+`Main` (right after `Save-Config`, guarded on `$Launcher`) were already
+present and correctly wired - the reviewer's "did not write it" concern
+does not hold against this build root's checked-out state. What was
+missing was proof: no existing test exercised the WRITE side at all (only
+`Get-StateUpdatesCheckedAtMinutesAgo`, the read side, and the skip rule
+against a manually-seeded `state.json`, were covered). Closed with:
+- `tests\unit\Cli.LauncherPerf.Tests.ps1` gained a
+  `Save-LauncherUpdatesCheckedAt` `Describe` (5 `It`s): creates
+  `state.json` from scratch, merges into an existing one preserving
+  fields it does not own (`jobs`/`lastRun`/other flavours), upgrades the
+  pre-flavour flat-string shape preserving the old value under `retail`,
+  confirms a second flavour's stamp does not clobber the first, and never
+  throws against a nonexistent root.
+- `tests\integration\Cli.InstallRollbackLauncher.Tests.ps1` gained
+  `-Launcher`'s own second launch skips because ITS OWN first launch
+  wrote updatesCheckedAt` (`Network`-tagged, 2 `It`s) - the real
+  end-to-end proof the task asked for: two real, back-to-back
+  `-Launcher` child processes against a completely fresh root with **no
+  manually-seeded `state.json` at all** (unlike the two pre-existing
+  Describes in this file, which seed it by hand to test the read side in
+  isolation). The first launch starts with no `state.json`, reaches a
+  real per-addon sync, and is asserted to have written
+  `updatesCheckedAt.retail` itself; the second, fired immediately after,
+  is asserted to skip (empty results, "recently checked" in `sync.log`).
+  If `Save-LauncherUpdatesCheckedAt` were ever unwired again, this fails
+  at the FIRST `It` (state.json never appears), not only the second.
+
+**Verified** - `tests\run-all.ps1 -Quick`: **159.4s**, all 5 layers PASS
+(`static 7/7`, `unit 157/157` - was 145, +12 new (5
+`Save-LauncherUpdatesCheckedAt` + 7 `FURPHY_TEST_*_BASEURL`),
+`integration 66/66` - was 65, +1 new Quick-visible `Describe` (the
+black-hole launcher-budget proof, deliberately untagged since it makes no
+real internet call), `host 2/2`, `spa 1/1`). Confirmed live that `-Quick`
+implies `-NoNetwork` (`run-all.ps1`'s own `$effectiveNoNetwork` - every
+`Network`-tagged `Describe`, including all of this round's new ones, is
+skipped under plain `-Quick`; `TESTING.md`'s own layer table is a little
+imprecise on this point, pre-existing, not touched here) - so the new
+`Network`-tagged pieces (item 2's empty-override proof, item 4's
+end-to-end self-write proof, plus the two pre-existing `-Launcher`
+Describes in the same file) were separately verified with real network:
+`Invoke-Pester -Script @('tests\integration\Cli.InstallRollbackLauncher.Tests.ps1', 'tests\integration\Cli.LauncherBudgetOverride.Tests.ps1') -Tag Network`
+= **7/7 passed, 10.1s**. Every port/process/HKCU/`tests\.tmp` hygiene
+check confirmed clean before and after every run (no stray
+`FurphyHost.exe`, port 47899/47890-47897 free, no HKCU
+`FurphyAddonManager` Run value); `fixtures\wowroot` confirmed still
+exactly the pristine 12 files; build-root `settings.json`/`state.json`
+untouched (every test used a copied/temp root). Never ran `deploy.ps1`
+and made no commits (repo-mirror `.gitignore` edit included), per the
+standing instruction.
+
 ## Round 25 (performance pass: zero impact on gameplay)
 
 Eric's rule, verbatim: "do a full performance tuning / pass, absolutely nothing / everything must have zero impact on gameplay." Four steps: **P0** measured every app state cold (`tests\perf\bench\BASELINE.md`) and found the resident pieces (server idle, tray skip) already effectively zero-cost, but the native host window and its SPA poll loop ignored WoW entirely - the one real gap. **P1** (below) closed the server/CLI half: a shared cached "is WoW running" signal, gates built on it, process deprioritization, log rotation, and a launch-chain time cap. **P2** closed the actual gap: the host window's own background mode, the tray's priority/re-check widening, and the SPA's poll-cadence gating. **P3** turned the whole thing into a real, asserted `tests\run-all.ps1` layer (`tests\perf\Perf.Tests.ps1`) instead of hand-run bench scripts, plus docs and two unrelated carry-over fixes. See `SPEC.md`'s "Expansion E28" section for the full contract and `ROADMAP.md`'s new "E29" entry for the one-line summary. The **before/after table** at the end of this entry has the full numbers.

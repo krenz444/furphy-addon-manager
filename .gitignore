@@ -27,4 +27,3 @@ host/smoke-result.txt
 
 # Keyless CurseForge catalogue cache (regenerated; never commit)
 cache/
-tray-state.json

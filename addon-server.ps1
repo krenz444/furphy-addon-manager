@@ -7149,7 +7149,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.9.0'
+$Script:Version = '1.9.1'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -7285,7 +7285,17 @@ Load-CheckState
 # catalogue index that /api/cf/browse and /api/cf/enrich fall back to when
 # no key is configured. Best-effort - see the function's own doc comment;
 # a failure here never blocks the server from starting.
-Initialize-CfCatalogueIndex
+# Round 26 (hardening, item 1): this call used to run HERE, before the
+# HttpListener ever binds - Load-CfCatalogueIndexFromDisk's synchronous
+# ConvertFrom-Json over a ~18k-entry cf-catalogue.json cache measurably
+# delays every cold start behind a plain-JSON parse that has nothing to do
+# with the listener itself. Moved below $listener.Start() (bind first, load
+# lazily after "Listening on ..." is logged) - see that call site's own
+# comment for the full before/after measurement. Still runs before the
+# request-accept loop starts (Search-CfCatalogue/Get-CfCatalogueEntry are
+# only ever called from within a request handler, never during startup
+# itself), so no behavior changes - only the wall-clock ordering relative to
+# the listener's own bind does.
 
 if (-not (Test-Path -LiteralPath $Script:Root)) {
     throw "Root path does not exist: $Script:Root"
@@ -7361,6 +7371,14 @@ try {
 }
 
 Write-ServerLog "Listening on $(($listener.Prefixes | ForEach-Object { $_ }) -join ' and ')"
+
+# Round 26 (hardening, item 1): moved from before $listener.Start() (see that
+# call site's own comment). The listener is now bound and already queuing
+# any incoming connection (a test's Wait-Port/TCP-connect succeeds against
+# http.sys's own accept queue immediately) before this potentially-slow disk
+# read + JSON parse runs, instead of after it. Still best-effort/never
+# blocks startup on failure - unchanged from before the move.
+Initialize-CfCatalogueIndex
 
 if ($OpenBrowser) {
     $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'

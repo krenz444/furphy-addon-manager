@@ -174,6 +174,30 @@ $ErrorActionPreference = 'Stop'
 
 $script:CfUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
 
+# Round 26 (hardening, item 2): test-only base-URL override surface. When
+# FURPHY_TEST_CF_BASEURL / FURPHY_TEST_WAGO_BASEURL is set to a non-empty
+# value, it replaces the real CurseForge/Wago base URL below for the life
+# of this process - every real call site further down builds its URL from
+# $script:CfBaseUrl/$script:WagoBaseUrl rather than a literal host, so one
+# override point covers all of them. TEST-ONLY: nothing else in this file,
+# addon-server.ps1, or the real app ever sets these two variables - a real
+# user's launch always resolves to the real hosts below. This exists so an
+# integration test can point both hosts at a local black-hole listener
+# (accepts a connection, never responds) and prove the -Launcher wall-clock
+# budget cap (Test-LauncherBudgetExceeded) actually bounds a real launch
+# chain even when every HTTP call would otherwise hang for its own
+# -TimeoutSec. An empty/whitespace-only value is treated the same as unset
+# (falls back to the real host) - see the "ignored when empty" unit test in
+# tests\unit\Cli.BaseUrlOverride.Tests.ps1.
+$script:CfBaseUrl = 'https://www.curseforge.com'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_CF_BASEURL)) {
+    $script:CfBaseUrl = $env:FURPHY_TEST_CF_BASEURL.TrimEnd('/')
+}
+$script:WagoBaseUrl = 'https://addons.wago.io'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL)) {
+    $script:WagoBaseUrl = $env:FURPHY_TEST_WAGO_BASEURL.TrimEnd('/')
+}
+
 # =====================================================================
 # Flavours (FLAVORS-SPEC.md S2.1) - static tables, defined once at script
 # scope so every function below (and addon-server.ps1's duplicate) reads
@@ -522,7 +546,7 @@ function Invoke-CfRequest {
 
     $headers = @{
         'Accept'  = 'application/json'
-        'Referer' = 'https://www.curseforge.com/'
+        'Referer' = "$script:CfBaseUrl/"
     }
 
     $maxAttempts = 2
@@ -534,12 +558,16 @@ function Invoke-CfRequest {
         $attempt++
         $shouldRetry = $false
         $lastError = $null
+        # Round 26 hardening: recomputed every attempt (not hoisted above
+        # the loop) so a retry after the 5s 429/403 backoff below still
+        # gets a freshly-shrunk value in -Launcher mode.
+        $timeoutSec = Get-LauncherAwareTimeoutSec -DefaultTimeoutSec 30
         try {
             if ($OutFile) {
-                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec 30 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
+                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
                 $result = $null
             } else {
-                $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
             }
         } catch {
             $lastError = $_
@@ -584,7 +612,7 @@ function Get-CfFiles {
     if ($MaxReleaseType -ge 3) {
         $removeAlphasPart = ''
     }
-    $uri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files?pageIndex=0&pageSize=20&sort=dateCreated&sortDescending=true" + $removeAlphasPart
+    $uri = "$script:CfBaseUrl/api/v1/mods/$ProjectId/files?pageIndex=0&pageSize=20&sort=dateCreated&sortDescending=true" + $removeAlphasPart
     $response = Invoke-CfRequest -Uri $uri
     if (-not $response) {
         throw "Empty response listing files for project $ProjectId"
@@ -689,7 +717,7 @@ function Get-CfFileById {
         [Parameter(Mandatory = $true)][int64]$FileId
     )
 
-    $uri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files/$FileId"
+    $uri = "$script:CfBaseUrl/api/v1/mods/$ProjectId/files/$FileId"
     $response = Invoke-CfRequest -Uri $uri
     if (-not $response) {
         return $null
@@ -721,7 +749,7 @@ function Get-DownloadedZip {
 
     $fileId = [int64]$SelectedFile.id
     $zipPath = Join-Path -Path $StagingPath -ChildPath ("{0}-{1}.zip" -f $ProjectId, $fileId)
-    $downloadUri = "https://www.curseforge.com/api/v1/mods/$ProjectId/files/$fileId/download"
+    $downloadUri = "$script:CfBaseUrl/api/v1/mods/$ProjectId/files/$fileId/download"
 
     Invoke-CfRequest -Uri $downloadUri -OutFile $zipPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon | Out-Null
 
@@ -789,12 +817,16 @@ function Invoke-WagoRequest {
         $attempt++
         $shouldRetry = $false
         $lastError = $null
+        # Round 26 hardening: see the matching comment in Invoke-CfRequest
+        # above - recomputed every attempt so a retry after the 5s 429/503
+        # backoff below still gets a freshly-shrunk value in -Launcher mode.
+        $timeoutSec = Get-LauncherAwareTimeoutSec -DefaultTimeoutSec 30
         try {
             if ($OutFile) {
-                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec 30 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
+                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
                 $result = $null
             } else {
-                $result = Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                $result = Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
             }
         } catch {
             $lastError = $_
@@ -903,7 +935,7 @@ function Get-WagoReleasesPage {
         [int]$Page = 1
     )
 
-    $uri = "https://addons.wago.io/addons/$Slug/versions?page=$Page"
+    $uri = "$script:WagoBaseUrl/addons/$Slug/versions?page=$Page"
     $props = Invoke-WagoInertiaRequest -PageUri $uri
     if (-not $props -or -not $props.releases) {
         return $null
@@ -2903,6 +2935,49 @@ function Test-LauncherBudgetExceeded {
     return (($Now - $StartTime).TotalSeconds -ge $BudgetSeconds)
 }
 
+function Get-LauncherAwareTimeoutSec {
+    <#
+      Round 26 hardening (review finding: "Launcher wall-clock budget can
+      still exceed 45s with 2+ slow CurseForge-sourced addons"): the
+      per-addon loop's Test-LauncherBudgetExceeded check only runs at the
+      TOP of each addon's turn, so two addons that each independently hang
+      for the full -TimeoutSec 30 on their own CurseForge/Wago HTTP call
+      could still cost ~60s combined even though neither single call
+      exceeded its own timeout - the loop's next budget check happens only
+      AFTER the first call already returned. This closes that gap at the
+      source: every CurseForge/Wago HTTP call site asks this function for
+      its timeout instead of hard-coding 30, and in -Launcher mode this
+      shrinks that timeout to whatever is actually left of the budget - so
+      a second (or third) addon's call can itself never run long enough to
+      push the total past the cap.
+
+      Not -Launcher (script:LauncherDeadline unset/null): returns
+      -DefaultTimeoutSec unchanged - no behavior change for a manual sync,
+      a server-driven job, -Add, -Pin, etc.
+
+      -Launcher: returns the lesser of -DefaultTimeoutSec and the seconds
+      remaining until script:LauncherDeadline, floored at
+      -MinimumTimeoutSec (a call is still given a small real chance to
+      complete/fail cleanly rather than being handed a 0/negative timeout,
+      which .NET's WebRequest.Timeout rejects outright) - so the FIRST
+      call in a launcher run still gets the full 30s (nothing left of the
+      budget has been spent yet), while a call starting near the end of
+      the budget is bounded to whatever time is actually left.
+    #>
+    param(
+        [int]$DefaultTimeoutSec = 30,
+        [int]$MinimumTimeoutSec = 5
+    )
+
+    if (-not $script:LauncherDeadline) {
+        return $DefaultTimeoutSec
+    }
+
+    $remaining = ($script:LauncherDeadline - (Get-Date)).TotalSeconds
+    $capped = [Math]::Min($DefaultTimeoutSec, [Math]::Ceiling($remaining))
+    return [Math]::Max($MinimumTimeoutSec, [int]$capped)
+}
+
 # =====================================================================
 # Path resolution
 # =====================================================================
@@ -4035,6 +4110,13 @@ if ($LowPriority -or $Json -or $Quiet) {
 # the per-addon sync loop.
 $script:MainStartTime = Get-Date
 
+# Round 26 hardening: absolute deadline Get-LauncherAwareTimeoutSec shrinks
+# each CurseForge/Wago call's own -TimeoutSec against, once the -Launcher
+# per-addon loop below sets it from $script:MainStartTime + its budget.
+# Stays $null (every HTTP call keeps its normal fixed timeout) for every
+# non -Launcher code path.
+$script:LauncherDeadline = $null
+
 # ---- FLAVORS-SPEC S3.3: one-time, idempotent migration - before ANY path
 #      resolution below. Never fatal: a migration failure logs and this run
 #      falls through to whatever paths already exist (today's Retail-only
@@ -4867,6 +4949,18 @@ try {
     # is never time-boxed this way.
     $Script:LauncherBudgetSeconds = 40
     $Script:LauncherBudgetExceeded = $false
+
+    # Round 26 hardening: also arms Get-LauncherAwareTimeoutSec (used by
+    # every CurseForge/Wago HTTP call site) so a slow call started by the
+    # SECOND (or later) addon in this loop is itself bounded to whatever is
+    # left of the budget, instead of always getting its own fresh 30s -
+    # closes the gap where two-or-more independently-hanging calls could
+    # compound past the 45s task-brief cap even though neither one alone
+    # exceeded -TimeoutSec 30 (this check above only runs between addons,
+    # never interrupting a call already in flight).
+    if ($Launcher) {
+        $script:LauncherDeadline = $script:MainStartTime.AddSeconds($Script:LauncherBudgetSeconds)
+    }
 
     foreach ($record in $toSync) {
         if ($Launcher -and (-not $Script:LauncherBudgetExceeded)) {
