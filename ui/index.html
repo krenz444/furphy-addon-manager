@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="vaporwave">
+<html lang="en" data-theme="arcane-library">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -67,6 +67,24 @@
           <rect x="14" y="4" width="2" height="3"/>
         </g>
         <rect fill="#ffcf94" x="5" y="5" width="1.4" height="1.4"/>
+      </svg>
+      <!-- Arcane Library only (round 19): a tiny open-eyed cat beside the
+           wordmark - hidden on every other theme via .arcane-brand-cat's
+           default display:none in style.css. Deliberately open-eyed (two
+           glowing rune eyes) versus the sidebar cat's single literal rune
+           eye - "on watch" / "off duty" duality per THEMES-SPEC.md 7.6. -->
+      <svg class="arcane-brand-cat" viewBox="0 0 16 12" aria-hidden="true" focusable="false" shape-rendering="crispEdges">
+        <g fill="#b3a8d6">
+          <rect x="2" y="6" width="10" height="4"/>
+          <rect x="1" y="4" width="12" height="3"/>
+          <rect x="3" y="2" width="8" height="3"/>
+        </g>
+        <g fill="#d9a441">
+          <rect x="3" y="1" width="2" height="2"/>
+          <rect x="9" y="1" width="2" height="2"/>
+        </g>
+        <rect fill="#8fc4ff" x="5.2" y="4.5" width="1.4" height="1.4"/>
+        <rect fill="#8fc4ff" x="8.2" y="4.5" width="1.4" height="1.4"/>
       </svg>
       <span class="brand-name">Furphy Addon Manager</span>
     </div>
@@ -222,6 +240,107 @@
       <g class="lofi-cat-tail" fill="#4a3f78" style="transform-origin:178px 80px;"><rect x="178" y="78" width="3" height="4"/><rect x="180" y="73" width="3" height="5"/><rect x="181" y="68" width="3" height="5"/><rect x="179" y="65" width="3" height="4"/></g>
       <!-- lofi cat 2: curled up asleep on another rooftop, tail tucked in (static) -->
       <g class="lofi-cat lofi-cat-curled" fill="#4a3f78"><rect x="40" y="74" width="16" height="6"/><rect x="38" y="70" width="20" height="6"/><rect x="41" y="67" width="14" height="5"/><rect x="41" y="65" width="2" height="3"/><rect x="45" y="64" width="2" height="3"/><rect x="54" y="72" width="4" height="2"/><rect x="56" y="69" width="3" height="4"/></g><rect fill="#ffcf94" x="44" y="69" width="1.5" height="1.5"/>
+    </svg>
+
+    <!-- Arcane Library only (round 19): torchlit stone archive along the
+         bottom of the sidebar - same "faint decoration behind the real nav
+         content" technique as .lofi-cityscape above, hidden on every other
+         theme via .arcane-alcove's default display:none in style.css.
+         aria-hidden: purely decorative, never conveys state. The propped
+         dagger (THEMES-SPEC.md 7.2 graft #1) sits right before the study
+         cat group so it reads as leaning against the tome stack. -->
+    <svg class="arcane-alcove" viewBox="0 0 232 140" preserveAspectRatio="none" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="arcaneWall" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#1b1830"/>
+          <stop offset="55%" stop-color="#121022"/>
+          <stop offset="100%" stop-color="#0a0912"/>
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="232" height="140" fill="url(#arcaneWall)"/>
+
+      <!-- faint mortared stone blocks -->
+      <g fill="#1f1b38" opacity="0.5">
+        <rect x="0" y="4" width="38" height="18"/><rect x="42" y="4" width="34" height="18"/>
+        <rect x="80" y="4" width="40" height="18"/><rect x="124" y="4" width="36" height="18"/>
+        <rect x="164" y="4" width="30" height="18"/><rect x="198" y="4" width="34" height="18"/>
+        <rect x="-16" y="26" width="36" height="18"/><rect x="24" y="26" width="40" height="18"/>
+        <rect x="68" y="26" width="34" height="18"/><rect x="106" y="26" width="38" height="18"/>
+        <rect x="148" y="26" width="36" height="18"/><rect x="188" y="26" width="44" height="18"/>
+      </g>
+
+      <!-- wall sconce, upper right, flickering flame - flat two-layer fill,
+           zero gradient (THEMES-SPEC.md 7.2 graft #2). -->
+      <g fill="#332c54"><rect x="196" y="14" width="4" height="14"/><rect x="190" y="26" width="16" height="4"/></g>
+      <g class="arcane-flame" style="opacity:.85">
+        <rect fill="#e0a83c" x="195" y="6" width="6" height="6"/>
+        <rect fill="#ff7a7a" x="196.5" y="9" width="3" height="4"/>
+      </g>
+
+      <!-- two shelves of stacked, gold-trimmed tome spines -->
+      <g fill="#332c54"><rect x="0" y="52" width="232" height="4"/><rect x="0" y="92" width="232" height="4"/></g>
+      <g fill="#b3a8d6">
+        <rect x="4" y="34" width="10" height="18"/><rect x="16" y="30" width="8" height="22"/>
+        <rect x="26" y="36" width="12" height="16"/><rect x="40" y="32" width="9" height="20"/>
+        <rect x="51" y="35" width="11" height="17"/><rect x="64" y="31" width="8" height="21"/>
+        <rect x="74" y="37" width="10" height="15"/><rect x="86" y="33" width="9" height="19"/>
+        <rect x="97" y="30" width="12" height="22"/><rect x="111" y="36" width="8" height="16"/>
+        <rect x="121" y="32" width="11" height="20"/><rect x="134" y="35" width="9" height="17"/>
+        <rect x="145" y="31" width="10" height="21"/><rect x="157" y="37" width="12" height="15"/>
+        <rect x="171" y="33" width="8" height="19"/><rect x="181" y="30" width="10" height="22"/>
+        <rect x="4" y="74" width="9" height="18"/><rect x="15" y="70" width="11" height="22"/>
+        <rect x="28" y="76" width="8" height="16"/><rect x="38" y="72" width="12" height="20"/>
+        <rect x="52" y="75" width="9" height="17"/><rect x="63" y="71" width="10" height="21"/>
+        <rect x="75" y="77" width="11" height="15"/><rect x="88" y="73" width="8" height="19"/>
+        <rect x="98" y="70" width="10" height="22"/><rect x="110" y="76" width="12" height="16"/>
+      </g>
+      <g fill="#d9a441">
+        <rect x="4" y="42" width="10" height="2"/><rect x="40" y="40" width="9" height="2"/>
+        <rect x="97" y="38" width="12" height="2"/><rect x="145" y="39" width="10" height="2"/>
+        <rect x="4" y="82" width="9" height="2"/><rect x="63" y="79" width="10" height="2"/>
+      </g>
+
+      <!-- drifting arcane motes -->
+      <g fill="#8fc4ff">
+        <rect class="arcane-mote-1" style="opacity:.4" x="70" y="18" width="2" height="2"/>
+        <rect class="arcane-mote-2" style="opacity:.4" x="150" y="60" width="2" height="2"/>
+        <rect class="arcane-mote-3" style="opacity:.4" x="30" y="100" width="2" height="2"/>
+      </g>
+
+      <!-- foreground: leaning, gold-trimmed stack of tomes -->
+      <g fill="#242040">
+        <rect x="150" y="118" width="60" height="10"/><rect x="154" y="108" width="52" height="10"/>
+        <rect x="158" y="98" width="44" height="10"/>
+      </g>
+      <g fill="#d9a441">
+        <rect x="150" y="126" width="60" height="2"/><rect x="154" y="116" width="52" height="2"/>
+        <rect x="158" y="106" width="44" height="2"/>
+      </g>
+
+      <!-- GRAFT (THEMES-SPEC.md 7.2 item 1, from Tavern Hearth's propped
+           shield): a small traveling dagger leaning against the left edge of
+           the tome stack - adventuring-gear material culture beside the cat.
+           Colors reused verbatim from the existing palette: blade in
+           --border-hover (#453c70), hilt/pommel in --secondary (#d9a441). -->
+      <g transform="rotate(-8 146 118)">
+        <rect x="144" y="92" width="4" height="28" fill="#453c70"/>
+        <path d="M144,92 L146,84 L148,92 Z" fill="#453c70"/>
+        <rect x="141" y="118" width="10" height="4" fill="#d9a441"/>
+        <circle cx="146" cy="126" r="3" fill="#d9a441"/>
+      </g>
+
+      <!-- the study cat, same 3-color language as the app icon, tail swaying -->
+      <g fill="#b3a8d6">
+        <rect x="164" y="80" width="34" height="18"/>
+        <rect x="168" y="72" width="26" height="10"/>
+        <rect x="171" y="66" width="20" height="8"/>
+      </g>
+      <g fill="#d9a441"><rect x="171" y="62" width="6" height="6"/><rect x="185" y="62" width="6" height="6"/></g>
+      <rect class="arcane-rune-eye" fill="#8fc4ff" x="177" y="70" width="4" height="4"/>
+      <g class="arcane-cat-tail" fill="#b3a8d6" style="transform-origin:200px 96px;">
+        <rect x="198" y="92" width="6" height="8"/><rect x="202" y="84" width="6" height="10"/>
+        <rect x="204" y="76" width="5" height="9"/>
+      </g>
     </svg>
 
     <div class="sidebar-bottom">

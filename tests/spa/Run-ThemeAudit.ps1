@@ -2,7 +2,7 @@
 =====================================================================
  tests\spa\Run-ThemeAudit.ps1
 
- THEMES-SPEC.md section 6's "all 14 theme screenshots + contrast" full-run
+ THEMES-SPEC.md section 6's "all 15 theme screenshots + contrast" full-run
  item. Full-run-only (slow, real msedge process per screenshot) - never
  called from -Quick. Two independent passes against a same-origin COPY of
  ui\ (never the real ui\ folder), served the same way tests\spa\Run-
@@ -10,15 +10,15 @@
 
    1. tests\spa\theme-audit.html/js, driven headlessly via
       msedge --headless=new --dump-dom (same pattern as Run-SpaHarness.ps1)
-      - the live-computed-contrast pass, all 14 themes, one msedge launch.
-   2. One msedge --headless=new --screenshot launch PER theme (14 total) of
+      - the live-computed-contrast pass, all 15 themes, one msedge launch.
+   2. One msedge --headless=new --screenshot launch PER theme (15 total) of
       My Addons under ?mock=1&theme=<slug>, written to
       tests\theme-screenshots\theme-<slug>.png for a human reviewer - this
       folder is cleared and re-populated at the START of every run (never
       swept by tests\.tmp cleanup, and excluded from deploy.ps1's tests\
       mirror - see TESTING.md).
 
- Exit code: 0 if every contrast check passed AND all 14 screenshots were
+ Exit code: 0 if every contrast check passed AND all 15 screenshots were
  produced; 1 otherwise.
 #>
 
@@ -30,7 +30,7 @@ param(
 
 $Script:VirtualTimeBudgetMs = 30000
 $Script:ThemeSlugs = @(
-    'vaporwave', 'lofi', 'dark', 'light', 'terminal-green', 'arctic-ice',
+    'arcane-library', 'vaporwave', 'lofi', 'dark', 'light', 'terminal-green', 'arctic-ice',
     'art-deco-gold', 'alpine-dawn', 'matcha', 'desert-night', 'tokyo-rain',
     'brushed-steel', 'aurora-sky', 'strawberry-cream'
 )
@@ -104,7 +104,7 @@ try {
             if ($parsed.PSObject.Properties.Name -contains 'harnessError' -and $parsed.harnessError) {
                 Add-Result -Collector $results -Name 'contrast pass: harness ran without an uncaught error' -Passed $false -Message ([string]$parsed.harnessError)
             }
-            Add-Result -Collector $results -Name 'contrast pass: all 14 themes audited (complete=true)' -Passed ([bool]$parsed.complete) -Message ("themes seen: " + (@($parsed.themes)).Count)
+            Add-Result -Collector $results -Name 'contrast pass: all 15 themes audited (complete=true)' -Passed ([bool]$parsed.complete) -Message ("themes seen: " + (@($parsed.themes)).Count)
 
             foreach ($theme in @($parsed.themes)) {
                 if ($theme.error) {
@@ -115,7 +115,8 @@ try {
                     Add-Result -Collector $results -Name ($theme.slug + " :: " + $c.name) -Passed ([bool]$c.passed) -Message $c.detail
                 }
                 foreach ($c in @($theme.contrastChecks)) {
-                    $msg = if ($null -ne $c.ratio) { "ratio " + $c.ratio + ":1" } else { $c.detail }
+                    $floorMsg = if ($null -ne $c.floor) { " (floor " + $c.floor + ":1)" } else { "" }
+                    $msg = if ($null -ne $c.ratio) { "ratio " + $c.ratio + ":1" + $floorMsg } else { $c.detail }
                     Add-Result -Collector $results -Name ($theme.slug + " :: " + $c.name) -Passed ([bool]$c.passed) -Message $msg
                 }
             }

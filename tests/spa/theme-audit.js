@@ -2,7 +2,7 @@
    tests\spa\theme-audit.js
 
    THEMES-SPEC.md section 5 Set A #2 / section 6's "live-computed contrast"
-   acceptance item, automated: for each of the 14 themes (order copied
+   acceptance item, automated: for each of the 15 themes (order copied
    verbatim from ui\app.js's own THEMES array - the sole source of slug
    ordering per that spec), loads a same-origin COPY of ui\index.html in an
    iframe with ?mock=1&test=1&theme=<slug>, reads the live COMPUTED style
@@ -10,9 +10,16 @@
    for every base token pair in the Status-Chip Surface Inventory plus all
    5 status chips (each composited over both --bg-1 and --bg-2, since a
    chip's own background is a semi-transparent tint - see ui\style.css's
-   *-tint custom properties), and asserts every pairing is >= 4.5:1 (WCAG
-   AA for normal text) via the same relative-luminance formula used by
-   this repo's own earlier ad-hoc shots\contrast2.js script.
+   *-tint custom properties), and asserts every pairing clears its floor
+   (WCAG AA 4.5:1 for normal text, by default) via the same relative-
+   luminance formula used by this repo's own earlier ad-hoc
+   shots\contrast2.js script. The default theme, arcane-library, has to
+   clear stricter floors instead (THEMES-SPEC.md section 7.4 / Eric's
+   round-19 "readability and clarity" brief): text >=7:1, text-muted
+   >=5:1, chip-vs-tint >=5:1 - see CONTRAST_FLOOR_OVERRIDES below, keyed
+   by pairing category so a future contrast regression on the default
+   theme fails here even while still comfortably clearing the generic
+   4.5:1 every other theme is held to.
 
    Writes one aggregated JSON object into <pre id="results"> the same way
    tests\spa\harness.js does, for Run-ThemeAudit.ps1 to read back out of a
@@ -32,7 +39,7 @@
   // as install.ps1's own documented duplication of FlavourDefs elsewhere
   // in this codebase).
   const THEME_SLUGS = [
-    "vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",
+    "arcane-library", "vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",
     "art-deco-gold", "alpine-dawn", "matcha", "desert-night", "tokyo-rain",
     "brushed-steel", "aurora-sky", "strawberry-cream"
   ];
@@ -40,6 +47,26 @@
   const BASE_TOKENS = ["--bg-0", "--bg-1", "--bg-2", "--bg-3", "--border", "--text", "--text-muted", "--text-faint", "--accent", "--accent-text"];
   const HEX6 = /^#[0-9a-fA-F]{6}$/;
   const CHIP_CLASSES = ["chip-success", "chip-warning", "chip-info", "chip-muted", "chip-danger"];
+
+  // Contrast floors, by pairing category. Every theme must clear the
+  // generic WCAG AA floor (4.5:1); arcane-library additionally has to
+  // clear the stricter, "readability and clarity" floors Eric's round-19
+  // default-theme brief and THEMES-SPEC.md section 7.4 spell out (text
+  // >=7, text-muted >=5, chip-vs-tint >=5 - text-faint's own floor, 4.5,
+  // and accent-text's, 4.5 (7 is only a "prefer", not a hard floor per the
+  // brief), already equal the generic default so no override is listed
+  // for them). Keyed by category rather than by literal check name so it
+  // applies uniformly across every --bg-0..3/--bg-1..2 pairing without
+  // hardcoding each one twice.
+  const DEFAULT_FLOORS = { text: 4.5, muted: 4.5, faint: 4.5, accent: 4.5, chip: 4.5 };
+  const CONTRAST_FLOOR_OVERRIDES = {
+    "arcane-library": { text: 7, muted: 5, chip: 5 }
+  };
+  function floorFor(slug, category) {
+    const overrides = CONTRAST_FLOOR_OVERRIDES[slug];
+    const override = overrides && overrides[category];
+    return typeof override === "number" ? override : DEFAULT_FLOORS[category];
+  }
 
   const results = { themes: [], startedAt: new Date().toISOString(), complete: false };
 
@@ -139,22 +166,23 @@
         if (asHex) { rgb[t] = asHex; }
       });
 
-      function pushRatio(name, fg, bg) {
-        if (!fg || !bg) { theme.contrastChecks.push({ name: name, passed: false, ratio: null, detail: "missing token value" }); return; }
+      function pushRatio(name, fg, bg, category) {
+        const floor = floorFor(slug, category);
+        if (!fg || !bg) { theme.contrastChecks.push({ name: name, passed: false, ratio: null, floor: floor, detail: "missing token value" }); return; }
         const ratio = contrastRatio(fg, bg);
-        theme.contrastChecks.push({ name: name, passed: ratio >= 4.5, ratio: Math.round(ratio * 100) / 100, detail: null });
+        theme.contrastChecks.push({ name: name, passed: ratio >= floor, ratio: Math.round(ratio * 100) / 100, floor: floor, detail: null });
       }
 
-      pushRatio("text vs bg-0", rgb["--text"], rgb["--bg-0"]);
-      pushRatio("text vs bg-1", rgb["--text"], rgb["--bg-1"]);
-      pushRatio("text vs bg-2", rgb["--text"], rgb["--bg-2"]);
-      pushRatio("text vs bg-3", rgb["--text"], rgb["--bg-3"]);
-      pushRatio("text-muted vs bg-1", rgb["--text-muted"], rgb["--bg-1"]);
-      pushRatio("text-muted vs bg-2", rgb["--text-muted"], rgb["--bg-2"]);
-      pushRatio("text-faint vs bg-1", rgb["--text-faint"], rgb["--bg-1"]);
-      pushRatio("text-faint vs bg-2", rgb["--text-faint"], rgb["--bg-2"]);
-      pushRatio("text-faint vs bg-3", rgb["--text-faint"], rgb["--bg-3"]);
-      pushRatio("accent-text vs accent", rgb["--accent-text"], rgb["--accent"]);
+      pushRatio("text vs bg-0", rgb["--text"], rgb["--bg-0"], "text");
+      pushRatio("text vs bg-1", rgb["--text"], rgb["--bg-1"], "text");
+      pushRatio("text vs bg-2", rgb["--text"], rgb["--bg-2"], "text");
+      pushRatio("text vs bg-3", rgb["--text"], rgb["--bg-3"], "text");
+      pushRatio("text-muted vs bg-1", rgb["--text-muted"], rgb["--bg-1"], "muted");
+      pushRatio("text-muted vs bg-2", rgb["--text-muted"], rgb["--bg-2"], "muted");
+      pushRatio("text-faint vs bg-1", rgb["--text-faint"], rgb["--bg-1"], "faint");
+      pushRatio("text-faint vs bg-2", rgb["--text-faint"], rgb["--bg-2"], "faint");
+      pushRatio("text-faint vs bg-3", rgb["--text-faint"], rgb["--bg-3"], "faint");
+      pushRatio("accent-text vs accent", rgb["--accent-text"], rgb["--accent"], "accent");
 
       // Chips: each chip's real class supplies color (opaque) and
       // background (a semi-transparent *-tint) - render two synthetic
@@ -176,7 +204,7 @@
           const fgOpaque = parseColor(cs.color).slice(0, 3);
           const bgRgba = parseColor(cs.backgroundColor);
           const compositedBg = bgRgba[3] < 1 ? compositeOver(bgRgba, hostBgRgb) : bgRgba.slice(0, 3);
-          pushRatio(cls + " vs " + hostBgVar, fgOpaque, compositedBg);
+          pushRatio(cls + " vs " + hostBgVar, fgOpaque, compositedBg, "chip");
           span.remove();
         });
         host.remove();

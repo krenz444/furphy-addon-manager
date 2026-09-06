@@ -25,6 +25,10 @@
    derive from this array; none of them hardcode a theme list of their own.
    ========================================================================== */
 const THEMES = [
+  // Round 19 (THEMES-SPEC.md section 7.8): Arcane Library is now the
+  // default (prepended here, and DEFAULT_THEME below flipped to match -
+  // see section 7.9 rows 1/5/11-16).
+  { slug: "arcane-library",    name: "Arcane Library" },
   { slug: "vaporwave",         name: "Vaporwave" },
   { slug: "lofi",              name: "Lofi Night" },
   { slug: "dark",              name: "Dark" },
@@ -40,7 +44,7 @@ const THEMES = [
   { slug: "aurora-sky",        name: "Aurora Sky" },
   { slug: "strawberry-cream",  name: "Strawberry Cream" },
 ];
-const DEFAULT_THEME = "vaporwave";
+const DEFAULT_THEME = "arcane-library";
 
 /* ==========================================================================
    Prefs - persisted appearance settings (theme, density), read from
@@ -55,12 +59,15 @@ const Prefs = (function () {
 
   // E15/E15b/round 18: started as four theme values ("light", "vaporwave",
   // "dark" from E15, joined by "lofi" in E15b/round 11), now checks
-  // membership against the full 14-slug THEMES array above (THEMES-SPEC.md
-  // section 4) instead of a hardcoded list of its own - adding theme #15
-  // needs no change here. "vaporwave" is the DEFAULT (round 17, Eric: "make
-  // vaporwave the main theme again" - see SPEC.md section 3). Anything else
-  // read back (missing key, corrupt value, an older/newer build's value, an
-  // unknown slug) falls through to DEFAULT_THEME.
+  // membership against the full 15-slug THEMES array above (THEMES-SPEC.md
+  // section 4) instead of a hardcoded list of its own - adding a theme
+  // needs no change here. "vaporwave" was the DEFAULT from round 17 (Eric:
+  // "make vaporwave the main theme again" - see SPEC.md section 3) through
+  // round 18; round 19 (THEMES-SPEC.md section 7) made "arcane-library" the
+  // DEFAULT instead (Eric: cats mixed with dungeon-fantasy,
+  // dark-by-default, readability-first). Anything else read back (missing
+  // key, corrupt value, an older/newer build's value, an unknown slug)
+  // falls through to DEFAULT_THEME.
   function isKnownTheme(v) { return THEMES.some(function (t) { return t.slug === v; }); }
 
   function readTheme() {

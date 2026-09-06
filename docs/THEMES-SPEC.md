@@ -701,6 +701,8 @@ Each entry: concept, restated contrast ratios (as verified/accepted by the judge
 
 ## 2. Vaporwave becomes the default again
 
+**Round 19 update — superseded, kept as history, do not delete:** Vaporwave's run as default ends in round 19. Eric asked for a cats-mixed-with-Warcraft theme, made the new default, dark by default, focused on readability. **Arcane Library (`arcane-library`) is now the default theme** — see §7 for the full spec, the round-19 change points (§7.9, which supersede rows 1–5 and 7 below the same way this section's own rows superseded round 11's Lofi-Night default), and the updated 15-theme picker order (§7.8: Arcane Library, then Vaporwave, Lofi Night, Dark, Light, then the ten). Vaporwave remains fully intact as the #2 entry in the picker; nothing in this section's history is invalidated, only superseded as current behavior.
+
 Every place the literal fallback theme currently reads `"lofi"` (flipped from Vaporwave in round 11) must change to `"vaporwave"`. The Vaporwave and Lofi Night token blocks themselves are untouched — this is purely a default/fallback change, per Eric's request.
 
 | # | File | Location | Change |
@@ -920,4 +922,510 @@ const isKnownTheme = (v) => THEMES.some(t => t.slug === v);
 - [ ] `manifest.json` background/theme colors match Vaporwave's `--bg-0` (`#12081f`).
 - [ ] `SPEC.md` carries the new round-12 decision entry with both prior (round 7, round 11) entries intact.
 - [ ] README reflects 14 themes and Vaporwave as default.
+- [ ] No new theme introduces a network font, external asset, or anything that breaks the app running fully offline.
+
+---
+
+## 7. The default theme: Arcane Library (`arcane-library`)
+
+Round 19. Eric's request, verbatim: *"make a cats theme mixed with warcraft, change the icon for the app to be a cat in this theme, make it the default focus on readability and clarity in the app with it"*, followed by *"make it dark by default"*. Three candidates (Ember Keep, Tavern Hearth, Arcane Library) were designed and scored by 3 judges against this round's brief (readability floors stricter than the standing per-theme contract — see §7.4 — plus a hard reject on any Blizzard/Warcraft IP and a cat-legibility-at-16px requirement on the icon). This is the 15th theme; every one of the 14 existing theme blocks (§1, plus Dark/Light/Vaporwave/Lofi Night) is unchanged.
+
+### 7.0 Selection
+
+| slug | judge 1 | judge 2 | judge 3 | tally (of 150) | trademark issues |
+|---|---|---|---|---|---|
+| **arcane-library** | 45 | 42 | 41 | **128** | none |
+| ember-keep | 43 | 39 | 42 | 124 | none |
+| tavern-hearth | 39 | 36 | 38 | 113 | none |
+
+**Winner: Arcane Library** — highest tally, zero trademark issues (tied with the other two on that count, but wins outright on score). All three judges independently recomputed the candidate's self-reported contrast numbers from scratch and found no misreported figures in any of the three submissions; Arcane Library was the only one of the three where every judge's independent recheck also confirmed no pairing sat close to its floor (its tightest value, 5.30 on `text-faint/bg-3`, still beats both other candidates' tightest values — 5.08 for Ember Keep, 5.06 for Tavern Hearth — by a comfortable margin), and the only one where an independent pixel-level render of the icon at 16px (done separately by two of the three judges, not just trusted from the candidate's own writeup) confirmed a clean, unambiguous cat read. Tavern Hearth's icon, by contrast, was independently pixel-dumped by Judge 3 and found to *not* hold up at 16px despite its own rationale's contrary claim — the ear notches wash out to a solid gold blob with a blurred dot, which is why no synthesis step should trust a candidate's self-reported icon legibility without redoing the render (this synthesis step redid it — see §7.7).
+
+### 7.1 Concept
+
+A hushed archive deep beneath the keep: midnight-indigo stone shelves rising into torchlight, gold-leafed tome spines lining the walls in careful rows, motes of arcane blue drifting past a wall sconce. A study cat has claimed a leaning stack of tomes at the reading nook's edge — ears up, one eye left open as a faint blue rune-glow — keeping watch through the small hours. Cool mana-blue accent, warm gold trim, the calmest and highest-contrast reading experience of any theme in the set (per Eric's "focus on readability and clarity"), dark by default.
+
+### 7.2 Grafts applied (post-judging synthesis pass)
+
+All three judge panels converged on Arcane Library as the winner and each proposed grafts from the two runners-up. Applied here, in order of judge consensus:
+
+1. **Tavern Hearth's "propped adventuring gear beside the cat" idea (Judge 1 & Judge 2, independently)** — Judge 2 specifically named "a small dagger or buckler leaning against the tome-stack near the cat" as a low-risk way to raise catWarcraftMood (Arcane Library's one consistently soft score across all three judges, 7/7/7) without touching tokens or the icon. **Applied:** a small flat-color dagger, propped against the left edge of the foreground tome stack, added to the `.arcane-alcove` signature scene (markup in §7.5). It is static (no new motion budget), built from colors already in the palette (`--border-hover` for the blade, `--secondary` for the hilt/pommel — no new hex introduced), and sits at `y ≥ 88`, well clear of the nav list and every other element's established layout.
+2. **Ember Keep's flat, two-layer (no-gradient) flame technique (Judge 2)** — flagged as worth grafting "anywhere Arcane Library's own sconce flame might otherwise be tempted to use a gradient." **Verified, not changed:** the existing `.arcane-flame` in the candidate's own markup is already two flat `<rect>` fills (`--warning` outer, `--danger` inner, no gradient) — it already satisfies this graft as submitted. No edit was needed; confirmed by re-reading the markup before append.
+3. **Ember Keep's "sidebar cat asleep / brand-mark cat on watch" duality, and Arcane Library's own equivalent (Judge 1 & Judge 3)** — both judges called this out as worth *preserving*, not flattening: Arcane Library's brand cat already uses two open glowing eyes (matching the icon's legibility-first choice) while the larger sidebar cat uses one literal rune eye (taking Eric's "a cat with a glowing rune eye" brief at its word where there's room to). **Applied: left untouched, verbatim** — this is a "don't regress it" graft, not a new addition.
+4. **Process discipline (Judge 1)** — keep palette/icon draft files as an audit trail. **Applied:** this synthesis step's independent icon re-render (`al-icon.svg`, `al-icon-out/al-{16,32,256}.png` plus a nearest-neighbor 16x zoom, and `al-contrast.js` for the independent contrast recheck) are kept in the scratch folder alongside this spec's append, following the same audit-trail convention Tavern Hearth's own candidate writeup used.
+
+No graft altered any CSS custom-property value — the token block in §7.3 is byte-for-byte identical to the judged candidate. §7.4 re-verifies contrast anyway, by independent computation, as the synthesis step requires.
+
+### 7.3 Final token block (verbatim)
+
+```css
+/* ==========================================================================
+   Arcane Library theme - the round-19 default (cats mixed with Warcraft-
+   flavored fantasy, dark by default, readability-first per Eric's request).
+   Applied via [data-theme="arcane-library"] exactly like every other theme
+   block in this file. Direction: midnight indigo stone, mana-blue accent
+   with gold trim, a cat perched on a stack of tomes with a glowing rune eye.
+   Every token the base :root defines is redefined here (nothing falls
+   through), plus:
+     --secondary  - the gold trim itself (ear-tips/collar in the signature
+       art, focus ring, chip/card gilt hairlines). Deliberately near-identical
+       in hue to --warning (contrast 1.05 between them) - both are "the
+       gold" in a Warcraft-flavored palette; a warning pill reads as brass,
+       not a defect (same non-blocking-note tradition as Art Deco's own gold
+       accent/warning proximity).
+     --focus-ring - pointed at --secondary rather than --accent, so every
+       shared :focus-visible rule draws a gilded ring instead of a blue one -
+       "gold trim" made literal on every interactive control.
+   Geometry (--radius-sm/--radius/--radius-lg) is overridden to slightly
+   tighter, more architectural corners than the shared default - carved
+   stone blocks and gilt frames read squarer than a soft glassy dark theme.
+   Contrast (independently re-verified twice - once by all 3 judges against
+   the candidate's own report, once more by this synthesis step's own
+   al-contrast.js after grafting - see §7.4): text/bg-0 17.08, text/bg-1
+   16.14, text/bg-2 14.85, text/bg-3 13.37 (floor 7, target 10+ - all
+   comfortably clear it); muted/bg-1 8.45, muted/bg-2 7.78 (floor 5); faint/
+   bg-1 6.40, faint/bg-2 5.89, faint/bg-3 5.30 (floor 4.5, the tightest
+   margin in the theme and still the widest "tightest margin" of the three
+   judged candidates); accent-text/accent 8.58 (floor 4.5, "prefer 7"). Chip
+   text-on-tint over bg-1/bg-2 (floor 5): success 6.67/6.01, warning 6.96/
+   6.27, danger 6.04/5.46, info 7.19/6.48, accent 6.49/5.84. banner-danger-
+   text/danger-tint-over-bg-0 11.00, form-error-text/danger-tint-over-bg-1
+   8.78, danger-text/danger 7.26. ALL PASS with real margin.
+   Host palette (8-color, for Host.reportTheme() and FurphyHost.cs's
+   InitializeDefaultTheme()): bg0 #0a0912 bg1 #121022 bg2 #1b1830 bg3
+   #242040 border #332c54 text #f4eedd muted #b3a8d6 accent #88afff.
+   ========================================================================== */
+:root[data-theme="arcane-library"] {
+  color-scheme: dark;
+
+  --bg-0: #0a0912;
+  --bg-1: #121022;
+  --bg-2: #1b1830;
+  --bg-3: #242040;
+  --border: #332c54;
+  --border-soft: #1b1830;
+  --border-hover: #453c70;
+
+  --text: #f4eedd;
+  --text-muted: #b3a8d6;
+  --text-faint: #9992bb;
+
+  --accent: #88afff;
+  --accent-hover: #a3c1ff;
+  --accent-active: #5f8ef0;
+  --accent-text: #071224;
+
+  --success: #5fc17a;
+  --warning: #e0a83c;
+  --danger: #ff7a7a;
+  --info: #4fc3e8;
+
+  --secondary: #d9a441;
+  --focus-ring: var(--secondary);
+
+  --success-tint: rgba(95, 193, 122, 0.14);
+  --warning-tint: rgba(224, 168, 60, 0.14);
+  --danger-tint: rgba(255, 122, 122, 0.14);
+  --info-tint: rgba(79, 195, 232, 0.14);
+  --accent-tint: rgba(136, 175, 255, 0.16);
+  --muted-tint: rgba(179, 168, 214, 0.12);
+
+  --banner-danger-text: #ffc4c4;
+  --form-error-text: #ffb0b0;
+
+  --danger-hover: #ff9494;
+  --danger-text: #2a0a0a;
+  --danger-border: rgba(255, 122, 122, 0.35);
+  --danger-outline-border: rgba(255, 122, 122, 0.4);
+
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+:root[data-theme="arcane-library"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23b3a8d6' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+/* THEMES-SPEC.md §3.2: this theme's own swatch-preview rule for the picker
+   grid, colocated with its token block per that section's rule. */
+.theme-swatch[data-theme-value="arcane-library"] { --sw-bg:#121022; --sw-bg2:#0a0912; --sw-accent:#88afff; --sw-text:#f4eedd; }
+```
+
+### 7.4 Final contrast table (re-verified by independent computation, post-graft)
+
+Recomputed from scratch with a fresh WCAG relative-luminance + alpha-composite script (`al-contrast.js`, not reused from any candidate's own report) against the token block in §7.3, unchanged after grafting since no graft touched a token value:
+
+| pairing | ratio | floor | verdict |
+|---|---|---|---|
+| text/bg-0 | 17.08 | 7 | PASS |
+| text/bg-1 | 16.14 | 7 | PASS |
+| text/bg-2 | 14.85 | 7 | PASS |
+| text/bg-3 | 13.37 | 7 | PASS |
+| text-muted/bg-1 | 8.45 | 5 | PASS |
+| text-muted/bg-2 | 7.78 | 5 | PASS |
+| text-faint/bg-1 | 6.40 | 4.5 | PASS |
+| text-faint/bg-2 | 5.89 | 4.5 | PASS |
+| text-faint/bg-3 | 5.30 | 4.5 | PASS |
+| accent-text/accent | 8.58 | 4.5 (prefer 7) | PASS |
+| chip-success text/tint over bg-1 | 6.68 | 5 | PASS |
+| chip-success text/tint over bg-2 | 6.04 | 5 | PASS |
+| chip-warning text/tint over bg-1 | 6.95 | 5 | PASS |
+| chip-warning text/tint over bg-2 | 6.27 | 5 | PASS |
+| chip-danger text/tint over bg-1 | 6.04 | 5 | PASS |
+| chip-danger text/tint over bg-2 | 5.47 | 5 | PASS |
+| chip-info text/tint over bg-1 | 7.19 | 5 | PASS |
+| chip-info text/tint over bg-2 | 6.48 | 5 | PASS |
+| chip-accent text/tint over bg-1 | 6.47 | 5 | PASS |
+| chip-accent text/tint over bg-2 | 5.82 | 5 | PASS |
+| banner-danger-text / danger-tint-over-bg-0 | 11.00 | 4.5 | PASS |
+| form-error-text / danger-tint-over-bg-1 | 8.79 | 4.5 | PASS |
+| danger-text/danger | 7.26 | 4.5 | PASS |
+| secondary/warning (disclosed near-duplicate hue) | 1.05 | — (intentional, non-blocking) | n/a |
+
+**ALL 23 required pairings PASS**, matching the judged candidate's and all three judges' independently-recomputed numbers to within floating-point rounding (max observed delta ±0.02, from tint-alpha rounding in the two different scripts). This is the widest safety margin of the three round-19 candidates on every metric class in the brief, and clears every floor in this round's stricter brief (body text ≥7:1, muted ≥5:1, faint ≥4.5:1, accent-text ≥4.5:1 prefer 7, chip-over-tint ≥5:1) with room to spare. Status-hue separation: success (nature green, #5fc17a), warning (gold, #e0a83c), danger (health-red, #ff7a7a), info (mana-blue, #4fc3e8), accent (blue-violet, #88afff) — the only one of the three candidates whose accent sits far outside the warm success/warning/danger cluster instead of crowding into it, per Judge 2's independent hue check.
+
+### 7.5 Signature touch — sidebar scene (`.arcane-alcove`)
+
+Same technique as every other theme's own signature art in this file (Lofi Night's `.lofi-cityscape`/`.lofi-brand-cat`, and every candidate above): a masked, `pointer-events:none`, `z-index:0` inline `<svg>` behind the sidebar's real content (which gets `z-index:1`), class-prefixed `arcane-`, hidden by default and shown only under `[data-theme="arcane-library"]`.
+
+**CSS** (`ui/style.css`, colocated with the §7.3 token block):
+
+```css
+:root[data-theme="arcane-library"] .btn-accent {
+  box-shadow: 0 0 0 1px rgba(136, 175, 255, 0.4), 0 3px 14px rgba(136, 175, 255, 0.25);
+}
+:root[data-theme="arcane-library"] .btn-accent:hover:not(:disabled) {
+  box-shadow: 0 0 0 1px rgba(163, 193, 255, 0.5), 0 4px 20px rgba(163, 193, 255, 0.35);
+}
+:root[data-theme="arcane-library"] .btn-accent:active:not(:disabled) {
+  background: var(--accent-active);
+  box-shadow: 0 0 0 1px rgba(95, 142, 240, 0.6), 0 2px 10px rgba(95, 142, 240, 0.3);
+}
+:root[data-theme="arcane-library"] .nav-item.is-active {
+  box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.35), 0 0 12px rgba(136, 175, 255, 0.2);
+}
+:root[data-theme="arcane-library"] .chip { box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.3); }
+:root[data-theme="arcane-library"] .filter-chip.is-active { box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.42); }
+:root[data-theme="arcane-library"] .settings-group,
+:root[data-theme="arcane-library"] .browse-row {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 3px 12px rgba(5, 4, 12, 0.45);
+}
+:root[data-theme="arcane-library"] .settings-group::before,
+:root[data-theme="arcane-library"] .browse-row::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background-image: repeating-linear-gradient(90deg, var(--secondary) 0, var(--secondary) 2px, transparent 2px, transparent 5px);
+  opacity: 0.45;
+}
+:root[data-theme="arcane-library"] .addon-row { box-shadow: 0 2px 8px rgba(5, 4, 12, 0.32); }
+
+.arcane-alcove { display: none; }
+:root[data-theme="arcane-library"] .sidebar { position: relative; overflow: hidden; }
+:root[data-theme="arcane-library"] .sidebar > *:not(.arcane-alcove) { position: relative; z-index: 1; }
+:root[data-theme="arcane-library"] .arcane-alcove {
+  display: block; position: absolute; left: 0; right: 0; bottom: 0;
+  width: 100%; height: 140px; z-index: 0; pointer-events: none;
+}
+
+@keyframes arcane-flame-flicker { 0%, 100% { opacity: .85; } 45% { opacity: 1; } 60% { opacity: .55; } }
+.arcane-flame { animation: arcane-flame-flicker 2.2s ease-in-out infinite; }
+
+@keyframes arcane-rune-glow { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
+.arcane-rune-eye { animation: arcane-rune-glow 2.8s ease-in-out infinite; }
+
+@keyframes arcane-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+.arcane-cat-tail { animation: arcane-tail-sway 4s ease-in-out infinite; }
+
+@keyframes arcane-mote-drift {
+  0%, 100% { opacity: .4; transform: translateY(0); }
+  50% { opacity: .85; transform: translateY(-5px); }
+}
+.arcane-mote-1 { animation: arcane-mote-drift 5.5s ease-in-out infinite; }
+.arcane-mote-2 { animation: arcane-mote-drift 6.5s ease-in-out infinite 1.2s; }
+.arcane-mote-3 { animation: arcane-mote-drift 6s ease-in-out infinite 2.4s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .arcane-flame, .arcane-rune-eye, .arcane-cat-tail,
+  .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
+}
+```
+
+**Markup** (`ui/index.html`, inside `.sidebar`, after `<nav id="nav">` and before `.sidebar-bottom` — the same slot `.lofi-cityscape` occupies). The propped dagger (graft §7.2 item 1) is the only addition versus the judged candidate, inserted as its own `<g>` right after the foreground tome-stack group and before the study-cat group, so it reads as leaning against the stack, in front of the cat:
+
+```html
+<svg class="arcane-alcove" viewBox="0 0 232 140" preserveAspectRatio="none" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="arcaneWall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1b1830"/>
+      <stop offset="55%" stop-color="#121022"/>
+      <stop offset="100%" stop-color="#0a0912"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="232" height="140" fill="url(#arcaneWall)"/>
+
+  <!-- faint mortared stone blocks -->
+  <g fill="#1f1b38" opacity="0.5">
+    <rect x="0" y="4" width="38" height="18"/><rect x="42" y="4" width="34" height="18"/>
+    <rect x="80" y="4" width="40" height="18"/><rect x="124" y="4" width="36" height="18"/>
+    <rect x="164" y="4" width="30" height="18"/><rect x="198" y="4" width="34" height="18"/>
+    <rect x="-16" y="26" width="36" height="18"/><rect x="24" y="26" width="40" height="18"/>
+    <rect x="68" y="26" width="34" height="18"/><rect x="106" y="26" width="38" height="18"/>
+    <rect x="148" y="26" width="36" height="18"/><rect x="188" y="26" width="44" height="18"/>
+  </g>
+
+  <!-- wall sconce, upper right, flickering flame - flat two-layer fill,
+       zero gradient (Ember Keep graft, §7.2 item 2 - already satisfied by
+       the original candidate markup, confirmed unchanged here) -->
+  <g fill="#332c54"><rect x="196" y="14" width="4" height="14"/><rect x="190" y="26" width="16" height="4"/></g>
+  <g class="arcane-flame" style="opacity:.85">
+    <rect fill="#e0a83c" x="195" y="6" width="6" height="6"/>
+    <rect fill="#ff7a7a" x="196.5" y="9" width="3" height="4"/>
+  </g>
+
+  <!-- two shelves of stacked, gold-trimmed tome spines -->
+  <g fill="#332c54"><rect x="0" y="52" width="232" height="4"/><rect x="0" y="92" width="232" height="4"/></g>
+  <g fill="#b3a8d6">
+    <rect x="4" y="34" width="10" height="18"/><rect x="16" y="30" width="8" height="22"/>
+    <rect x="26" y="36" width="12" height="16"/><rect x="40" y="32" width="9" height="20"/>
+    <rect x="51" y="35" width="11" height="17"/><rect x="64" y="31" width="8" height="21"/>
+    <rect x="74" y="37" width="10" height="15"/><rect x="86" y="33" width="9" height="19"/>
+    <rect x="97" y="30" width="12" height="22"/><rect x="111" y="36" width="8" height="16"/>
+    <rect x="121" y="32" width="11" height="20"/><rect x="134" y="35" width="9" height="17"/>
+    <rect x="145" y="31" width="10" height="21"/><rect x="157" y="37" width="12" height="15"/>
+    <rect x="171" y="33" width="8" height="19"/><rect x="181" y="30" width="10" height="22"/>
+    <rect x="4" y="74" width="9" height="18"/><rect x="15" y="70" width="11" height="22"/>
+    <rect x="28" y="76" width="8" height="16"/><rect x="38" y="72" width="12" height="20"/>
+    <rect x="52" y="75" width="9" height="17"/><rect x="63" y="71" width="10" height="21"/>
+    <rect x="75" y="77" width="11" height="15"/><rect x="88" y="73" width="8" height="19"/>
+    <rect x="98" y="70" width="10" height="22"/><rect x="110" y="76" width="12" height="16"/>
+  </g>
+  <g fill="#d9a441">
+    <rect x="4" y="42" width="10" height="2"/><rect x="40" y="40" width="9" height="2"/>
+    <rect x="97" y="38" width="12" height="2"/><rect x="145" y="39" width="10" height="2"/>
+    <rect x="4" y="82" width="9" height="2"/><rect x="63" y="79" width="10" height="2"/>
+  </g>
+
+  <!-- drifting arcane motes -->
+  <g fill="#8fc4ff">
+    <rect class="arcane-mote-1" style="opacity:.4" x="70" y="18" width="2" height="2"/>
+    <rect class="arcane-mote-2" style="opacity:.4" x="150" y="60" width="2" height="2"/>
+    <rect class="arcane-mote-3" style="opacity:.4" x="30" y="100" width="2" height="2"/>
+  </g>
+
+  <!-- foreground: leaning, gold-trimmed stack of tomes -->
+  <g fill="#242040">
+    <rect x="150" y="118" width="60" height="10"/><rect x="154" y="108" width="52" height="10"/>
+    <rect x="158" y="98" width="44" height="10"/>
+  </g>
+  <g fill="#d9a441">
+    <rect x="150" y="126" width="60" height="2"/><rect x="154" y="116" width="52" height="2"/>
+    <rect x="158" y="106" width="44" height="2"/>
+  </g>
+
+  <!-- GRAFT §7.2 item 1 (from Tavern Hearth's propped shield): a small
+       traveling dagger leaning against the left edge of the tome stack -
+       adventuring-gear material culture beside the cat, sharpening the
+       Warcraft-flavored mood without a new token or any motion budget.
+       Colors reused verbatim from the existing palette: blade in
+       --border-hover (#453c70), hilt/pommel in --secondary (#d9a441). -->
+  <g transform="rotate(-8 146 118)">
+    <rect x="144" y="92" width="4" height="28" fill="#453c70"/>
+    <path d="M144,92 L146,84 L148,92 Z" fill="#453c70"/>
+    <rect x="141" y="118" width="10" height="4" fill="#d9a441"/>
+    <circle cx="146" cy="126" r="3" fill="#d9a441"/>
+  </g>
+
+  <!-- the study cat, same 3-color language as the app icon, tail swaying -->
+  <g fill="#b3a8d6">
+    <rect x="164" y="80" width="34" height="18"/>
+    <rect x="168" y="72" width="26" height="10"/>
+    <rect x="171" y="66" width="20" height="8"/>
+  </g>
+  <g fill="#d9a441"><rect x="171" y="62" width="6" height="6"/><rect x="185" y="62" width="6" height="6"/></g>
+  <rect class="arcane-rune-eye" fill="#8fc4ff" x="177" y="70" width="4" height="4"/>
+  <g class="arcane-cat-tail" fill="#b3a8d6" style="transform-origin:200px 96px;">
+    <rect x="198" y="92" width="6" height="8"/><rect x="202" y="84" width="6" height="10"/>
+    <rect x="204" y="76" width="5" height="9"/>
+  </g>
+</svg>
+```
+
+Placement/motion discipline: the scene sits at `z-index:0` behind the sidebar's real children (`z-index:1`), is `pointer-events:none`, and is cropped to the sidebar's own bottom 140px — it can never sit above or intercept a click on the nav list, the flavour-switcher, or `.sidebar-bottom`'s buttons above it. The dagger and cat sit low (`y ≥ 62` for the cat's ear-tips, `y ≥ 84` for the dagger's point), well clear of the nav list; every animated element (flame, rune-eye, tail, three motes) is gated behind one `@media (prefers-reduced-motion: reduce)` block that sets `animation:none`, leaving a static torchlit archive with a watchful cat.
+
+### 7.6 Brand cat (`.arcane-brand-cat`, 16×12, beside the wordmark)
+
+Unchanged from the judged candidate (graft §7.2 item 3 — preserved verbatim, not flattened). Deliberately open-eyed (two glowing blue eye-squares) versus the sidebar cat's single literal rune eye: the same "on watch" / "off duty" duality Ember Keep's judges asked to keep.
+
+```css
+.arcane-brand-cat { display: none; }
+:root[data-theme="arcane-library"] .arcane-brand-cat {
+  display: block; position: absolute;
+  width: 18px; height: 14px; left: 22px; bottom: 2px;
+  pointer-events: none;
+}
+```
+
+```html
+<!-- inside .brand, right after <img class="brand-icon">, mirroring .lofi-brand-cat -->
+<svg class="arcane-brand-cat" viewBox="0 0 16 12" aria-hidden="true" focusable="false" shape-rendering="crispEdges">
+  <g fill="#b3a8d6">
+    <rect x="2" y="6" width="10" height="4"/>
+    <rect x="1" y="4" width="12" height="3"/>
+    <rect x="3" y="2" width="8" height="3"/>
+  </g>
+  <g fill="#d9a441">
+    <rect x="3" y="1" width="2" height="2"/>
+    <rect x="9" y="1" width="2" height="2"/>
+  </g>
+  <rect fill="#8fc4ff" x="5.2" y="4.5" width="1.4" height="1.4"/>
+  <rect fill="#8fc4ff" x="8.2" y="4.5" width="1.4" height="1.4"/>
+</svg>
+```
+
+No animation on the brand mark — at 16×12 there is nothing worth moving, and it sits right next to legible wordmark text, so it stays still (same reasoning as every other candidate's brand cat in this round).
+
+### 7.7 App icon (`ui/icon.svg`)
+
+4 flat theme-palette colors, no gradients, no filters, drawn on a 16×16 pixel grid (4 SVG units/cell in the 64×64 `viewBox`): panel `#150f2a` (bespoke deep-indigo backdrop, darker than `--bg-0`, so the cat pops at tiny sizes), cat body `#b3a8d6` (`--text-muted`, reused verbatim), gilt trim `#d9a441` (`--secondary`), rune-glow `#8fc4ff` (near `--accent`). Pointed gold ear-tips with a visible v-notch between them, a wide lavender head, two glowing blue eye-squares, and a solid gold collar band low on the neck (the "gold trim" detail, built as a 2-cell-tall solid band rather than a hairline outline, since a stroke that thin disappears at 16px).
+
+```html
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+  <title>Arcane Library</title>
+  <defs>
+    <clipPath id="panel"><rect x="0" y="0" width="64" height="64" rx="10" ry="10"/></clipPath>
+  </defs>
+  <g clip-path="url(#panel)">
+    <rect x="0" y="0" width="64" height="64" fill="#150f2a"/>
+    <g fill="#b3a8d6">
+      <rect x="4" y="12" width="24" height="4"/>
+      <rect x="36" y="12" width="24" height="4"/>
+      <rect x="4" y="16" width="56" height="4"/>
+      <rect x="0" y="20" width="64" height="4"/>
+      <rect x="0" y="24" width="64" height="4"/>
+      <rect x="0" y="28" width="16" height="4"/>
+      <rect x="24" y="28" width="16" height="4"/>
+      <rect x="48" y="28" width="16" height="4"/>
+      <rect x="0" y="32" width="16" height="4"/>
+      <rect x="24" y="32" width="16" height="4"/>
+      <rect x="48" y="32" width="16" height="4"/>
+      <rect x="4" y="36" width="56" height="4"/>
+      <rect x="4" y="40" width="56" height="4"/>
+      <rect x="8" y="44" width="48" height="4"/>
+      <rect x="8" y="48" width="48" height="4"/>
+      <rect x="16" y="56" width="32" height="4"/>
+    </g>
+    <g fill="#d9a441">
+      <rect x="12" y="4" width="4" height="4"/>
+      <rect x="48" y="4" width="4" height="4"/>
+      <rect x="8" y="8" width="12" height="4"/>
+      <rect x="44" y="8" width="12" height="4"/>
+      <rect x="12" y="52" width="40" height="4"/>
+    </g>
+    <g fill="#8fc4ff">
+      <rect x="16" y="28" width="8" height="4"/>
+      <rect x="40" y="28" width="8" height="4"/>
+      <rect x="16" y="32" width="8" height="4"/>
+      <rect x="40" y="32" width="8" height="4"/>
+    </g>
+  </g>
+</svg>
+```
+
+**Rendering notes (re-verified independently by this synthesis step, not trusted from the candidate's own writeup — see §7.0's note on why):** rendered through the project's own `make-icon.ps1` (headless Edge) to fresh 16px, 32px, and 256px PNGs (`al-icon-out/al-{16,32,256}.png`), then the 16px PNG was upscaled 16× with nearest-neighbor interpolation (`al-icon-out/al-16-zoom.png`) and read back pixel-by-pixel:
+
+- **16px:** reads unambiguously as a cat head — two sharp gold ear-tips with a hard dark v-notch between them, a wide lavender head/face, two crisp glowing blue eye-squares, and a solid gold collar band across the lower head. No element blurs or merges into another at this size; this is the clearest "cat, glowing eyes, gilt trim" read of any of the three round-19 candidates' icons, matching every judge's independent assessment.
+- **32px:** identical composition, one pixel-grid step crisper; same read, no new ambiguity.
+- **256px:** trivially clean at this size (well past the resolution where any of the flat 4-color shapes could blur or alias) — confirms the icon scales cleanly across the full `make-icon.ps1` render range (16..512) with the same silhouette at every step, no gradient-to-mud risk anywhere in the range.
+
+### 7.8 Picker order (15 themes)
+
+New theme first, then Vaporwave, Lofi Night, Dark, Light, then the existing ten in tally order (§1) — unchanged from each other, only prepended:
+
+1. **Arcane Library** (`arcane-library`) — new default
+2. Vaporwave (`vaporwave`)
+3. Lofi Night (`lofi`)
+4. Dark (`dark`)
+5. Light (`light`)
+6. Terminal Green (`terminal-green`)
+7. Arctic Ice (`arctic-ice`)
+8. Art Deco (`art-deco-gold`)
+9. Alpine Dawn (`alpine-dawn`)
+10. Matcha (`matcha`)
+11. Desert Night (`desert-night`)
+12. Tokyo Rain (`tokyo-rain`)
+13. Brushed Steel (`brushed-steel`)
+14. Aurora Sky (`aurora-sky`)
+15. Strawberry Cream (`strawberry-cream`)
+
+```js
+const THEMES = [
+  { slug: "arcane-library",    name: "Arcane Library" },
+  { slug: "vaporwave",         name: "Vaporwave" },
+  { slug: "lofi",              name: "Lofi Night" },
+  { slug: "dark",              name: "Dark" },
+  { slug: "light",             name: "Light" },
+  { slug: "terminal-green",    name: "Terminal Green" },
+  { slug: "arctic-ice",        name: "Arctic Ice" },
+  { slug: "art-deco-gold",     name: "Art Deco" },
+  { slug: "alpine-dawn",       name: "Alpine Dawn" },
+  { slug: "matcha",            name: "Matcha" },
+  { slug: "desert-night",      name: "Desert Night" },
+  { slug: "tokyo-rain",        name: "Tokyo Rain" },
+  { slug: "brushed-steel",     name: "Brushed Steel" },
+  { slug: "aurora-sky",        name: "Aurora Sky" },
+  { slug: "strawberry-cream",  name: "Strawberry Cream" },
+];
+const DEFAULT_THEME = "arcane-library";
+```
+
+At `minmax(88px,1fr)` (§3.2) 15 swatches still wraps cleanly with no scrolling drawer, dropdown, or pagination — one calm grid, one more row than the 14-theme layout.
+
+### 7.9 Default change points
+
+Mirrors §2's table format; these rows supersede §2's rows 1–5 and 7 (Vaporwave-as-default) the same way §2's rows themselves superseded round 11's Lofi-Night-as-default — history preserved, not deleted, per the standing pattern in this file and in `SPEC.md`.
+
+| # | File | Location | Change |
+|---|---|---|---|
+| 1 | `ui/index.html` | line 2, `<html data-theme="vaporwave">` seed attribute | → `data-theme="arcane-library"` |
+| 2 | `ui/index.html` | inside `.brand`, right after `<img class="brand-icon">` (the `.lofi-brand-cat` slot) | add `.arcane-brand-cat` markup verbatim (§7.6) |
+| 3 | `ui/index.html` | inside `.sidebar`, after `<nav id="nav">`, before `.sidebar-bottom` (the `.lofi-cityscape` slot) | add `.arcane-alcove` markup verbatim, including the grafted dagger prop (§7.5) |
+| 4 | `ui/app.js` | `THEMES` array (~line 27) | prepend `{ slug: "arcane-library", name: "Arcane Library" }` as the first entry (§7.8) |
+| 5 | `ui/app.js` | `DEFAULT_THEME` (~line 43) | `"vaporwave"` → `"arcane-library"` |
+| 6 | `ui/app.js` | `isKnownTheme(v)` | no logic change — it already derives from `THEMES` (§2 row 5's fix); it now accepts 15 slugs automatically once row 4 lands |
+| 7 | `ui/style.css` | new block | add the §7.3 token block, `.select` chevron override, and swatch-preview rule; add the §7.5 signature-touch CSS (base-control accents, keyframes, reduced-motion gate) and the §7.6 brand-cat CSS |
+| 8 | `ui/manifest.json` | `background_color`, `theme_color` | `"#12081f"` (Vaporwave's bg-0) → `"#0a0912"` (Arcane Library's bg-0) |
+| 9 | `ui/icon.svg` | whole file | replaced with §7.7's markup verbatim — the sidebar `<img class="brand-icon">` source, the favicon, and `make-icon.ps1`'s input |
+| 10 | `ui/icons/furphy-<size>.png` (16..512), `icon.ico` | regenerated | run `make-icon.ps1 -Svg ui/icon.svg -OutDir <dir> -Name furphy` per the icon pipeline note; copy the resulting `icon.ico` to the live folder root and `host/bin/icon.ico` **only on a real deploy** — this synthesis step does not deploy (hard rule) |
+| 11 | `host/FurphyHost.cs` | `InitializeDefaultTheme()` (~lines 1235-1245) | Vaporwave's 8-color palette + `_themeName = "vaporwave"` → Arcane Library's 8-color palette (§7.3's comment block) + `_themeName = "arcane-library"`; rebuild via `host/build-host.ps1` |
+| 12 | `SPEC.md` | default-theme decision record | append a new dated round-19 entry: "Arcane Library (cats mixed with Warcraft-flavored fantasy, Eric's decision, round 19) is the default, superseding round 12's Vaporwave-default call-out. Rounds 7, 11, and 12's entries remain below as history, per this file's established pattern — do not delete any." |
+| 13 | `README.md` / `README.txt` | default-theme line, theme count | update to 15 themes; state Arcane Library as the current default; Vaporwave, Lofi Night, Dark, Light, and the ten remain listed as available via the picker |
+| 14 | `tests/spa/harness.js` | asserted default-theme slug | `"vaporwave"` → `"arcane-library"` |
+| 15 | `tests/spa/harness.js` | asserted picker order array | 14-entry order → the 15-entry order in §7.8 |
+| 16 | `tests/Run-ThemeAudit.ps1` (or equivalent audit driver) | iterated theme list / count | 14 → 15; add `arcane-library` with the §7.4 contrast floors so the audit does not skip the new default |
+
+**Arcane Library's 8-color host palette** (for row 11, verbatim from §7.3): bg0 `#0a0912` bg1 `#121022` bg2 `#1b1830` bg3 `#242040` border `#332c54` text `#f4eedd` muted `#b3a8d6` accent `#88afff`.
+
+### 7.10 Acceptance checklist
+
+- [ ] `:root[data-theme="arcane-library"]` block present in `ui/style.css`, byte-identical to §7.3, defining the complete token contract with no inherited/missing tokens.
+- [ ] `color-scheme: dark` set explicitly.
+- [ ] `.select` chevron override present, keyed to `#b3a8d6` (`--text-muted`).
+- [ ] `--bg-0/1/2/3`, `--border`, `--text`, `--text-muted`, `--accent` are literal 6-digit hex (not `var()`/`rgba()`), so `Host.reportTheme()`'s regex passes.
+- [ ] Live-computed contrast script (per §5 Set A's methodology, extended to this round's stricter floors) passes every pairing in §7.4 on `arcane-library`, and all 14 existing themes still pass unchanged.
+- [ ] Every animated signature touch (`arcane-flame`, `arcane-rune-eye`, `arcane-cat-tail`, three `arcane-mote-*`) is wrapped in the `prefers-reduced-motion: reduce` gate and visibly stops when emulated.
+- [ ] `.arcane-alcove` and `.arcane-brand-cat` never overlap a clickable control at any viewport width tested; the grafted dagger prop sits within the scene's existing bounds with no new overflow.
+- [ ] My Addons (table/chips/progress bar), Get New Addons (cards/embedded toolbar), Settings (toggles/segmented controls, including the 15-swatch picker grid), a dialog, and a toast all screenshot cleanly in `arcane-library`.
+- [ ] `ui/icon.svg` replaced with §7.7's markup; `ui/icons/furphy-*.png` and `icon.ico` regenerated via `make-icon.ps1` and verified legible at 16px by an actual pixel-level render (not eyeballed) — do not trust a candidate's or a prior pass's own legibility claim without redoing this.
+- [ ] Every one of the 14 existing theme blocks (§1 plus Dark/Light/Vaporwave/Lofi Night) is byte-for-byte unchanged.
+- [ ] Swatch-grid picker renders all 15 themes in the §7.8 order, Arcane Library first and ring-marked by default on a fresh profile.
+- [ ] `THEMES` array in `app.js` is the sole source of slug+label ordering; `isKnownTheme` and `DEFAULT_THEME` derive from/agree with it.
+- [ ] Fresh profile (no `localStorage`, no persisted `hostTheme`) loads Arcane Library on both the page and the native title bar; an existing user's persisted theme preference (Vaporwave, Lofi Night, or any other) is undisturbed, per §2's "not a bug" note.
+- [ ] `manifest.json` background/theme colors match Arcane Library's `--bg-0` (`#0a0912`).
+- [ ] `SPEC.md` carries the new round-19 decision entry with rounds 7, 11, and 12's entries intact.
+- [ ] README reflects 15 themes and Arcane Library as default.
+- [ ] `tests/spa/harness.js`'s default-theme assertion and picker-order assertion are updated to match §7.8, not weakened or skipped.
+- [ ] `tests/Run-ThemeAudit.ps1` (or equivalent) audits all 15 themes, including `arcane-library`'s own contrast floors from §7.4.
+- [ ] No trademarked name (Warcraft, Azeroth, Horde, Alliance, Hearthstone, Blizzard, or any class/race name) appears anywhere in the theme's name, code comments, or user-facing copy; no Blizzard emblem or logo shape is reproduced.
 - [ ] No new theme introduces a network font, external asset, or anything that breaks the app running fully offline.

@@ -171,22 +171,81 @@ Describe 'update-all-flavours excludes ptr unless showTestRealms' {
 
 Describe 'Round 28: progress.json tallies pass through to job.progress on a real check job' -Tags 'Network' {
     <#
-      Same "real (fast-failing) CurseForge round trip" trick as the
-      'Freshness: checking' Describe above (bogus-but-numeric project ids -
-      each addon is tracked, so the check job actually iterates and reports
-      Failed for every one of them - never Up-to-date, since these ids do
-      not exist) - here used to prove addon-sync.ps1's new running tallies
-      (checked/updated/failed/upToDate/updatesFound) reach job.progress
-      with no server-side change, exactly as documented on -ProgressPath.
+      NOT the same trick as the 'Freshness: checking'/per-flavour-concurrency
+      Describes' "-Add a few bogus-but-numeric project ids first" seed: that
+      trick only needs those jobs to still be RUNNING when polled, so it
+      never noticed that CurseForge's files-list endpoint returns a plain
+      200 with an empty "data":[] for a project id that does not exist
+      (never a 404) - Select-CfFile then finds no matching file and
+      Sync-SingleAddon returns Status='Skipped', not 'Failed', and (since
+      this happens during the -Add run itself) addon-sync.ps1's own "drop
+      placeholder records that never got an installable file" cleanup
+      (CHANGELOG-documented, S. "Persist config") then deletes every one of
+      those records from addons.json before the CLI process even exits -
+      so a later 'check' job over that flavour has ZERO tracked addons to
+      iterate, not three, and every tally stays 0 (this is exactly the
+      "checked=0" verify failure this Describe used to reproduce).
+      Confirmed live: `-Add 900000011,900000012,900000013` against the
+      real curseforge.com API leaves addons.json as `[]`.
+
+      Fixed the way Cli.InstallRollbackLauncher.Tests.ps1's offline rollback
+      Describe already does it: hand-craft the addons.json records directly
+      (next to the copied addon-sync.ps1 under $root - Start-TestServer
+      already put one there - never under $wowRoot, which only affects
+      flavour/AddOns-path DETECTION), so the "drop placeholder" cleanup
+      never runs against them at all (that cleanup is -Add-only). Each
+      record carries a pinnedFileId that does not exist for its (also
+      bogus) project - Sync-SingleAddon's pin path (addon-sync.ps1's own
+      -FileId/pinnedFileId branch) then makes exactly ONE real
+      Get-CfFileById request per addon (still paced 300ms apart, so the
+      job stays observably 'running' for a beat, same as the older trick),
+      gets back a genuine `{"data":null}` for a fileId that belongs to no
+      project, and returns Status='Failed' deterministically - proven by a
+      live run against curseforge.com before landing this fix. This never
+      touches -Add at all, so the placeholder-drop cleanup is a complete
+      non-issue here.
     #>
     $wowRoot = Copy-Fixture
     $root = New-TempRoot -Name 'fresh-tallies'
     $server = $null
     try {
         $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot
+
         $bogusIds = @(900000011, 900000012, 900000013)
-        Invoke-CliJson -ScriptPath (Join-Path $root 'addon-sync.ps1') `
-            -ArgumentList @('-Add', ($bogusIds -join ','), '-Json', '-WowRoot', $wowRoot, '-Flavor', 'retail') | Out-Null
+        $flavourDir = Join-Path $root 'flavours\retail'
+        New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+        $records = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($id in $bogusIds) {
+            $records.Add([PSCustomObject]@{
+                    name             = "project $id"
+                    projectId        = $id
+                    fileId           = 1
+                    version          = '0.0.0'
+                    fileName         = 'fake.zip'
+                    installedAt      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                    folders          = @("Fake$id")
+                    author           = $null
+                    ignoreUpdates    = $false
+                    # A file id that cannot belong to ANY project (let alone
+                    # this bogus one) - Get-CfFileById's own doc comment: "a
+                    # fileId that does not belong to the project naturally
+                    # 404s (caller treats any failure as Failed)".
+                    pinnedFileId     = 999999999
+                    releaseType      = $null
+                    previousFileId   = $null
+                    previousVersion  = $null
+                    previousFileName = $null
+                    requiredDeps     = @()
+                    optionalDeps     = @()
+                    source           = 'curseforge'
+                    wagoId           = $null
+                    slug             = $null
+                    curseId          = $null
+                    latestGameVersions = @()
+                    latestFileDate     = $null
+                })
+        }
+        ConvertTo-Json -InputObject $records.ToArray() -Depth 10 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
 
         It 'job.progress carries the tallies, ends checked=3 failed=3 updated=0 upToDate=0 updatesFound=0' {
             $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'check' }

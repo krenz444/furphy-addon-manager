@@ -383,7 +383,7 @@ if ($layersToRun -contains 'host') {
 }
 
 # =====================================================================
-# spa (harness always; the 14-theme screenshot+contrast audit is
+# spa (harness always; the 15-theme screenshot+contrast audit is
 # full-run-only - real per-theme msedge launches, not part of Quick's
 # <4-minute budget)
 # =====================================================================
@@ -392,7 +392,7 @@ if ($layersToRun -contains 'spa') {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-SpaHarness.ps1') -DisplayName 'spa: Run-SpaHarness'
     if (-not $Quick) {
-        Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-ThemeAudit.ps1') -DisplayName 'spa: Run-ThemeAudit (14 themes, full-only)' -TimeoutSec 300
+        Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-ThemeAudit.ps1') -DisplayName 'spa: Run-ThemeAudit (15 themes, full-only)' -TimeoutSec 300
     }
     $sw.Stop()
     $layer.DurationSec = $sw.Elapsed.TotalSeconds

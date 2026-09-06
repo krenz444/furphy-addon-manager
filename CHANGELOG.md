@@ -1,5 +1,89 @@
 # Furphy Addon Manager - changelog
 
+## Round 27 (default theme: Arcane Library, new cat icon)
+
+Eric's request, verbatim: "make a cats theme mixed with warcraft, change
+the icon for the app to be a cat in this theme, make it the default focus
+on readability and clarity in the app with it", followed by "make it dark
+by default". Full design brief, judge scoring, contrast table, and
+signature-art/icon markup live in `THEMES-SPEC.md` section 7; this entry
+covers what shipped.
+
+**Theme (15th theme, added without flipping the default in a first pass,
+then flipped as this round's own change):** Arcane Library
+(`arcane-library`) - a hushed torchlit archive of gold-trimmed tome
+shelves with a study cat keeping watch, one eye a glowing blue rune. Dark
+by default (`color-scheme: dark`), the calmest and highest-contrast theme
+in the set per Eric's "readability and clarity" ask: text/bg-0..3 ranges
+13.37-17.08 (floor 7), muted/bg-1..2 7.78-8.45 (floor 5), faint/bg-1..3
+5.30-6.40 (floor 4.5), accent-text/accent 8.58 (floor 4.5), every chip
+text-on-tint over bg-1/bg-2 5.47-7.19 (floor 5) - all PASS, independently
+re-verified twice (once per judge, once by a fresh WCAG-luminance script
+against the shipped token block). Status hues given a Warcraft-flavored
+mapping without any Warcraft IP: nature green (success), gold (warning),
+health red (danger), mana blue (info) - no Horde/Alliance/Blizzard names
+or emblems anywhere in the code, comments, or copy. Cat signature touches,
+built the same way Lofi Night's are (masked inline SVG, `pointer-events:
+none`, motion gated behind `prefers-reduced-motion`): `.arcane-alcove`
+sidebar scene (stone shelves, a flickering sconce, drifting arcane motes,
+a study cat with a swaying tail and one rune-glow eye, plus a small
+propped dagger grafted in from a runner-up candidate) and `.arcane-brand-
+cat`, a tiny open-eyed cat beside the wordmark.
+
+**Icon:** `ui\icon.svg` replaced with a 4-flat-color cat head (deep-indigo
+panel, lavender face, gold ear-tips/collar, glowing blue eyes) on a
+16x16-cell pixel grid - no gradients, no external assets. Regenerated
+every `ui\icons\furphy-*.png` (16..512) and `icon.ico` via the project's
+own `make-icon.ps1` (headless Edge); verified legible by an actual
+pixel-level render at 16/32/256px, not eyeballed.
+
+**Default flip (this round's own change, per `THEMES-SPEC.md` section
+7.9's change-point list):**
+- `ui\index.html` - `<html data-theme>` seed attribute now `arcane-
+  library` (was `vaporwave`); `.arcane-brand-cat`/`.arcane-alcove` markup
+  was already in place from the prior pass.
+- `ui\app.js` - `THEMES` array now lists Arcane Library first (15-theme
+  picker order: Arcane Library, Vaporwave, Lofi Night, Dark, Light, then
+  the existing ten); `DEFAULT_THEME` is now `"arcane-library"`.
+  `isKnownTheme`/`readTheme`/`applyTheme` needed no logic change - they
+  already derive from `THEMES`/`DEFAULT_THEME`.
+- `ui\manifest.json` - `background_color`/`theme_color` already matched
+  Arcane Library's `--bg-0` (`#0a0912`) from the prior pass.
+- `host\FurphyHost.cs` - `InitializeDefaultTheme()`'s built-in cold-start
+  palette is now Arcane Library's 8-color host palette (`bg0 #0a0912, bg1
+  #121022, bg2 #1b1830, bg3 #242040, border #332c54, text #f4eedd, muted
+  #b3a8d6, accent #88afff`) with `_themeName = "arcane-library"`; a
+  returning user's persisted `settings.json` `hostTheme` still wins
+  unchanged. Rebuilt clean via `host\build-host.ps1`. Also new: a
+  `--theme <slug>` command-line option (`HostOptions.Theme`, parsed
+  alongside the existing `--view`/`--tab`) appended to the SPA URL as
+  `&theme=<slug>` - a one-shot way to switch an existing profile's
+  persisted theme from the command line without opening Settings; the
+  page's own `?theme=` handling already applies and persists it.
+- `SPEC.md`, `README.md`, `UX-SPEC.md` section 6.1/11 - updated to name
+  Arcane Library as the default and 15 as the theme count; every prior
+  round's default-theme decision (rounds 7, 11, 12/17) kept below as
+  history, per this file's own established pattern - nothing deleted.
+- `tests\spa\harness.js` - the fresh-profile theme-grid check now expects
+  15 radios in the new order with `arcane-library` checked and applied
+  (was 14 radios, `vaporwave` checked); the `?theme=matcha` deep-link
+  phase's comment updated to reflect the new baseline default it runs
+  after.
+- `tests\spa\Run-ThemeAudit.ps1` / `tests\spa\theme-audit.js` - already
+  covered all 15 themes (including `arcane-library`'s own contrast
+  floors) from the prior pass; unchanged this round.
+
+**Verified:** `node --check ui/app.js` / `tests/spa/harness.js` /
+`tests/spa/theme-audit.js` all clean. `[PSParser]::Tokenize` clean on
+`host\build-host.ps1`, `tests\spa\Run-ThemeAudit.ps1`, `tests\run-all.ps1`.
+`host\FurphyHost.cs` confirmed pure ASCII and compiles clean via
+`host\build-host.ps1` (zero errors). `tests\run-all.ps1 -Quick` run green
+after the flip (see that run's own console summary for the pass count).
+Every existing theme block in `ui\style.css` remains byte-for-byte
+unchanged - only the seed attribute, the `THEMES` array order/
+`DEFAULT_THEME` constant, the host's cold-start palette, and the test
+assertions above were touched to make the flip.
+
 ## Round 29 (tray stop signal scoped per port)
 
 Live-safety fix: round 28 (section K below) scoped the tray's single-
@@ -38,6 +122,8 @@ silently stopped it. The fix mirrors round 28's mutex fix exactly:
 un-all.ps1`'s hygiene sweep used to force-stop EVERY `FurphyHost.exe` by name and delete the production HKCU Run value `FurphyAddonManager`; it ran before and after every test run and as the deploy gate, and it killed the owner's live tray and removed his Start-with-Windows entry twice. It now stops only test instances (launched with `--port 4789x` or from an executable outside the live install path) and removes only the test value `FurphyAddonManager.Test`; live instances and the production value are reported and left alone.
 - **Fixed (live-safety, by hand)** - `POST /api/tray/start` now launches the child with `--port <this server's port>`; before, a tray started by a test server read the production port from settings, talked to the live server and held the production single-instance lock.
 - **Fixed (live-safety, by hand)** - the server's `/api/startup/register|unregister|status` handlers wrote and removed the production HKCU Run value `FurphyAddonManager` on every port; a test server on 47899 therefore deleted the owner's real Start-with-Windows entry when the tray integration test ran. `Get-StartupValueName` now returns the production name only on port 47831 and `FurphyAddonManager.Test` otherwise; the tray process applies the identical rule to its own menu toggle (`TrayForm._startupValueName`), and the tray integration test expects the test name.
+- **Fixed (by hand)** - `Test-TrayProcessAlive` only accepted a command line that *ended* with `--tray`, so a tray started with `--tray --port <n>` was reported as not running (`/api/tray/status` false, the 409 guard bypassed, the Settings status line wrong). It now matches `--tray` as a token anywhere. `Test-StartupRegistered` read the registry value back by the hardcoded production property name; it now reads the scoped name it wrote.
+- **Fixed (by hand)** - `tests\integration\Server.Tray.Tests.ps1`'s cleanup hard-killed every `--tray` process on the machine; it now kills only test instances (test port or non-live exe path).
 
 ## Round 28 (tray experience)
 

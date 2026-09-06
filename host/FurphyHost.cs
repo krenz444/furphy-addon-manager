@@ -128,6 +128,16 @@ namespace Furphy
         // default", matching every existing launch.
         public string View;
         public string Tab;
+        // Round 19 (THEMES-SPEC.md section 7.9): --theme <slug>, appended
+        // to the SPA URL as &theme=<slug>. The page's own ?theme= handling
+        // (ui/app.js) already applies and persists any known slug and
+        // falls back to DEFAULT_THEME on an unknown one, so this arg needs
+        // no validation here - it is a one-shot way to switch an existing
+        // profile's persisted theme from the command line (e.g. Eric's own
+        // live profile onto the new default) without opening Settings.
+        // Absent (null) means "let the page use its own persisted/default
+        // theme", matching every existing launch.
+        public string Theme;
 
         // Auto-updater tray mode (E24). --tray: run headless with just a
         // NotifyIcon (TrayProgram.Run), never MainForm. --tray-selftest
@@ -186,6 +196,11 @@ namespace Furphy
                 else if (string.Equals(a, "--tab", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
                     o.Tab = args[i + 1];
+                    i++;
+                }
+                else if (string.Equals(a, "--theme", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    o.Theme = args[i + 1];
                     i++;
                 }
             }
@@ -1220,29 +1235,30 @@ namespace Furphy
 
         // ------------------------------------------------------- theming
 
-        // Vaporwave - the app's default theme again as of round 12/18
-        // (ui/style.css data-theme="vaporwave": --bg-0.. --bg-3, --border,
+        // Arcane Library - the app's default theme as of round 19
+        // (ui/style.css data-theme="arcane-library": --bg-0.. --bg-3, --border,
         // --text, --text-muted, --accent - verbatim from THEMES-SPEC.md
-        // section 2's "Vaporwave's 8-color host palette", unmodified from
-        // the existing, unmodified Vaporwave token block in style.css).
-        // Superseded round 11's flip to Lofi Night as the built-in
+        // section 7.9's "Arcane Library's 8-color host palette", unmodified
+        // from the existing, unmodified Arcane Library token block in
+        // style.css). Superseded round 17's flip to Vaporwave (itself a
+        // supersession of round 11's flip to Lofi Night) as the built-in
         // cold-start default. Overwritten by LoadPersistedTheme
         // (settings.json hostTheme) and, live, by ApplyTheme whenever a
         // "theme" WebMessage arrives (HandleThemeMessage) - an existing
-        // user's persisted hostTheme (Lofi Night or otherwise) still wins,
-        // this only changes what a brand-new profile paints before the
-        // page reports in.
+        // user's persisted hostTheme (Vaporwave, Lofi Night, or otherwise)
+        // still wins, this only changes what a brand-new profile paints
+        // before the page reports in.
         private void InitializeDefaultTheme()
         {
-            ChromeBg = Color.FromArgb(0x12, 0x08, 0x1f);       // --bg-0
-            ChromeBgAlt = Color.FromArgb(0x1a, 0x0b, 0x2e);    // --bg-1
-            ChromeBgActive = Color.FromArgb(0x24, 0x16, 0x40); // --bg-2
-            ChromeHover = Color.FromArgb(0x2d, 0x1b, 0x4e);    // --bg-3
-            _chromeBorder = Color.FromArgb(0x3a, 0x2a, 0x5c);  // --border
-            ChromeText = Color.FromArgb(0xf3, 0xe9, 0xff);     // --text
-            ChromeMuted = Color.FromArgb(0xb9, 0xa6, 0xd6);    // --text-muted
-            ChromeAccent = Color.FromArgb(0xff, 0x71, 0xce);   // --accent
-            _themeName = "vaporwave";
+            ChromeBg = Color.FromArgb(0x0a, 0x09, 0x12);       // --bg-0
+            ChromeBgAlt = Color.FromArgb(0x12, 0x10, 0x22);    // --bg-1
+            ChromeBgActive = Color.FromArgb(0x1b, 0x18, 0x30); // --bg-2
+            ChromeHover = Color.FromArgb(0x24, 0x20, 0x40);    // --bg-3
+            _chromeBorder = Color.FromArgb(0x33, 0x2c, 0x54);  // --border
+            ChromeText = Color.FromArgb(0xf4, 0xee, 0xdd);     // --text
+            ChromeMuted = Color.FromArgb(0xb3, 0xa8, 0xd6);    // --text-muted
+            ChromeAccent = Color.FromArgb(0x88, 0xaf, 0xff);   // --accent
+            _themeName = "arcane-library";
         }
 
         // Reads settings.json's optional hostTheme = {name, colors} and, if
@@ -2247,6 +2263,10 @@ namespace Furphy
                     if (!string.IsNullOrEmpty(_options.Tab))
                     {
                         furphyUrl += "&tab=" + Uri.EscapeDataString(_options.Tab);
+                    }
+                    if (!string.IsNullOrEmpty(_options.Theme))
+                    {
+                        furphyUrl += "&theme=" + Uri.EscapeDataString(_options.Theme);
                     }
                     _furphyWebView.Source = new Uri(furphyUrl);
                 }
