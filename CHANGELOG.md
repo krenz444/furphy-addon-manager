@@ -1,5 +1,59 @@
 # Furphy Addon Manager - changelog
 
+## Round 30 (1.11.1: a cat you can actually see, icon v3, port-scoped window title)
+
+Eric's reactions to 1.11.0, verbatim: "CANT ACTUALLY SEE THE CATS OR
+WHATEVER" and "and the icon kinda sucks". Both fixed here; nothing else
+changed for the user.
+
+**Sidebar hero cat (Arcane Library).** The round-27 alcove drew a study
+cat about 30px tall inside a busy shelf scene - it read as noise. Two
+pixel artists drew competing large cats, a blind judge scored them for
+one-second recognizability, and the winner shipped: a sitting lavender
+cat with tapered ears, a gold helm, filled rune-blue eyes, whiskers, a
+chest blaze, crossed paws and a curled tail, on a stone ledge with a
+dashed rune-circle, a sleeping second cat and a small dagger. It lives in
+a new `.arcane-hero` flex slot between the nav and the Update & Play
+block and sizes itself to that slot's real height: `min(100%, 280px)`,
+so it can never be forced past the box. The torchlit bookshelf is now a
+backdrop layer inside the same box. The brand cat beside the wordmark
+grew from 18x14 to 27x22 and stays absolutely positioned so it cannot
+truncate the wordmark.
+
+Two verification rounds caught the first two builds clipping the cat's
+head off on a real three-version install at the default 1056x720 window
+(a taller nav from the version pills left the slot ~76px, under the art's
+110px floor, and the old `clamp()`/`vh` sizing forced the cat taller than
+the box). Final rule: the slot is a CSS size container, and a
+`@container arcane-hero (max-height: 109px)` query hides the cat and
+backdrop entirely below the recognizability floor instead of showing a
+fragment. Measured: one version at the default window gives a 175px cat;
+three versions at the default window gives a clean empty slot; a
+2530x1591 window gives the 280px cat. Other themes' sidebars unchanged.
+Contrast audit 469/469 across all 15 themes. Full write-up in
+`THEMES-SPEC.md` sections 7.5-7.6 and 7.15-7.16.
+
+**Icon v3.** Nine concepts rendered at 16/32/256px, scored blind by a
+judge for silhouette, cat-ness and Arcane Library fit; the "bold
+facecrest" (big-eyed cat face, gold crown band, collar badge) won. The
+first polish overshot (redrawn ears, enlarged orb) and was reverted; v3
+is v2 plus a ~25% larger gold nose and warmer fur (#8878a3), confirmed by
+pixel diff. `ui\icon.svg`, `icon.ico`, `host\bin\icon.ico` and every
+`ui\iconsurphy-*.png` regenerated through `make-icon.ps1`. Windows may
+show the old shortcut icon until Explorer refreshes its icon cache.
+Section 7.11-7.12 of `THEMES-SPEC.md` records the verdicts.
+
+**Port-scoped window title (bug found by the test gate).** The tray's
+click handler found the main window with `FindWindow` by the literal
+title "Furphy Addon Manager", regardless of port. With Eric's live window
+open, the `--tray-selftest` on port 47899 reported `activate:foreground`
+instead of `launch` - it had found, and pulled to the foreground, the
+LIVE window. `AppConstants.WindowTitleFor(port)` now returns the exact
+legacy title on 47831 and "Furphy Addon Manager [test <port>]" on any
+other port; `MainForm` sets its `Text` from it and the tray looks windows
+up with the same call, so a test tray can never touch a real window and a
+live tray can never adopt a test one. Production behaviour unchanged.
+
 ## Round 27 (default theme: Arcane Library, new cat icon)
 
 Eric's request, verbatim: "make a cats theme mixed with warcraft, change

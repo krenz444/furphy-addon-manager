@@ -1084,59 +1084,76 @@ Recomputed from scratch with a fresh WCAG relative-luminance + alpha-composite s
 
 **ALL 23 required pairings PASS**, matching the judged candidate's and all three judges' independently-recomputed numbers to within floating-point rounding (max observed delta ±0.02, from tint-alpha rounding in the two different scripts). This is the widest safety margin of the three round-19 candidates on every metric class in the brief, and clears every floor in this round's stricter brief (body text ≥7:1, muted ≥5:1, faint ≥4.5:1, accent-text ≥4.5:1 prefer 7, chip-over-tint ≥5:1) with room to spare. Status-hue separation: success (nature green, #5fc17a), warning (gold, #e0a83c), danger (health-red, #ff7a7a), info (mana-blue, #4fc3e8), accent (blue-violet, #88afff) — the only one of the three candidates whose accent sits far outside the warm success/warning/danger cluster instead of crowding into it, per Judge 2's independent hue check.
 
-### 7.5 Signature touch — sidebar scene (`.arcane-alcove`)
+### 7.5 Signature touch — sidebar hero cat (`.arcane-hero-cat`) + backdrop (`.arcane-alcove`)
 
-Same technique as every other theme's own signature art in this file (Lofi Night's `.lofi-cityscape`/`.lofi-brand-cat`, and every candidate above): a masked, `pointer-events:none`, `z-index:0` inline `<svg>` behind the sidebar's real content (which gets `z-index:1`), class-prefixed `arcane-`, hidden by default and shown only under `[data-theme="arcane-library"]`.
+**Follow-up round update — the sizing/layout in this section is superseded by §7.13, kept here as history, do not delete:** round 20's `.arcane-hero-cat` sizing (`clamp(110px, 22vh, 160px)`, `.arcane-alcove` a separate fixed-140px flex sibling) shipped, passed the single-flavour mock/theme-audit harness, then failed verification against a real multi-flavour install (Eric's own real setup) - the flavour pills + Update All button make `.nav` tall enough that `.arcane-hero`'s real flex-computed box shrinks well below the cat's `22vh`-sized rendering, and since the box clips overflow, the cat's own head got clipped off at the DEFAULT 1056×720 window - reproducing Eric's original "can't see the cats" complaint on a configuration the build's own verification never tested. §7.13 has the root cause, the fix (the cat and alcove both now live inside `.arcane-hero`, sized against ITS OWN real height rather than the viewport), and the brand-cat ear/crown redraw from the same pass. The **concept** (hero cat + ledge + sleeping cat + dagger, alcove as the wider room) is unchanged; only the CSS sizing mechanics below are superseded.
 
-**CSS** (`ui/style.css`, colocated with the §7.3 token block):
+**Verdict on the round-19 scene (superseded here):** shipped, then Eric's reaction on the real app, verbatim: *"CANT ACTUALLY SEE THE CATS OR WHATEVER."* He was right. The round-19 `.arcane-alcove` cat lived inside a fixed 140px strip at the very bottom of the sidebar — comparable in size to Lofi Night's own `.lofi-cityscape` cats, which *do* read fine — but Lofi Night's sidebar has no long stretch of dead space above that strip pulling the eye away first. Arcane Library's `.nav { flex: 1 }` left 500-1000px of unused flex space on a tall/high-DPI window (Eric's real window: 2530×1591 @125% DPI, ≈232 CSS px sidebar) that the old strip's cat never had a chance to fill or draw attention into — on his window it rendered as a short strip of bookshelf bars with a ≈20px pale blob, and the brand mark beside the wordmark was a few pixels. Replaced below by a round-20 hero cat sized to actually fill that space, judged the same way round 19's three candidates were (multi-artist bake-off, judged, then a synthesis pass applying the judge's tweaks).
+
+**Concept:** the freed flex space between the nav and `.sidebar-bottom` becomes a lit pedestal for one large cat — sitting upright, three-step tapered ears, a gold helm nested between them, open filled rune-blue eye squares, whiskers, a cream chest blaze, crossed front paws, a curled tail — anchored on a low stone ledge that carries a faint dashed rune-circle underfoot and a second, smaller cat curled asleep beside a tiny dagger prop. The round-19 bookshelf/torch/motes scene (`.arcane-alcove`) is unchanged and keeps its own slot below the hero, now read as the wider room the ledge sits in rather than the theme's primary cat-bearing scene.
+
+**Technique:** `.nav` gives up its `flex: 1` (scoped to this theme only — every other theme's `.nav` is untouched) and a new `.arcane-hero` flex sibling, sitting between `</nav>` and `.arcane-alcove` in the sidebar markup, takes over that role instead, so it — not empty space — owns whatever room a tall window frees up. Its inline `<svg class="arcane-hero-cat">` (`preserveAspectRatio="xMidYMax meet"`, bottom-anchored, centered rather than stretched full-width so it reads as a spotlit pedestal) is sized via `height: clamp(110px, 22vh, 160px)`: the 110px floor keeps the default ≈1056×720 window from feeling starved, the 160px ceiling keeps a very tall window's cat from growing without bound. Below a ≈460px window height there is no longer room for nav + a 110px cat + `.sidebar-bottom` without collision, so — the same "vanish rather than overlap" contract every other theme's sidebar decoration already follows — the whole hero slot collapses to nothing instead of crowding or clipping the nav, the CTAs, the status dots, or the wordmark. Motion is a tail sway, an eye blink every ≈6s, and a slow glow pulse, every one of it gated behind one `@media (prefers-reduced-motion: reduce)` block.
+
+**CSS** (`ui/style.css`, appended after the §7.3 token block):
 
 ```css
-:root[data-theme="arcane-library"] .btn-accent {
-  box-shadow: 0 0 0 1px rgba(136, 175, 255, 0.4), 0 3px 14px rgba(136, 175, 255, 0.25);
-}
-:root[data-theme="arcane-library"] .btn-accent:hover:not(:disabled) {
-  box-shadow: 0 0 0 1px rgba(163, 193, 255, 0.5), 0 4px 20px rgba(163, 193, 255, 0.35);
-}
-:root[data-theme="arcane-library"] .btn-accent:active:not(:disabled) {
-  background: var(--accent-active);
-  box-shadow: 0 0 0 1px rgba(95, 142, 240, 0.6), 0 2px 10px rgba(95, 142, 240, 0.3);
-}
-:root[data-theme="arcane-library"] .nav-item.is-active {
-  box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.35), 0 0 12px rgba(136, 175, 255, 0.2);
-}
-:root[data-theme="arcane-library"] .chip { box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.3); }
-:root[data-theme="arcane-library"] .filter-chip.is-active { box-shadow: inset 0 0 0 1px rgba(217, 164, 65, 0.42); }
-:root[data-theme="arcane-library"] .settings-group,
-:root[data-theme="arcane-library"] .browse-row {
-  position: relative;
-  overflow: hidden;
-  box-shadow: 0 3px 12px rgba(5, 4, 12, 0.45);
-}
-:root[data-theme="arcane-library"] .settings-group::before,
-:root[data-theme="arcane-library"] .browse-row::before {
-  content: "";
-  position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background-image: repeating-linear-gradient(90deg, var(--secondary) 0, var(--secondary) 2px, transparent 2px, transparent 5px);
-  opacity: 0.45;
-}
-:root[data-theme="arcane-library"] .addon-row { box-shadow: 0 2px 8px rgba(5, 4, 12, 0.32); }
+:root[data-theme="arcane-library"] .nav { flex: 0 0 auto; }
 
-.arcane-alcove { display: none; }
-:root[data-theme="arcane-library"] .sidebar { position: relative; overflow: hidden; }
-:root[data-theme="arcane-library"] .sidebar > *:not(.arcane-alcove) { position: relative; z-index: 1; }
+.arcane-hero { display: none; }
+:root[data-theme="arcane-library"] .arcane-hero {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+:root[data-theme="arcane-library"] .arcane-hero-cat {
+  width: 100%;
+  height: clamp(110px, 22vh, 160px);
+  display: block;
+}
+@media (max-height: 460px) {
+  :root[data-theme="arcane-library"] .arcane-hero { display: none; }
+}
+
+@keyframes arcane-hero-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s ease-in-out infinite; }
+
+@keyframes arcane-hero-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+.arcane-hero-eye-l, .arcane-hero-eye-r {
+  animation: arcane-hero-blink 6.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.arcane-hero-eye-r { animation-delay: .05s; }
+
+@keyframes arcane-hero-glow-pulse { 0%, 100% { opacity: .5; } 50% { opacity: .8; } }
+.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .arcane-hero-tail, .arcane-hero-eye-l, .arcane-hero-eye-r, .arcane-hero-glow {
+    animation: none;
+  }
+}
+
+/* .arcane-alcove itself (the bookshelf/torch/motes backdrop below the hero)
+   is unchanged from round 19 - its own flex:0 0 140px rule, and the
+   arcane-flame/arcane-mote-1/2/3 keyframes, still stand as documented
+   below; only its old study-cat + propped-dagger groups were removed from
+   its markup (§ below) since the hero now carries the theme's cat and
+   dagger. */
 :root[data-theme="arcane-library"] .arcane-alcove {
-  display: block; position: absolute; left: 0; right: 0; bottom: 0;
-  width: 100%; height: 140px; z-index: 0; pointer-events: none;
+  display: block;
+  flex: 0 0 140px;
+  width: 100%;
+  height: 140px;
+  pointer-events: none;
 }
 
 @keyframes arcane-flame-flicker { 0%, 100% { opacity: .85; } 45% { opacity: 1; } 60% { opacity: .55; } }
 .arcane-flame { animation: arcane-flame-flicker 2.2s ease-in-out infinite; }
-
-@keyframes arcane-rune-glow { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
-.arcane-rune-eye { animation: arcane-rune-glow 2.8s ease-in-out infinite; }
-
-@keyframes arcane-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
-.arcane-cat-tail { animation: arcane-tail-sway 4s ease-in-out infinite; }
 
 @keyframes arcane-mote-drift {
   0%, 100% { opacity: .4; transform: translateY(0); }
@@ -1147,197 +1164,192 @@ Same technique as every other theme's own signature art in this file (Lofi Night
 .arcane-mote-3 { animation: arcane-mote-drift 6s ease-in-out infinite 2.4s; }
 
 @media (prefers-reduced-motion: reduce) {
-  .arcane-flame, .arcane-rune-eye, .arcane-cat-tail,
-  .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
+  .arcane-flame, .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
 }
 ```
 
-**Markup** (`ui/index.html`, inside `.sidebar`, after `<nav id="nav">` and before `.sidebar-bottom` — the same slot `.lofi-cityscape` occupies). The propped dagger (graft §7.2 item 1) is the only addition versus the judged candidate, inserted as its own `<g>` right after the foreground tome-stack group and before the study-cat group, so it reads as leaning against the stack, in front of the cat:
+**Markup** (`ui/index.html`, inside `.sidebar`, `.arcane-hero` sits between `</nav>` and `.arcane-alcove`, the same slot the round-19 scene used to open at):
 
 ```html
-<svg class="arcane-alcove" viewBox="0 0 232 140" preserveAspectRatio="none" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+<div class="arcane-hero">
+<svg class="arcane-hero-cat" viewBox="0 0 116 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
   <defs>
-    <linearGradient id="arcaneWall" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#1b1830"/>
-      <stop offset="55%" stop-color="#121022"/>
-      <stop offset="100%" stop-color="#0a0912"/>
-    </linearGradient>
+    <radialGradient id="arcaneHeroGlow" cx="50%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="#88afff" stop-opacity="0.55"/>
+      <stop offset="65%" stop-color="#88afff" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#88afff" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <rect x="0" y="0" width="232" height="140" fill="url(#arcaneWall)"/>
-
-  <!-- faint mortared stone blocks -->
-  <g fill="#1f1b38" opacity="0.5">
-    <rect x="0" y="4" width="38" height="18"/><rect x="42" y="4" width="34" height="18"/>
-    <rect x="80" y="4" width="40" height="18"/><rect x="124" y="4" width="36" height="18"/>
-    <rect x="164" y="4" width="30" height="18"/><rect x="198" y="4" width="34" height="18"/>
-    <rect x="-16" y="26" width="36" height="18"/><rect x="24" y="26" width="40" height="18"/>
-    <rect x="68" y="26" width="34" height="18"/><rect x="106" y="26" width="38" height="18"/>
-    <rect x="148" y="26" width="36" height="18"/><rect x="188" y="26" width="44" height="18"/>
+  <ellipse class="arcane-hero-glow" cx="60" cy="96" rx="56" ry="62" fill="url(#arcaneHeroGlow)"/>
+  <g fill="#1c1832"><rect x="0" y="140" width="116" height="18"/></g>
+  <rect fill="#d9b45a" x="0" y="140" width="116" height="2"/>
+  <g fill="#2a2447">
+    <rect x="2" y="144" width="9" height="14"/><rect x="13" y="146" width="7" height="12"/>
+    <rect x="99" y="145" width="8" height="13"/><rect x="108" y="147" width="7" height="11"/>
   </g>
-
-  <!-- wall sconce, upper right, flickering flame - flat two-layer fill,
-       zero gradient (Ember Keep graft, §7.2 item 2 - already satisfied by
-       the original candidate markup, confirmed unchanged here) -->
-  <g fill="#332c54"><rect x="196" y="14" width="4" height="14"/><rect x="190" y="26" width="16" height="4"/></g>
-  <g class="arcane-flame" style="opacity:.85">
-    <rect fill="#e0a83c" x="195" y="6" width="6" height="6"/>
-    <rect fill="#ff7a7a" x="196.5" y="9" width="3" height="4"/>
+  <!-- graft: faint dashed rune-circle on the ledge, under/behind the sitting cat -->
+  <ellipse class="arcane-hero-runecircle" cx="58" cy="148" rx="46" ry="7" fill="none" stroke="#8fc4ff" stroke-width="1" stroke-dasharray="3 3" opacity="0.35"/>
+  <!-- second, smaller cat: curled and asleep on the ledge -->
+  <g class="arcane-hero-sleeping-cat" fill="#4d4478">
+    <rect x="4" y="150" width="20" height="7"/><rect x="6" y="146" width="14" height="5"/>
+    <rect x="7" y="143" width="4" height="4"/><rect x="16" y="143" width="4" height="4"/>
   </g>
-
-  <!-- two shelves of stacked, gold-trimmed tome spines -->
-  <g fill="#332c54"><rect x="0" y="52" width="232" height="4"/><rect x="0" y="92" width="232" height="4"/></g>
-  <g fill="#b3a8d6">
-    <rect x="4" y="34" width="10" height="18"/><rect x="16" y="30" width="8" height="22"/>
-    <rect x="26" y="36" width="12" height="16"/><rect x="40" y="32" width="9" height="20"/>
-    <rect x="51" y="35" width="11" height="17"/><rect x="64" y="31" width="8" height="21"/>
-    <rect x="74" y="37" width="10" height="15"/><rect x="86" y="33" width="9" height="19"/>
-    <rect x="97" y="30" width="12" height="22"/><rect x="111" y="36" width="8" height="16"/>
-    <rect x="121" y="32" width="11" height="20"/><rect x="134" y="35" width="9" height="17"/>
-    <rect x="145" y="31" width="10" height="21"/><rect x="157" y="37" width="12" height="15"/>
-    <rect x="171" y="33" width="8" height="19"/><rect x="181" y="30" width="10" height="22"/>
-    <rect x="4" y="74" width="9" height="18"/><rect x="15" y="70" width="11" height="22"/>
-    <rect x="28" y="76" width="8" height="16"/><rect x="38" y="72" width="12" height="20"/>
-    <rect x="52" y="75" width="9" height="17"/><rect x="63" y="71" width="10" height="21"/>
-    <rect x="75" y="77" width="11" height="15"/><rect x="88" y="73" width="8" height="19"/>
-    <rect x="98" y="70" width="10" height="22"/><rect x="110" y="76" width="12" height="16"/>
+  <rect fill="#f4eedd" x="10" y="147" width="1.6" height="1.6"/>
+  <!-- graft: small dagger prop lying beside the sleeping cat -->
+  <g transform="rotate(3 34 152)">
+    <rect x="27" y="150" width="14" height="3" fill="#453c70"/>
+    <path d="M41,150 L49,151.5 L41,153 Z" fill="#453c70"/>
+    <rect x="24" y="149.5" width="4" height="4" fill="#d9a441"/>
+    <circle cx="23" cy="151.5" r="2" fill="#d9a441"/>
   </g>
-  <g fill="#d9a441">
-    <rect x="4" y="42" width="10" height="2"/><rect x="40" y="40" width="9" height="2"/>
-    <rect x="97" y="38" width="12" height="2"/><rect x="145" y="39" width="10" height="2"/>
-    <rect x="4" y="82" width="9" height="2"/><rect x="63" y="79" width="10" height="2"/>
+  <!-- tail: curls from the right hip around to the front paws -->
+  <g class="arcane-hero-tail" fill="#a99adf" style="transform-origin:101px 112px;">
+    <rect x="94" y="104" width="15" height="16"/><rect x="99" y="119" width="15" height="15"/>
+    <rect x="87" y="130" width="17" height="12"/><rect x="68" y="134" width="18" height="10"/>
   </g>
-
-  <!-- drifting arcane motes -->
-  <g fill="#8fc4ff">
-    <rect class="arcane-mote-1" style="opacity:.4" x="70" y="18" width="2" height="2"/>
-    <rect class="arcane-mote-2" style="opacity:.4" x="150" y="60" width="2" height="2"/>
-    <rect class="arcane-mote-3" style="opacity:.4" x="30" y="100" width="2" height="2"/>
+  <rect fill="#f4eedd" x="65" y="136" width="7" height="7"/>
+  <!-- body: sitting trapezoid, three stacked bands widening toward the base -->
+  <g fill="#c9bdf0">
+    <rect x="30" y="80" width="56" height="17"/><rect x="21" y="97" width="74" height="20"/>
+    <rect x="11" y="117" width="94" height="24"/>
   </g>
-
-  <!-- foreground: leaning, gold-trimmed stack of tomes -->
-  <g fill="#242040">
-    <rect x="150" y="118" width="60" height="10"/><rect x="154" y="108" width="52" height="10"/>
-    <rect x="158" y="98" width="44" height="10"/>
+  <g fill="#a99adf">
+    <rect x="70" y="80" width="16" height="17"/><rect x="80" y="97" width="15" height="20"/>
+    <rect x="90" y="117" width="15" height="24"/>
   </g>
-  <g fill="#d9a441">
-    <rect x="150" y="126" width="60" height="2"/><rect x="154" y="116" width="52" height="2"/>
-    <rect x="158" y="106" width="44" height="2"/>
+  <rect fill="#f4eedd" x="46" y="82" width="24" height="42"/>
+  <g fill="#f4eedd">
+    <rect x="43" y="124" width="15" height="15"/><rect x="59" y="124" width="15" height="15"/>
   </g>
-
-  <!-- GRAFT §7.2 item 1 (from Tavern Hearth's propped shield): a small
-       traveling dagger leaning against the left edge of the tome stack -
-       adventuring-gear material culture beside the cat, sharpening the
-       Warcraft-flavored mood without a new token or any motion budget.
-       Colors reused verbatim from the existing palette: blade in
-       --border-hover (#453c70), hilt/pommel in --secondary (#d9a441). -->
-  <g transform="rotate(-8 146 118)">
-    <rect x="144" y="92" width="4" height="28" fill="#453c70"/>
-    <path d="M144,92 L146,84 L148,92 Z" fill="#453c70"/>
-    <rect x="141" y="118" width="10" height="4" fill="#d9a441"/>
-    <circle cx="146" cy="126" r="3" fill="#d9a441"/>
+  <rect fill="#c9bdf0" x="57" y="124" width="3" height="15"/>
+  <!-- head: three-step tapered ears for a clean point -->
+  <g fill="#c9bdf0">
+    <rect x="33" y="42" width="17" height="8"/><rect x="36" y="35" width="11" height="7"/><rect x="39" y="29" width="5" height="6"/>
+    <rect x="66" y="42" width="17" height="8"/><rect x="69" y="35" width="11" height="7"/><rect x="72" y="29" width="5" height="6"/>
+    <rect x="26" y="48" width="64" height="30"/>
   </g>
-
-  <!-- the study cat, same 3-color language as the app icon, tail swaying -->
-  <g fill="#b3a8d6">
-    <rect x="164" y="80" width="34" height="18"/>
-    <rect x="168" y="72" width="26" height="10"/>
-    <rect x="171" y="66" width="20" height="8"/>
-  </g>
-  <g fill="#d9a441"><rect x="171" y="62" width="6" height="6"/><rect x="185" y="62" width="6" height="6"/></g>
-  <rect class="arcane-rune-eye" fill="#8fc4ff" x="177" y="70" width="4" height="4"/>
-  <g class="arcane-cat-tail" fill="#b3a8d6" style="transform-origin:200px 96px;">
-    <rect x="198" y="92" width="6" height="8"/><rect x="202" y="84" width="6" height="10"/>
-    <rect x="204" y="76" width="5" height="9"/>
+  <rect fill="#a99adf" x="26" y="72" width="64" height="6"/>
+  <g fill="#d9b45a"><rect x="37" y="38" width="42" height="11"/><rect x="53" y="31" width="10" height="9"/></g>
+  <rect fill="#b8923f" x="37" y="47" width="42" height="3"/>
+  <rect fill="#f0d98c" x="56" y="33" width="4" height="4"/>
+  <rect fill="#f4eedd" x="44" y="66" width="28" height="12"/>
+  <rect class="arcane-hero-eye-l" fill="#88afff" x="39" y="57" width="11" height="11"/>
+  <rect class="arcane-hero-eye-r" fill="#88afff" x="66" y="57" width="11" height="11"/>
+  <rect fill="#453c70" x="54" y="70" width="8" height="5"/>
+  <g fill="#f4eedd" opacity="0.75">
+    <rect x="4" y="63" width="20" height="2"/><rect x="2" y="69" width="22" height="2"/>
+    <rect x="92" y="63" width="20" height="2"/><rect x="92" y="69" width="22" height="2"/>
   </g>
 </svg>
+</div>
 ```
 
-Placement/motion discipline: the scene sits at `z-index:0` behind the sidebar's real children (`z-index:1`), is `pointer-events:none`, and is cropped to the sidebar's own bottom 140px — it can never sit above or intercept a click on the nav list, the flavour-switcher, or `.sidebar-bottom`'s buttons above it. The dagger and cat sit low (`y ≥ 62` for the cat's ear-tips, `y ≥ 84` for the dagger's point), well clear of the nav list; every animated element (flame, rune-eye, tail, three motes) is gated behind one `@media (prefers-reduced-motion: reduce)` block that sets `animation:none`, leaving a static torchlit archive with a watchful cat.
+`.arcane-alcove`'s own markup (`ui/index.html`, unchanged wall/sconce/shelves/motes/foreground-tomes from round 19) loses only its old study-cat group and its old propped-dagger `<g>` — both retired in favor of the hero cat and the ledge's own dagger above; nothing else in that scene moved.
 
-### 7.6 Brand cat (`.arcane-brand-cat`, 16×12, beside the wordmark)
+Placement/motion discipline: `.arcane-hero` is a `pointer-events:none` flex item that vanishes outright under 460px window height rather than ever overlapping the nav, the CTAs, the status dots, or the wordmark; `.arcane-alcove` keeps its round-19 discipline (cropped to the sidebar's own bottom 140px, `pointer-events:none`). Every animated element across both — hero tail/eyes/glow, alcove flame/three motes — is gated behind `@media (prefers-reduced-motion: reduce)`, leaving a fully static scene when the OS asks for it.
 
-Unchanged from the judged candidate (graft §7.2 item 3 — preserved verbatim, not flattened). Deliberately open-eyed (two glowing blue eye-squares) versus the sidebar cat's single literal rune eye: the same "on watch" / "off duty" duality Ember Keep's judges asked to keep.
+### 7.6 Brand cat (`.arcane-brand-cat`, 27×22, beside the wordmark)
+
+**Follow-up round update — the artwork in this section is superseded by §7.13, kept here as history, do not delete:** the round-20 redraw below shipped, then verification at the true 27×22px render size found the gold crown band (y 3.2-6.4) sitting directly over the ear-taper rects (y 1-5.6), visually capping the ears into a row of castle crenellations rather than two points - it read as a small purple box with a gold stripe, not a cat head. §7.13 has the redraw: ears occupy their own clear band above the head, the gold trim is a slim headband entirely inside the head block, and the two shapes never touch.
+
+**Verdict on the round-19 mark (superseded here):** at 18×14 it held up in isolation but dissolved into a handful of pixels on Eric's real window — part of the same "can't see the cats" complaint. Redrawn at 27×22 (same two-step ear taper and open filled rune-blue eyes as the round-20 hero cat's own head, just smaller) so the ears and eyes read as a cat head at a glance instead of a blur; still absolute-positioned outside the `.brand` flex row (same reasoning as `.lofi-brand-cat`: at the app's 1000px floor there are no spare pixels to give the wordmark), so the size increase cannot push or truncate `.brand-name` — verified in-browser at both 1056×720 and 1400×900 with `brand-name.scrollWidth <= clientWidth` (no ellipsis) at each.
 
 ```css
 .arcane-brand-cat { display: none; }
 :root[data-theme="arcane-library"] .arcane-brand-cat {
   display: block; position: absolute;
-  width: 18px; height: 14px; left: 22px; bottom: 2px;
+  width: 27px; height: 22px; left: 22px; bottom: -2px;
   pointer-events: none;
 }
 ```
 
 ```html
 <!-- inside .brand, right after <img class="brand-icon">, mirroring .lofi-brand-cat -->
-<svg class="arcane-brand-cat" viewBox="0 0 16 12" aria-hidden="true" focusable="false" shape-rendering="crispEdges">
+<svg class="arcane-brand-cat" viewBox="0 0 16 13" aria-hidden="true" focusable="false" shape-rendering="crispEdges">
   <g fill="#b3a8d6">
-    <rect x="2" y="6" width="10" height="4"/>
-    <rect x="1" y="4" width="12" height="3"/>
-    <rect x="3" y="2" width="8" height="3"/>
+    <rect x="1.5" y="3" width="4" height="2.6"/>
+    <rect x="2.6" y="1" width="2" height="2.4"/>
+    <rect x="10.5" y="3" width="4" height="2.6"/>
+    <rect x="11.4" y="1" width="2" height="2.4"/>
+    <rect x="2" y="5" width="12" height="7"/>
   </g>
   <g fill="#d9a441">
-    <rect x="3" y="1" width="2" height="2"/>
-    <rect x="9" y="1" width="2" height="2"/>
+    <rect x="4.5" y="3.2" width="7" height="3.2"/>
+    <rect x="7" y="1.4" width="2" height="2.2"/>
   </g>
-  <rect fill="#8fc4ff" x="5.2" y="4.5" width="1.4" height="1.4"/>
-  <rect fill="#8fc4ff" x="8.2" y="4.5" width="1.4" height="1.4"/>
+  <rect fill="#8fc4ff" x="4.2" y="7" width="2.4" height="2.4"/>
+  <rect fill="#8fc4ff" x="9.4" y="7" width="2.4" height="2.4"/>
 </svg>
 ```
 
-No animation on the brand mark — at 16×12 there is nothing worth moving, and it sits right next to legible wordmark text, so it stays still (same reasoning as every other candidate's brand cat in this round).
+Still no animation on the brand mark — same reasoning as round 19: it sits right next to legible wordmark text, so it stays still. Verified with an isolated 16x-zoom render (viewBox scaled to 256px) that the two-step ears rise clearly clear of the head block before the gold band starts, the way the hero cat's own three-step ears clear its head.
 
-### 7.7 App icon (`ui/icon.svg`)
+### 7.7 App icon (`ui/icon.svg`) — "Helm Cat"
 
-4 flat theme-palette colors, no gradients, no filters, drawn on a 16×16 pixel grid (4 SVG units/cell in the 64×64 `viewBox`): panel `#150f2a` (bespoke deep-indigo backdrop, darker than `--bg-0`, so the cat pops at tiny sizes), cat body `#b3a8d6` (`--text-muted`, reused verbatim), gilt trim `#d9a441` (`--secondary`), rune-glow `#8fc4ff` (near `--accent`). Pointed gold ear-tips with a visible v-notch between them, a wide lavender head, two glowing blue eye-squares, and a solid gold collar band low on the neck (the "gold trim" detail, built as a 2-cell-tall solid band rather than a hairline outline, since a stroke that thin disappears at 16px).
+**Follow-up round update — superseded, kept as history, do not delete:** a later judged icon round picked **`bold-facecrest` v2** over "Helm Cat" — see §7.11 for the winner, the applied tweaks, and the judge's line on why both this icon and the original flat-emoji icon it replaced were weak at 16px. `ui/icon.svg`, `ui/icons/*.png`, `icon.ico`, and `host/bin/icon.ico` all now carry §7.11's markup. Note for the audit trail: a script error in that round's install step briefly wrote "Helm Cat" (this section's SVG) into those same live files before the mistake was caught and corrected to `bold-facecrest` v2 — "Helm Cat" itself was never a build-script bug, only its accidental installation was.
+
+**Verdict on the previous icon (shipped 2026-09-05, superseded here):** a generic flat-emoji cat face — gold ear-tips and a plain collar bar were its only motif, so at 16px (its most common real-world size, the taskbar) it collapsed into a nearly featureless pale-purple blob with no distinct silhouette or personality. Replaced below.
+
+The replacement gives the cat a fantasy identity — an open-face knight's helm — rather than costume-jewelry trim on an otherwise blank head: lavender ears and cheek fur peek out from under a gold forehead band and rounded-rect cheek flaps, a darker-gold crest ridge runs up the center topped by a small red plume, and the open face shows glowing rune-blue eyes with dark vertical slit pupils so the glow reads as an expression (attitude), not a soft dot. 7 flat colors, no gradients, one soft highlight (the helm shine strip), on the same deep-indigo `#121022` badge (rounded-square, holds up on light and dark taskbars).
+
+Iterated twice before judging (curvy cheek-guards/soft ellipse eyes → muddy blobs at 16px in v1; v2 switched to crisp rounded-rect cheek flaps, a straight forehead band, an enlarged head filling more of the badge, and slit pupils), then given one more polish pass applying the judge's four small-size legibility notes:
+
+1. **Ears** — were the one element almost merging into the dark badge at 16px. Lightened (`#b9a6d9` → `#d4bfe8`) and given a thicker dark outline (`stroke="#2a2140" stroke-width="1.6"`) so the silhouette separates from the badge instead of blending into it.
+2. **Small top-of-head accent** — the judge's note named a "blue orb pip" that doesn't exist as a literal element in this design (its only top-of-head accent is the crest ridge + plume, both warm-toned, not blue); treated as the same underlying complaint — a small top accent nearly disappearing below 32px — and enlarged that assembly ~30% (`transform="translate(32,20) scale(1.3) translate(-32,-20)"`) around the forehead anchor.
+3. **Nose** — the small gold diamond was washing out against the fur at 16px. Enlarged (7×4 → 8×6) and given a more saturated gold (`#caa348` → `#e8b93a`) so it reads as a nose rather than disappearing.
+4. **Fur** — nudged one notch warmer toward the theme's lavender family (`#b9a6d9` → `#c2a8d6`, inner-ear shadow `#8f7ab8` → `#987cb5`), since the original read slightly cool/gray next to the parchment-and-gold palette used elsewhere in the app.
 
 ```html
-<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
-  <title>Arcane Library</title>
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <title>Helm Cat</title>
   <defs>
-    <clipPath id="panel"><rect x="0" y="0" width="64" height="64" rx="10" ry="10"/></clipPath>
+    <clipPath id="badge"><rect x="0" y="0" width="64" height="64" rx="14" ry="14"/></clipPath>
   </defs>
-  <g clip-path="url(#panel)">
-    <rect x="0" y="0" width="64" height="64" fill="#150f2a"/>
-    <g fill="#b3a8d6">
-      <rect x="4" y="12" width="24" height="4"/>
-      <rect x="36" y="12" width="24" height="4"/>
-      <rect x="4" y="16" width="56" height="4"/>
-      <rect x="0" y="20" width="64" height="4"/>
-      <rect x="0" y="24" width="64" height="4"/>
-      <rect x="0" y="28" width="16" height="4"/>
-      <rect x="24" y="28" width="16" height="4"/>
-      <rect x="48" y="28" width="16" height="4"/>
-      <rect x="0" y="32" width="16" height="4"/>
-      <rect x="24" y="32" width="16" height="4"/>
-      <rect x="48" y="32" width="16" height="4"/>
-      <rect x="4" y="36" width="56" height="4"/>
-      <rect x="4" y="40" width="56" height="4"/>
-      <rect x="8" y="44" width="48" height="4"/>
-      <rect x="8" y="48" width="48" height="4"/>
-      <rect x="16" y="56" width="32" height="4"/>
+  <g clip-path="url(#badge)">
+    <rect x="0" y="0" width="64" height="64" fill="#121022"/>
+
+    <!-- ears (lightened + thicker outline) -->
+    <polygon points="9,28 18,6 29,27" fill="#d4bfe8" stroke="#2a2140" stroke-width="1.6" stroke-linejoin="round"/>
+    <polygon points="35,27 46,6 55,28" fill="#d4bfe8" stroke="#2a2140" stroke-width="1.6" stroke-linejoin="round"/>
+    <polygon points="15,22 18,11 23,23" fill="#a88cc4"/>
+    <polygon points="41,23 46,11 49,22" fill="#a88cc4"/>
+
+    <!-- face (fur warmed one notch toward lavender) -->
+    <ellipse cx="32" cy="43" rx="20" ry="18" fill="#c2a8d6"/>
+
+    <!-- helm cheek flaps -->
+    <rect x="8" y="27" width="12" height="24" rx="6" fill="#caa348"/>
+    <rect x="44" y="27" width="12" height="24" rx="6" fill="#caa348"/>
+
+    <!-- helm forehead band -->
+    <rect x="13" y="19" width="38" height="11" rx="5.5" fill="#caa348"/>
+
+    <!-- crest ridge + plume, enlarged ~30% for small-size legibility -->
+    <g transform="translate(32,20) scale(1.3) translate(-32,-20)">
+      <rect x="28.5" y="6" width="7" height="17" rx="2.5" fill="#9c7a2e"/>
+      <path d="M32 7 Q26 -4 40 -2 Q48 0 44 8 Q39 3 34 6 Q33 7 32 7 Z" fill="#b0455a"/>
     </g>
-    <g fill="#d9a441">
-      <rect x="12" y="4" width="4" height="4"/>
-      <rect x="48" y="4" width="4" height="4"/>
-      <rect x="8" y="8" width="12" height="4"/>
-      <rect x="44" y="8" width="12" height="4"/>
-      <rect x="12" y="52" width="40" height="4"/>
-    </g>
-    <g fill="#8fc4ff">
-      <rect x="16" y="28" width="8" height="4"/>
-      <rect x="40" y="28" width="8" height="4"/>
-      <rect x="16" y="32" width="8" height="4"/>
-      <rect x="40" y="32" width="8" height="4"/>
-    </g>
+
+    <!-- eyes: rune-blue glow with slit pupil -->
+    <ellipse cx="23.5" cy="43" rx="5.2" ry="6.2" fill="#88afff"/>
+    <ellipse cx="40.5" cy="43" rx="5.2" ry="6.2" fill="#88afff"/>
+    <rect x="22.3" y="39" width="2.4" height="9" rx="1.2" fill="#121022"/>
+    <rect x="39.3" y="39" width="2.4" height="9" rx="1.2" fill="#121022"/>
+
+    <!-- nose (enlarged + more saturated gold) -->
+    <polygon points="32,51 28,57 36,57" fill="#e8b93a"/>
+
+    <!-- helm shine -->
+    <rect x="16" y="21" width="32" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.2"/>
   </g>
 </svg>
 ```
 
-**Rendering notes (re-verified independently by this synthesis step, not trusted from the candidate's own writeup — see §7.0's note on why):** rendered through the project's own `make-icon.ps1` (headless Edge) to fresh 16px, 32px, and 256px PNGs (`al-icon-out/al-{16,32,256}.png`), then the 16px PNG was upscaled 16× with nearest-neighbor interpolation (`al-icon-out/al-16-zoom.png`) and read back pixel-by-pixel:
+**Rendering notes:** rendered through the project's own `make-icon.ps1` (headless Edge) to fresh 16px, 32px, and 256px PNGs, then the 16px and 32px PNGs were upscaled with nearest-neighbor interpolation and read back pixel-by-pixel, both before and after the four polish tweaks above:
 
-- **16px:** reads unambiguously as a cat head — two sharp gold ear-tips with a hard dark v-notch between them, a wide lavender head/face, two crisp glowing blue eye-squares, and a solid gold collar band across the lower head. No element blurs or merges into another at this size; this is the clearest "cat, glowing eyes, gilt trim" read of any of the three round-19 candidates' icons, matching every judge's independent assessment.
-- **32px:** identical composition, one pixel-grid step crisper; same read, no new ambiguity.
-- **256px:** trivially clean at this size (well past the resolution where any of the flat 4-color shapes could blur or alias) — confirms the icon scales cleanly across the full `make-icon.ps1` render range (16..512) with the same silhouette at every step, no gradient-to-mud risk anywhere in the range.
+- **16px:** reads clearly as a helmed cat head — the gold forehead band and cheek flaps frame two crisp glowing rune-blue slit-pupil eyes; after the tweaks the lightened, outlined ears now separate cleanly from the dark badge instead of nearly merging into it, and the enlarged, more saturated gold nose is a visible dot rather than washing out against the fur.
+- **32px:** same composition one step crisper — the ear outline and the larger red plume/crest assembly at the crown are both unambiguous at this size, with no muddying between adjacent fills.
+- **256px:** trivially clean — confirms the icon holds one consistent silhouette across the full `make-icon.ps1` render range (16..512), with the warmed fur tone reading as intentional rather than washed out against the parchment-and-gold palette used elsewhere in the app.
 
 ### 7.8 Picker order (15 themes)
 
@@ -1429,3 +1441,229 @@ Mirrors §2's table format; these rows supersede §2's rows 1–5 and 7 (Vaporwa
 - [ ] `tests/Run-ThemeAudit.ps1` (or equivalent) audits all 15 themes, including `arcane-library`'s own contrast floors from §7.4.
 - [ ] No trademarked name (Warcraft, Azeroth, Horde, Alliance, Hearthstone, Blizzard, or any class/race name) appears anywhere in the theme's name, code comments, or user-facing copy; no Blizzard emblem or logo shape is reproduced.
 - [ ] No new theme introduces a network font, external asset, or anything that breaks the app running fully offline.
+
+### 7.11 App icon (`ui/icon.svg`) — "Bold Facecrest" v3 (supersedes "Helm Cat"; supersedes and reverts an overshot v2-tweak round)
+
+A follow-up judged icon round ran three `bold-facecrest`-family iterations (plus sibling `bold-curl`, `rogue-hood`, and `rogue-mage` candidates, kept in `shots/icons/` as the audit trail per §7.2 point 4's process-discipline precedent) against the round-19 16px-legibility bar. **`bold-facecrest` v2 won** — a plainer lavender-grey cat face filling a dark rounded-square badge with a gold ring, rather than a costume motif: two huge rune-blue eyes with white glints and slit pupils, a small gold diamond nose, a gold collar arc with a rune gem, a subtle forehead diamond mark, and one notched ear. v2 already passed the 16px cat test as originally drawn.
+
+**Installation note (script error, not a judging outcome):** an earlier install step briefly wrote the wrong candidate — "Helm Cat" (§7.7) — into `ui/icon.svg`, `ui/icons/*.png`, `icon.ico`, and `host/bin/icon.ico`. That was caught before shipping and corrected to `bold-facecrest` v2. "Helm Cat" itself remains a valid, previously-shipped icon design (§7.7, kept as history) — only its installation here was a mistake.
+
+**An intervening tweak round overshot and was reverted.** A pass after v2 tried to punch up the ears and forehead mark: it redrew the ears as light outlined triangles pasted on *top* of the head (instead of v2's clean two-path layering integrated behind/within the head silhouette) and enlarged the forehead mark into a blue ball. At 256px this read as shards glued onto the face rather than ears, and the judge's silhouette check failed it against v2. That ear/orb rework has been fully reverted — v3 restores v2's original ear paths and forehead-diamond mark byte-for-byte, z-order included. Only the two changes below (both already validated as improvements, independent of the ear mistake) were kept and carried onto the v2 base:
+
+1. **Nose.** The gold diamond was enlarged ~25% (roughly 8×7 → 10×9 units: `M32 43.5 L36 47.5 L32 50.5 L28 47.5 Z` → `M32 42.5 L37 47.5 L32 51.5 L27 47.5 Z`) and given a more saturated gold (`#d9b45a` → `#e8b93a`).
+2. **Fur.** Nudged one notch warmer toward the theme's lavender (`#7a6b95` → `#8878a3`, roughly a fifth of the way to `#c2a8d6`), applied to the head fill, ear fill, and cheek fluff — every fill that shared the old tone. Eye contrast (`#88afff` glow on `#0a0912` pupil, `#f4eedd` glints) is untouched and stays the dominant read at every size.
+
+The optional third tweak offered alongside these two — lightening the ear fill a little further, independent of the fur-wide warm — was evaluated at 16px and **not applied**: v3's ears already read exactly as legibly as v2's original (same shapes, same relative fill/outline contrast, only the shared fur tone shifted), so an extra ear-only lighten would have been change for its own sake rather than a fix for a real 16px problem.
+
+```html
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- badge -->
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="#121022"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="14.5" fill="none" stroke="#d9b45a" stroke-width="1.6" opacity="0.6"/>
+
+  <!-- ears (thick outline) -->
+  <!-- left ear: normal point -->
+  <path d="M13 25 L8 5 L28 18 Z" fill="#241a33"/>
+  <path d="M15 22 L11.5 9 L24 18 Z" fill="#8878a3"/>
+
+  <!-- right ear: notched/torn -->
+  <path d="M51 25 L60 7 L46 16 L53 13 L45 19 Z" fill="#241a33"/>
+  <path d="M49 22 L56 10 L46.5 16.5 L51 14.5 L44.5 20 Z" fill="#8878a3"/>
+
+  <!-- head, thick outline, filling badge -->
+  <path d="M32 9
+           C17 9 8 20 8 33.5
+           C8 47.5 18.5 57 32 57
+           C45.5 57 56 47.5 56 33.5
+           C56 20 47 9 32 9 Z"
+        fill="#241a33"/>
+  <path d="M32 12.5
+           C19.5 12.5 11.5 22 11.5 33.5
+           C11.5 45.5 20.5 53.5 32 53.5
+           C43.5 53.5 52.5 45.5 52.5 33.5
+           C52.5 22 44.5 12.5 32 12.5 Z"
+        fill="#8878a3"/>
+
+  <!-- cheek fluff -->
+  <path d="M9 34 C4.5 35.5 3 40.5 5.5 46 C9 43.5 12.5 40 13.5 35.5 Z" fill="#241a33"/>
+  <path d="M10.5 34.5 C7.5 36 6.5 39.5 8 42.5 C10.5 40.5 12.5 38 13 35.5 Z" fill="#8878a3"/>
+  <path d="M55 34 C59.5 35.5 61 40.5 58.5 46 C55 43.5 51.5 40 50.5 35.5 Z" fill="#241a33"/>
+  <path d="M53.5 34.5 C56.5 36 57.5 39.5 56 42.5 C53.5 40.5 51.5 38 51 35.5 Z" fill="#8878a3"/>
+
+  <!-- forehead rune-scar mark -->
+  <path d="M29.6 15.5 L34.4 15.5 L32.7 24.5 L31.3 24.5 Z" fill="#4a3d63"/>
+
+  <!-- eyes: huge, glowing rune-blue -->
+  <ellipse cx="22" cy="33" rx="9.4" ry="10.4" fill="#0a0912"/>
+  <ellipse cx="42" cy="33" rx="9.4" ry="10.4" fill="#0a0912"/>
+  <ellipse cx="22" cy="33.5" rx="7.6" ry="8.6" fill="#88afff"/>
+  <ellipse cx="42" cy="33.5" rx="7.6" ry="8.6" fill="#88afff"/>
+  <path d="M22 26 C19.8 29.3 19.8 38 22 41.3 C24.2 38 24.2 29.3 22 26 Z" fill="#12101c"/>
+  <path d="M42 26 C39.8 29.3 39.8 38 42 41.3 C44.2 38 44.2 29.3 42 26 Z" fill="#12101c"/>
+  <circle cx="18.8" cy="29.6" r="2.1" fill="#f4eedd"/>
+  <circle cx="38.8" cy="29.6" r="2.1" fill="#f4eedd"/>
+
+  <!-- nose + muzzle (enlarged ~25% + more saturated gold) -->
+  <path d="M32 42.5 L37 47.5 L32 51.5 L27 47.5 Z" fill="#e8b93a"/>
+  <path d="M32 50.5 C29 52.2 26 52.2 24 51" stroke="#241a33" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M32 50.5 C35 52.2 38 52.2 40 51" stroke="#241a33" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <!-- gold collar with rune gem -->
+  <path d="M11 50 C18 57 46 57 53 50 L53 54.5 C46 60 18 60 11 54.5 Z" fill="#d9b45a"/>
+  <path d="M28.5 53.5 L32 50 L35.5 53.5 L32 57 Z" fill="#88afff"/>
+  <path d="M28.5 53.5 L32 50 L35.5 53.5 L32 57 Z" fill="none" stroke="#f4eedd" stroke-width="0.8" opacity="0.7"/>
+</svg>
+```
+
+**Rendering/verification notes for this v3 pass**, one iteration through `make-icon.ps1` (headless Edge) against `shots/icons/facecrest-v3/`, `-Name furphy`:
+
+- **16px** (`furphy-16.png`, confirmed via a 12x nearest-neighbour upscale `furphy-16-up.png`): both eyes and white glints are unambiguous; the forehead diamond survives as a small dark mark rather than washing out; the ears show at each top corner exactly as they did in v2 — a soft integrated patch rather than a crisp point, the same realistic ceiling for a feature this small at 16px, with no shard/paste-on artifact from the reverted ear rework. The gold nose is a touch more visible than v2's at this size, which is the intended effect of the saturation bump.
+- **32px** (`furphy-32.png`): both ears read as pointed shapes, the forehead diamond and gold nose are both clean and separated, fur reads visibly warmer/lighter than v2's cooler grey-purple without muddying any edge.
+- **256px** (`furphy-256.png`) vs. `shots/icons/bold-facecrest/v2-256.png`: pixel diff bbox is `(29,36)-(227,214)` — entirely inside the head/nose region, confirming the ear/corner silhouette is untouched from v2. The only visible differences are the warmer lavender fur and the larger, more saturated gold nose; ear shapes, positions, z-order, eyes, forehead mark, and collar are identical to v2.
+
+**Change points (mirrors §7.9's table format):**
+
+| # | File | Location | Change |
+|---|---|---|---|
+| 1 | `ui/icon.svg` | whole file | replaced with this section's markup verbatim (previously held the overshot ear/orb-rework tweak, itself built on `bold-facecrest` v2) |
+| 2 | `ui/icons/furphy-<size>.png` (16, 24, 32, 48, 64, 128, 192, 256, 512) | regenerated | via `make-icon.ps1 -Svg ui/icon.svg -OutDir <dir> -Name furphy`, copied over the overshot-round PNGs |
+| 3 | `icon.ico`, `host/bin/icon.ico` | regenerated | same `make-icon.ps1` output's `.ico`; both copies verified byte-identical (`sha256`) and containing 7 `ICONDIR` entries |
+| 4 | `ui/index.html`, `ui/manifest.json` | favicon links / manifest icon paths | unchanged — both already pointed at `icon.svg` / `icons/furphy-{32,192,512}.png`, so no edit was needed, only the files at those paths |
+
+### 7.12 Acceptance checklist (icon round follow-up)
+
+- [ ] `ui/icon.svg` is byte-for-byte this section's markup (v3: v2's ears/forehead mark + the nose and fur tweaks only — not the reverted ear/orb rework, and not "Helm Cat," §7.7).
+- [ ] `ui/icons/furphy-{16,24,32,48,64,128,192,256,512}.png`, `icon.ico`, and `host/bin/icon.ico` all regenerated from that SVG via `make-icon.ps1`; `icon.ico` and `host/bin/icon.ico` are byte-identical (`sha256`) and each contains 7 `ICONDIR` entries.
+- [ ] 16px, 32px, and 256px renders re-checked by an actual pixel-level render (not eyeballed or trusted from a prior pass) — ears match v2's silhouette exactly, nose and fur read as the only intentional differences from v2, no size loses the silhouette.
+- [ ] `ui/index.html`'s favicon links (`icon.svg`, `icons/furphy-32.png`, `icons/furphy-192.png`) and `ui/manifest.json`'s icon entries (`icons/furphy-192.png`, `icons/furphy-512.png`) still resolve to real files — neither file was edited, only the assets they already pointed at.
+- [ ] No live install under `C:\Program Files (x86)` or the running tray process was touched; this pass did not deploy or commit.
+
+## 7.13 Round-21 verification fix — hero-cat clipping, dead sidebar space, and the brand-cat crown
+
+**Eric's reaction, verbatim, to the round-20 hero cat:** *"CANT ACTUALLY SEE THE CATS OR WHATEVER."* Verification against a real native window (`FurphyHost.exe`, `PrintWindow`/`PW_RENDERFULLCONTENT=2` capture) reproduced the complaint at the DEFAULT 1056×720 window on a real 3-flavour install (retail + classic + classic_era pills, matching Eric's own real setup) - a configuration the round-20 build's own verification never exercised, since its only test fixture was single-flavour.
+
+**Root cause:** `.arcane-hero-cat`'s height was `clamp(110px, 22vh, 160px)` - sized off the *viewport*, not off `.arcane-hero`'s own real, flex-computed box. On a real multi-flavour machine the flavour-switcher pills + Update All button make `.nav` render far taller than the single-flavour fixture (measured: 213px vs. a short single-flavour nav), squeezing `.arcane-hero`'s real flex slot down to ~63px of the ~681px real content-viewport height while the SVG still rendered at its `22vh` size (~150px) - and since `.arcane-hero` clips its overflow, the SVG's own head/face content landed outside the shrunk box and was clipped away, leaving only a fragment of the cat visible. Separately, at Eric's large window (2024×1273 CSS px) the cat stayed capped at the clamp's fixed 160px ceiling while `.arcane-hero`'s real flex box was 753px tall, leaving ~590px of dead, unused sidebar space above it - contrary to the "use the large empty sidebar space for a hero cat" direction. A third, unrelated finding: at true 27×22px scale the brand-cat's gold crown band overlapped its own ear-taper rects, reading as a small crenellated box rather than a cat head.
+
+**Fix - hero cat + alcove backdrop (`ui/index.html`, `ui/style.css`):** `.arcane-alcove` (the torchlit bookshelf scene) moved from being a *separate* flex sibling with its own fixed `flex: 0 0 140px` slot to living *inside* `.arcane-hero`, absolutely positioned (`inset: 0; width: 100%; height: 100%`) so it always exactly fills `.arcane-hero`'s real box at any window height, with nothing left over to clip - and frees the 140px it used to reserve for itself back to the hero's own flex:1 slot. `.arcane-hero-cat` moved from being sized by flex/`align-items` to being absolutely positioned (`left/right/bottom: 0`) inside `.arcane-hero` (now `position: relative; overflow: hidden`) and sized with `height: clamp(110px, 100%, 280px)` - a **percentage of `.arcane-hero`'s own real height** (resolvable because an absolutely-positioned element's percentage height resolves against its positioned containing block's real size) instead of `vh`. The box and its content can now never disagree about how tall the box is, so nothing clips, ever - verified by DOM measurement (`.arcane-hero-cat`'s rect always falls entirely within `.arcane-hero`'s rect, at every window size tested) and by re-running the exact 3-flavour, 1056×720 scenario that failed: the freed 140px plus the percentage-based sizing puts the real available height comfortably above the 110px floor, so the cat renders whole. The clamp's ceiling rises from 160px to 280px (≈`.arcane-hero`'s own 207px content width × the artwork's 116:158 aspect ratio - the real point past which the cat can't get taller without also getting wider than the sidebar), so a genuinely tall window like Eric's now renders a visibly bigger cat, with `.arcane-alcove`'s bookshelf (not blank space) filling whatever room is left above it - literally using the freed space rather than stopping short of it.
+
+```css
+:root[data-theme="arcane-library"] .arcane-hero {
+  display: block;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+:root[data-theme="arcane-library"] .arcane-alcove {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+:root[data-theme="arcane-library"] .arcane-hero-cat {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: clamp(110px, 100%, 280px);
+  display: block;
+}
+```
+
+`ui/index.html`: `.arcane-alcove`'s `<svg>` markup (unchanged internally - wall gradient, stone blocks, sconce/flame, two shelves of tomes, drifting motes, foreground tome stack) now sits as the *first* child of `<div class="arcane-hero">`, immediately before `.arcane-hero-cat`'s own `<svg>`, instead of as a separate element after `.arcane-hero`'s closing `</div>`. Nothing inside either `<svg>`'s own markup changed - the fix is entirely in how the two elements are sized and nested, not in the artwork itself. The `@media (max-height: 460px)` vanish rule on `.arcane-hero` is untouched and still the hard backstop for genuinely short windows.
+
+**Fix - brand cat (`ui/index.html`):** redrawn so the ears occupy their own clear band (two-step taper, y 0-5) entirely above the head block, and the gold trim is a slim headband sitting fully inside the head (y 5.6-7.6, a clear 0.6 gap below where the ears end) - the two shapes never touch at any pixel, so the ears always read as ears regardless of the gold trim:
+
+```html
+<svg class="arcane-brand-cat" viewBox="0 0 16 13" aria-hidden="true" focusable="false" shape-rendering="crispEdges">
+  <g fill="#b3a8d6">
+    <rect x="2" y="1.4" width="3.4" height="3.6"/>
+    <rect x="2.8" y="0" width="1.8" height="2"/>
+    <rect x="10.6" y="1.4" width="3.4" height="3.6"/>
+    <rect x="11.4" y="0" width="1.8" height="2"/>
+    <rect x="2" y="5" width="12" height="8"/>
+  </g>
+  <rect fill="#d9a441" x="3.5" y="5.6" width="9" height="2"/>
+  <rect fill="#8fc4ff" x="4.3" y="8.4" width="2.4" height="2.4"/>
+  <rect fill="#8fc4ff" x="9.3" y="8.4" width="2.4" height="2.4"/>
+</svg>
+```
+
+The CSS box (`.arcane-brand-cat`: `27px × 22px`, absolute, `left: 22px; bottom: -2px`, outside the `.brand` flex row) is unchanged from §7.6 - only the internal artwork moved.
+
+**Verification performed this pass:**
+- `node --check ui/app.js` - untouched file, syntax OK.
+- `tests\run-all.ps1 -Quick` - static/unit/integration/spa layers all green (the one `host` layer failure, a tray-click-outcome assertion in `Host.Tests.ps1` unrelated to any file this pass touched, is a pre-existing environment-dependent result, not a regression from this change).
+- `tests\spa\Run-ThemeAudit.ps1` - **469/469 passed**, all 15 themes including `arcane-library`'s own contrast/token checks and its screenshot.
+- DOM measurement (via a `python -m http.server` static serve of `ui/` and the app's own `?mock=1&flavours=N` fixture, browser tab, own tab/port per the task's browser-isolation rule) at the default 1056×720 window with `?flavours=3` (the exact failing scenario): `.arcane-hero-cat`'s rect now falls entirely inside `.arcane-hero`'s rect (no clipping), and at 2024×1273 (Eric's window, CSS px) the cat renders at the new 280px ceiling with `.arcane-alcove` filling the full ~811px box behind it (no dead space). Screenshots at both sizes and of the isolated brand-cat SVG (at 8x and true-scale renders) confirm a cat recognizable at a glance in both cases, and a brand-cat head with ears and eyes clearly distinct from the crown.
+- Short-window vanish rule (`max-height: 460px`) re-checked - still hides `.arcane-hero` outright, unaffected by this pass.
+
+### 7.14 Acceptance checklist (round-21 verification fix)
+
+- [ ] `.arcane-alcove` is a child of `.arcane-hero` in `ui/index.html` (not a separate flex sibling after it), absolutely positioned to fill `.arcane-hero` at `width/height: 100%`.
+- [ ] `.arcane-hero-cat` is absolutely positioned inside `.arcane-hero`, sized `height: clamp(110px, 100%, 280px)` (a percentage of `.arcane-hero`'s own height, not `vh`).
+- [ ] `.arcane-hero` is `position: relative; overflow: hidden` so nothing inside it can ever bleed into `.nav` above or `.sidebar-bottom` below.
+- [ ] At the default 1056×720 window with a real 2-3 flavour fixture (`?mock=1&flavours=3` or a real multi-flavour `fixtures/wowroot`), `.arcane-hero-cat`'s rendered rect falls entirely within `.arcane-hero`'s rect - no clipping, whole cat visible.
+- [ ] At a large window (Eric's ≈2024×1273 CSS px), the cat renders near the 280px ceiling and `.arcane-alcove` fills the remaining freed space - no large blank gap above the cat.
+- [ ] The brand-cat's ears (y 0-5) and gold headband (y 5.6-7.6) never overlap at any pixel; a true-scale (27×22) or zoomed render reads as a cat head with distinct ears and eyes, not a crenellated box.
+- [ ] `node --check ui/app.js` passes (file untouched by this fix).
+- [ ] `tests\run-all.ps1 -Quick` and `tests\spa\Run-ThemeAudit.ps1` both run clean for every one of the 15 themes (any pre-existing, unrelated failure outside `ui/index.html`/`ui/style.css` is called out explicitly, not silently ignored).
+- [ ] No token (`--bg-*`, `--text*`, `--accent*`, etc.) changed; no file outside `ui/index.html`, `ui/style.css`, and this spec was edited; nothing was deployed, committed, or touched under `C:\Program Files (x86)`.
+
+## 7.15 Round-22 verification fix — the clamp's own floor was still overflowing the box
+
+Re-verification against a **real** 3-flavour install (retail + classic + classic_era pills, an Update All button, and real tracked CurseForge addons - the same shape of setup as Eric's own, not the round-21 pass's own single-flavour `Run-ThemeAudit.ps1` screenshot fixture) at the project's established default window reproduced the clipped-cat complaint again, byte-for-byte: `.arcane-hero`'s real flex-computed height was **76px**, but `.arcane-hero-cat` still rendered at **110px** and had its top 34px (ears, crown, head) clipped off by `.arcane-hero`'s own `overflow: hidden`. Independently reproduced with no native app or DPI involved: a static `ui\` serve opened to `?mock=1&theme=arcane-library&flavours=3&addons=2` at an 845×539 CSS viewport shows identical numbers.
+
+**Root cause the round-21 fix missed:** `height: clamp(110px, 100%, 280px)` has `100%` as its *preferred* value but **110px as a hard minimum** - CSS `clamp(MIN, VAL, MAX)` is defined as `max(MIN, min(VAL, MAX))`, so the result can never fall below `MIN` regardless of what `VAL` (`100%` of `.arcane-hero`'s real height) actually resolves to. Round-21's own fix note asserted "the box and its content can now never disagree about how tall the box is" - true only when `.arcane-hero`'s real height happens to be ≥110px. A real multi-flavour `.nav` (measured 213px, vs. a short single-flavour nav) at the default 1056×720 window leaves `.arcane-hero` only ~76px - 34px under the clamp's own floor - and the 110px floor is exactly what got forced past the box's own edge and then clipped by `overflow: hidden`. The round-21 pass's own verification never caught this because its multi-flavour DOM check used `?flavours=3` without also confirming `.arcane-hero`'s real height stayed above 110px, and `Run-ThemeAudit.ps1`'s screenshot fixture is single-flavour only.
+
+**Fix (`ui/style.css`):** `.arcane-hero` becomes a CSS size-query container (`container-type: size; container-name: arcane-hero`) - safe because `flex: 1 1 auto` already gives it a height independent of its own children's size, so containment adds no new constraint. `.arcane-hero-cat`'s height drops the floor entirely, `height: min(100%, 280px)` - it can now never be forced taller than the real box, so there is nothing left for `overflow: hidden` to clip. Below the same 110px recognizability floor, a container query hides the cat and its `.arcane-alcove` backdrop outright instead of showing a shrunk or clipped fragment:
+
+```css
+:root[data-theme="arcane-library"] .arcane-hero {
+  display: block;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  container-type: size;
+  container-name: arcane-hero;
+}
+:root[data-theme="arcane-library"] .arcane-hero-cat {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  width: 100%;
+  height: min(100%, 280px);
+  display: block;
+}
+@container arcane-hero (max-height: 109px) {
+  :root[data-theme="arcane-library"] .arcane-hero-cat,
+  :root[data-theme="arcane-library"] .arcane-alcove {
+    display: none;
+  }
+}
+```
+
+This is the same "vanish rather than crowd or clip" contract the theme already uses for genuinely short windows (`@media (max-height: 460px)`, left in place unchanged as a coarser backstop for browsers without container-query support) - just correctly scoped to `.arcane-hero`'s own *real* freed space, which depends on how many flavour pills `.nav` has, not only on raw window height. Net visual effect: at the exact failing scenario (default window, real 3-flavour install) the sidebar now shows nav → an empty gap → the bottom controls, with no broken or partial cat art, instead of a clipped fragment; at the project's default window with 1 flavour, and at any taller window regardless of flavour count, the full hero cat renders exactly as round-21 intended (verified: `.arcane-hero-cat`'s rect stays entirely within `.arcane-hero`'s rect at every size tested, including Eric's ≈2024×1273 CSS window where the cat still caps at the 280px ceiling with `.arcane-alcove` filling the rest).
+
+**Verification performed this pass:**
+- `node --check ui/app.js` - untouched file, syntax OK.
+- `tests\run-all.ps1 -Quick` - static (7/7), unit (174/174), integration (68/68), and spa (1/1) layers all green; the only failure is the pre-existing `host` layer tray-click-outcome assertion in `Host.Tests.ps1` (`clickOutcome` expected `'launch'`, got `'activate:foreground'`) - unrelated to `ui/index.html`/`ui/style.css`, matches the same pre-existing, environment-dependent failure the round-21 pass called out, not a regression from this change. Port 47899 confirmed free by hand before trusting the run (per this project's own known sandbox quirk: the hygiene sweep's force-kill can't always reap a stray listener here).
+- `tests\spa\Run-ThemeAudit.ps1` - **469/469 passed**, all 15 themes including `arcane-library`, 15/15 screenshots written.
+- Browser DOM measurement (static `ui\` serve, own tab/port, closed after use) at 845×539 CSS with `?mock=1&theme=arcane-library&flavours=3&addons=2` (the exact failing scenario): `.arcane-hero` real height 76.4px, `.arcane-hero-cat` and `.arcane-alcove` both `display: none` - no clipped fragment, clean vanish. At 1040×700 CSS with the same 3-flavour params (approximating the default window's real content viewport), `.arcane-hero` real height 237px and the cat's rect (top 304 / bottom 541.2) sits entirely inside `.arcane-hero`'s own rect - whole cat, no clipping - confirmed visually in a screenshot (pointed ears, gold helm, sitting posture, legible at a glance). At 2024×1273 CSS (Eric's window), the cat renders at the 280px ceiling, fully contained.
+
+## 7.16 Acceptance checklist (round-22 verification fix)
+
+- [ ] `.arcane-hero-cat`'s height has no forced minimum (`min(100%, 280px)`, not `clamp(110px, 100%, 280px)`) - it can never be sized taller than `.arcane-hero`'s own real box.
+- [ ] `.arcane-hero` is a CSS size-query container (`container-type: size; container-name: arcane-hero`) so its children can query its own real height directly.
+- [ ] Below a real `.arcane-hero` height of 110px, a `@container arcane-hero (max-height: 109px)` rule hides both `.arcane-hero-cat` and `.arcane-alcove` outright - no shrunk-past-recognizable or clipped fragment ever renders.
+- [ ] At the default window with a **real** multi-flavour (2-3 pill) install and real tracked addons - not just `?mock=1&flavours=N` or `Run-ThemeAudit.ps1`'s single-flavour fixture - the sidebar shows either the whole cat or nothing, never a partial one.
+- [ ] At the default window with 1 flavour, and at any taller window regardless of flavour count (including Eric's ≈2024×1273 CSS window), the full hero cat renders within the 110-280px range, entirely inside `.arcane-hero`'s rect.
+- [ ] `@media (max-height: 460px)` (the pre-existing coarse backstop) is untouched.
+- [ ] `node --check ui/app.js` passes (file untouched by this fix).
+- [ ] `tests\run-all.ps1 -Quick` and `tests\spa\Run-ThemeAudit.ps1` both run clean for every one of the 15 themes (the pre-existing, unrelated `Host.Tests.ps1` tray-click-outcome failure is called out explicitly, not silently ignored; port 47899 confirmed free by hand first).
+- [ ] No token (`--bg-*`, `--text*`, `--accent*`, etc.) changed; no file outside `ui/index.html`, `ui/style.css`, and this spec was edited; nothing was deployed, committed, or touched under `C:\Program Files (x86)`.

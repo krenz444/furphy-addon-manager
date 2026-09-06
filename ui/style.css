@@ -3036,42 +3036,33 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 :root[data-theme="arcane-library"] .addon-row { box-shadow: 0 2px 8px rgba(5, 4, 12, 0.32); }
 
 .arcane-alcove { display: none; }
-/* Review-round fix: .arcane-alcove used to be absolutely positioned
-   with left:0/right:0/bottom:0 against .sidebar itself, the same
-   bottom edge .sidebar-bottom's box (the "Update & Play"/"Launch WoW"/
-   freshness/status stack) is flush against in normal flow. Because the
-   scene's own height (140px) is close to .sidebar-bottom's own
-   rendered height (~143px, one CTA line), the two boxes coincided
-   almost exactly - so the opaque backdrop that was added to keep
-   .sidebar-bottom's transparent .btn-ghost/status text legible ALSO
-   covered the entire scene, at every window size, not just "short"
-   ones. That backdrop-and-bleed-compensation approach is removed here
-   in favor of the actual fix: .arcane-alcove is already positioned
-   between </nav> and .sidebar-bottom in index.html's markup, so
-   letting it lay out as a normal (non-absolute) flex item of .sidebar
-   places it in the real gap between .nav's rendered items and
-   .sidebar-bottom - genuinely empty space at every window height this
-   app supports - instead of stacked underneath .sidebar-bottom. No
-   opaque backdrop, no negative-margin bleed compensation, and no JS
-   measurement needed: .sidebar's own flex column (nav: flex:1, this:
-   flex:0 0 140px, sidebar-bottom: auto) guarantees the three never
-   overlap. */
+/* Round-21 verification fix: .arcane-alcove used to be its own flex
+   sibling with a fixed flex:0 0 140px slot between .arcane-hero and
+   .sidebar-bottom. That fixed slot did two things wrong: it capped the
+   backdrop at exactly 140px regardless of how much room the sidebar
+   actually had (dead space above it on tall windows), and it ate 140px
+   that .arcane-hero's own flex:1 slot could otherwise have claimed - on
+   a real multi-flavour install (taller .nav from the flavour pills +
+   Update All button) that 140px was often the difference between the
+   hero cat fitting cleanly and getting clipped (see .arcane-hero below).
+   Fix: .arcane-alcove now lives INSIDE .arcane-hero (index.html) as an
+   absolutely-positioned background layer filling that box exactly,
+   width and height 100% - it always matches .arcane-hero's real
+   flex-computed size at any window height, with no fixed number and
+   nothing left over to clip. .arcane-hero itself is `position: relative;
+   overflow: hidden` so this can never bleed into .nav or
+   .sidebar-bottom. */
 :root[data-theme="arcane-library"] .arcane-alcove {
   display: block;
-  flex: 0 0 140px;
+  position: absolute;
+  inset: 0;
   width: 100%;
-  height: 140px;
+  height: 100%;
   pointer-events: none;
 }
 
 @keyframes arcane-flame-flicker { 0%, 100% { opacity: .85; } 45% { opacity: 1; } 60% { opacity: .55; } }
 .arcane-flame { animation: arcane-flame-flicker 2.2s ease-in-out infinite; }
-
-@keyframes arcane-rune-glow { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
-.arcane-rune-eye { animation: arcane-rune-glow 2.8s ease-in-out infinite; }
-
-@keyframes arcane-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
-.arcane-cat-tail { animation: arcane-tail-sway 4s ease-in-out infinite; }
 
 @keyframes arcane-mote-drift {
   0%, 100% { opacity: .4; transform: translateY(0); }
@@ -3082,13 +3073,159 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .arcane-mote-3 { animation: arcane-mote-drift 6s ease-in-out infinite 2.4s; }
 
 @media (prefers-reduced-motion: reduce) {
-  .arcane-flame, .arcane-rune-eye, .arcane-cat-tail,
-  .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
+  .arcane-flame, .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
 }
 
+/* ==========================================================================
+   Round 20 (Pixel Artist A, post-judging), restructured in the round-21
+   verification fix: the hero cat. Eric's real window (2530x1591 @125% DPI)
+   left ~500-1000px of dead flex:1 space below .nav that the old
+   torchlit-archive strip (a fixed 140px) never used, so its cat never had a
+   chance to read as a cat at a glance. The base .nav rule is flex:1, which
+   is what let that space balloon unboundedly in the first place - scoped to
+   this theme only, .nav goes back to its own content height and
+   .arcane-hero (a new flex sibling, sitting between </nav> and
+   .sidebar-bottom in the markup) takes the flex:1 role instead, so IT owns
+   the freed space.
+
+   Round-21 fix: the cat SVG's own height used to be `clamp(110px, 22vh,
+   160px)` - sized off the VIEWPORT, not off this box's own real,
+   flex-computed size. On a real multi-flavour install the flavour pills +
+   Update All button make .nav tall enough that this box's real height
+   shrinks well below what the clamp rendered, and since the box clips its
+   overflow, the cat's own head got clipped clean off - reproduced and
+   confirmed against a real 3-flavour fixture at the default 1056x720
+   window (previously only a single-flavour mock was ever tested). Fixed by
+   making the cat (and its .arcane-alcove backdrop, see above) both children
+   of THIS box, sized against ITS OWN real height via percentage instead of
+   vh - see .arcane-hero-cat below. `position: relative; overflow: hidden`
+   stays here as the hard backstop: even if some future window/DPI
+   combination this box's own math didn't anticipate ever occurs, nothing
+   drawn inside can bleed into .nav above or .sidebar-bottom below. */
+:root[data-theme="arcane-library"] .nav { flex: 0 0 auto; }
+
+.arcane-hero { display: none; }
+:root[data-theme="arcane-library"] .arcane-hero {
+  display: block;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* Round-22 verification fix: this box is now also its own size-query
+     container, named so the cat/alcove below can ask how tall THIS box
+     really is (not the viewport, and not a media-query guess about window
+     height) and react to a small real box directly - see the container
+     query below .arcane-hero-cat. flex:1 1 auto already gives this element
+     a definite height independent of its children's own size (the flex
+     algorithm hands it whatever space .nav + .sidebar-bottom left over
+     before laying out its contents), so `container-type: size` here is
+     safe containment, not a guess. */
+  container-type: size;
+  container-name: arcane-hero;
+}
+/* Both children of .arcane-hero (.arcane-alcove above, this cat) are
+   absolutely positioned so they size against THIS box's own real,
+   flex-computed height (a percentage of the nearest positioned ancestor,
+   i.e. .arcane-hero itself) rather than the viewport - the actual fix for
+   the clipping bug, since the box and its content can now never disagree
+   about how tall the box is. Bottom-anchored (left/right/bottom: 0) so the
+   cat stays grounded on its ledge as that height changes; centered
+   horizontally by the width:100% + preserveAspectRatio="xMidYMax meet"
+   pairing, same as before.
+   The ceiling (280px) is roughly this box's own 207px content width times
+   the artwork's own 116:158 aspect ratio - the real point past which the
+   cat can't get any taller without also getting wider than the sidebar -
+   so a genuinely tall window like Eric's actually uses the freed space for
+   a bigger cat instead of stopping short of it; .arcane-alcove (100%
+   height, always) fills whatever room is left above.
+
+   Round-22 verification fix: this used to be `clamp(110px, 100%, 280px)`,
+   which forced a 110px FLOOR even when .arcane-hero's own real,
+   flex-computed height was smaller than that. A real multi-flavour
+   install (3 flavour pills + an Update All button, i.e. Eric's own actual
+   setup) makes .nav tall enough that at the project's own default
+   1056x720 window .arcane-hero's real height is only ~76px - 34px short
+   of that floor - and since .arcane-hero clips its overflow, the forced
+   110px cat had its top 34px (ears, crown, head) clipped clean off. A
+   clamp's minimum bound always wins over its own preferred value, so
+   `clamp(110px, 100%, 280px)` can NEVER be smaller than 110px regardless
+   of what 100% actually resolves to - that floor is exactly what was
+   overflowing the box. Dropping it to `min(100%, 280px)` (no floor) means
+   the art's height can never exceed .arcane-hero's own real size, so
+   nothing is ever forced past the box's edge again; the container query
+   below - scoped to this box's own real height via container-type: size
+   above, not the viewport - hides the art below its own 110px
+   recognizability floor instead of relying on overflow:hidden to hide an
+   overrun. Same "vanish rather than crowd or clip" contract already used
+   for genuinely short windows below, just correctly scoped to the actual
+   freed space, which depends on how many flavour pills .nav has, not just
+   raw window height. */
+:root[data-theme="arcane-library"] .arcane-hero-cat {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: min(100%, 280px);
+  display: block;
+}
+/* Below its own 110px recognizability floor, hide the cat and its
+   backdrop rather than showing a shrunk or clipped fragment that no
+   longer reads as a cat at a glance - queried against .arcane-hero's own
+   real size (container-name: arcane-hero, set above), so this correctly
+   fires whenever the ACTUAL freed space is too small, whether that is
+   because the window itself is short or because a real multi-flavour nav
+   ate most of a not-so-short window. */
+@container arcane-hero (max-height: 109px) {
+  :root[data-theme="arcane-library"] .arcane-hero-cat,
+  :root[data-theme="arcane-library"] .arcane-alcove {
+    display: none;
+  }
+}
+/* Hard backstop for genuinely short windows: never let the hero slot
+   overlap the CTAs or status line below it. The container query above
+   already handles the case where .arcane-hero itself has little real
+   height left over; this coarser, viewport-based rule stays as a second
+   line of defence (e.g. browsers without container-query support simply
+   never get the queried rule above, and fall back to this one instead of
+   showing nothing responsive at all). */
+@media (max-height: 460px) {
+  :root[data-theme="arcane-library"] .arcane-hero { display: none; }
+}
+
+@keyframes arcane-hero-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s ease-in-out infinite; }
+
+/* Blink: both eyes squash to a sliver just before the 6s mark, held briefly,
+   then release - transform-box:fill-box so the squash pivots around each
+   eye's own center instead of the SVG's origin corner. Right eye lags 0.05s
+   so the two lids don't read as one mechanical flat plane. */
+@keyframes arcane-hero-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+.arcane-hero-eye-l, .arcane-hero-eye-r {
+  animation: arcane-hero-blink 6.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.arcane-hero-eye-r { animation-delay: .05s; }
+
+@keyframes arcane-hero-glow-pulse { 0%, 100% { opacity: .5; } 50% { opacity: .8; } }
+.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .arcane-hero-tail, .arcane-hero-eye-l, .arcane-hero-eye-r, .arcane-hero-glow {
+    animation: none;
+  }
+}
+
+/* Brand cat head beside the wordmark: same slot/technique as before - only
+   the artwork and its box changed, sized up from 18x14 to 27x22 so ears and
+   eyes read at a glance instead of dissolving into a few pixels. Absolute
+   (not in the .brand flex row), same reasoning as .lofi-brand-cat above: at
+   the app's 1000px floor there are no spare pixels to give the wordmark. */
 .arcane-brand-cat { display: none; }
 :root[data-theme="arcane-library"] .arcane-brand-cat {
   display: block; position: absolute;
-  width: 18px; height: 14px; left: 22px; bottom: 2px;
+  width: 27px; height: 22px; left: 22px; bottom: -2px;
   pointer-events: none;
 }

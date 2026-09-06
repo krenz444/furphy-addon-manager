@@ -453,11 +453,13 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
 
             # Round 28 (SPEC.md section F/J): --tray-selftest's own
             # ActivateOrLaunch(true) call never actually starts a process
-            # (dryRun) - with no real "Furphy Addon Manager"-titled window
-            # anywhere on this machine, the only possible outcome is
-            # "launch" (an "activate:foreground"/"activate:flashed" value
-            # would mean this run somehow found and clicked a REAL live
-            # window, which must never happen from a test).
+            # (dryRun). Round 30: the tray looks the window up by the
+            # PORT-SCOPED title ("Furphy Addon Manager [test 47899]" here,
+            # AppConstants.WindowTitleFor), so a real live window titled
+            # "Furphy Addon Manager" on 47831 is invisible to it and the
+            # only possible outcome is "launch". Before round 30 this
+            # assertion failed whenever a live window was open - the test
+            # tray had found and pulled the REAL window to the foreground.
             $marker.clickOutcome | Should Be 'launch'
 
             # Round 28: a genuine 3-flavour cycle has no single-job n-of-N

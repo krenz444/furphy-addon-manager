@@ -216,6 +216,21 @@ namespace Furphy
     internal static class AppConstants
     {
         public const string WindowTitle = "Furphy Addon Manager";
+        public const int ProductionPort = 47831;
+
+        // Round 30: the main window's title is scoped to the port it was
+        // launched for. On the production port it is the exact legacy
+        // literal above; on any other port (tests, --tray-selftest, a
+        // second instance on a scratch root) it carries the port so a
+        // test tray's click can never find - and drag to the foreground -
+        // a real user's live window, and a live tray can never adopt a
+        // test window. MainForm sets its Text from this and the tray
+        // looks windows up with the same call, so the two cannot drift.
+        public static string WindowTitleFor(int port)
+        {
+            if (port == ProductionPort) return WindowTitle;
+            return WindowTitle + " [test " + port.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]";
+        }
     }
 
     // ------------------------------------------------------------------
@@ -787,7 +802,6 @@ namespace Furphy
     // ------------------------------------------------------------------
     internal class MainForm : Form
     {
-        private const string WindowTitle = AppConstants.WindowTitle;
         // Hard allow-list: never blocked by the ad filter regardless of
         // what adfilter-hosts.txt contains.
         private static readonly string[] HardAllowHosts = new string[]
@@ -989,7 +1003,7 @@ namespace Furphy
             InitializeDefaultTheme();
             LoadPersistedTheme();
 
-            Text = WindowTitle;
+            Text = AppConstants.WindowTitleFor(_port);
             StartPosition = FormStartPosition.Manual;
             MinimumSize = new Size(900, 600);
             BackColor = ChromeBg;
@@ -3581,9 +3595,11 @@ boot();
     // Win32 window activation - used by the tray's click handler to bring
     // an already-open main window to the foreground instead of starting a
     // second one, keyed on MainForm's exact window title (AppConstants.
-    // WindowTitle) since that is the one thing every FurphyHost.exe window
-    // (normal launch, deep link, whatever --view/--tab it was given) has
-    // in common and the tray process itself never creates.
+    // WindowTitleFor(port)) since that is the one thing every FurphyHost.exe
+    // window on the same port (normal launch, deep link, whatever
+    // --view/--tab it was given) has in common and the tray process itself
+    // never creates. Round 30: the title carries the port on non-production
+    // ports, so a test tray never matches a live window or vice versa.
     internal static class WindowActivation
     {
         private const int SW_RESTORE = 9;
@@ -4671,7 +4687,7 @@ boot();
                 // of the two ways the Updated/Failed badge dot clears.
                 ClearBadge();
 
-                string activateOutcome = WindowActivation.ActivateWindowByTitle(AppConstants.WindowTitle);
+                string activateOutcome = WindowActivation.ActivateWindowByTitle(AppConstants.WindowTitleFor(_port));
                 if (activateOutcome != null)
                 {
                     LogHost("[tray] activated existing window - " +
@@ -5645,8 +5661,8 @@ boot();
         // done_updated/done_failed, called only from CompleteCycle's own
         // branch for those two statuses (never from a resting-state code
         // path, which does not exist as a separate path today). Title is
-        // the literal "Furphy" (deliberately NOT AppConstants.WindowTitle,
-        // which must stay "Furphy Addon Manager" unchanged since
+        // the literal "Furphy" (deliberately NOT AppConstants.WindowTitle /
+        // WindowTitleFor, which must stay exactly what MainForm sets since
         // WindowActivation.ActivateWindowByTitle matches windows by that
         // exact string).
         private void ShowBalloon(string status, List<string> updatedNames, List<string> failedNames)
