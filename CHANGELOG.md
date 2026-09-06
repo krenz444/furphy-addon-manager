@@ -1,5 +1,97 @@
 # Furphy Addon Manager - changelog
 
+## Round 31 (1.12.0: Tokyo Rain default, new Snowy theme)
+
+Eric's request, verbatim: "keep the icon make a snowy theme make the
+rainy theme default, fix the icon on my desktop." Three asks: the app
+icon stays exactly as it is (nothing under `ui/icon.svg`, `icon.ico`,
+`host/bin/icon.ico`, or `ui/icons/*` changed this round); a new snowy
+16th theme; and Tokyo Rain becomes the default. The desktop-shortcut
+icon fix is separate, unrelated work (Explorer's shortcut-icon cache),
+handled outside this theme round.
+
+**Install-link toggle crash (Eric, 2026-09-06, same round).** Turning
+"CurseForge install links" off in Settings failed with "Cannot convert
+value PSCustomObject to type SwitchParameter" from
+`register-protocol.ps1` line 69. Root cause: the -Unregister branch stored
+its status object in a local named `$status`, and PowerShell variable
+names are case-insensitive, so that IS the script's own `[switch]$Status`
+parameter - the assignment tried to coerce an object into a switch and
+threw before anything was unregistered. Renamed to `$state`. Added a
+test-only `-KeyPath` parameter and `tests\unit\RegisterProtocol.Tests.ps1`,
+which runs a real register / status / unregister round-trip as a child
+powershell.exe (the same way the server calls it) against a throwaway
+`HKCU\Software\Classes\furphy-test-curseforge-<id>` key, never the real
+`curseforge` key. The Settings wording for that row is reworked in the
+settings round that follows.
+**Tokyo Rain is now the default theme**, superseding round 19's flip to
+Arcane Library. Arcane Library remains fully intact as the picker's #2
+entry - nothing about its token block, signature touches, or icon
+changed. The 15-theme picker reorders to put Tokyo Rain first and Arcane
+Library second; every other theme keeps its prior relative order. A
+user who had already picked a theme keeps seeing it - this only changes
+what a fresh profile seeds (`ui/app.js`'s `THEMES`/`DEFAULT_THEME`,
+`ui/index.html`'s seed attribute, `ui/manifest.json`'s theme colors, and
+`host/FurphyHost.cs`'s `InitializeDefaultTheme()` cold-start palette).
+
+Tokyo Rain must clear the same stricter contrast floors the default
+theme has been held to since round 19 (text/muted/chip-vs-tint, not just
+the generic 4.5:1). One pairing fell short once it became the default:
+`.chip-danger`'s text over its own tint composited on `--bg-2` measured
+4.78:1 against the 5:1 floor. Fixed with the smallest hex change that
+clears it - `--danger` `#ff6478` -> `#ff6f78` (green channel only, +11)
+- 5.01:1 after, character unchanged. See `THEMES-SPEC.md` section 8 for
+the full change-point table and before/after contrast numbers.
+
+**New 16th theme: Snow Day.** A bright, overcast snow-morning theme -
+flat low-chroma grey-blue sky and fresh snow-white cards, with one warm
+accent: a cocoa-brown (a mug of hot chocolate carried out into the
+cold). Muted forest-green success, amber-olive warning, brick-red
+danger, and slate-blue info round out the status colors. Corner radii
+are softened (6/10/16px) for a gently snow-rounded feel - the only
+theme in the set to do so. Its signature touch is a small drift of
+soft, out-of-focus snowflakes low in the sidebar's nav column, gated
+off (via a container-query kill switch) whenever the nav is too short
+for the snow to clear the real nav buttons, and reduced to a static
+frame under `prefers-reduced-motion: reduce`. Three candidate snowy
+directions were designed and blind-judged; Snow Day won on concept and
+cleared every contrast floor as submitted, with no hex changes needed
+(tightest margins: `text-faint vs bg-3` at 4.75, `chip-info vs bg-2` at
+5.21, both comfortably above their floors). Added to the picker in the
+last position, after Strawberry Cream - it does not change the app's
+default theme, which stays Tokyo Rain per the entry above. See
+`THEMES-SPEC.md` section 9 for the full selection writeup, token block,
+contrast table, and signature-touch verification.
+
+**Snow Day art (same-day redo).** The signature touch above shipped too
+subtle to read: a real 2530x1591 capture showed "a blank light column
+with a faint grey smudge" - the same complaint Eric made about Arcane
+Library's first cat art, just for snow instead of cats. Root cause was
+two-fold - five near-white dots sitting directly on the theme's own
+near-white sidebar had no backdrop to read against, and the fixed 88px
+band occupied only a sliver of the 500-1000px of real space a tall
+multi-flavour window actually leaves free below the nav. Two pixel
+artists redesigned it using the same "dedicated flex slot owns the freed
+sidebar space" technique as Arcane Library's hero cat rather than a
+`.nav::after` decoration; a blind judge picked "Snowfall over pines" - a
+new `.snow-scene` slot between the nav and the Update & Play button that
+fills the entire freed height with a soft overcast-sky backdrop (so
+near-white flakes finally have contrast), three parallax layers of
+falling snow spanning the whole box, and a bottom-anchored horizon of
+snow-capped pines, a rolling drift, and a small cocoa-scarfed snowman as
+the one warm focal point - over a frosted-window concept whose own ambient
+snowfall reproduced the same near-invisible-on-white bug at Eric's real
+window size. Measured at all four required configurations (845x539 and
+2024x1273, single-flavour and three-flavour): the scene fills 173-907px
+of real freed space with a consistent 16px gap to the nav and to the
+Update & Play block, and vanishes cleanly (no clipped fragment) below its
+own 109px recognizability floor - verified live at the 74px box a
+three-flavour 845x539 window produces. Arcane Library's hero cat and Lofi
+Night's cityscape strip are unaffected - `.snow-scene` stays `display:
+none` on every theme but its own, exactly like their own art does on
+every theme but theirs. Full write-up, judged concepts, and verbatim
+markup/CSS in `THEMES-SPEC.md` section 9.5.
+
 ## Round 30 (1.11.1: a cat you can actually see, icon v3, port-scoped window title)
 
 Eric's reactions to 1.11.0, verbatim: "CANT ACTUALLY SEE THE CATS OR

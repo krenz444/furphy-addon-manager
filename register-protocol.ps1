@@ -8,10 +8,14 @@ param(
     [switch]$Json,
     [string]$HandlerPath = (Join-Path $PSScriptRoot 'curseforge-handler.vbs'),
     [string]$IconPath = (Join-Path $PSScriptRoot 'icon.ico'),
-    [string]$SettingsPath = (Join-Path $PSScriptRoot 'settings.json')
+    [string]$SettingsPath = (Join-Path $PSScriptRoot 'settings.json'),
+    # Test-only (round 31): lets tests\unit\RegisterProtocol.Tests.ps1 run a
+    # real register/unregister round-trip against a throwaway key instead of
+    # the user's real HKCU\Software\Classes\curseforge.
+    [string]$KeyPath = 'HKCU:\Software\Classes\curseforge'
 )
 $ErrorActionPreference = 'Stop'
-$keyPath = 'HKCU:\Software\Classes\curseforge'
+$keyPath = $KeyPath
 $cmdPath = "$keyPath\shell\open\command"
 $ourCommand = 'wscript.exe "' + $HandlerPath + '" "%1"'
 
@@ -66,8 +70,14 @@ if ($Register) {
     exit 0
 }
 if ($Unregister) {
-    $status = Get-StatusObject
-    if ($status.registered) {
+    # Round 31: this local used to be named $status - which in PowerShell IS
+    # the [switch]$Status parameter above (variable names are case-
+    # insensitive), so the assignment tried to convert the status object to a
+    # SwitchParameter and -Unregister always failed ("Cannot convert value
+    # PSCustomObject to type SwitchParameter"). Eric hit it turning the
+    # Settings toggle off. Regression test: tests\unit\RegisterProtocol.Tests.ps1.
+    $state = Get-StatusObject
+    if ($state.registered) {
         $settings = Read-Settings
         $previous = ''
         if ($settings.PSObject.Properties['previousCurseforgeHandler']) { $previous = [string]$settings.previousCurseforgeHandler }

@@ -1249,30 +1249,31 @@ namespace Furphy
 
         // ------------------------------------------------------- theming
 
-        // Arcane Library - the app's default theme as of round 19
-        // (ui/style.css data-theme="arcane-library": --bg-0.. --bg-3, --border,
+        // Tokyo Rain - the app's default theme as of round 31
+        // (ui/style.css data-theme="tokyo-rain": --bg-0.. --bg-3, --border,
         // --text, --text-muted, --accent - verbatim from THEMES-SPEC.md
-        // section 7.9's "Arcane Library's 8-color host palette", unmodified
-        // from the existing, unmodified Arcane Library token block in
-        // style.css). Superseded round 17's flip to Vaporwave (itself a
-        // supersession of round 11's flip to Lofi Night) as the built-in
-        // cold-start default. Overwritten by LoadPersistedTheme
-        // (settings.json hostTheme) and, live, by ApplyTheme whenever a
-        // "theme" WebMessage arrives (HandleThemeMessage) - an existing
-        // user's persisted hostTheme (Vaporwave, Lofi Night, or otherwise)
-        // still wins, this only changes what a brand-new profile paints
-        // before the page reports in.
+        // section 8's "Tokyo Rain's 8-color host palette", unmodified from
+        // the existing Tokyo Rain token block in style.css). Superseded
+        // round 19's flip to Arcane Library (itself a supersession of round
+        // 17's flip to Vaporwave, which superseded round 11's flip to Lofi
+        // Night) as the built-in cold-start default. Overwritten by
+        // LoadPersistedTheme (settings.json hostTheme) and, live, by
+        // ApplyTheme whenever a "theme" WebMessage arrives
+        // (HandleThemeMessage) - an existing user's persisted hostTheme
+        // (Arcane Library, Vaporwave, Lofi Night, or otherwise) still wins,
+        // this only changes what a brand-new profile paints before the page
+        // reports in.
         private void InitializeDefaultTheme()
         {
-            ChromeBg = Color.FromArgb(0x0a, 0x09, 0x12);       // --bg-0
-            ChromeBgAlt = Color.FromArgb(0x12, 0x10, 0x22);    // --bg-1
-            ChromeBgActive = Color.FromArgb(0x1b, 0x18, 0x30); // --bg-2
-            ChromeHover = Color.FromArgb(0x24, 0x20, 0x40);    // --bg-3
-            _chromeBorder = Color.FromArgb(0x33, 0x2c, 0x54);  // --border
-            ChromeText = Color.FromArgb(0xf4, 0xee, 0xdd);     // --text
-            ChromeMuted = Color.FromArgb(0xb3, 0xa8, 0xd6);    // --text-muted
-            ChromeAccent = Color.FromArgb(0x88, 0xaf, 0xff);   // --accent
-            _themeName = "arcane-library";
+            ChromeBg = Color.FromArgb(0x0b, 0x0d, 0x14);       // --bg-0
+            ChromeBgAlt = Color.FromArgb(0x12, 0x15, 0x1f);    // --bg-1
+            ChromeBgActive = Color.FromArgb(0x1a, 0x1e, 0x2c); // --bg-2
+            ChromeHover = Color.FromArgb(0x23, 0x28, 0x38);    // --bg-3
+            _chromeBorder = Color.FromArgb(0x2c, 0x32, 0x44);  // --border
+            ChromeText = Color.FromArgb(0xe8, 0xec, 0xf5);     // --text
+            ChromeMuted = Color.FromArgb(0x9a, 0xa3, 0xba);    // --text-muted
+            ChromeAccent = Color.FromArgb(0xff, 0x5a, 0xa8);   // --accent
+            _themeName = "tokyo-rain";
         }
 
         // Reads settings.json's optional hostTheme = {name, colors} and, if

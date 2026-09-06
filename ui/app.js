@@ -25,9 +25,13 @@
    derive from this array; none of them hardcode a theme list of their own.
    ========================================================================== */
 const THEMES = [
-  // Round 19 (THEMES-SPEC.md section 7.8): Arcane Library is now the
-  // default (prepended here, and DEFAULT_THEME below flipped to match -
-  // see section 7.9 rows 1/5/11-16).
+  // Round 31 (THEMES-SPEC.md section 8): Tokyo Rain is now the default
+  // (moved to the front here, and DEFAULT_THEME below flipped to match -
+  // see section 8's change-point table). Arcane Library, the previous
+  // default, drops to the #2 slot; every other theme keeps its prior
+  // relative order (round 19, THEMES-SPEC.md section 7.9 rows 1/5/11-16,
+  // made Arcane Library the default before this round).
+  { slug: "tokyo-rain",        name: "Tokyo Rain" },
   { slug: "arcane-library",    name: "Arcane Library" },
   { slug: "vaporwave",         name: "Vaporwave" },
   { slug: "lofi",              name: "Lofi Night" },
@@ -39,12 +43,15 @@ const THEMES = [
   { slug: "alpine-dawn",       name: "Alpine Dawn" },
   { slug: "matcha",            name: "Matcha" },
   { slug: "desert-night",      name: "Desert Night" },
-  { slug: "tokyo-rain",        name: "Tokyo Rain" },
   { slug: "brushed-steel",     name: "Brushed Steel" },
   { slug: "aurora-sky",        name: "Aurora Sky" },
   { slug: "strawberry-cream",  name: "Strawberry Cream" },
+  // Round 31 (THEMES-SPEC.md section 9): 16th theme, added at the end of
+  // the picker order per the judge's final spec - does not change the
+  // default (still tokyo-rain, section 8).
+  { slug: "snow-day",          name: "Snow Day" },
 ];
-const DEFAULT_THEME = "arcane-library";
+const DEFAULT_THEME = "tokyo-rain";
 
 /* ==========================================================================
    Prefs - persisted appearance settings (theme, density), read from
@@ -65,9 +72,12 @@ const Prefs = (function () {
   // "make vaporwave the main theme again" - see SPEC.md section 3) through
   // round 18; round 19 (THEMES-SPEC.md section 7) made "arcane-library" the
   // DEFAULT instead (Eric: cats mixed with dungeon-fantasy,
-  // dark-by-default, readability-first). Anything else read back (missing
-  // key, corrupt value, an older/newer build's value, an unknown slug)
-  // falls through to DEFAULT_THEME.
+  // dark-by-default, readability-first); round 31 (THEMES-SPEC.md section 8)
+  // made "tokyo-rain" the DEFAULT instead (Eric: "make the rainy theme
+  // default"). Anything else read back (missing key, corrupt value, an
+  // older/newer build's value, an unknown slug) falls through to
+  // DEFAULT_THEME. A user who had already picked a theme keeps seeing it -
+  // this only changes what a fresh profile seeds.
   function isKnownTheme(v) { return THEMES.some(function (t) { return t.slug === v; }); }
 
   function readTheme() {

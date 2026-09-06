@@ -1667,3 +1667,495 @@ This is the same "vanish rather than crowd or clip" contract the theme already u
 - [ ] `node --check ui/app.js` passes (file untouched by this fix).
 - [ ] `tests\run-all.ps1 -Quick` and `tests\spa\Run-ThemeAudit.ps1` both run clean for every one of the 15 themes (the pre-existing, unrelated `Host.Tests.ps1` tray-click-outcome failure is called out explicitly, not silently ignored; port 47899 confirmed free by hand first).
 - [ ] No token (`--bg-*`, `--text*`, `--accent*`, etc.) changed; no file outside `ui/index.html`, `ui/style.css`, and this spec was edited; nothing was deployed, committed, or touched under `C:\Program Files (x86)`.
+
+---
+
+## 8. Tokyo Rain becomes the default
+
+**Round 31, Eric's verbatim request:** "keep the icon make a snowy theme make the rainy theme default, fix the icon on my desktop." Three separate asks: the app icon is untouched (not this section's concern - see `ui/icon.svg`'s own history in section 7.7/7.11, unchanged this round), a new snowy 16th theme is added (a separate change set, not covered here), and **Tokyo Rain (`tokyo-rain`) becomes the default theme**, superseding round 19's flip to Arcane Library the same way round 19's own table (section 7.9) superseded round 12's Vaporwave-default rows - history preserved below, not deleted, per this file's and `SPEC.md`'s established pattern. The desktop-shortcut icon Eric also mentions is a separate, unrelated fix (Explorer's shortcut-icon cache, not anything under `ui/` or `host/`) and is out of scope for this theme round.
+
+Tokyo Rain keeps its existing concept and token block (section 7) unchanged except for the one failing token the stricter default floors below required - see "Contrast floor fix" further down. Arcane Library remains fully intact, byte-for-byte, as the picker's new #2 entry; nothing about its own token block, signature touches, or icon changed.
+
+### 8.1 Picker order (15 themes)
+
+Rule: the default is always first in the picker. Tokyo Rain moves to position 1; Arcane Library (the previous default) drops to position 2; every other theme keeps its prior relative order unchanged (this just closes the gap Tokyo Rain leaves behind at its old position 12 - nothing between Arcane Library and Strawberry Cream reshuffles beyond that).
+
+1. **Tokyo Rain** (`tokyo-rain`) - new default
+2. Arcane Library (`arcane-library`)
+3. Vaporwave (`vaporwave`)
+4. Lofi Night (`lofi`)
+5. Dark (`dark`)
+6. Light (`light`)
+7. Terminal Green (`terminal-green`)
+8. Arctic Ice (`arctic-ice`)
+9. Art Deco (`art-deco-gold`)
+10. Alpine Dawn (`alpine-dawn`)
+11. Matcha (`matcha`)
+12. Desert Night (`desert-night`)
+13. Brushed Steel (`brushed-steel`)
+14. Aurora Sky (`aurora-sky`)
+15. Strawberry Cream (`strawberry-cream`)
+
+```js
+const THEMES = [
+  { slug: "tokyo-rain",        name: "Tokyo Rain" },
+  { slug: "arcane-library",    name: "Arcane Library" },
+  { slug: "vaporwave",         name: "Vaporwave" },
+  { slug: "lofi",              name: "Lofi Night" },
+  { slug: "dark",              name: "Dark" },
+  { slug: "light",             name: "Light" },
+  { slug: "terminal-green",    name: "Terminal Green" },
+  { slug: "arctic-ice",        name: "Arctic Ice" },
+  { slug: "art-deco-gold",     name: "Art Deco" },
+  { slug: "alpine-dawn",       name: "Alpine Dawn" },
+  { slug: "matcha",            name: "Matcha" },
+  { slug: "desert-night",      name: "Desert Night" },
+  { slug: "brushed-steel",     name: "Brushed Steel" },
+  { slug: "aurora-sky",        name: "Aurora Sky" },
+  { slug: "strawberry-cream",  name: "Strawberry Cream" },
+];
+const DEFAULT_THEME = "tokyo-rain";
+```
+
+(A 16th entry - the new snowy theme - is added by a separate change set, appended after Strawberry Cream per section 4's "adding a theme is a one-entry change" rule; it does not reorder anything above.)
+
+### 8.2 Contrast floor fix
+
+Tokyo Rain must clear the same stricter "default theme" floors Arcane Library was held to in round 19 (section 7.4's brief, carried forward): text vs bg-0..3 >=7:1, muted vs bg-1..2 >=5:1, chip text-on-tint vs bg-1..2 >=5:1, faint >=4.5:1 (unchanged from the generic floor), accent-text/accent >=4.5:1 (unchanged from the generic floor).
+
+Computed with node, straight from Tokyo Rain's existing token block (section 7.3), before any change:
+
+| Pairing | Ratio | Floor | Result |
+|---|---|---|---|
+| text/bg-0 | 16.40 | 7 | pass |
+| text/bg-1 | 15.40 | 7 | pass |
+| text/bg-2 | 14.02 | 7 | pass |
+| text/bg-3 | 12.39 | 7 | pass |
+| muted/bg-1 | 7.22 | 5 | pass |
+| muted/bg-2 | 6.57 | 5 | pass |
+| faint/bg-1 | 5.86 | 4.5 | pass |
+| faint/bg-2 | 5.33 | 4.5 | pass |
+| faint/bg-3 | 4.72 | 4.5 | pass |
+| accent-text/accent | 6.50 | 4.5 | pass |
+| chip-success vs bg-1 / bg-2 | 8.43 / 7.53 | 5 | pass |
+| chip-warning vs bg-1 / bg-2 | 7.78 / 6.96 | 5 | pass |
+| chip-info vs bg-1 / bg-2 | 8.21 / 7.32 | 5 | pass |
+| chip-muted vs bg-1 / bg-2 | 5.76 / 5.16 | 5 | pass |
+| chip-danger vs bg-1 / bg-2 | 5.31 / **4.78** | 5 | **fail (bg-2)** |
+
+Only one pairing fails: `.chip-danger`'s text (`--danger`) over its own tint (`--danger-tint`, alpha .14) composited on `--bg-2` measured 4.78:1, under the 5:1 default floor (it already cleared the generic 4.5:1 floor every non-default theme is held to, which is why this never surfaced before Tokyo Rain became the default).
+
+**Fix (smallest hex change found by exhaustive search over +-30 on each channel, minimizing total per-channel delta, requiring both bg-1 and bg-2 stay >=5:1):** `--danger` `#ff6478` -> `#ff6f78` - green channel only, `0x64` -> `0x6f` (+11 decimal), red and blue untouched. `--danger-tint`/`--danger-border`/`--danger-outline-border` updated to the matching rgb (255, 111, 120) so the tint stays keyed to the solid color, per this file's existing convention (every other theme's tint literals mirror their solid token's rgb).
+
+| Pairing | Before | After | Floor |
+|---|---|---|---|
+| chip-danger vs bg-1 | 5.31 | 5.56 | 5 |
+| chip-danger vs bg-2 | 4.78 | **5.01** | 5 |
+| danger-text (#2a0a10) vs danger | 6.39 | 6.78 | n/a (not floor-gated) |
+| banner-danger-text vs danger-tint-over-bg-0 | 10.13 | 10.01 | n/a |
+| form-error-text vs danger-tint-over-bg-1 | 8.06 | 7.95 | n/a |
+
+All other Tokyo Rain tokens are untouched. The theme's character (a cool blue-black street at night, magenta signage, cyan streetlight) is unaffected - `#ff6f78` reads as the same coral-red danger color as `#ff6478` at a glance; the shift is 11/255 on one channel.
+
+### 8.3 Change points
+
+| # | File | Location | Change |
+|---|---|---|---|
+| 1 | `ui/index.html` | line 2, `<html data-theme="arcane-library">` seed attribute | -> `data-theme="tokyo-rain"` |
+| 2 | `ui/app.js` | `THEMES` array (~line 27) | reorder: `tokyo-rain` first, `arcane-library` second, everything else keeps prior relative order (section 8.1) |
+| 3 | `ui/app.js` | `DEFAULT_THEME` (~line 47) | `"arcane-library"` -> `"tokyo-rain"` |
+| 4 | `ui/app.js` | `isKnownTheme(v)` | no logic change - already derives from `THEMES`; accepts the reordered 15 slugs automatically |
+| 5 | `ui/style.css` | `:root[data-theme="tokyo-rain"]` block (section 7.3's location) | `--danger` `#ff6478` -> `#ff6f78`; `--danger-tint`/`--danger-border`/`--danger-outline-border` rgb updated to match (section 8.2) - the only pixel-level change this round makes to any token |
+| 6 | `ui/manifest.json` | `background_color`, `theme_color` | `"#0a0912"` (Arcane Library's bg-0) -> `"#0b0d14"` (Tokyo Rain's bg-0) |
+| 7 | `host/FurphyHost.cs` | `InitializeDefaultTheme()` | Arcane Library's 8-color palette + `_themeName = "arcane-library"` -> Tokyo Rain's 8-color palette (below) + `_themeName = "tokyo-rain"`; rebuild via `host/build-host.ps1` |
+| 8 | `SPEC.md` | default-theme decision record (section 3's opening paragraph) | append a new dated entry (2026-09-06, round 31): "Tokyo Rain is the default (Eric's decision, round 31), superseding round 19's flip to Arcane Library. Rounds 7, 11, 12, and 19's entries remain below as history, per this file's established pattern - do not delete any." |
+| 9 | `README.txt` | default-theme line, if any | checked - `README.txt` names no default theme or theme count today, so this round leaves it unchanged; `README.md` (out of this round's file scope) still says Arcane Library and should be corrected in a future pass |
+| 10 | `CHANGELOG.md` | top of file | new `## Round 31 (1.12.0: Tokyo Rain default, new Snowy theme)` entry, Eric's verbatim request quoted, this section's default-flip summary (the new snowy theme's own paragraph is appended by the change set that adds it) |
+| 11 | `tests/spa/harness.js` | asserted default-theme slug + picker-order array (~line 559) | `"arcane-library"` -> `"tokyo-rain"`; 15-entry order updated to section 8.1; the phase-4 comment referencing the fresh-profile default (~line 632) updated to match |
+| 12 | `tests/spa/theme-audit.js` | `THEME_SLUGS` order | updated to section 8.1's order |
+| 13 | `tests/spa/theme-audit.js` | `CONTRAST_FLOOR_OVERRIDES` | add `"tokyo-rain": { text: 7, muted: 5, chip: 5 }`; **keep** `"arcane-library"` at the same strict floors - it still passes them and nothing asked to relax it |
+| 14 | `tests/spa/Run-ThemeAudit.ps1` | `$Script:ThemeSlugs` | updated to section 8.1's order |
+
+**Tokyo Rain's 8-color host palette** (for row 7, verbatim from section 7.3, unaffected by the section 8.2 `--danger` fix - none of these eight tokens changed): bg0 `#0b0d14` bg1 `#12151f` bg2 `#1a1e2c` bg3 `#232838` border `#2c3244` text `#e8ecf5` muted `#9aa3ba` accent `#ff5aa8`.
+
+**Not a bug, don't "fix" (same rule as section 2 and section 7.9's row 11 comment):** `LoadPersistedTheme()` in `FurphyHost.cs` overlays a returning user's `settings.json` `hostTheme` after the new default is seeded - a user who already has Arcane Library (or Vaporwave, or Lofi Night, or any other theme) persisted keeps seeing that theme's chrome even after the default flips, exactly mirroring the page's own localStorage-first behavior (`Prefs.readTheme()` only falls back to `DEFAULT_THEME` when nothing valid is stored). Do not force-migrate existing `settings.json` files or `localStorage` values.
+
+### 8.4 Acceptance checklist
+
+- [ ] `ui/app.js`'s `THEMES` array has `tokyo-rain` first, `arcane-library` second, and the remaining 13 slugs in their prior relative order (section 8.1); `DEFAULT_THEME === "tokyo-rain"`.
+- [ ] `isKnownTheme` and the swatch-grid picker derive from `THEMES` with no separate hardcoded list (unchanged mechanism from section 4/7.9 row 6).
+- [ ] `ui/index.html`'s `<html data-theme>` seed reads `tokyo-rain`.
+- [ ] `ui/manifest.json`'s `background_color`/`theme_color` equal Tokyo Rain's `--bg-0` (`#0b0d14`).
+- [ ] `host/FurphyHost.cs`'s `InitializeDefaultTheme()` paints Tokyo Rain's 8-color palette and sets `_themeName = "tokyo-rain"`; `host/build-host.ps1` builds clean.
+- [ ] `:root[data-theme="tokyo-rain"]`'s only token change is `--danger` (`#ff6478` -> `#ff6f78`) and its three dependent `rgba(...)` literals (`--danger-tint`, `--danger-border`, `--danger-outline-border`) updated to the matching rgb; every other Tokyo Rain token, its signature touch, and its `.select` chevron override are byte-for-byte unchanged.
+- [ ] Live-computed contrast audit passes Tokyo Rain against the stricter default floors (text >=7, muted >=5, chip >=5, faint/accent-text >=4.5) - specifically `chip-danger vs bg-2` now clears 5:1 - and Arcane Library still passes the same strict floors unchanged.
+- [ ] Every one of the other 13 existing theme blocks is byte-for-byte unchanged.
+- [ ] Swatch-grid picker renders 15 themes in the section 8.1 order, Tokyo Rain first and ring-marked by default on a fresh profile.
+- [ ] Fresh profile (no `localStorage`, no persisted `hostTheme`) loads Tokyo Rain on both the page and the native title bar; an existing user's persisted theme preference (Arcane Library or any other) is undisturbed, per section 8.3's "not a bug" note.
+- [ ] `tests/spa/harness.js`'s default-theme assertion, picker-order array, and the phase-4 comment all say `tokyo-rain`, not `arcane-library`.
+- [ ] `tests/spa/theme-audit.js`'s `THEME_SLUGS` order matches section 8.1; `CONTRAST_FLOOR_OVERRIDES` keys both `tokyo-rain` and `arcane-library` at the strict floors.
+- [ ] `tests/spa/Run-ThemeAudit.ps1`'s `$Script:ThemeSlugs` order matches section 8.1; the audit reports 15/15 themes passing.
+- [ ] `SPEC.md` carries the new round-31 decision entry with rounds 7, 11, 12, and 19's entries intact.
+- [ ] The app icon (`ui/icon.svg`, `icon.ico`, `host/bin/icon.ico`, `ui/icons/*`) is untouched - Eric explicitly asked to keep it.
+- [ ] The new snowy 16th theme is NOT added by this change set - that is a separate pass.
+- [ ] No new theme introduces a network font, external asset, or anything that breaks the app running fully offline.
+
+## 9. Snowy theme: Snow Day (snow-day)
+
+**Round 31, second half of Eric's verbatim request** (section 8's opening quote): "...make a snowy theme..." A new, 16th theme, added to the picker in last position after Strawberry Cream. This does **not** change the app's default theme - that stays Tokyo Rain per section 8 - Snow Day is simply theme #16 in the list.
+
+### 9.1 Selection
+
+Three candidate directions were designed independently and judged blind, then each one's contrast was independently recomputed against this round's stricter floors (the same "default theme" floors section 8.2 uses - text >=7:1, muted >=5:1, faint >=4.5:1, accent-text >=4.5:1, chip-vs-tint >=5:1 - applied uniformly to all three candidates for this round's judging, not just to whichever one shipped as default):
+
+- **A - Snow Day** (winner, shipped, this section). A bright, overcast snow-morning palette: flat low-chroma grey-blue sky/ground tones plus one warm, human accent (cocoa-brown, "a mug of hot chocolate carried out into the cold"). Signature touch: a full-slot snowfall-over-pines scene filling the sidebar's freed space below the nav (redone post-launch - see section 9.5 for the original too-subtle touch and its replacement). Softened 6/10/16px corner radii ("snow-rounded" geometry) - the only candidate to touch the radius tokens.
+- **B - Snowglow.** A similar cool-neutral/warm-accent family, distinguished by its signature touch: true seamless-loop falling snow (`translateY(0 -> 50%)` on a 200%-tall tiled background) rather than a bounded drift, so its flakes read as continuously falling. Independently verified all-pass against the stricter floors; tightest margin `chip-danger vs bg-2` at 5.34 (floor 5).
+- **C - Snowbound Cabin.** A "looking outside" concept built around a window/muntin motif (frosted panes, a view out rather than a view of the snow itself). Independently verified all-pass against the stricter floors; tightest margin `chip-danger vs bg-2` at 5.16 (floor 5) - the single thinnest margin of the three candidates, though it still clears its floor.
+
+**Judge's verdict:** Snow Day (A) won - it clears every floor and every craft requirement as submitted, with no mandatory grafts needed to ship it. Its concept (outdoors, in the snow, holding something warm) reads as the most immediately "snowy" of the three at a glance, and it is the only candidate of the three - and the only theme in the full 16-theme set - to soften all three corner-radius tokens for a deliberately rounded, snow-drift feel.
+
+**Distinctness check (the judge's own verification, not just "by eye"):** Snow Day's `--bg-0` (`#eef1f2`, H195 S13% L94%) sits at far lower chroma than Arctic Ice's `--bg-0` (`#eef4f7`, H200 S36% L95%) - Arctic Ice reads as bright icy-blue "glacier glare," Snow Day reads as flat overcast sky. Its accent (`#8f5a2e`, H27 S51% L37%, warm cocoa-brown) is the opposite temperature from Arctic Ice's cool deep-teal accent (`#0c6c8f`, H196) and shares no hue family with any other theme's accent in the other 15: Matcha's green (H106), Strawberry Cream's raspberry-pink (H348), Alpine Dawn/Desert Night's oranges (H18/H29), Brushed Steel's steel-blue (H203), Aurora Sky's violet (H265). No existing theme pairs a cool, low-chroma neutral base with a warm, desaturated brown accent.
+
+**Grafts:** None were mandatory - Snow Day shipped verbatim, no hex changes required by the winning submission. Two optional, non-blocking ideas were flagged for a possible future polish pass (not part of this round, and not acted on here):
+
+1. Port Snowglow's (B) true seamless-loop tiling technique onto Snow Day's existing `.nav::after` box (without touching its kill-switch/mask/z-index safety net), if a future iteration wants a more literal "continuously falling" read than Snow Day's own bounded ping-pong drift. *(Overtaken by events: the signature-touch redo in section 9.5 replaced the `.nav::after` box entirely with the `.snow-scene` slot, whose three `.snow-layer` tiles already loop as true continuous falling snow via `linear infinite` translate animations - this idea's goal is satisfied, just via a different box than the one this note named.)*
+2. A contrast-headroom note (not a defect, same non-blocking tradition as Matcha's and Strawberry Cream's own accent-text notes elsewhere in this file): Snow Day's two thinnest margins - `text-faint vs bg-3` (4.75, floor 4.5) and `chip-info vs bg-2` (5.21, floor 5) - pass cleanly but sit closer to their floor than the rest of the set, worth a maintainer's eyes if there's appetite for a follow-up.
+
+Nothing from Snowbound Cabin (C) was worth grafting - its window/muntin, "looking outside" motif doesn't fit Snow Day's "outdoors, in the snow" concept.
+
+### 9.2 Concept
+
+A bright, overcast snow morning right after a fresh fall: a flat, quiet grey-blue sky (not sunny, not glaring), fresh snow-white ground and cards, and cool grey-blue "packed snow" shadow tones with almost no chroma. Against that cool neutrality sits one warm, human accent - a cocoa-brown (a mug of hot chocolate carried out into the cold) - used for every interactive/accent surface, with a muted forest-green success, warm amber-olive warning, brick-red danger, and slate-blue info rounding out the status set. Geometry is softened (6/10/16px radii, versus the shared default's tighter corners) so cards and buttons read as gently snow-rounded rather than crisp glacier-cut. `color-scheme: light` - Snow Day is a light theme, the fourth in the set alongside Light, Arctic Ice, and Matcha.
+
+### 9.3 Token block (verbatim, `ui/style.css`)
+
+```css
+:root[data-theme="snow-day"] {
+  color-scheme: light;
+  --bg-0: #eef1f2;
+  --bg-1: #ffffff;
+  --bg-2: #e6ebed;
+  --bg-3: #d7dfe2;
+  --border: #c9d3d8;
+  --border-soft: #dde6ea;
+  --border-hover: #aab8c0;
+
+  --text: #1c2b33;
+  --text-muted: #435862;
+  --text-faint: #4c626c;
+
+  --accent: #8f5a2e;
+  --accent-hover: #764a26;
+  --accent-active: #613c1f;
+  --accent-text: #fff8f0;
+
+  --success: #0f5f37;
+  --warning: #6b4c00;
+  --danger: #922f24;
+  --info: #1f5e86;
+
+  --secondary: #5b7b93;
+
+  --success-tint: rgba(15, 95, 55, .08);
+  --warning-tint: rgba(107, 76, 0, .08);
+  --danger-tint: rgba(146, 47, 36, .08);
+  --info-tint: rgba(31, 94, 134, .08);
+  --accent-tint: rgba(143, 90, 46, .12);
+  --muted-tint: rgba(67, 88, 98, .10);
+
+  --banner-danger-text: #922f24;
+  --form-error-text: #922f24;
+
+  --danger-hover: #7a2620;
+  --danger-text: #fff5f3;
+  --danger-border: rgba(146, 47, 36, .35);
+  --danger-outline-border: rgba(146, 47, 36, .4);
+
+  --focus-ring: var(--accent);
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+}
+
+:root[data-theme="snow-day"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23435862' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+```
+
+Swatch preview rule (`ui/style.css`, colocated with the token block per this file's own convention, section 3.2):
+
+```css
+.theme-swatch[data-theme-value="snow-day"] { --sw-bg:#ffffff; --sw-bg2:#eef1f2; --sw-accent:#8f5a2e; --sw-text:#1c2b33; }
+```
+
+Snow Day is the only theme in the set to override `--radius-sm`/`--radius`/`--radius-lg` (default: 6px/10px/16px are actually the shared base values already used by most other themes - Snow Day matches them here rather than diverging; the note is that it is the one theme block that states them explicitly, as a deliberate "snow-rounded" design decision rather than an inherited fallthrough).
+
+### 9.4 Contrast table (recomputed independently with node against this section's token block, same formula as `tests/spa/theme-audit.js`: sRGB -> linear, 0.2126/0.7152/0.0722 weights, `(L1+.05)/(L2+.05)`; chip pairs composite the `*-tint` rgba onto the stated `--bg` hex, then take the solid chip-text color's contrast against that composite)
+
+Snow Day is not the default theme, so the generic WCAG AA floor (4.5:1 for text, chips held to the same 4.5 in `theme-audit.js`'s `DEFAULT_FLOORS`) is what `tests/spa/theme-audit.js` actually enforces for it - shown below is the fuller table the judge computed against this round's stricter default-theme floors, which Snow Day also clears with no override needed:
+
+| Pairing | Ratio | Floor | Result |
+|---|---|---|---|
+| text/bg-0 | 12.82 | 7 | pass |
+| text/bg-1 | 14.56 | 7 | pass |
+| text/bg-2 | 12.11 | 7 | pass |
+| text/bg-3 | 10.77 | 7 | pass |
+| muted/bg-1 | 7.47 | 5 | pass |
+| muted/bg-2 | 6.22 | 5 | pass |
+| faint/bg-1 | 6.42 | 4.5 | pass |
+| faint/bg-2 | 5.34 | 4.5 | pass |
+| faint/bg-3 | 4.75 | 4.5 | pass (tightest margin in the set) |
+| accent-text/accent | 5.43 | 4.5 | pass |
+| chip-success vs bg-1 / bg-2 | 6.83 / 5.73 | 5 | pass |
+| chip-warning vs bg-1 / bg-2 | 6.99 / 5.83 | 5 | pass |
+| chip-danger vs bg-1 / bg-2 | 6.92 / 5.81 | 5 | pass |
+| chip-info vs bg-1 / bg-2 | 6.20 / 5.21 | 5 | pass (second-tightest margin) |
+| chip-muted vs bg-1 / bg-2 | 6.42 / 5.39 | 5 | pass |
+
+All 20 pairs clear their floor; no hex change was required. This document's own independent node recompute (separate from the judge's) landed within 0.01-0.02 on every row (e.g. chip-danger vs bg-2: 5.81 both times; chip-info vs bg-2: 5.20 here vs 5.21 above) - rounding noise only, no pass/fail disagreement.
+
+### 9.5 Signature touch: sidebar snowfall (`ui/index.html`, `ui/style.css`)
+
+#### 9.5.1 Original touch - superseded
+
+Snow Day originally shipped (this round, before the redo below) with soft, out-of-focus snowflakes drifting in the naturally-empty lower portion of the sidebar's `.nav` column: a fixed 88px band of five faint radial-gradient dots pinned to `.nav`'s own bottom edge via `.nav::after`, gated by a `@container snow-day-nav (max-height: 220px)` kill switch and animated with a bounded `translate`/`opacity` ping-pong. No markup changes were needed for that version - it was pure `.nav::after` decoration.
+
+**Verdict: rejected.** A real capture of the shipped build at 2530x1591 (Eric's own window) showed, in Eric's own words when he saw the equivalent problem on Arcane Library's first cat art, the same failure mode: "CANT ACTUALLY SEE THE CATS OR WHATEVER." For Snow Day specifically, the capture showed a blank light column with a faint grey smudge - nothing read as snow. Two compounding causes: (1) the five dots were near-white (`rgba(255,255,255,.7-.9)`) sitting directly on this theme's own near-white sidebar (`--bg-1` `#ffffff`), so they had essentially no backdrop to read against; and (2) the band was a fixed 88px strip pinned to `.nav`, while a real multi-flavour window like Eric's leaves 500-1000px of genuinely free `flex:1` space below the nav - the decoration occupied a small fraction of the space actually available, so even where it was visible it read as a sliver, not a scene.
+
+#### 9.5.2 Redo: judged concepts
+
+Two pixel artists were asked to redesign the signature touch using the same "dedicated flex slot owns the freed sidebar space" technique Arcane Library's `.arcane-hero` already uses (sections 7.5-7.6, 7.13, 7.15-7.16) rather than a `.nav::after` decoration, so the art gets the real freed space instead of a fixed strip:
+
+- **A - Snowfall over pines** (winner, shipped, this section). A `.snow-scene` flex slot filling the entire gap between the nav and the bottom CTA: a soft, never-quite-white overcast-sky wash (`.snow-scene-sky`) behind everything so near-white flakes always have contrast, three parallax layers of falling snow (`.snow-layer-far/-mid/-near`, CSS-only repeating radial-gradient tiles, transform-only drift loops) spanning the whole box, over a bottom-anchored pixel-art horizon (`.snow-scene-ground`): snow-capped pine silhouettes, a rolling white drift with its own soft shadow line, and a small cocoa-scarfed snowman as the one warm focal object.
+- **B - Frosted window.** A pixel-art window frame silhouette with small tree icons visible through the panes and a cocoa mug on the sill, plus an ambient flurry of flakes above the frame.
+
+**Judge's verdict: A won.** At 845x539/single-flavour (the `.snow-scene` box renders 207x173) it reads as a complete snow diorama in well under a second: snow-capped pine silhouettes with tapering branch-shelf snow, a rolling white drift with a visible shadow line, and a small cocoa-scarfed snowman as the one warm touch, all against the overcast-sky wash that finally gives the near-white flakes something to read against - the actual fix for the original white-on-white bug. At 2024x1273 (Eric's real proportions, a 907px box) the falling-snow layers scale to fill the whole freed height, staying a dense, evenly-distributed field top to bottom, anchored by the pine/snowman horizon at the very bottom - unmistakably "it's snowing" even glanced at from across the room. At flavours=3/845x539 the box drops to 74px and the whole scene correctly vanishes below the 109px container-query floor, matching `.arcane-hero`'s own "vanish, don't clip" contract.
+
+B's window silhouette itself was instantly recognizable, but as "a window," not "snow" - the one-second read had to travel past the frame to small tree icons before landing on winter, and the judge found two contrast bugs reproducing the exact failure class this redo exists to eliminate: the snow-drift mounds in the lower glass panes were indistinguishable from the pane's own near-white fill at 5x zoom, and - most damaging for this brief specifically - B's own crop at 2024x1273 showed roughly 500px of near-blank ambient-flurry space above the window frame, materially the same "blank light column with a faint grey smudge" bug the redo was triggered by. Nothing from B was worth grafting onto A.
+
+**Judge's tweaks (both verified during implementation, no code changes needed):**
+
+1. *Spot-check the `.snow-scene-ground` rendering at an in-between slot height (~130-150px), between the 210px ground cap and the 109px hide-floor, to confirm the snowman's head isn't awkwardly sliced.* Verified at a live 845x506 window (single flavour), which produces a `.snow-scene` box of exactly 140px: `.snow-scene-ground`'s `viewBox="0 0 208 158"` with `preserveAspectRatio="xMidYMax meet"` means the entire viewBox is always scaled to fit the box - "meet" never crops, it only shrinks - so the snowman, pines, and drift all render smaller but complete at 140px, with no slicing at any height between the 109px floor and the 210px cap.
+2. *Confirm `.snow-scene-sky`'s hardcoded gradient stops (`#e7edef`/`#e1e8ea`/`#d9e2e6`) are actually in the theme's own palette family before shipping.* Computed HSL for both sets: the theme's own `--bg-0`/`--bg-2`/`--bg-3`/`--border-soft` (section 9.3) land at H195-200 S13-24% L82-94%; the three sky stops land at H193-198 S18-21% L88-92% - the same cool, low-chroma grey-blue family, confirmed rather than assumed.
+
+#### 9.5.3 Final markup (`ui/index.html`, verbatim)
+
+Inserted immediately after `</nav>` and before the Lofi Night `.lofi-cityscape` block (`.snow-scene` is `display:none` on every other theme, exactly like `.lofi-cityscape` and `.arcane-hero`):
+
+```html
+<div class="snow-scene">
+  <div class="snow-scene-sky" aria-hidden="true"></div>
+  <div class="snow-layer snow-layer-far" aria-hidden="true"></div>
+  <svg class="snow-scene-ground" viewBox="0 0 208 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+    <g fill="#93a7b4">
+      <path d="M56,86 L70,118 L42,118 Z"/>
+      <path d="M108,78 L124,116 L92,116 Z"/>
+      <path d="M158,88 L171,118 L145,118 Z"/>
+    </g>
+    <g fill="#ffffff" opacity="0.9">
+      <rect x="59" y="98" width="8" height="2.5"/>
+      <rect x="112" y="90" width="8" height="2.5"/>
+      <rect x="161" y="100" width="8" height="2.5"/>
+    </g>
+    <g fill="#3a4f60">
+      <path d="M27,58 L46,132 L4,132 Z"/>
+      <path d="M186,52 L207,132 L162,132 Z"/>
+    </g>
+    <g fill="#ffffff">
+      <rect x="8" y="120" width="30" height="3"/><rect x="12" y="104" width="20" height="3"/><rect x="16" y="90" width="12" height="3"/><rect x="20" y="76" width="6" height="3"/>
+      <rect x="166" y="120" width="30" height="3"/><rect x="170" y="104" width="22" height="3"/><rect x="175" y="90" width="13" height="3"/><rect x="180" y="76" width="6" height="3"/>
+    </g>
+    <g fill="#aab8c0" opacity="0.55">
+      <ellipse cx="34" cy="149" rx="52" ry="24"/>
+      <ellipse cx="112" cy="153" rx="58" ry="25"/>
+      <ellipse cx="190" cy="149" rx="46" ry="24"/>
+    </g>
+    <g fill="#ffffff">
+      <ellipse cx="34" cy="145" rx="52" ry="22"/>
+      <ellipse cx="112" cy="149" rx="58" ry="23"/>
+      <ellipse cx="190" cy="145" rx="46" ry="22"/>
+      <rect x="0" y="148" width="208" height="10"/>
+    </g>
+    <g>
+      <rect x="126.5" y="127" width="14" height="2.4" fill="#764a26" transform="rotate(-18 126.5 128.2)"/>
+      <rect x="152" y="127" width="14" height="2.4" fill="#764a26" transform="rotate(18 152 128.2)"/>
+      <ellipse cx="146" cy="140" rx="19" ry="16" fill="#ffffff"/>
+      <ellipse cx="152" cy="146" rx="11" ry="8" fill="#e3eaed"/>
+      <ellipse cx="146" cy="115" rx="13" ry="12" fill="#ffffff"/>
+      <path d="M133,117 L159,117 L155,124 L137,124 Z" fill="#8f5a2e"/>
+      <rect x="150" y="122" width="6" height="13" rx="1.5" fill="#8f5a2e" transform="rotate(14 150 122)"/>
+      <circle cx="141" cy="112" r="1.7" fill="#1c2b33"/>
+      <circle cx="151" cy="112" r="1.7" fill="#1c2b33"/>
+      <path d="M144,116 L149,117.5 L144,119 Z" fill="#8f5a2e"/>
+      <circle cx="146" cy="128" r="1.6" fill="#1c2b33"/>
+      <circle cx="146" cy="136" r="1.6" fill="#1c2b33"/>
+    </g>
+  </svg>
+  <div class="snow-layer snow-layer-mid" aria-hidden="true"></div>
+  <div class="snow-layer snow-layer-near" aria-hidden="true"></div>
+</div>
+```
+
+Reading order top to bottom: `.snow-scene-sky` (backdrop), `.snow-layer-far` (behind the horizon), `.snow-scene-ground` (pines/drift/snowman), `.snow-layer-mid` and `.snow-layer-near` (in front of the horizon, for parallax depth). `aria-hidden` throughout - purely decorative, never conveys state, same convention as `.lofi-cityscape` and `.arcane-alcove`/`.arcane-hero-cat`.
+
+#### 9.5.4 Final CSS (`ui/style.css`, verbatim)
+
+Same location as the superseded 9.5.1 block: after Strawberry Cream's signature-touch block, before the Arcane Library theme's own token block.
+
+```css
+:root[data-theme="snow-day"] .nav { flex: 0 0 auto; }
+
+.snow-scene { display: none; }
+:root[data-theme="snow-day"] .snow-scene {
+  display: block;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: var(--radius);
+  container-type: size;
+  container-name: snow-scene;
+}
+:root[data-theme="snow-day"] .snow-scene-sky {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, #e7edef 0%, #e1e8ea 55%, #d9e2e6 100%);
+}
+:root[data-theme="snow-day"] .snow-scene-ground {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: min(100%, 210px);
+  display: block;
+}
+:root[data-theme="snow-day"] .snow-layer {
+  position: absolute;
+  inset: -140px;
+  background-repeat: repeat;
+}
+:root[data-theme="snow-day"] .snow-layer-far {
+  background-image:
+    radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 20% 30%, rgba(255,255,255,.8) 0%, transparent 100%),
+    radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 70% 65%, rgba(255,255,255,.75) 0%, transparent 100%);
+  background-size: 64px 108px;
+  opacity: .85;
+  animation: snow-day-fall-far 24s linear infinite;
+}
+:root[data-theme="snow-day"] .snow-layer-mid {
+  background-image:
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 35% 20%, rgba(255,255,255,.9) 0%, transparent 100%),
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 80% 60%, rgba(255,255,255,.85) 0%, transparent 100%),
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 10% 75%, rgba(255,255,255,.9) 0%, transparent 100%);
+  background-size: 58px 96px;
+  opacity: .92;
+  animation: snow-day-fall-mid 16s linear infinite;
+}
+:root[data-theme="snow-day"] .snow-layer-near {
+  background-image:
+    radial-gradient(circle clamp(3.5px, 1.2cqh, 6.5px) at 25% 25%, rgba(255,255,255,1) 0%, transparent 100%),
+    radial-gradient(circle clamp(3.5px, 1.2cqh, 6.5px) at 68% 55%, rgba(255,255,255,.95) 0%, transparent 100%);
+  background-size: 52px 88px;
+  opacity: 1;
+  animation: snow-day-fall-near 11s linear infinite;
+}
+@keyframes snow-day-fall-far  { from { transform: translate(0,0); } to { transform: translate(-64px, 108px); } }
+@keyframes snow-day-fall-mid  { from { transform: translate(0,0); } to { transform: translate(58px, 96px); } }
+@keyframes snow-day-fall-near { from { transform: translate(0,0); } to { transform: translate(-52px, 88px); } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="snow-day"] .snow-layer { animation: none; }
+}
+@container snow-scene (max-height: 109px) {
+  :root[data-theme="snow-day"] .snow-scene-sky,
+  :root[data-theme="snow-day"] .snow-scene-ground,
+  :root[data-theme="snow-day"] .snow-layer {
+    display: none;
+  }
+}
+@media (max-height: 460px) {
+  :root[data-theme="snow-day"] .snow-scene { display: none; }
+}
+```
+
+#### 9.5.5 Slot/container mechanics
+
+Identical technique to `.arcane-hero` (sections 7.15-7.16): `:root[data-theme="snow-day"] .nav { flex: 0 0 auto; }` scopes `.nav` back to its own content height for this theme only (the shared base rule is `.nav { flex: 1; }`), and `.snow-scene` - a new flex sibling between `</nav>` and `.sidebar-bottom` in the markup - takes over the freed `flex: 1 1 auto` role instead, so it always gets exactly whatever room a real `.nav` (however many flavour pills it currently has) leaves free. `position: relative; overflow: hidden` on `.snow-scene` keeps every child (the sky wash, the ground SVG, all three snow layers, each inset well past the box's own edges) clipped to the box's real rectangle, so nothing can ever bleed into `.nav` above or `.sidebar-bottom` below regardless of window size. `.snow-scene` is also its own CSS size container (`container-type: size; container-name: snow-scene`), and `@container snow-scene (max-height: 109px)` hides the sky/ground/snow-layers entirely below that recognizability floor rather than showing a squeezed or clipped fragment - the same 109px threshold and "vanish, don't clip" contract as `.arcane-hero-cat`. A coarser `@media (max-height: 460px)` rule is the second line of defence for browsers without container-query support, mirroring `.arcane-hero`'s own backstop. The ground SVG's `height: min(100%, 210px)` (no floor, matching the round-22 `.arcane-hero-cat` fix) means it can never be forced taller than the box actually is, and `preserveAspectRatio="xMidYMax meet"` means the whole scene scales down instead of clipping at any height above the 109px floor (verified at a spot-checked 140px box - section 9.5.2, tweak 1).
+
+**Verification (measured with `getBoundingClientRect` against the live mock app, all four required configurations, matching the pattern already established for `.arcane-hero` in section 7.16):**
+
+- 845x539, single flavour: `.nav` `{top:75, bottom:191, height:116}`; `.snow-scene` `{top:207, bottom:380, height:173, display:block}` (16px gap to `.nav`); `.sidebar-bottom` `{top:396, bottom:523}` (16px gap to the scene). Scene visible (173px > 109px floor) - reads as a complete snow diorama.
+- 845x539, flavours=3 (the tallest nav configuration in the set): `.nav` `{top:75, bottom:290, height:215}`; `.snow-scene` box computes to `{top:306, bottom:380, height:74}` - below the 109px floor, so `.snow-scene-sky`/`.snow-scene-ground`/`.snow-layer` are all `display:none` via the container query (confirmed live, not just by inspection); `.sidebar-bottom` unchanged at `{top:396, bottom:523}` (16px gap to the scene box regardless). Zero overlap, zero clipping - the scene vanishes cleanly rather than showing a fragment.
+- 2024x1273, single flavour: `.nav` `{top:75, bottom:191}`; `.snow-scene` `{top:207, bottom:1114, height:907}` (16px gap to `.nav`); `.sidebar-bottom` `{top:1130, bottom:1257}` (16px gap to the scene). Fully visible - the falling-snow layers fill the entire freed height, reading as "it's snowing" at a glance.
+- 2024x1273, flavours=3 (Eric's own real setup): `.nav` `{top:75, bottom:290}`; `.snow-scene` `{top:306, bottom:1114, height:808}` (16px gap to `.nav`); `.sidebar-bottom` `{top:1130, bottom:1257}` (16px gap to the scene). Fully visible, no overlap with the flavour pills/Update All button above or the Update & Play/status dots below.
+
+In every configuration `.snow-scene`'s `left`/`right` exactly match `.nav`'s own (`12`/`219`) - never wider than the sidebar's content column - and `overflow: hidden` plus each `.snow-layer`'s oversized `-140px` inset guarantee nothing bleeds past those bounds even mid-animation. `.arcane-hero` (Arcane Library) and `.lofi-cityscape` (Lofi Night) were spot-checked at 845x539 in the same session and render pixel-identical to their pre-existing geometry - `.snow-scene` stays `display: none` on both themes, exactly like `.arcane-hero` and `.lofi-cityscape` stay `display: none` on every theme that isn't their own.
+
+### 9.6 Picker order (16 themes)
+
+Snow Day is appended in the last position - nothing above it reorders.
+
+```js
+const THEMES = [
+  { slug: "tokyo-rain",        name: "Tokyo Rain" },
+  { slug: "arcane-library",    name: "Arcane Library" },
+  { slug: "vaporwave",         name: "Vaporwave" },
+  { slug: "lofi",              name: "Lofi Night" },
+  { slug: "dark",              name: "Dark" },
+  { slug: "light",             name: "Light" },
+  { slug: "terminal-green",    name: "Terminal Green" },
+  { slug: "arctic-ice",        name: "Arctic Ice" },
+  { slug: "art-deco-gold",     name: "Art Deco" },
+  { slug: "alpine-dawn",       name: "Alpine Dawn" },
+  { slug: "matcha",            name: "Matcha" },
+  { slug: "desert-night",      name: "Desert Night" },
+  { slug: "brushed-steel",     name: "Brushed Steel" },
+  { slug: "aurora-sky",        name: "Aurora Sky" },
+  { slug: "strawberry-cream",  name: "Strawberry Cream" },
+  { slug: "snow-day",          name: "Snow Day" },
+];
+const DEFAULT_THEME = "tokyo-rain";
+```
+
+### 9.7 Change points
+
+| # | File | Location | Change |
+|---|---|---|---|
+| 1 | `ui/style.css` | after Strawberry Cream's token block/`.select` override/swatch line (~line 899) | new `:root[data-theme="snow-day"]` token block (section 9.3), numbered "16." in the file's own comment style |
+| 2 | `ui/style.css` | after Strawberry Cream's token block | `:root[data-theme="snow-day"] .select` chevron override (section 9.3) |
+| 3 | `ui/style.css` | colocated with the token block | `.theme-swatch[data-theme-value="snow-day"]` preview rule (section 9.3) |
+| 4 | `ui/style.css` | after Strawberry Cream's sidebar/brand-icon signature-touch block, before the Arcane Library theme's token block | **superseded, then redone same round:** originally the `:root[data-theme="snow-day"] .nav`/`.nav::after` band (section 9.5.1); replaced in place by the `.snow-scene`/`.snow-scene-sky`/`.snow-scene-ground`/`.snow-layer-*` slot rules (section 9.5.4) after Eric's real-capture rejection - old rules fully removed, no dead CSS left behind |
+| 4b | `ui/index.html` | immediately after `</nav>`, before the Lofi Night `.lofi-cityscape` block | new: the `.snow-scene` markup (section 9.5.3) - the original touch needed no markup change; the redo does, since it moved from a `.nav::after` decoration to a dedicated flex-slot sibling (same technique as `.arcane-hero`) |
+| 5 | `ui/app.js` | `THEMES` array, last position | append `{ slug: "snow-day", name: "Snow Day" }` (section 9.6) - `DEFAULT_THEME` unchanged (`tokyo-rain`, section 8) |
+| 6 | `ui/app.js` | `isKnownTheme(v)` | no logic change - already derives from `THEMES` |
+| 7 | `ui/index.html` | swatch markup / any hardcoded theme list | none found for the theme picker itself - it is fully driven by `THEMES` via `Views.settings.buildThemeGrid()` (section 4), confirmed by inspection (the `.snow-scene` markup added per row 4b is signature art, not picker markup) |
+| 8 | `tests/spa/harness.js` | fresh-profile theme-grid assertion (~line 559) | tile count 15 -> 16; expected order array gains `"snow-day"` at the end |
+| 9 | `tests/spa/theme-audit.js` | `THEME_SLUGS` | gains `"snow-day"` at the end; header comment "15 themes" -> "16 themes". No `CONTRAST_FLOOR_OVERRIDES` entry added - Snow Day is not a default theme, so it is correctly held to the generic 4.5 floor `DEFAULT_FLOORS` already applies, which section 9.4 shows it clears by a wide margin even against the stricter floors |
+| 10 | `tests/spa/Run-ThemeAudit.ps1` | `$Script:ThemeSlugs`, header comments, the `contrast pass: all N themes audited` result name | gains `'snow-day'` at the end; "15" -> "16" throughout |
+| 11 | `THEMES-SPEC.md` | this section | new section 9 |
+| 12 | `CHANGELOG.md` | Round 31 entry (section 8's entry, already opened by the round's first change set) | append the Snow Day paragraph |
+| 13 | `VERSION` / `addon-server.ps1` `$Script:Version` | version string | `1.12.0` |
+
+### 9.8 Acceptance checklist
+
+- [ ] `ui/app.js`'s `THEMES` array has `snow-day` appended after `strawberry-cream`, nothing else reordered; `DEFAULT_THEME` is still `"tokyo-rain"`.
+- [ ] `isKnownTheme` and the swatch-grid picker derive from `THEMES` with no separate hardcoded list needing an update (confirmed - none exists).
+- [ ] `ui/style.css` carries the section 9.3 token block verbatim and the `.select` chevron override, scoped to `:root[data-theme="snow-day"]`; the section 9.5.4 `.snow-scene` signature touch is present and the superseded 9.5.1 `.nav`/`.nav::after` rules (and their `snow-day-nav` container and `snow-day-drift` keyframes) are fully removed, not left as dead CSS.
+- [ ] `ui/index.html` carries the section 9.5.3 `.snow-scene` markup immediately after `</nav>`, before the Lofi Night block; `.snow-scene` is `display: none` on every other theme (confirmed on `arcane-library` and `lofi`).
+- [ ] `.theme-swatch[data-theme-value="snow-day"]` renders the correct preview colors in Settings > Appearance.
+- [ ] Live-computed contrast audit passes Snow Day against the generic 4.5:1 floor `tests/spa/theme-audit.js` applies to non-default themes (section 9.4 shows it in fact clears the stricter default-theme floors too, with no hex change needed).
+- [ ] The snowfall signature touch never overlaps the Update & Play button, the status dot, the nav buttons, or the wordmark, at 845x539 and 2024x1273, both single-flavour and `flavours=3` (section 9.5.5 - four configurations, all verified).
+- [ ] The scene disappears cleanly (no partial/clipped remnant) when `.snow-scene`'s own real height drops below the `@container snow-scene (max-height: 109px)` threshold (verified live at flavours=3/845x539, where the box is 74px).
+- [ ] Only `transform`/`opacity` are animated in the signature touch (the three `.snow-layer` drift loops); it is static under `prefers-reduced-motion: reduce`.
+- [ ] `.arcane-hero` (Arcane Library) and `.lofi-cityscape` (Lofi Night) render pixel-identical to their pre-existing geometry at 845x539 - unaffected by the `.snow-scene` addition.
+- [ ] Every one of the other 15 existing theme blocks (including Tokyo Rain and Arcane Library from section 8) is byte-for-byte unchanged.
+- [ ] Swatch-grid picker renders 16 themes, Snow Day last, in the section 9.6 order.
+- [ ] `tests/spa/harness.js`'s theme-grid assertion expects 16 radios in the section 9.6 order.
+- [ ] `tests/spa/theme-audit.js`'s `THEME_SLUGS` includes `snow-day` last; `CONTRAST_FLOOR_OVERRIDES` is unchanged (still only `tokyo-rain`/`arcane-library`).
+- [ ] `tests/spa/Run-ThemeAudit.ps1`'s `$Script:ThemeSlugs` includes `snow-day` last; the audit reports 16/16 themes passing and writes `tests/theme-screenshots/theme-snow-day.png`.
+- [ ] `CHANGELOG.md`'s Round 31 entry carries this section's paragraph alongside section 8's default-flip summary.
+- [ ] `VERSION` and `addon-server.ps1`'s `$Script:Version` both read `1.12.0`.
+- [ ] The app icon, the host, the server, the CLI, and the CurseForge/tray code are untouched by this change set.
+- [ ] The app's default theme is still Tokyo Rain (section 8) - Snow Day does not change it.

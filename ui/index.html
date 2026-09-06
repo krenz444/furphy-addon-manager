@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="arcane-library">
+<html lang="en" data-theme="tokyo-rain">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -121,6 +121,92 @@
            (principle 2). Never remove/rename this id. -->
       <div id="flavour-switcher-anchor" hidden></div>
     </nav>
+
+    <!-- Snow Day only (round 31 signature-touch redo, Pixel Artist A):
+         same "dedicated flex slot owns the freed sidebar space" technique
+         as Arcane Library's .arcane-hero further below (read that block's
+         own history first) - .nav goes back to its own content height for
+         this theme only, and .snow-scene (a new flex sibling sitting
+         between </nav> and .lofi-cityscape/.arcane-hero/.sidebar-bottom)
+         takes over the flex:1 role, so it always gets whatever room a real
+         multi-flavour .nav actually leaves free. Replaces the round-31-
+         original touch (a too-subtle 88px band of five faint dots along
+         .nav's own bottom edge, THEMES-SPEC.md 9.5 pre-redo) after Eric's
+         real 2530x1591 capture showed "a blank light column with a faint
+         grey smudge" - nothing read as snow. The new scene fills the WHOLE
+         freed slot: a soft overcast-sky backdrop (.snow-scene-sky) so this
+         light theme's own near-white flakes have something to read
+         against, three parallax layers of falling snow spanning the
+         entire box (.snow-layer, CSS-only repeating radial-gradient tiles
+         with transform-only drift loops - see style.css), and a
+         bottom-anchored pixel-art horizon (.snow-scene-ground: snow-capped
+         pines, a rolling drift with its own soft shadow line, and a small
+         cocoa-scarfed snowman as the one warm focal point) sized off THIS
+         box's own real height via min(100%, cap), never the viewport.
+         position:relative; overflow:hidden on the slot keeps every layer
+         inside it, exactly like .arcane-hero; a @container query hides the
+         whole scene below its own recognizability floor instead of
+         clipping it. aria-hidden throughout: purely decorative, never
+         conveys state. -->
+    <div class="snow-scene">
+      <div class="snow-scene-sky" aria-hidden="true"></div>
+      <div class="snow-layer snow-layer-far" aria-hidden="true"></div>
+      <svg class="snow-scene-ground" viewBox="0 0 208 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+        <!-- far pines: small solid triangles, light and distant, one faint
+             snow highlight each - just enough depth behind the near row -->
+        <g fill="#93a7b4">
+          <path d="M56,86 L70,118 L42,118 Z"/>
+          <path d="M108,78 L124,116 L92,116 Z"/>
+          <path d="M158,88 L171,118 L145,118 Z"/>
+        </g>
+        <g fill="#ffffff" opacity="0.9">
+          <rect x="59" y="98" width="8" height="2.5"/>
+          <rect x="112" y="90" width="8" height="2.5"/>
+          <rect x="161" y="100" width="8" height="2.5"/>
+        </g>
+        <!-- near pines: big triangle silhouettes with snow sitting on the
+             branches as a few narrowing horizontal shelves, not a cap band
+             cutting across the whole tier - reads as fir, not a stack of
+             boxes. -->
+        <g fill="#3a4f60">
+          <path d="M27,58 L46,132 L4,132 Z"/>
+          <path d="M186,52 L207,132 L162,132 Z"/>
+        </g>
+        <g fill="#ffffff">
+          <rect x="8" y="120" width="30" height="3"/><rect x="12" y="104" width="20" height="3"/><rect x="16" y="90" width="12" height="3"/><rect x="20" y="76" width="6" height="3"/>
+          <rect x="166" y="120" width="30" height="3"/><rect x="170" y="104" width="22" height="3"/><rect x="175" y="90" width="13" height="3"/><rect x="180" y="76" width="6" height="3"/>
+        </g>
+        <!-- rolling drift: shadow crescents drawn first, white crest on top -->
+        <g fill="#aab8c0" opacity="0.55">
+          <ellipse cx="34" cy="149" rx="52" ry="24"/>
+          <ellipse cx="112" cy="153" rx="58" ry="25"/>
+          <ellipse cx="190" cy="149" rx="46" ry="24"/>
+        </g>
+        <g fill="#ffffff">
+          <ellipse cx="34" cy="145" rx="52" ry="22"/>
+          <ellipse cx="112" cy="149" rx="58" ry="23"/>
+          <ellipse cx="190" cy="145" rx="46" ry="22"/>
+          <rect x="0" y="148" width="208" height="10"/>
+        </g>
+        <!-- snowman: the one warm focal object -->
+        <g>
+          <rect x="126.5" y="127" width="14" height="2.4" fill="#764a26" transform="rotate(-18 126.5 128.2)"/>
+          <rect x="152" y="127" width="14" height="2.4" fill="#764a26" transform="rotate(18 152 128.2)"/>
+          <ellipse cx="146" cy="140" rx="19" ry="16" fill="#ffffff"/>
+          <ellipse cx="152" cy="146" rx="11" ry="8" fill="#e3eaed"/>
+          <ellipse cx="146" cy="115" rx="13" ry="12" fill="#ffffff"/>
+          <path d="M133,117 L159,117 L155,124 L137,124 Z" fill="#8f5a2e"/>
+          <rect x="150" y="122" width="6" height="13" rx="1.5" fill="#8f5a2e" transform="rotate(14 150 122)"/>
+          <circle cx="141" cy="112" r="1.7" fill="#1c2b33"/>
+          <circle cx="151" cy="112" r="1.7" fill="#1c2b33"/>
+          <path d="M144,116 L149,117.5 L144,119 Z" fill="#8f5a2e"/>
+          <circle cx="146" cy="128" r="1.6" fill="#1c2b33"/>
+          <circle cx="146" cy="136" r="1.6" fill="#1c2b33"/>
+        </g>
+      </svg>
+      <div class="snow-layer snow-layer-mid" aria-hidden="true"></div>
+      <div class="snow-layer snow-layer-near" aria-hidden="true"></div>
+    </div>
 
     <!-- Lofi Night only (E15b): pixel night cityscape along the bottom of
          the sidebar - same "faint decoration behind the real nav content"

@@ -2,7 +2,7 @@
    tests\spa\theme-audit.js
 
    THEMES-SPEC.md section 5 Set A #2 / section 6's "live-computed contrast"
-   acceptance item, automated: for each of the 15 themes (order copied
+   acceptance item, automated: for each of the 16 themes (order copied
    verbatim from ui\app.js's own THEMES array - the sole source of slug
    ordering per that spec), loads a same-origin COPY of ui\index.html in an
    iframe with ?mock=1&test=1&theme=<slug>, reads the live COMPUTED style
@@ -13,13 +13,16 @@
    *-tint custom properties), and asserts every pairing clears its floor
    (WCAG AA 4.5:1 for normal text, by default) via the same relative-
    luminance formula used by this repo's own earlier ad-hoc
-   shots\contrast2.js script. The default theme, arcane-library, has to
-   clear stricter floors instead (THEMES-SPEC.md section 7.4 / Eric's
+   shots\contrast2.js script. The default theme, tokyo-rain, has to
+   clear stricter floors instead (THEMES-SPEC.md section 8 / Eric's
+   round-31 "make the rainy theme default" request, carrying forward the
    round-19 "readability and clarity" brief): text >=7:1, text-muted
    >=5:1, chip-vs-tint >=5:1 - see CONTRAST_FLOOR_OVERRIDES below, keyed
    by pairing category so a future contrast regression on the default
    theme fails here even while still comfortably clearing the generic
-   4.5:1 every other theme is held to.
+   4.5:1 every other theme is held to. arcane-library, the previous
+   default, keeps the same stricter floors below even though it is no
+   longer current - it still passes them and nothing asked to relax it.
 
    Writes one aggregated JSON object into <pre id="results"> the same way
    tests\spa\harness.js does, for Run-ThemeAudit.ps1 to read back out of a
@@ -39,9 +42,9 @@
   // as install.ps1's own documented duplication of FlavourDefs elsewhere
   // in this codebase).
   const THEME_SLUGS = [
-    "arcane-library", "vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",
-    "art-deco-gold", "alpine-dawn", "matcha", "desert-night", "tokyo-rain",
-    "brushed-steel", "aurora-sky", "strawberry-cream"
+    "tokyo-rain", "arcane-library", "vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",
+    "art-deco-gold", "alpine-dawn", "matcha", "desert-night",
+    "brushed-steel", "aurora-sky", "strawberry-cream", "snow-day"
   ];
 
   const BASE_TOKENS = ["--bg-0", "--bg-1", "--bg-2", "--bg-3", "--border", "--text", "--text-muted", "--text-faint", "--accent", "--accent-text"];
@@ -60,6 +63,7 @@
   // hardcoding each one twice.
   const DEFAULT_FLOORS = { text: 4.5, muted: 4.5, faint: 4.5, accent: 4.5, chip: 4.5 };
   const CONTRAST_FLOOR_OVERRIDES = {
+    "tokyo-rain": { text: 7, muted: 5, chip: 5 },
     "arcane-library": { text: 7, muted: 5, chip: 5 }
   };
   function floorFor(slug, category) {

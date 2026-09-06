@@ -204,7 +204,8 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         $pending = git status --porcelain 2>$null
         if ($pending) {
             if (-not $Message) { $Message = "Deploy $stamp" }
-            git commit -q -m $Message -m 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' 2>$null | Out-Null
+            # Eric (2026-09-06): he is the repo's only contributor - no co-author trailer.
+            git commit -q -m $Message 2>$null | Out-Null
             $null = cmd /c 'git push --quiet 2>&1'
             if ($LASTEXITCODE -eq 0) { "repo: committed and pushed ($((git rev-parse --short HEAD)))" } else { "repo: committed, but push FAILED (exit $LASTEXITCODE) - run 'git push' in $RepoPath" }
         } else {

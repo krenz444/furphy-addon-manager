@@ -556,17 +556,17 @@
       check("Settings status line uses the tray's status-driven core sentence after enabling background updates", false, "#toggle-background-updates not found");
     }
 
-    checkTry("theme grid has 15 radios in THEMES-SPEC.md section 7.8 order, arcane-library checked on a fresh profile", function () {
-      const expectedOrder = ["arcane-library", "vaporwave", "lofi", "dark", "light", "terminal-green", "arctic-ice",
-        "art-deco-gold", "alpine-dawn", "matcha", "desert-night", "tokyo-rain", "brushed-steel",
-        "aurora-sky", "strawberry-cream"];
+    checkTry("theme grid has 16 radios in THEMES-SPEC.md section 8/9 order, tokyo-rain checked on a fresh profile", function () {
+      const expectedOrder = ["tokyo-rain", "arcane-library", "vaporwave", "lofi", "dark", "light", "terminal-green",
+        "arctic-ice", "art-deco-gold", "alpine-dawn", "matcha", "desert-night", "brushed-steel",
+        "aurora-sky", "strawberry-cream", "snow-day"];
       const tiles = qa(win, "#theme-grid [role='radio']");
-      if (tiles.length !== 15) return false;
+      if (tiles.length !== 16) return false;
       const slugs = tiles.map(function (t) { return t.dataset.themeValue; });
       const orderOk = slugs.every(function (s, i) { return s === expectedOrder[i]; });
       const checkedTile = q(win, "#theme-grid [aria-checked='true']");
       const checkedSlug = checkedTile && checkedTile.dataset.themeValue;
-      return orderOk && checkedSlug === "arcane-library" && win.document.documentElement.dataset.theme === "arcane-library";
+      return orderOk && checkedSlug === "tokyo-rain" && win.document.documentElement.dataset.theme === "tokyo-rain";
     });
 
     checkTry("no banned UX-SPEC.md section 11 term appears in rendered body text", function () {
@@ -629,9 +629,9 @@
   // ------------------------------------------------------------------
   // Phase 4: ?theme=matcha - applies AND persists (THEMES-SPEC.md set B).
   // Deliberately runs AFTER every phase above that depends on the DEFAULT
-  // (arcane-library, fresh-profile) theme, since this is same-origin and
+  // (tokyo-rain, fresh-profile) theme, since this is same-origin and
   // will write localStorage - a later reload without ?theme= would
-  // otherwise see matcha, not arcane-library.
+  // otherwise see matcha, not tokyo-rain.
   // ------------------------------------------------------------------
   async function phaseTheme() {
     beginPhase("theme deep link (?mock=1&test=1&theme=matcha)");

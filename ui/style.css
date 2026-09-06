@@ -680,14 +680,24 @@
 
   --success: #2fe6a7;
   --warning: #ffb347;
-  --danger: #ff6478;
+  /* Round 31 (THEMES-SPEC.md section 8): Tokyo Rain became the default
+     theme, which must clear the stricter default contrast floors (chip
+     text-on-tint >=5:1, up from the generic 4.5:1). chip-danger vs bg-2
+     measured 4.78:1 against the new floor - nudged from #ff6478 to
+     #ff6f78 (green channel only, +11, the smallest hex change found that
+     clears it) for 5.01:1; chip-danger vs bg-1 was already passing and
+     only improves (5.31 -> 5.56). See section 8 for the full before/after
+     table. --danger-tint/--danger-border/--danger-outline-border below
+     carry the same rgb so the tint stays keyed to the solid color, per
+     this file's existing pattern. */
+  --danger: #ff6f78;
   --info: #4dd9ff;
 
   --secondary: #4dd9ff;
 
   --success-tint: rgba(47, 230, 167, .14);
   --warning-tint: rgba(255, 179, 71, .14);
-  --danger-tint: rgba(255, 100, 120, .14);
+  --danger-tint: rgba(255, 111, 120, .14);
   --info-tint: rgba(77, 217, 255, .14);
   --accent-tint: rgba(255, 90, 168, .14);
   --muted-tint: rgba(154, 163, 186, .14);
@@ -697,8 +707,8 @@
 
   --danger-hover: #ff8494;
   --danger-text: #2a0a10;
-  --danger-border: rgba(255, 100, 120, .35);
-  --danger-outline-border: rgba(255, 100, 120, .4);
+  --danger-border: rgba(255, 111, 120, .35);
+  --danger-outline-border: rgba(255, 111, 120, .4);
 
   --focus-ring: var(--secondary);
 
@@ -887,6 +897,63 @@
 }
 
 .theme-swatch[data-theme-value="strawberry-cream"] { --sw-bg:#fffbfa; --sw-bg2:#faf1ee; --sw-accent:#c43d59; --sw-text:#3a2220; }
+
+/* --------------------------------------------------------------------------
+   16. Snow Day - snow-day
+   -------------------------------------------------------------------------- */
+:root[data-theme="snow-day"] {
+  color-scheme: light;
+  --bg-0: #eef1f2;
+  --bg-1: #ffffff;
+  --bg-2: #e6ebed;
+  --bg-3: #d7dfe2;
+  --border: #c9d3d8;
+  --border-soft: #dde6ea;
+  --border-hover: #aab8c0;
+
+  --text: #1c2b33;
+  --text-muted: #435862;
+  --text-faint: #4c626c;
+
+  --accent: #8f5a2e;
+  --accent-hover: #764a26;
+  --accent-active: #613c1f;
+  --accent-text: #fff8f0;
+
+  --success: #0f5f37;
+  --warning: #6b4c00;
+  --danger: #922f24;
+  --info: #1f5e86;
+
+  --secondary: #5b7b93;
+
+  --success-tint: rgba(15, 95, 55, .08);
+  --warning-tint: rgba(107, 76, 0, .08);
+  --danger-tint: rgba(146, 47, 36, .08);
+  --info-tint: rgba(31, 94, 134, .08);
+  --accent-tint: rgba(143, 90, 46, .12);
+  --muted-tint: rgba(67, 88, 98, .10);
+
+  --banner-danger-text: #922f24;
+  --form-error-text: #922f24;
+
+  --danger-hover: #7a2620;
+  --danger-text: #fff5f3;
+  --danger-border: rgba(146, 47, 36, .35);
+  --danger-outline-border: rgba(146, 47, 36, .4);
+
+  --focus-ring: var(--accent);
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+}
+
+:root[data-theme="snow-day"] .select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23435862' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+
+.theme-swatch[data-theme-value="snow-day"] { --sw-bg:#ffffff; --sw-bg2:#eef1f2; --sw-accent:#8f5a2e; --sw-text:#1c2b33; }
 
 * { box-sizing: border-box; }
 
@@ -2902,6 +2969,143 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   :root[data-theme="strawberry-cream"] .brand-icon {
     filter: drop-shadow(0 0 2px rgba(196, 61, 89, .56));
   }
+}
+
+/* ==========================================================================
+   Snow Day signature touch, round-31 REDO (Pixel Artist A). Supersedes the
+   original round-31 touch below this note's own history: a fixed 88px band
+   of five faint near-white radial-gradient dots along .nav's own bottom
+   edge. Eric's real 2530x1591 capture showed "a blank light column with a
+   faint grey smudge" - nothing read as snow, because the dots sat directly
+   on this theme's own near-white sidebar (--bg-1 #ffffff) with no backdrop
+   to read against, and because a fixed 88px strip is a sliver against the
+   500-1000px of real flex:1 space a tall multi-flavour window like Eric's
+   actually leaves free.
+
+   Same "dedicated flex slot owns the freed sidebar space" technique as
+   Arcane Library's .arcane-hero below (read that block's own history first)
+   - .nav goes back to its own content height for this theme only, and
+   .snow-scene (a new flex sibling between </nav> and .arcane-hero/
+   .sidebar-bottom in index.html) takes over the flex:1 role, so it always
+   gets whatever room a real multi-flavour .nav actually leaves free. The
+   fix is two-part: (1) a soft, never-quite-white overcast-sky wash
+   (.snow-scene-sky) behind everything so near-white flakes always have
+   contrast, at every height in the slot, and (2) letting the falling-snow
+   layers cover the WHOLE freed space instead of a fixed 88px strip, so
+   "it's snowing" reads at a glance rather than being squeezed into a
+   sliver.
+   ========================================================================== */
+:root[data-theme="snow-day"] .nav { flex: 0 0 auto; }
+
+.snow-scene { display: none; }
+:root[data-theme="snow-day"] .snow-scene {
+  display: block;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: var(--radius);
+  /* Own size container, exactly like .arcane-hero below, so every child
+     below reacts to THIS box's real flex-computed height, never the
+     viewport. */
+  container-type: size;
+  container-name: snow-scene;
+}
+/* Soft overcast-morning backdrop panel filling the slot exactly (absolute
+   inset:0 against the positioned .snow-scene above) - without it the
+   near-white falling snow below has nothing to read against on this
+   theme's own near-white sidebar (--bg-1 #fff), which is exactly what made
+   the original touch invisible on a real capture. Colors sit in the same
+   cool grey-blue family as this theme's own --bg-0/--bg-2/--bg-3
+   (#eef1f2/#e6ebed/#d7dfe2, THEMES-SPEC.md 9.3) but are hardcoded here
+   rather than via var(), per the existing signature-touch convention
+   (.arcane-alcove etc. do the same) since this is decorative art, not a
+   themable surface. */
+:root[data-theme="snow-day"] .snow-scene-sky {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, #e7edef 0%, #e1e8ea 55%, #d9e2e6 100%);
+}
+:root[data-theme="snow-day"] .snow-scene-ground {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: min(100%, 210px);
+  display: block;
+}
+/* Three parallax layers of falling snow, spanning the WHOLE slot (not just
+   a strip) - .snow-layer-far sits behind the pixel-art horizon (painted
+   between it and -mid/-near in index.html), each layer its own repeating
+   radial-gradient tile tuned for depth (smaller/dimmer/slower toward the
+   back, bigger/brighter/faster toward the front). Each layer is inset well
+   past the slot's own edges and moved by exactly one tile's width/height
+   per loop, so the repeating pattern lines up perfectly at the seam and the
+   loop is invisible; overflow:hidden on .snow-scene (above) clips the
+   oversized layer down to the real box, so nothing ever bleeds into .nav or
+   .sidebar-bottom. Flake radii lean on this box's own container (declared
+   above) via clamp(floor, ...cqh..., ceiling) so a much taller real window
+   (Eric's) gets visibly bigger flakes than the 845x539 default without ever
+   shrinking past the floor on a short one. */
+:root[data-theme="snow-day"] .snow-layer {
+  position: absolute;
+  inset: -140px;
+  background-repeat: repeat;
+}
+/* A plain soft-edged white dot per flake - two stops (solid, then
+   transparent) is enough contrast on its own now that .snow-scene-sky
+   above never goes near-white at any height (a light-but-never-white
+   overcast wash the whole way down), which is what actually sank the
+   original touch: on the sidebar's own stark-white background, near-white
+   flakes had nothing to read against at all. */
+:root[data-theme="snow-day"] .snow-layer-far {
+  background-image:
+    radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 20% 30%, rgba(255,255,255,.8) 0%, transparent 100%),
+    radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 70% 65%, rgba(255,255,255,.75) 0%, transparent 100%);
+  background-size: 64px 108px;
+  opacity: .85;
+  animation: snow-day-fall-far 24s linear infinite;
+}
+:root[data-theme="snow-day"] .snow-layer-mid {
+  background-image:
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 35% 20%, rgba(255,255,255,.9) 0%, transparent 100%),
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 80% 60%, rgba(255,255,255,.85) 0%, transparent 100%),
+    radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 10% 75%, rgba(255,255,255,.9) 0%, transparent 100%);
+  background-size: 58px 96px;
+  opacity: .92;
+  animation: snow-day-fall-mid 16s linear infinite;
+}
+:root[data-theme="snow-day"] .snow-layer-near {
+  background-image:
+    radial-gradient(circle clamp(3.5px, 1.2cqh, 6.5px) at 25% 25%, rgba(255,255,255,1) 0%, transparent 100%),
+    radial-gradient(circle clamp(3.5px, 1.2cqh, 6.5px) at 68% 55%, rgba(255,255,255,.95) 0%, transparent 100%);
+  background-size: 52px 88px;
+  opacity: 1;
+  animation: snow-day-fall-near 11s linear infinite;
+}
+@keyframes snow-day-fall-far  { from { transform: translate(0,0); } to { transform: translate(-64px, 108px); } }
+@keyframes snow-day-fall-mid  { from { transform: translate(0,0); } to { transform: translate(58px, 96px); } }
+@keyframes snow-day-fall-near { from { transform: translate(0,0); } to { transform: translate(-52px, 88px); } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="snow-day"] .snow-layer { animation: none; }
+}
+/* Below its own recognizability floor, hide the scene entirely rather than
+   showing a squeezed or clipped fragment - same 109px threshold and
+   "vanish, don't clip" contract as .arcane-hero-cat below, queried against
+   this box's own real size (container-name: snow-scene, set above). */
+@container snow-scene (max-height: 109px) {
+  :root[data-theme="snow-day"] .snow-scene-sky,
+  :root[data-theme="snow-day"] .snow-scene-ground,
+  :root[data-theme="snow-day"] .snow-layer {
+    display: none;
+  }
+}
+/* Hard backstop for genuinely short windows, same second-line-of-defence
+   reasoning as .arcane-hero's own @media rule below. */
+@media (max-height: 460px) {
+  :root[data-theme="snow-day"] .snow-scene { display: none; }
 }
 
 /* ==========================================================================
