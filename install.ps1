@@ -90,6 +90,49 @@ function Test-LooksLikeScratchRun {
     return $false
 }
 
+# Round 32 (DISTRIBUTION-SPEC.md section 5.1): the Start-with-Windows value
+# name and the tray stop-event name are scoped per install, mirroring the
+# server's Get-StartupValueName / Get-TrayStopEventName and the host's
+# _startupValueName / TrayProgram.ResolveStopEventName exactly:
+#   production port 47831 -> 'FurphyAddonManager' / 'FurphyAddonManager.TrayStop'
+#   any other port        -> 'FurphyAddonManager.Test' / 'FurphyAddonManager.TrayStop.<port>'
+# A scratch/test root (Test-LooksLikeScratchRun) that still carries the
+# default production port owns NEITHER name - the only registration and
+# the only tray under the production names belong to the real install -
+# so both functions return $null for it and the caller skips the step.
+function Get-InstallPort {
+    param([string]$AppDest)
+    $port = 47831
+    if (-not $AppDest) { return $port }
+    $settingsFile = Join-Path -Path $AppDest -ChildPath 'settings.json'
+    if (Test-Path -LiteralPath $settingsFile) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($settingsFile)
+            if ($raw -match '"port"\s*:\s*(\d{2,5})') {
+                $candidate = [int]$Matches[1]
+                if ($candidate -ge 1024 -and $candidate -le 65535) { $port = $candidate }
+            }
+        } catch { }
+    }
+    return $port
+}
+
+function Get-InstallStartupValueName {
+    param([string]$AppDest)
+    $port = Get-InstallPort -AppDest $AppDest
+    if ($port -ne 47831) { return 'FurphyAddonManager.Test' }
+    if (Test-LooksLikeScratchRun -Path $AppDest) { return $null }
+    return 'FurphyAddonManager'
+}
+
+function Get-InstallTrayStopEventName {
+    param([string]$AppDest)
+    $port = Get-InstallPort -AppDest $AppDest
+    if ($port -ne 47831) { return ('FurphyAddonManager.TrayStop.' + $port) }
+    if (Test-LooksLikeScratchRun -Path $AppDest) { return $null }
+    return 'FurphyAddonManager.TrayStop'
+}
+
 # =====================================================================
 # FLAVORS-SPEC S2.1: the same fixed-order table addon-sync.ps1/
 # addon-server.ps1 carry as $Script:FlavourDefs, duplicated here per the
@@ -205,6 +248,14 @@ function Find-WowRoot {
     return $null
 }
 
+# Dot-source guard (round 32, same pattern as addon-sync.ps1/addon-server.ps1):
+# when this file is dot-sourced by a unit test (". .\install.ps1") only the
+# functions above are defined and nothing below runs - no WoW detection, no
+# copying, no registry, no uninstall. $MyInvocation.InvocationName is the
+# literal "." when dot-sourced; the $MyInvocation.Line check is a fallback.
+$script:FurphyDotSourced = ($MyInvocation.InvocationName -eq '.') -or ($MyInvocation.Line -match '^\s*\.\s')
+if ($script:FurphyDotSourced) { return }
+
 $wowRoot = Find-WowRoot -Override $WowPath
 if (-not $wowRoot) {
     Write-Host ''
@@ -286,28 +337,44 @@ if ($Uninstall) {
     # uninstall can't relaunch the tray), then signal the running instance to
     # exit, then wait for it before any Remove-Item touches host\.
     $trayExePath = Join-Path -Path $appDest -ChildPath 'host\bin\FurphyHost.exe'
-    try {
-        $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        if (Test-Path -LiteralPath $runKeyPath) {
-            $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
-            if ($null -ne $existing) {
-                Remove-ItemProperty -LiteralPath $runKeyPath -Name 'FurphyAddonManager' -ErrorAction SilentlyContinue
-                Write-Info 'Removed "Start with Windows" registration.'
+    # Round 32 (DISTRIBUTION-SPEC.md section 0, fixes 1 and 3): both the Run
+    # value and the tray stop event are SCOPED to this install - the value
+    # name and event name derive from this install's own port, and a
+    # scratch/test root on the production port touches neither (there is
+    # nothing of its own to remove there). Before this fix an -Uninstall run
+    # against a scratch fixture removed the REAL user's "Start with Windows"
+    # entry and stopped the REAL user's tray (2026-09-06 14:45, incident
+    # during the round-32 research pass).
+    $runValueName = Get-InstallStartupValueName -AppDest $appDest
+    if ($null -eq $runValueName) {
+        Write-Info 'Scratch/test install on the production port - the real Start-with-Windows entry is left alone.'
+    } else {
+        try {
+            $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+            if (Test-Path -LiteralPath $runKeyPath) {
+                $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+                if ($null -ne $existing) {
+                    Remove-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+                    Write-Info "Removed ""Start with Windows"" registration ($runValueName)."
+                }
             }
+        } catch {
+            Write-Warn2 "Could not remove the Start-with-Windows registry value: $($_.Exception.Message)"
         }
-    } catch {
-        Write-Warn2 "Could not remove the Start-with-Windows registry value: $($_.Exception.Message)"
     }
 
+    $trayStopEventName = Get-InstallTrayStopEventName -AppDest $appDest
     $trayStopEvent = $null
-    try {
-        $trayStopEvent = [System.Threading.EventWaitHandle]::OpenExisting('FurphyAddonManager.TrayStop')
-        $trayStopEvent.Set() | Out-Null
-    } catch {
-        # No live tray holds this event - nothing to stop.
-        $trayStopEvent = $null
-    } finally {
-        if ($null -ne $trayStopEvent) { try { $trayStopEvent.Close() } catch { } }
+    if ($null -ne $trayStopEventName) {
+        try {
+            $trayStopEvent = [System.Threading.EventWaitHandle]::OpenExisting($trayStopEventName)
+            $trayStopEvent.Set() | Out-Null
+        } catch {
+            # No live tray holds this event - nothing to stop.
+            $trayStopEvent = $null
+        } finally {
+            if ($null -ne $trayStopEvent) { try { $trayStopEvent.Close() } catch { } }
+        }
     }
 
     if (Test-Path -LiteralPath $trayExePath -PathType Leaf) {
@@ -491,7 +558,10 @@ if ($multiFlavour) {
 }
 
 New-Item -ItemType Directory -Force -Path $appDest | Out-Null
-$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico')
+# Round 32 (DISTRIBUTION-SPEC.md fix 2): install.ps1 ships INTO the install
+# so the installed copy can uninstall itself (tray menu / Settings /
+# Installed apps all run "<appDest>\install.ps1 -Uninstall").
+$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
 foreach ($f in $codeFiles) {
     $s = Join-Path -Path $SourceRoot -ChildPath $f
     if (Test-Path -LiteralPath $s) {

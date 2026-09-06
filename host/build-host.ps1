@@ -56,28 +56,43 @@ if (-not (Test-Path -LiteralPath $binDir)) {
 # "type already exists" style error on recompilation of the same
 # TypeDefinition text, so always spin up a fresh child powershell.exe to
 # do the actual compile.
+# Round 32 (Eric: "the furphy addon manager icon should be the same as the
+# one in the app"): the exe used to carry the generic .NET icon because the
+# icon was only copied NEXT to it (MainForm loads icon.ico at runtime for
+# the window, but Explorer, Task Manager, pinned taskbar buttons, the Apps
+# list and any shortcut aimed at the exe show the exe's own resource).
+# Add-Type's simple parameter set has no icon option, so the compile goes
+# through CompilerParameters with csc's /win32icon. Note -IgnoreWarnings
+# cannot be combined with -CompilerParameters; the "generated type is not
+# public" warning that results is harmless.
 $compileScript = @'
-param($SrcPath, $OutPath, $CoreDll, $WinformsDll)
+param($SrcPath, $OutPath, $CoreDll, $WinformsDll, $IconPath)
 $src = Get-Content -LiteralPath $SrcPath -Raw
-Add-Type -TypeDefinition $src `
-    -ReferencedAssemblies @(
-        'System.dll',
-        'System.Drawing.dll',
-        'System.Windows.Forms.dll',
-        $CoreDll,
-        $WinformsDll
-    ) `
-    -OutputAssembly $OutPath `
-    -OutputType WindowsApplication `
-    -IgnoreWarnings
+$cp = New-Object System.CodeDom.Compiler.CompilerParameters
+foreach ($r in @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', $CoreDll, $WinformsDll)) {
+    [void]$cp.ReferencedAssemblies.Add($r)
+}
+$cp.OutputAssembly = $OutPath
+$cp.GenerateExecutable = $true
+$cp.GenerateInMemory = $false
+$cp.TreatWarningsAsErrors = $false
+$opts = '/target:winexe'
+if ($IconPath -and (Test-Path -LiteralPath $IconPath)) { $opts += ' /win32icon:"' + $IconPath + '"' }
+$cp.CompilerOptions = $opts
+Add-Type -TypeDefinition $src -CompilerParameters $cp
 '@
 $compileScriptPath = Join-Path -Path $env:TEMP -ChildPath ('furphy-build-host-{0}.ps1' -f ([Guid]::NewGuid().ToString('N')))
 Set-Content -LiteralPath $compileScriptPath -Value $compileScript -Encoding ASCII
 
 try {
+    # Start-Process joins -ArgumentList with spaces and does not quote, so
+    # every path is wrapped in quotes here (the build root has no spaces
+    # today, but an installed copy under "Program Files (x86)" does).
+    $q = { param($s) '"' + $s + '"' }
     $psArgs = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $compileScriptPath,
-        '-SrcPath', $srcPath, '-OutPath', $outPath, '-CoreDll', $coreDll, '-WinformsDll', $winformsDll
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (& $q $compileScriptPath),
+        '-SrcPath', (& $q $srcPath), '-OutPath', (& $q $outPath), '-CoreDll', (& $q $coreDll), '-WinformsDll', (& $q $winformsDll),
+        '-IconPath', (& $q $iconSrc)
     )
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs -Wait -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $env:TEMP 'furphy-build-host.out.log') `

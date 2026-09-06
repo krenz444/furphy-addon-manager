@@ -94,7 +94,8 @@ if (Test-Path -LiteralPath $Dest) {
 
 # 3. Copy code files (mirror ui\, never state files).
 New-Item -ItemType Directory -Force -Path $Dest, (Join-Path $Dest 'ui'), (Join-Path $Dest 'jobs') | Out-Null
-$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
+# install.ps1 ships into the live install too (round 32) so the installed copy can uninstall itself.
+$codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
 foreach ($f in $codeFiles) {
     $s = Join-Path $Source $f
     if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $Dest $f) -Force; "copied $f" }

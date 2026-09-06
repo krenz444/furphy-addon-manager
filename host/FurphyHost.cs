@@ -862,6 +862,40 @@ namespace Furphy
         private readonly bool _dpiAware;
         private int _effectiveDpi;
 
+        // Round 32 (SETTINGS-SPEC.md section 5, item 1): the window's
+        // MinimumSize needs to guarantee window.innerWidth (CSS px) stays at
+        // or above style.css's #app min-width:1000px floor on ANY Windows
+        // display-scaling factor, not just 100%. WinForms's MinimumSize is a
+        // plain physical-pixel property that is never rescaled for us on a
+        // per-monitor-v2-aware DPI change (see the WM_DPICHANGED comment
+        // below - no EnableWindowsFormsHighDpiAutoResizing, no handling of
+        // MinimumSize specifically), so this value is defined as a 96-DPI
+        // (100% scaling) BASELINE and MinimumSizeForDpi() converts it to
+        // physical pixels for whatever DPI is actually in effect. At 96 DPI,
+        // physical px == CSS px, so 1040x660 here is the same
+        // real-headroom-over-1000px value the constructor's own Round 32
+        // comment always intended - MinimumSizeForDpi() is what makes that
+        // value correct at 125%, 150%, etc. too.
+        private static readonly Size MinimumSizeBaselineAt96Dpi = new Size(1040, 660);
+
+        // Converts MinimumSizeBaselineAt96Dpi into physical pixels for the
+        // given DPI. Windows itself scales a per-monitor-v2-aware window's
+        // non-client chrome (title bar, borders) proportionally to DPI, so
+        // scaling this whole physical baseline by dpi/96 keeps the
+        // resulting CSS-pixel client area - and therefore
+        // window.innerWidth/innerHeight - approximately constant across
+        // scale factors, instead of shrinking as DPI rises. Called once
+        // from the constructor once DeviceDpi is known, and again from
+        // WM_DPICHANGED if the window is dragged to a monitor with a
+        // different DPI.
+        private static Size MinimumSizeForDpi(int dpi)
+        {
+            double scale = dpi / 96.0;
+            int w = (int)Math.Ceiling(MinimumSizeBaselineAt96Dpi.Width * scale);
+            int h = (int)Math.Ceiling(MinimumSizeBaselineAt96Dpi.Height * scale);
+            return new Size(w, h);
+        }
+
         // Round 15 (E20 - embedded CurseForge pane): the left nav strip /
         // WinForms tab layout and the WinForms CurseForge toolbar are gone.
         // _contentPanel fills the whole form; _furphyWebView (the SPA,
@@ -1005,7 +1039,22 @@ namespace Furphy
 
             Text = AppConstants.WindowTitleFor(_port);
             StartPosition = FormStartPosition.Manual;
-            MinimumSize = new Size(900, 600);
+            // Round 32 (SETTINGS-SPEC.md section 5, item 1): 900x600 let the
+            // native window shrink small enough that every Settings toggle
+            // switch got pushed off the visible right edge, with no scroll
+            // escape (html/body carry overflow-x:hidden). 1040x660 gives real
+            // headroom over the CSS app's documented 1000px floor - but that
+            // is only true at 96 DPI (100% Windows scaling). MinimumSize is
+            // physical pixels and WinForms never rescales an explicitly
+            // assigned MinimumSize for per-monitor-v2 DPI (see the
+            // WM_DPICHANGED comment below), so 1040x660 is defined as a
+            // 96-DPI BASELINE (MinimumSizeBaselineAt96Dpi) and converted to
+            // real physical pixels for the DPI actually in effect by
+            // MinimumSizeForDpi() - assigned here as a placeholder (DeviceDpi
+            // is not known yet) and reassigned for real a few lines down
+            // once _effectiveDpi is read, and again from WM_DPICHANGED if
+            // the window moves to a monitor with a different DPI.
+            MinimumSize = MinimumSizeBaselineAt96Dpi;
             BackColor = ChromeBg;
 
             string iconPath = HostFiles.FindUpward(exeDir, "icon.ico", 1);
@@ -1016,10 +1065,40 @@ namespace Furphy
 
             ApplyWindowBounds();
 
-            // DeviceDpi reflects the DPI of the monitor the form will be
-            // created on now that per-monitor-v2 awareness is declared
-            // (DpiAwareness.TryEnable, called before this form existed).
-            _effectiveDpi = DeviceDpi;
+            // Round 32 fix, empirically found while verifying the
+            // MinimumSize fix below: DeviceDpi read HERE (before the native
+            // handle exists) does NOT reliably reflect the DPI of the
+            // monitor ApplyWindowBounds' Location just placed this window
+            // on - measured directly on this dev machine's own 125%-scaled
+            // display, it came back 96 (100%) even though the window then
+            // actually opened at 120 (125%), the same gap that produced the
+            // MinimumSize bug in the first place. GetDpiForLocation queries
+            // the target monitor's real DPI via
+            // MonitorFromPoint+GetDpiForMonitor instead, which needs no
+            // window handle at all, so it is accurate right here before
+            // BuildUi() - unlike DeviceDpi, and unlike waiting for
+            // WM_DPICHANGED below, which only fires when an ALREADY-shown
+            // window moves to a different-DPI monitor, never on first
+            // creation directly on a non-default-DPI one (confirmed: no
+            // WM_DPICHANGED line appears in host.log for a window created
+            // straight onto a 125% monitor - relying on it alone would have
+            // silently left MinimumSize at its wrong 96-DPI value forever
+            // on exactly the machines this fix targets).
+            _effectiveDpi = GetDpiForLocation(Location);
+
+            // Round 32 fix (SETTINGS-SPEC.md section 5, item 1 / section 6's
+            // LAYOUT checklist item 1): re-derive MinimumSize now that the
+            // real DPI is known. Without this, a >100%-scaled display (e.g.
+            // this dev machine's own 125%/DeviceDpi=120 default) clamps the
+            // window to 1040x660 PHYSICAL pixels, which is only ~818x491 CSS
+            // pixels once WebView2 divides by the DPI scale for
+            // window.innerWidth/innerHeight - 182px short of style.css's
+            // #app min-width:1000px floor, pushing every Essentials toggle
+            // switch off the right edge with no scroll escape (html/body
+            // carry overflow-x:hidden). Confirmed via
+            // getBoundingClientRect()/window.innerWidth over CDP, not a
+            // screenshot glance, per the spec's own verification method.
+            MinimumSize = MinimumSizeForDpi(_effectiveDpi);
 
             BuildUi();
 
@@ -1082,6 +1161,52 @@ namespace Furphy
             public int bottom;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int x;
+            public int y;
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+        private const int MDT_EFFECTIVE_DPI = 0;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+        [DllImport("shcore.dll")]
+        private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+        // Round 32 (SETTINGS-SPEC.md section 5, item 1): looks up the real
+        // DPI of the monitor that contains -location- directly via
+        // MonitorFromPoint + GetDpiForMonitor, WITHOUT needing this form's
+        // own window handle to exist yet - unlike Control.DeviceDpi, which
+        // was found (empirically, on this dev machine's own 125%-scaled
+        // display) to still report 96 when read before HandleCreated, even
+        // though the window went on to actually open at 120. Falls back to
+        // 96 (100% scaling, the same assumption the rest of this file made
+        // before this fix) if either P/Invoke call fails - e.g. shcore.dll
+        // is missing GetDpiForMonitor on an older Windows release than the
+        // per-monitor-v2 APIs DpiAwareness already assumes are present.
+        private static int GetDpiForLocation(Point location)
+        {
+            try
+            {
+                POINT pt = new POINT();
+                pt.x = location.X;
+                pt.y = location.Y;
+                IntPtr hMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                uint dpiX, dpiY;
+                int hr = GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, out dpiX, out dpiY);
+                if (hr == 0 && dpiX > 0)
+                {
+                    return (int)dpiX;
+                }
+            }
+            catch { }
+            return 96;
+        }
+
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == WM_DPICHANGED)
@@ -1091,6 +1216,13 @@ namespace Furphy
                     int newDpi = m.WParam.ToInt32() & 0xFFFF;
                     RECT suggested = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
                     _effectiveDpi = newDpi;
+                    // Round 32 fix (SETTINGS-SPEC.md section 5, item 1): the
+                    // 1000px-CSS-floor MinimumSize is only correct for the
+                    // DPI it was computed for - re-derive it for the new
+                    // monitor's DPI too, not just the window's Bounds below,
+                    // so dragging to a different-DPI monitor can't leave the
+                    // window clamped to a floor sized for the old DPI.
+                    MinimumSize = MinimumSizeForDpi(_effectiveDpi);
                     LogHost("WM_DPICHANGED: dpi=" + newDpi.ToString(CultureInfo.InvariantCulture) +
                         " suggested=" + suggested.left.ToString(CultureInfo.InvariantCulture) +
                         "," + suggested.top.ToString(CultureInfo.InvariantCulture) +
@@ -5482,8 +5614,17 @@ boot();
                     return "Everything's up to date - checked " + doneStamp + " - next " + FormatNextCheck(nextRunAtUtc);
 
                 case "done_updated":
-                    return "Updated " + updated.ToString(CultureInfo.InvariantCulture) + " at " + doneStamp +
-                        ": " + JoinNamesTruncated(updatedNames, 4);
+                    {
+                        // Round 32 (SETTINGS-SPEC.md section 5, item 2): was
+                        // "Updated 1 at HH:MM: ..." with no noun at all for
+                        // any count. Pluralize with the same "addon"/"addons"
+                        // idiom the done_failed branch below already uses, so
+                        // this stays byte-identical with ui/app.js's
+                        // computeCoreText() done_updated branch.
+                        string plural = updated == 1 ? "" : "s";
+                        return "Updated " + updated.ToString(CultureInfo.InvariantCulture) + " addon" + plural +
+                            " at " + doneStamp + ": " + JoinNamesTruncated(updatedNames, 4);
+                    }
 
                 case "done_failed":
                     {

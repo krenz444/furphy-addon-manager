@@ -2000,8 +2000,86 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .diag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .diag-dot.is-ok { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
 .diag-dot.is-fail { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-tint); }
-.diag-name { font-weight: 600; font-size: 12.5px; color: var(--text); min-width: 170px; flex: none; }
+.diag-name { display: inline-flex; align-items: center; font-weight: 600; font-size: 12.5px; color: var(--text); min-width: 170px; flex: none; }
 .diag-detail { font-size: 12px; color: var(--text-faint); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* ==========================================================================
+   Round 32 (SETTINGS-SPEC.md section 2/3) - Settings UI/UX audit follow-ups:
+   the tooltip component, the merged Backup & troubleshooting sub-dividers,
+   the plain unboxed About footer line, and a small wrapper for an info-tip
+   icon that sits next to a plain action button (Scan, Open logs folder,
+   Force reinstall all, Run, Copy report) rather than a row label.
+   ========================================================================== */
+
+/* One small, focusable info-icon button placed right after whatever text or
+   control it explains (a row label, group heading, Advanced <summary>, a
+   fallback paragraph, a diagnostics row's name span, or - via
+   .btn-tip-group below - a plain action button). Spec-exact sizing/tokens. */
+.info-tip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin-left: 6px; padding: 0;
+  vertical-align: -3px; border: none; background: transparent;
+  border-radius: var(--radius-sm); color: var(--text-faint);
+  cursor: pointer; transition: color var(--fast);
+}
+.info-tip .icon { width: 14px; height: 14px; }
+.info-tip:hover, .info-tip:focus-visible { color: var(--text); }
+.info-tip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* Singleton tooltip bubble - Components.Tooltip creates/removes this node on
+   open/close, always with id="app-tooltip" (every trigger's own
+   aria-describedby points at that one constant id). z-index 95 sits above
+   .dropdown-menu's 90, since a tooltip can render on top of an open dropdown. */
+.tooltip-bubble {
+  position: fixed; max-width: 320px; width: max-content;
+  background: var(--bg-1); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius);
+  box-shadow: 0 8px 20px rgba(0,0,0,.35); padding: 8px 10px;
+  font-size: 12.5px; line-height: 1.4; z-index: 95;
+  opacity: 0; transform: translateY(4px);
+  transition: opacity var(--fast), transform var(--fast);
+}
+.tooltip-bubble.is-visible { opacity: 1; transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .tooltip-bubble { transition: none; }
+}
+
+/* A plain action button (no switch/value of its own) paired with an
+   .info-tip sibling - keeps the icon glued to its button regardless of
+   .btn-row's flex-wrap, and scopes hover-to-open to just that one button
+   instead of the whole row (Diagnostics' Run/Copy report share one
+   .btn-row but must show two different tooltips). */
+.btn-tip-group { display: inline-flex; align-items: center; }
+
+/* Round 32 (SETTINGS-SPEC.md section 2, Group 8): Save/load, Troubleshooting
+   and Diagnostics now live in one shared .settings-group with two thin
+   dividers between them, instead of three separate bordered boxes - same
+   border-top/spacing language as .settings-row's own divider elsewhere on
+   this screen. */
+.settings-subgroup + .settings-subgroup {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+/* Round 32 (SETTINGS-SPEC.md section 2, footer): the demoted About line -
+   no border, no h3, just small muted text below the Advanced disclosure.
+   Three items separated by "." spans, spaced with flex gap rather than
+   literal surrounding spaces in the text nodes. */
+.settings-footer {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 4px 2px 0; padding: 0;
+  font-size: 12px; color: var(--text-faint);
+}
+/* gap (not a literal space in the markup) separates the label word from its
+   value/icon - a text node immediately followed by a nested <span> becomes
+   two separate anonymous flex items once the parent is display:inline-flex,
+   and a flex container collapses whitespace at an anonymous item's own
+   boundary the same way it would at the edge of a block box, silently
+   eating a plain trailing space in the source ("Version" + "1.11.1" would
+   otherwise render as "Version1.11.1"). */
+.settings-footer-item { display: inline-flex; align-items: center; gap: 4px; }
+.settings-footer-sep { color: var(--text-faint); }
 
 /* ==========================================================================
    Drawer

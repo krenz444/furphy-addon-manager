@@ -656,12 +656,279 @@
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
+  // ------------------------------------------------------------------
+  // Phase 6 (SETTINGS-SPEC.md section 6 - Round 32 settings UI/UX audit):
+  // the tooltip component, the reworded CurseForge install-links row, the
+  // merged/demoted Advanced groups, and the done_updated pluralization fix.
+  // Finds a row's tooltip trigger by matching the START of a stable label/
+  // heading text rather than by DOM position, since exact markup nesting is
+  // an implementation detail this phase shouldn't have to track - only
+  // "does the row whose visible text starts with X carry a wired .info-tip"
+  // matters here.
+  // ------------------------------------------------------------------
+  function labelInfoTip(win, selector, textPrefix) {
+    const el = qa(win, selector).filter(function (e) { return text(e).indexOf(textPrefix) === 0; })[0];
+    return el ? el.querySelector(".info-tip") : undefined; // undefined: no such row found at all
+  }
+
+  async function phaseSettingsAudit() {
+    beginPhase("Settings UI/UX audit (SETTINGS-SPEC.md section 6)");
+    const win = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(win, 8000);
+
+    // Advanced starts collapsed - a closed <details> gives its content no
+    // box at all (same as display:none), so every row inside it needs this
+    // open before any of the checks below can find/interact with it.
+    const summary = q(win, "#settings-advanced summary");
+    if (summary) await clickAndSettle(win, summary, 150);
+    checkTry("Advanced opens on a real click (info-tip inside <summary> does not eat the click)", function () {
+      return q(win, "#settings-advanced").open === true;
+    });
+
+    // ---- Positive: every row this spec lists as having a tooltip carries
+    // a wired .info-tip with a non-empty aria-label. Static rows only here
+    // (present in the DOM regardless of Scan/Run ever being clicked) -
+    // Untracked-folder and Diagnostics per-row tooltips are dynamic and
+    // checked separately below, once their action has actually run.
+    const STATIC_TOOLTIP_ARIA_LABELS = [
+      "More about Include beta versions",
+      "More about Update addons in the background",
+      "More about How often",
+      "More about Start with Windows",
+      "More about Spacing",
+      "More about Theme",
+      "More about Advanced",
+      "More about Open CurseForge install links in Furphy",
+      "More about Available in the Furphy desktop window",
+      "More about Show only search results on CurseForge",
+      "More about Also include experimental versions",
+      "More about World of Warcraft folder",
+      "More about AddOns folder",
+      "More about Show test realms (PTR/Beta)",
+      "More about Folders Furphy doesn't manage yet",
+      "More about Scan",
+      "More about Save / load your addon list",
+      "More about Open logs folder",
+      "More about Force reinstall all",
+      "More about Run",
+      "More about Copy report",
+      "More about WoW client build",
+      "More about Running for"
+    ];
+    STATIC_TOOLTIP_ARIA_LABELS.forEach(function (label) {
+      checkTry("info-tip present: " + label, function () {
+        const btn = q(win, '.info-tip[aria-label="' + label + '"]');
+        return !!btn && btn.dataset.tooltip && btn.dataset.tooltip.length > 0;
+      });
+    });
+    checkTry("exactly " + STATIC_TOOLTIP_ARIA_LABELS.length + " static settings tooltips present (no extras, none missing)", function () {
+      return qa(win, "#view-settings .info-tip[data-tooltip]").length === STATIC_TOOLTIP_ARIA_LABELS.length;
+    });
+
+    // ---- Negative: rows this spec explicitly marks "tooltip: none" carry
+    // NO .info-tip - both directions matter per the spec's own acceptance
+    // line, not just "every listed row has one".
+    checkTry("'Update addons before WoW starts' (locked, permanently-visible helper lines) has NO tooltip", function () {
+      return labelInfoTip(win, ".settings-row-label", "Update addons before WoW starts") === null;
+    });
+    checkTry("the ad-filter row's own main label has NO tooltip (only its fallback line does)", function () {
+      const row = q(win, "#browsing-adfilter-row .settings-row-label");
+      return !!row && !row.querySelector(".info-tip");
+    });
+    checkTry("the theme swatch grid itself has NO tooltip (only the 'Theme' label above it does)", function () {
+      return !q(win, "#theme-grid .info-tip");
+    });
+    checkTry("About's 'Version' item has NO tooltip", function () {
+      const items = qa(win, "#settings-about-footer .settings-footer-item");
+      const versionItem = items.filter(function (e) { return text(e).indexOf("Version") === 0; })[0];
+      return !!versionItem && !versionItem.querySelector(".info-tip");
+    });
+
+    // ---- No baked-in "- On"/"- Off" suffix anywhere in Settings (Eric's
+    // named complaint) - scans the real rendered text, not just the
+    // CurseForge row, since the whole point is no ROW on this screen
+    // encodes state twice.
+    checkTry('no visible "- On"/"- Off" (or "-On"/"-Off") suffix anywhere in #view-settings', function () {
+      return !/[-\u2014]\s*(On|Off)\b/.test(text(q(win, "#view-settings")));
+    });
+
+    // ---- Banned-term scan (UX-SPEC.md section 11 + SETTINGS-SPEC.md
+    // section 4's "curseforge://" addition), reading BOTH the rendered DOM
+    // text AND every .info-tip's data-tooltip content - tooltip copy is
+    // JS-generated and only shows on hover/focus, so the static-HTML-only
+    // sweep (tests\static\Test-BannedTerms.ps1) can't see it.
+    checkTry("banned-term scan (incl. curseforge://) finds zero hits across every Settings label/helper/tooltip", function () {
+      const view = q(win, "#view-settings");
+      const domText = text(view).toLowerCase();
+      const tipText = qa(win, "#view-settings .info-tip[data-tooltip]")
+        .map(function (b) { return b.dataset.tooltip || ""; }).join(" ").toLowerCase();
+      const combined = domText + " " + tipText;
+      const phrases = BANNED_PHRASES.concat(["curseforge://"]);
+      const hits = [];
+      phrases.forEach(function (p) { if (combined.indexOf(p) !== -1) hits.push(p); });
+      BANNED_WORDS.forEach(function (w) {
+        const re = new RegExp("\\b" + w + "\\b", "i");
+        if (re.test(combined)) hits.push(w);
+      });
+      if (hits.length) check("Settings banned-term hits (detail)", false, hits.join(", "));
+      return hits.length === 0;
+    });
+
+    // ---- Diagnostics: exactly the two new, non-duplicate sentences before
+    // Run, never the old pair that both spelled out the same 4-item list.
+    checkTry("Diagnostics intro sentence is the new single sentence, byte-exact", function () {
+      const intro = qa(win, "#settings-diagnostics > p.muted-text")[0];
+      return !!intro && text(intro) === "Quick check that your files and CurseForge connection are working.";
+    });
+    checkTry("Diagnostics pre-run placeholder is the new wording, byte-exact (not the old itemized sentence)", function () {
+      return text(q(win, "#diagnostics-list")) === "Nothing checked yet. Click Run to look.";
+    });
+
+    // ---- About footer: no bordered box, no heading - just plain text/spans
+    // below the Advanced disclosure.
+    checkTry("About footer has no enclosing .settings-group border", function () {
+      const footer = q(win, "#settings-about-footer");
+      return !!footer && !footer.closest(".settings-group");
+    });
+    checkTry("About footer has no <h3>", function () {
+      const footer = q(win, "#settings-about-footer");
+      return !!footer && !footer.querySelector("h3") && footer.tagName !== "H3";
+    });
+    checkTry("About footer values still render (Version/WoW client build/Running for all non-placeholder)", function () {
+      const footer = q(win, "#settings-about-footer");
+      return /\S/.test(text(q(win, "#about-version"))) && /\S/.test(text(q(win, "#about-client-build"))) && /\S/.test(text(q(win, "#about-uptime")));
+    });
+
+    // ---- Row count: Advanced collapses to 5 groups at 1 flavour/no PTR
+    // (CurseForge, Also include experimental versions, Game folders,
+    // Folders Furphy doesn't manage yet, Backup & troubleshooting).
+    checkTry("Advanced holds exactly 5 VISIBLE top-level .settings-group boxes on a single-flavour, no-PTR mock (6th, WoW versions, exists in the DOM but stays [hidden] here)", function () {
+      return qa(win, ".settings-advanced-body > .settings-group").filter(visible).length === 5;
+    });
+    checkTry("Backup & troubleshooting merges Save/load + Troubleshooting + Diagnostics into one box with 3 sub-groups", function () {
+      const box = q(win, "#settings-backup-troubleshooting");
+      return !!box && box.classList.contains("settings-group") && qa(win, "#settings-backup-troubleshooting > .settings-subgroup").length === 3;
+    });
+
+    // ---- CurseForge install-links row (Row 8, Eric's named complaint): the
+    // switch and the label sentence never both encode on/off at once - the
+    // label string must be byte-identical whether the toggle is on or off.
+    const cfToggle = q(win, "#settings-protocol-control input[type=checkbox]");
+    const cfLabelText = function () {
+      const row = q(win, "#settings-protocol-control .settings-row-label");
+      return row ? text(row) : null;
+    };
+    if (cfToggle) {
+      const labelWhenOff = cfLabelText();
+      checkTry("CurseForge install-links label carries no on/off suffix while off", function () {
+        return labelWhenOff === "Open CurseForge install links in Furphy";
+      });
+      checkTry("CurseForge install-links checkbox carries its own aria-label (the only accessible state indicator once the suffix is gone)", function () {
+        return cfToggle.getAttribute("aria-label") === "Open CurseForge install links in Furphy";
+      });
+      await clickAndSettle(win, cfToggle, 300);
+      const labelWhenOn = cfLabelText();
+      checkTry("CurseForge install-links label is byte-identical on vs. off (state lives in the switch alone)", function () {
+        return labelWhenOn !== null && labelWhenOn === labelWhenOff;
+      });
+      // Leave it back where it started so a re-run of this phase (or a
+      // later phase reusing this same mock profile) sees the same baseline.
+      await clickAndSettle(win, cfToggle, 300);
+    } else {
+      check("CurseForge install-links label carries no on/off suffix while off", false, "checkbox not found");
+      check("CurseForge install-links label is byte-identical on vs. off", false, "checkbox not found");
+    }
+
+    // ---- Untracked folders + Diagnostics: dynamic per-row tooltips only
+    // exist once Scan/Run have actually populated their lists.
+    const scanBtn = q(win, "#btn-scan");
+    if (scanBtn) {
+      await clickAndSettle(win, scanBtn, 800);
+      checkTry("every 'Take over' button in a Scan result has its own wired .info-tip (Row 15 per-result tooltips)", function () {
+        const rows = qa(win, "#untracked-list .untracked-row");
+        if (rows.length === 0) return false; // the default mock fixture always has >=1 result
+        return rows.every(function (r) {
+          const groups = Array.prototype.slice.call(r.querySelectorAll(".btn-tip-group"));
+          return groups.length > 0 && groups.every(function (g) { return !!g.querySelector(".info-tip[data-tooltip]"); });
+        });
+      });
+    }
+    const runBtn = q(win, "#btn-run-diagnostics");
+    if (runBtn) {
+      await clickAndSettle(win, runBtn, 1200);
+      checkTry("AddOns folder/CurseForge/Disk space diagnostic rows each carry their own tooltip; other rows (Tracked addons, etc.) do not", function () {
+        const names = qa(win, "#diagnostics-list .diag-name");
+        const withTip = {}; names.forEach(function (n) { withTip[text(n)] = !!n.querySelector(".info-tip"); });
+        const wantTip = ["AddOns folder", "CurseForge", "Disk space"];
+        const noTip = ["Your addon settings", "Tracked addons"];
+        return wantTip.every(function (n) { return withTip[n] === true; }) &&
+          noTip.every(function (n) { return withTip[n] === undefined || withTip[n] === false; });
+      });
+      checkTry("Copy report's info-tip hides together with the button itself (no orphaned icon while report is unavailable)", function () {
+        // Just ran successfully above, so both should now be visible together.
+        const btn = q(win, "#btn-copy-diagnostics");
+        const group = btn && btn.closest(".btn-tip-group");
+        return !!group && !group.hidden && !btn.hidden;
+      });
+    }
+
+    // ---- computeCoreText() done_updated pluralization (SETTINGS-SPEC.md
+    // section 5, item 2 / section 6): proves the JS side's own singular vs.
+    // plural output is correct and stable. Byte-identity with host\
+    // FurphyHost.cs's ComputeCore is a cross-file, cross-language pairing
+    // this JS-only harness cannot execute directly - that half is verified
+    // by the matching Round 32 comment left in both files (see ui\app.js's
+    // computeCoreText and host\FurphyHost.cs's ComputeCore, both quoting
+    // this same acceptance line).
+    checkTry("computeCoreText() pluralizes 'addon' for N=1 (no bare count, no missing noun)", function () {
+      const fn = win.__furphyTest && win.__furphyTest.Views && win.__furphyTest.Views.settings && win.__furphyTest.Views.settings.computeCoreText;
+      if (!fn) return false;
+      const out = fn({ status: "done_updated", updated: 1, updatedNames: ["Auctionator"], lastRunAt: new Date().toISOString() });
+      return /^Updated 1 addon at \d{2}:\d{2}: Auctionator$/.test(out);
+    });
+    checkTry("computeCoreText() pluralizes 'addons' for N>1", function () {
+      const fn = win.__furphyTest && win.__furphyTest.Views && win.__furphyTest.Views.settings && win.__furphyTest.Views.settings.computeCoreText;
+      if (!fn) return false;
+      const out = fn({ status: "done_updated", updated: 3, updatedNames: ["A", "B", "C"], lastRunAt: new Date().toISOString() });
+      return /^Updated 3 addons at \d{2}:\d{2}: A, B, C$/.test(out);
+    });
+
+    // ---- Escape closes the tooltip bubble first, without also dismissing
+    // an overlay open underneath it (Section 3's ordering requirement) -
+    // uses a real confirm dialog (Force reinstall all) as the "overlay
+    // underneath", since Settings has no dropdown menu of its own to reuse.
+    const forceBtn = q(win, "#btn-force-reinstall");
+    if (forceBtn) {
+      await clickAndSettle(win, forceBtn, 250);
+      const dialogShown = visible(q(win, "#dialog-confirm"));
+      if (dialogShown) {
+        const betaTip = q(win, '.info-tip[aria-label="More about Include beta versions"]');
+        if (betaTip) { betaTip.focus(); }
+        await wait(600);
+        const tooltipOpenedUnderneath = !!q(win, "#app-tooltip");
+        win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        await wait(150);
+        checkTry("Escape closes the tooltip bubble", function () { return tooltipOpenedUnderneath && !q(win, "#app-tooltip"); });
+        checkTry("that same Escape leaves the confirm dialog underneath untouched (still open)", function () { return visible(q(win, "#dialog-confirm")); });
+        // Clean up: a second Escape dismisses the dialog itself, back to baseline.
+        win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        await wait(150);
+      } else {
+        check("Escape closes the tooltip bubble", false, "confirm dialog never opened");
+        check("that same Escape leaves the confirm dialog underneath untouched (still open)", false, "confirm dialog never opened");
+      }
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
   async function main() {
     await phaseDefault();
     await phaseFlavours();
     await phaseHostWebview2();
     await phaseTheme();
     await phaseViewDeepLink();
+    await phaseSettingsAudit();
 
     results.complete = true;
     results.finishedAt = new Date().toISOString();

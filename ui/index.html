@@ -820,7 +820,7 @@
         <div id="browse-cf-fallback" hidden>
           <div class="cfpane-fallback-card">
             <svg class="icon nokey-icon"><use href="#icon-compass"></use></svg>
-            <p class="muted-text">CurseForge browsing happens inside the Furphy desktop window.</p>
+            <p class="muted-text">CurseForge browsing happens inside the Furphy desktop window.<button type="button" class="info-tip" tabindex="0" aria-label="More about CurseForge browsing" aria-describedby="app-tooltip" data-tooltip="There's no CurseForge tab here to browse - only the Furphy desktop window has one."><svg class="icon"><use href="#icon-info"></use></svg></button></p>
             <button type="button" class="btn btn-outline" id="btn-cf-open-window">Open CurseForge in a window</button>
             <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link-fallback">Or type an addon's CurseForge ID number</button></p>
             <!-- One-time note: shown only right after "Open CurseForge in a
@@ -846,7 +846,7 @@
             <h3>Updates</h3>
             <div class="settings-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Include beta versions</div>
+                <div class="settings-row-label">Include beta versions<button type="button" class="info-tip" tabindex="0" aria-label="More about Include beta versions" aria-describedby="app-tooltip" data-tooltip="Beta versions are early test builds an addon's author releases before the regular one - more features sooner, but more likely to have bugs. Turning this off also turns off 'Also include experimental versions' in Advanced. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-beta">
@@ -885,7 +885,7 @@
                  logon otherwise, which is not what the toggle promises. -->
             <div class="settings-row" id="updates-background-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Update addons in the background</div>
+                <div class="settings-row-label">Update addons in the background<button type="button" class="info-tip" tabindex="0" aria-label="More about Update addons in the background" aria-describedby="app-tooltip" data-tooltip="Checks for updates on a schedule and installs them automatically - using a separate process that keeps running even after you close Furphy. It pauses while WoW is running. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-background-updates">
@@ -893,7 +893,7 @@
               </label>
             </div>
             <div class="settings-row settings-row-col" id="updates-interval-row" hidden>
-              <div class="settings-row-label">How often</div>
+              <div class="settings-row-label">How often<button type="button" class="info-tip" tabindex="0" aria-label="More about How often" aria-describedby="app-tooltip" data-tooltip="How often Furphy checks for updates in the background. If WoW is already running, it skips that check and tries again once you close the game."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               <select class="select" id="select-background-interval">
                 <option value="60">Every hour</option>
                 <option value="120">Every 2 hours</option>
@@ -904,7 +904,7 @@
             </div>
             <div class="settings-row" id="updates-startup-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Start with Windows</div>
+                <div class="settings-row-label">Start with Windows<button type="button" class="info-tip" tabindex="0" aria-label="More about Start with Windows" aria-describedby="app-tooltip" data-tooltip="Starts Furphy's background updater when you log into Windows. Turning this on also turns on 'Update addons in the background' above, since it would otherwise have nothing to do. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-run-at-startup">
@@ -917,14 +917,14 @@
           <section class="settings-group" id="settings-appearance">
             <h3>Appearance</h3>
             <div class="settings-row settings-row-col">
-              <div class="settings-row-label">Density</div>
-              <div class="segmented" id="density-toggle" role="group" aria-label="Table density">
+              <div class="settings-row-label">Spacing<button type="button" class="info-tip" tabindex="0" aria-label="More about Spacing" aria-describedby="app-tooltip" data-tooltip="Comfortable gives buttons, rows and lists more breathing room. Compact tightens everything up so more fits on screen at once. Purely visual - it doesn't change what anything does."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+              <div class="segmented" id="density-toggle" role="group" aria-label="Spacing">
                 <button type="button" class="segmented-btn" data-density-value="comfortable">Comfortable</button>
                 <button type="button" class="segmented-btn" data-density-value="compact">Compact</button>
               </div>
             </div>
             <div class="settings-row settings-row-col">
-              <div class="settings-row-label">Theme</div>
+              <div class="settings-row-label">Theme<button type="button" class="info-tip" tabindex="0" aria-label="More about Theme" aria-describedby="app-tooltip" data-tooltip="Changes the colors of the Furphy desktop window only. It has no effect on World of Warcraft or your in-game addons."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               <!-- THEMES-SPEC.md Set B: swatch-grid picker, replacing the old
                    4-option segmented control. Buttons are rendered entirely by
                    app.js (Views.settings.buildThemeGrid, from the single
@@ -938,22 +938,50 @@
           <!-- ===================== Advanced (CS4, UX-SPEC.md 6.2) =====================
                One collapsed disclosure, closed by default, holding everything else. -->
           <details class="settings-advanced" id="settings-advanced">
-            <summary>Advanced</summary>
+            <summary>Advanced<button type="button" class="info-tip" tabindex="0" aria-label="More about Advanced" aria-describedby="app-tooltip" data-tooltip="Less commonly needed settings, such as CurseForge install links, extra version options, game folders, ad filtering, and troubleshooting tools."><svg class="icon"><use href="#icon-info"></use></svg></button></summary>
             <div class="settings-advanced-body">
 
               <!-- E19 (script/registration itself is E17's, unchanged): the
                    curseforge:// install-link handler toggle - its one
                    remaining home in the whole app (removed from Browse by
-                   CS3). Painted by Components.ProtocolControl.render(). -->
-              <section class="settings-group" id="settings-protocol">
-                <h3>CurseForge install links</h3>
+                   CS3). Painted by Components.ProtocolControl.render().
+                   Round 32 (SETTINGS-SPEC.md section 2, Group 3): merged
+                   with the old standalone "Browsing" box (adFilter/cfFocus)
+                   under one shared "CurseForge" heading - all three rows
+                   keep their own labels/tooltips/behaviour untouched, only
+                   the surrounding box/heading is now shared. -->
+              <section class="settings-group" id="settings-curseforge">
+                <h3>CurseForge</h3>
                 <div id="settings-protocol-control"></div>
+                <div class="settings-row" id="browsing-adfilter-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
+                    <p class="muted-text">On by default. CurseForge is ad-funded and pays addon authors from that revenue - turn this off if you'd rather see it unfiltered.</p>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-adfilter">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
+                <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.<button type="button" class="info-tip" tabindex="0" aria-label="More about Available in the Furphy desktop window" aria-describedby="app-tooltip" data-tooltip="There's no CurseForge tab here to filter - only the Furphy desktop window has one."><svg class="icon"><use href="#icon-info"></use></svg></button></p>
+                <!-- Round 16 (E22): unlike the ad-filter row above, this one is
+                     never hidden - it saves in the plain Edge window too (it
+                     just applies next time the desktop window is used there). -->
+                <div class="settings-row" id="browsing-cffocus-row">
+                  <div class="settings-row-text">
+                    <div class="settings-row-label">Show only search results on CurseForge<button type="button" class="info-tip" tabindex="0" aria-label="More about Show only search results on CurseForge" aria-describedby="app-tooltip" data-tooltip="Trims CurseForge's search and listing pages down to just the results, hiding the promo banner, header, and filter sidebar. On an addon's own page, only ads, upsells, and unrelated extras are hidden - its title, description, and files stay."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="toggle-cf-focus">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                  </label>
+                </div>
               </section>
 
               <section class="settings-group" id="settings-alpha">
                 <div class="settings-row">
                   <div class="settings-row-text">
-                    <div class="settings-row-label">Also include alpha/experimental versions</div>
+                    <div class="settings-row-label">Also include experimental versions<button type="button" class="info-tip" tabindex="0" aria-label="More about Also include experimental versions" aria-describedby="app-tooltip" data-tooltip="Experimental versions are an addon's newest, least-tested builds - often posted within hours of a change. Turning this on also turns on 'Include beta versions' above, since experimental is a further step past beta, not a separate option. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
                   </div>
                   <label class="switch">
                     <input type="checkbox" id="toggle-alpha">
@@ -970,7 +998,7 @@
                 <h3>WoW versions</h3>
                 <div class="settings-row">
                   <div class="settings-row-text">
-                    <div class="settings-row-label">Show test realms (PTR/Beta)</div>
+                    <div class="settings-row-label">Show test realms (PTR/Beta)<button type="button" class="info-tip" tabindex="0" aria-label="More about Show test realms (PTR/Beta)" aria-describedby="app-tooltip" data-tooltip="Adds your PTR or Beta realm as another WoW version Furphy tracks addons for, alongside your normal Retail or Classic install. Off by default since most players never touch a test realm."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
                   </div>
                   <label class="switch">
                     <input type="checkbox" id="toggle-show-test-realms">
@@ -986,14 +1014,20 @@
                 <div id="settings-game-single">
                   <div class="settings-row">
                     <div class="settings-row-text">
-                      <div class="settings-row-label">World of Warcraft folder</div>
+                      <div class="settings-row-label">World of Warcraft folder<button type="button" class="info-tip" tabindex="0" aria-label="More about World of Warcraft folder" aria-describedby="app-tooltip" data-tooltip="Where World of Warcraft itself is installed. You'll rarely need this - it's here mainly for troubleshooting."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
                       <div class="settings-row-value" id="settings-wow-root">&mdash;</div>
                     </div>
-                    <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open folder</button>
+                    <!-- Round 32 (SETTINGS-SPEC.md section 2, Row 12): button
+                         text "Open folder" -> "Open", matching the sibling
+                         row below (a separately-flagged wiring bug means this
+                         button may not open the folder the label promises -
+                         see SETTINGS-SPEC.md section 5, item 4, not fixed
+                         this round). -->
+                    <button type="button" class="btn btn-outline" id="btn-open-wowfolder">Open</button>
                   </div>
                   <div class="settings-row">
                     <div class="settings-row-text">
-                      <div class="settings-row-label">AddOns folder</div>
+                      <div class="settings-row-label">AddOns folder<button type="button" class="info-tip" tabindex="0" aria-label="More about AddOns folder" aria-describedby="app-tooltip" data-tooltip="The exact folder your installed addons live in - the same one WoW reads from when you log in. Opening it lets you see the addon files directly."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
                       <div class="settings-row-value" id="settings-addons-path">&mdash;</div>
                     </div>
                     <button type="button" class="btn btn-outline" id="btn-open-addons">Open</button>
@@ -1006,93 +1040,94 @@
                 <div id="settings-game-multi" hidden></div>
               </section>
 
-              <!-- E19: ON by default as of 2026-09-04 (Eric's explicit
-                   request, SPEC E22 - was OFF by default originally, that
-                   earlier decision is superseded) - only meaningful in the
-                   native FurphyHost.exe window (host\), which has a real
-                   embedded CurseForge tab; the plain Edge app window has no
-                   such tab to filter, so this shows a muted explainer there
-                   instead of a toggle that would do nothing. -->
-              <section class="settings-group" id="settings-browsing">
-                <h3>Browsing</h3>
-                <div class="settings-row" id="browsing-adfilter-row">
-                  <div class="settings-row-text">
-                    <div class="settings-row-label">Filter ads and trackers in the CurseForge tab</div>
-                    <p class="muted-text">On by default. CurseForge is ad-funded and pays addon authors from that revenue; turn this off in Settings if you'd rather see it unfiltered.</p>
-                  </div>
-                  <label class="switch">
-                    <input type="checkbox" id="toggle-adfilter">
-                    <span class="switch-track"><span class="switch-thumb"></span></span>
-                  </label>
-                </div>
-                <p class="muted-text" id="browsing-adfilter-unavailable" hidden>Available in the Furphy desktop window.</p>
-                <!-- Round 16 (E22): unlike the ad-filter row above, this one is
-                     never hidden - it saves in the plain Edge window too (it
-                     just applies next time the desktop window is used there). -->
-                <div class="settings-row" id="browsing-cffocus-row">
-                  <div class="settings-row-text">
-                    <div class="settings-row-label">Show only search results on CurseForge</div>
-                  </div>
-                  <label class="switch">
-                    <input type="checkbox" id="toggle-cf-focus">
-                    <span class="switch-track"><span class="switch-thumb"></span></span>
-                  </label>
-                </div>
-              </section>
-
               <section class="settings-group" id="settings-untracked">
-                <h3>Folders Furphy doesn&rsquo;t manage yet</h3>
+                <h3>Folders Furphy doesn&rsquo;t manage yet<button type="button" class="info-tip" tabindex="0" aria-label="More about Folders Furphy doesn't manage yet" aria-describedby="app-tooltip" data-tooltip="Addons installed by unzipping a download, or with another addon manager, before Furphy knew about them."><svg class="icon"><use href="#icon-info"></use></svg></button></h3>
                 <p class="muted-text">Folders in your AddOns folder that Furphy doesn&rsquo;t manage yet.</p>
-                <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
+                <span class="btn-tip-group">
+                  <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
+                  <button type="button" class="info-tip" tabindex="0" aria-label="More about Scan" aria-describedby="app-tooltip" data-tooltip="Looks only - nothing changes until you take over or delete a result"><svg class="icon"><use href="#icon-info"></use></svg></button>
+                </span>
                 <div id="untracked-list" class="untracked-list"></div>
               </section>
 
-              <section class="settings-group" id="settings-backup">
-                <h3>Save / load your addon list</h3>
-                <p class="muted-text">Save your addon list to a file, or load one you saved before.</p>
-                <div class="btn-row">
-                  <button type="button" class="btn btn-outline" id="btn-export">
-                    <svg class="icon"><use href="#icon-download"></use></svg>
-                    <span>Save addon list</span>
-                  </button>
-                  <button type="button" class="btn btn-outline" id="btn-import">Load addon list</button>
-                  <input type="file" id="import-file-input" accept="application/json,.json" hidden>
+              <!-- Round 32 (SETTINGS-SPEC.md section 2, Group 8): the three
+                   former standalone boxes below (Save/load, Troubleshooting,
+                   Diagnostics) are now one shared bordered box with two thin
+                   dividers (.settings-subgroup), reducing box/heading count
+                   without removing anything. -->
+              <section class="settings-group" id="settings-backup-troubleshooting">
+                <div class="settings-subgroup" id="settings-backup">
+                  <h3>Save / load your addon list<button type="button" class="info-tip" tabindex="0" aria-label="More about Save / load your addon list" aria-describedby="app-tooltip" data-tooltip="Useful before reinstalling Windows, moving to a new PC, or just to back up what you're running now. Includes each addon's pinned version, ignored-updates choice, and release channel (Release, Beta, or Alpha) - not the addon files themselves."><svg class="icon"><use href="#icon-info"></use></svg></button></h3>
+                  <p class="muted-text">Save your addon list to a file, or load one you saved before.</p>
+                  <div class="btn-row">
+                    <button type="button" class="btn btn-outline" id="btn-export">
+                      <svg class="icon"><use href="#icon-download"></use></svg>
+                      <span>Save addon list</span>
+                    </button>
+                    <button type="button" class="btn btn-outline" id="btn-import">Load addon list</button>
+                    <input type="file" id="import-file-input" accept="application/json,.json" hidden>
+                  </div>
+                  <p class="form-msg" id="backup-msg" hidden></p>
                 </div>
-                <p class="form-msg" id="backup-msg" hidden></p>
-              </section>
 
-              <section class="settings-group" id="settings-maintenance">
-                <h3>Troubleshooting</h3>
-                <div class="btn-row">
-                  <button type="button" class="btn btn-outline" id="btn-open-logs">Open logs folder</button>
+                <div class="settings-subgroup" id="settings-maintenance">
+                  <div class="btn-row">
+                    <span class="btn-tip-group">
+                      <button type="button" class="btn btn-outline" id="btn-open-logs">Open logs folder</button>
+                      <button type="button" class="info-tip" tabindex="0" aria-label="More about Open logs folder" aria-describedby="app-tooltip" data-tooltip="Opens the folder with Furphy's own log files and backups. You'll only need it if something's gone wrong and you're asking for help - otherwise, safe to ignore."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                    </span>
+                  </div>
+                  <span class="btn-tip-group">
+                    <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
+                    <button type="button" class="info-tip" tabindex="0" aria-label="More about Force reinstall all" aria-describedby="app-tooltip" data-tooltip="For when an addon's files get corrupted or deleted by hand - otherwise Update all already keeps everything current."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                  </span>
                 </div>
-                <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
-              </section>
 
-              <section class="settings-group" id="settings-diagnostics">
-                <h3>Diagnostics</h3>
-                <p class="muted-text">Quick health checks: AddOns folder access, config files, CurseForge reachability, disk space.</p>
-                <div class="btn-row">
-                  <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
-                    <svg class="icon"><use href="#icon-shield"></use></svg>
-                    <span>Run</span>
-                  </button>
-                  <button type="button" class="btn btn-outline" id="btn-copy-diagnostics" hidden>Copy report</button>
+                <!-- Round 32 (SETTINGS-SPEC.md section 2, Row 19): "Diagnostics"
+                     is now plain row-label text (13px, same as every toggle
+                     name on this screen), not a full h3/own box - the word
+                     stays on screen as the anchor a support conversation
+                     refers to, without the disproportionate visual weight it
+                     had before. The old two near-duplicate intro sentences
+                     collapse into one; the itemized detail moves to the Run
+                     button's own tooltip. -->
+                <div class="settings-subgroup" id="settings-diagnostics">
+                  <div class="settings-row-label">Diagnostics</div>
+                  <p class="muted-text">Quick check that your files and CurseForge connection are working.</p>
+                  <div class="btn-row">
+                    <span class="btn-tip-group">
+                      <button type="button" class="btn btn-outline" id="btn-run-diagnostics">
+                        <svg class="icon"><use href="#icon-shield"></use></svg>
+                        <span>Run</span>
+                      </button>
+                      <button type="button" class="info-tip" tabindex="0" aria-label="More about Run" aria-describedby="app-tooltip" data-tooltip="Checks: AddOns folder, your addon settings, CurseForge, and disk space."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                    </span>
+                    <span class="btn-tip-group">
+                      <button type="button" class="btn btn-outline" id="btn-copy-diagnostics" hidden>Copy report</button>
+                      <button type="button" class="info-tip" tabindex="0" aria-label="More about Copy report" aria-describedby="app-tooltip" data-tooltip="Copies more detail than what's shown below - exact paths, version numbers, and status codes - ready to paste into a bug report or a chat message."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                    </span>
+                  </div>
+                  <div class="diag-list" id="diagnostics-list"></div>
                 </div>
-                <div class="diag-list" id="diagnostics-list"></div>
-              </section>
-
-              <section class="settings-group" id="settings-about">
-                <h3>About</h3>
-                <dl class="about-list">
-                  <div><dt>Version</dt><dd id="about-version">&mdash;</dd></div>
-                  <div><dt>Client build</dt><dd id="about-client-build">&mdash;</dd></div>
-                  <div><dt>Server uptime</dt><dd id="about-uptime">&mdash;</dd></div>
-                </dl>
               </section>
 
             </div>
           </details>
+
+          <!-- Round 32 (SETTINGS-SPEC.md section 2, footer): the old bordered
+               "About" box + h3 demoted to a plain unboxed line directly below
+               the Advanced disclosure - three items separated by " . ", each
+               its own span so a tooltip icon can attach per item. Values are
+               painted by Views.settings.render()/renderAboutClientBuild()/
+               renderUptimeOnly(), unchanged - only the wrapping markup and
+               two of the three labels moved. -->
+          <p class="settings-footer" id="settings-about-footer">
+            <span class="settings-footer-item">Version<span id="about-version">&mdash;</span></span>
+            <span class="settings-footer-sep">.</span>
+            <span class="settings-footer-item">WoW client build<span id="about-client-build">&mdash;</span><button type="button" class="info-tip" tabindex="0" aria-label="More about WoW client build" aria-describedby="app-tooltip" data-tooltip="The version of World of Warcraft installed on this PC - used to check whether your addons still work with it. Separate from Furphy's own version, shown above."><svg class="icon"><use href="#icon-info"></use></svg></button></span>
+            <span class="settings-footer-sep">.</span>
+            <span class="settings-footer-item">Running for<span id="about-uptime">&mdash;</span><button type="button" class="info-tip" tabindex="0" aria-label="More about Running for" aria-describedby="app-tooltip" data-tooltip="How long Furphy's background helper has been continuously running. It can keep running in the background even after you close this window - for example while background updates are on - and only stops after sitting idle for a while or when your PC restarts."><svg class="icon"><use href="#icon-info"></use></svg></button></span>
+          </p>
 
         </div>
       </section>

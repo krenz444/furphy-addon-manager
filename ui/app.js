@@ -2358,6 +2358,127 @@ Components.Dropdown = (function () {
   return { open: open, close: close, isOpen: isOpen };
 })();
 
+/* ---------- Round 32 (SETTINGS-SPEC.md section 3) - explanatory tooltips ----------
+   One singleton bubble (id="app-tooltip"), portalled to document.body,
+   modeled on Components.Dropdown's own portalled-menu lifecycle above:
+   created on open, removed on close, repositioned on scroll/resize with the
+   same clamp/flip algorithm. Every .info-tip button carries its own
+   pre-authored copy in a data-tooltip attribute (see ui/index.html and this
+   file's own dynamically-built rows below) - initAll() wires every such
+   button it finds, once, using its own immediate parent element as the
+   hover boundary (a row label div, a heading, a fallback paragraph, a diag
+   row's name span, or - for a plain action button like Scan/Run/Copy
+   report - a small .btn-tip-group wrapper span placed around just that one
+   button + its icon, so two tooltips sharing one .btn-row never collide). */
+Components.Tooltip = (function () {
+  let bubbleEl = null;
+  let openTrigger = null;
+  let showTimer = null;
+
+  function isOpen() { return !!bubbleEl; }
+
+  function clearShowTimer() { if (showTimer) { clearTimeout(showTimer); showTimer = null; } }
+
+  function reposition() {
+    if (!bubbleEl || !openTrigger) return;
+    const r = openTrigger.getBoundingClientRect();
+    const bw = bubbleEl.offsetWidth || 280;
+    const bh = bubbleEl.offsetHeight || 0;
+    let left = r.left;
+    left = Math.max(8, Math.min(left, window.innerWidth - bw - 8));
+    let top = r.bottom + 6;
+    if (top + bh > window.innerHeight - 8) top = Math.max(8, r.top - bh - 6);
+    bubbleEl.style.left = left + "px";
+    bubbleEl.style.top = top + "px";
+  }
+
+  function close() {
+    clearShowTimer();
+    if (!bubbleEl) return;
+    bubbleEl.remove();
+    bubbleEl = null;
+    openTrigger = null;
+    window.removeEventListener("scroll", reposition, true);
+    window.removeEventListener("resize", reposition);
+    OverlayTracker.close();
+  }
+
+  function open(trigger, text) {
+    if (openTrigger === trigger && bubbleEl) return;
+    close();
+    OverlayTracker.open();
+    const bubble = Utils.el("div", { id: "app-tooltip", class: "tooltip-bubble", role: "tooltip" }, [text]);
+    document.body.appendChild(bubble);
+    bubbleEl = bubble;
+    openTrigger = trigger;
+    reposition();
+    // Reduced-motion instant-show is handled purely in CSS (the transition
+    // itself is skipped there); this class just triggers the normal
+    // opacity/translate transition every other time.
+    requestAnimationFrame(function () { if (bubbleEl === bubble) bubble.classList.add("is-visible"); });
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+  }
+
+  function scheduleOpen(trigger, text) {
+    clearShowTimer();
+    showTimer = setTimeout(function () { showTimer = null; open(trigger, text); }, 400);
+  }
+
+  // Click-outside closes it, same pattern as Components.Dropdown's own
+  // document-level listener above.
+  document.addEventListener("click", function (ev) {
+    if (!bubbleEl) return;
+    if (bubbleEl.contains(ev.target)) return;
+    if (openTrigger && (ev.target === openTrigger || openTrigger.contains(ev.target))) return;
+    close();
+  });
+
+  // Wires one .info-tip trigger: hover/focus of hoverEl (its own parent
+  // element, so hovering the plain label text/heading/paragraph it belongs
+  // to also opens it - see this module's own header comment) opens after a
+  // ~400ms delay, cancelled if the pointer/focus leaves first; leaving hides
+  // immediately, no hide-delay. Click/tap toggles it open/closed instantly.
+  function wire(trigger, hoverEl, text) {
+    function onEnter() { scheduleOpen(trigger, text); }
+    function onLeave() { clearShowTimer(); if (openTrigger === trigger) close(); }
+    hoverEl.addEventListener("mouseenter", onEnter);
+    hoverEl.addEventListener("mouseleave", onLeave);
+    trigger.addEventListener("focus", onEnter);
+    trigger.addEventListener("blur", onLeave);
+    trigger.addEventListener("click", function (ev) {
+      // preventDefault suppresses a <summary> ancestor's native
+      // toggle-the-<details> activation behaviour (the Advanced summary's
+      // own info-tip sits inside it); stopPropagation keeps this same click
+      // from also reaching the document-level "click outside closes it"
+      // listener above, which would otherwise immediately re-close a
+      // bubble this very click just opened.
+      ev.preventDefault();
+      ev.stopPropagation();
+      clearShowTimer();
+      if (openTrigger === trigger && bubbleEl) close(); else open(trigger, text);
+    });
+  }
+
+  // Finds every not-yet-wired .info-tip[data-tooltip] under root (defaults
+  // to the whole document) and wires it. Safe to call repeatedly - a
+  // dynamically-rebuilt row (Diagnostics, Untracked folders, the CurseForge
+  // install-links control) gets fresh DOM nodes each render, so re-scanning
+  // after every repaint picks up the new ones for free while skipping
+  // elements already wired.
+  function initAll(root) {
+    Utils.qsa(".info-tip[data-tooltip]", root || document).forEach(function (btn) {
+      if (btn.__tooltipWired) return;
+      btn.__tooltipWired = true;
+      const text = btn.dataset.tooltip;
+      const hoverEl = btn.parentElement || btn;
+      wire(btn, hoverEl, text);
+    });
+  }
+
+  return { open: open, close: close, isOpen: isOpen, initAll: initAll };
+})();
+
 /* ---------- Status chip for an addon row/card ---------- */
 Components.Chip = (function () {
   function build(label, cls, title) {
@@ -4065,6 +4186,17 @@ Components.JobPanel = (function () {
 // as a short parenthetical on the same line rather than a whole sentence of
 // its own, per demote-don't-delete (UX-SPEC.md 1.3).
 Components.ProtocolControl = (function () {
+  // Round 32 (SETTINGS-SPEC.md section 2, Row 8 - Eric's named complaint:
+  // "this setting CurseForge install links / Let CurseForge.com's Install
+  // buttons open here - On / also that setting is worded weirdly"). The
+  // label sentence is now FIXED across every state - no more baked-in
+  // "- On"/"- Off" suffix duplicating what the switch position already
+  // shows. The one state that still needs its own visible text (another
+  // program already claims the handler while this is off) gets a separate
+  // conditional helper line instead of a suffix on the label itself.
+  const FIXED_LABEL = "Open CurseForge install links in Furphy";
+  const TOOLTIP_TEXT = "On CurseForge.com, each addon page has a green Install button. Turning this on sends that button straight to Furphy to install the addon. Turn it off and you'll need to download the file yourself and add it to your AddOns folder.";
+
   function render(containerId) {
     const box = Utils.qs("#" + containerId);
     if (!box) return;
@@ -4073,44 +4205,61 @@ Components.ProtocolControl = (function () {
     const p = Store.state.protocol;
     const busy = Store.state.protocolBusy;
     const loading = Store.state.protocolLoading && !p;
-    let label, registered;
+    let label, registered, helperText;
     if (loading) {
-      label = "Checking whether CurseForge's Install buttons open here…";
+      label = "Checking whether CurseForge install links open in Furphy...";
       registered = false;
     } else if (!p) {
       label = "Couldn't check CurseForge install-link handling.";
       registered = false;
     } else if (p.registered) {
-      label = "Let CurseForge.com's Install buttons open here — On";
+      label = FIXED_LABEL;
       registered = true;
     } else if (p.currentHandler) {
-      label = "Let CurseForge.com's Install buttons open here — Off (currently handled by another program)";
+      label = FIXED_LABEL;
       registered = false;
+      helperText = "Currently handled by another program on this PC.";
     } else {
-      label = "Let CurseForge.com's Install buttons open here — Off";
+      label = FIXED_LABEL;
       registered = false;
     }
 
-    const toggle = Utils.el("input", { type: "checkbox", disabled: busy || loading });
+    const toggle = Utils.el("input", {
+      type: "checkbox", disabled: busy || loading,
+      // Implementation note (SETTINGS-SPEC.md Row 8): dropping the text
+      // suffix removes what used to be the only accessible state indicator
+      // for this control, so the checkbox now carries its own explicit
+      // aria-label instead.
+      "aria-label": FIXED_LABEL
+    });
     toggle.checked = registered;
     toggle.addEventListener("change", function () {
       Actions.setProtocolRegistered(toggle.checked);
     });
 
-    box.appendChild(Utils.el("div", { class: "settings-row" }, [
+    const labelChildren = [label];
+    // Every new explanatory tooltip in Settings uses the new
+    // Components.Tooltip component (Section 3) - never mentions
+    // curseforge:// or "protocol" (that leak was caught and reverted once
+    // already on this exact row).
+    labelChildren.push(Utils.el("button", {
+      type: "button", class: "info-tip", tabindex: "0",
+      "aria-label": "More about " + FIXED_LABEL, "aria-describedby": "app-tooltip",
+      dataset: { tooltip: TOOLTIP_TEXT }
+    }, [Utils.icon("info")]));
+
+    const rowChildren = [
       Utils.el("div", { class: "settings-row-text" }, [
-        Utils.el("div", { class: "settings-row-label" }, [label])
+        Utils.el("div", { class: "settings-row-label" }, labelChildren),
+        helperText ? Utils.el("p", { class: "muted-text" }, [helperText]) : null
       ]),
-      // Review fix: dropped the title tooltip - it both re-added an
-      // explainer sentence UX-SPEC.md 6.2 says the label alone should carry
-      // ("No explainer sentence; the label already says what matters.") and
-      // leaked the raw curseforge:// scheme name on hover, which the rest of
-      // this pass deliberately keeps off-screen elsewhere.
       Utils.el("label", { class: "switch" }, [
         toggle,
         Utils.el("span", { class: "switch-track" }, [Utils.el("span", { class: "switch-thumb" })])
       ])
-    ]));
+    ];
+    box.appendChild(Utils.el("div", { class: "settings-row" }, rowChildren));
+    Components.Tooltip.initAll(box);
   }
 
   return { render: render };
@@ -5772,6 +5921,11 @@ Views.settings = (function () {
     const reinstall = Utils.qs("#btn-force-reinstall");
     reinstall.disabled = busy;
     if (busy) reinstall.title = "Another task is running"; else reinstall.removeAttribute("title");
+    // Round 32 (SETTINGS-SPEC.md section 3): re-scan for any .info-tip this
+    // pass just (re)built (Diagnostics rows, Untracked folders rows, the
+    // CurseForge install-links control) - already-wired static rows are
+    // skipped by initAll's own guard, so this is cheap on every repaint.
+    Components.Tooltip.initAll();
   }
 
   // FLAVORS-SPEC.md CS-F4 (section 6.2/copy table): today's exact two rows
@@ -5960,7 +6114,14 @@ Views.settings = (function () {
       case "done_clean":
         return "Everything's up to date - checked " + doneStamp + " - next " + formatNextCheck(state.nextRunAt);
       case "done_updated":
-        return "Updated " + updated + " at " + doneStamp + ": " + joinNamesTruncated(updatedNames, 4);
+        // Round 32 (SETTINGS-SPEC.md section 5, item 2): was "Updated 1 at
+        // HH:MM: ..." with no noun at all for any count. Pluralize with the
+        // same "addon"/"addons" idiom the done_failed branch below already
+        // uses, so this stays byte-identical with host/FurphyHost.cs's
+        // ComputeCore's own done_updated branch (mirrored there too, same
+        // round) - the tray tooltip/menu/balloon and this Settings status
+        // line must never say this differently.
+        return "Updated " + updated + " addon" + (updated === 1 ? "" : "s") + " at " + doneStamp + ": " + joinNamesTruncated(updatedNames, 4);
       case "done_failed":
         return failed + " addon" + (failed === 1 ? "" : "s") + " couldn't update at " + doneStamp + " - open Furphy for details";
       case "waiting_game":
@@ -6103,6 +6264,11 @@ Views.settings = (function () {
       return;
     }
     untrackedList.forEach(function (u) { box.appendChild(untrackedRow(u)); });
+    // Round 32 (SETTINGS-SPEC.md section 3): rescan() calls this function
+    // directly (not the outer Views.settings.render()), so the fresh
+    // per-result .info-tip buttons built above need their own wiring pass
+    // here rather than relying solely on render()'s end-of-pass call.
+    Components.Tooltip.initAll(box);
   }
 
   function untrackedRow(u) {
@@ -6112,6 +6278,21 @@ Views.settings = (function () {
     const idInput = Utils.el("input", { type: "text", placeholder: "Numeric ID", title: "Find this on the addon's CurseForge or Wago page" });
     const busy = Store.isBusy();
     const actions = [idInput];
+    // Round 32 (SETTINGS-SPEC.md section 2, Row 15): wraps a "Take over"
+    // button with its own .info-tip sibling explaining what the action
+    // actually does (re-downloads and overwrites the folder) - replaces the
+    // old bare title= mechanism hint, per section 3's "no bare title= for
+    // any NEW settings tooltip" rule.
+    function takeOverButton(text, ariaSuffix, tooltipText, onclick) {
+      return Utils.el("span", { class: "btn-tip-group" }, [
+        Utils.el("button", { type: "button", class: "btn btn-outline", disabled: busy, onclick: onclick }, [text]),
+        Utils.el("button", {
+          type: "button", class: "info-tip", tabindex: "0",
+          "aria-label": "More about Take over" + (ariaSuffix ? " (" + ariaSuffix + ")" : ""),
+          "aria-describedby": "app-tooltip", dataset: { tooltip: tooltipText }
+        }, [Utils.icon("info")])
+      ]);
+    }
     // E12: -Scan reports whatever curseId/wagoId it found in the folder's own
     // .toc (## X-Curse-Project-ID / ## X-Wago-ID) - offer a one-click take-
     // over straight from either id, ahead of the manual Project-ID input,
@@ -6120,27 +6301,23 @@ Views.settings = (function () {
     // this row shows - Actions.adopt/adoptWago (this row's only callers)
     // carry the matching "Taking over..." job-panel label.
     if (u.curseId) {
-      actions.push(Utils.el("button", {
-        type: "button", class: "btn btn-outline", disabled: busy,
-        title: "Take over as CurseForge project " + u.curseId,
-        onclick: function () { Actions.adopt(u.folder, Number(u.curseId)); }
-      }, ["Take over (CF " + u.curseId + ")"]));
+      actions.push(takeOverButton("Take over (CF " + u.curseId + ")", "CurseForge",
+        "Re-downloads this addon from CurseForge, so Furphy can keep it updated from now on.",
+        function () { Actions.adopt(u.folder, Number(u.curseId)); }));
     }
     if (u.wagoId) {
-      actions.push(Utils.el("button", {
-        type: "button", class: "btn btn-outline", disabled: busy,
-        title: "Take over as Wago addon " + u.wagoId,
-        onclick: function () { Actions.adoptWago(u.folder, u.wagoId); }
-      }, ["Take over (Wago)"]));
+      actions.push(takeOverButton("Take over (Wago)", "Wago",
+        "Re-downloads this addon from Wago, so Furphy can keep it updated from now on.",
+        function () { Actions.adoptWago(u.folder, u.wagoId); }));
     }
     actions.push(
-      Utils.el("button", {
-        type: "button", class: "btn btn-outline", disabled: busy, onclick: function () {
+      takeOverButton("Take over", "manual ID",
+        "Re-downloads this addon from CurseForge, so Furphy can keep it updated from now on.",
+        function () {
           const v = idInput.value.trim();
           if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric ID first.", "warning"); return; }
           Actions.adopt(u.folder, Number(v));
-        }
-      }, ["Take over"]),
+        }),
       Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"])
     );
     return Utils.el("div", { class: "untracked-row" }, [
@@ -6173,22 +6350,32 @@ Views.settings = (function () {
   function renderDiagnostics() {
     const box = Utils.qs("#diagnostics-list");
     const copyBtn = Utils.qs("#btn-copy-diagnostics");
+    // Round 32 (SETTINGS-SPEC.md section 2, Row 19): Copy report's own
+    // .info-tip lives in the same .btn-tip-group wrapper as the button
+    // itself - hiding just the button would otherwise leave a lone info
+    // icon floating with nothing next to it, so both hide together.
+    const copyGroup = copyBtn.closest(".btn-tip-group");
+    function setCopyHidden(hidden) { copyBtn.hidden = hidden; if (copyGroup) copyGroup.hidden = hidden; }
     const runBtn = Utils.qs("#btn-run-diagnostics");
     runBtn.disabled = diagLoading;
     box.textContent = "";
     if (diagLoading) {
       box.appendChild(Utils.el("div", { class: "skeleton-row" }));
-      copyBtn.hidden = true;
+      setCopyHidden(true);
       return;
     }
     if (diagError) {
       box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't run diagnostics: " + describeError(diagError)]));
-      copyBtn.hidden = true;
+      setCopyHidden(true);
       return;
     }
     if (!diagChecks) {
-      box.appendChild(Utils.el("p", { class: "muted-text" }, ["Click Run to check the AddOns folder, config files, CurseForge reachability, and disk space."]));
-      copyBtn.hidden = true;
+      // Round 32 (SETTINGS-SPEC.md section 2, Row 19): mirrors the sibling
+      // Untracked-folders section's own not-yet-run wording; the itemized
+      // check list this used to spell out moved to the Run button's own
+      // tooltip instead (see the .info-tip next to #btn-run-diagnostics).
+      box.appendChild(Utils.el("p", { class: "muted-text" }, ["Nothing checked yet. Click Run to look."]));
+      setCopyHidden(true);
       return;
     }
     // CS4 (UX-SPEC.md 6.2 + copy table): "PowerShell version" is dropped
@@ -6196,7 +6383,12 @@ Views.settings = (function () {
     // diagnosticsReportText()'s Copy report below) but is never painted as
     // a row here.
     diagChecks.forEach(function (c) { if (DIAG_HIDDEN_ONSCREEN.indexOf(c.name) === -1) box.appendChild(diagRow(c)); });
-    copyBtn.hidden = diagChecks.length === 0;
+    setCopyHidden(diagChecks.length === 0);
+    // Round 32 (SETTINGS-SPEC.md section 3): runDiagnostics() calls this
+    // function directly (not the outer Views.settings.render()), so the
+    // fresh per-check .info-tip buttons built above need their own wiring
+    // pass here rather than relying solely on render()'s end-of-pass call.
+    Components.Tooltip.initAll(box);
   }
 
   // CS4: on-screen rows show plain pass/fail language, never the server's
@@ -6227,7 +6419,10 @@ Views.settings = (function () {
       case "Disk space":
         return { label: "Disk space", detail: ok ? "Plenty free" : "Running low" };
       case "Server uptime":
-        return { label: "Server uptime", detail: DIAG_ISO_RE.test(detail) ? "" : (detail || "—") };
+        // Round 32 (SETTINGS-SPEC.md section 2, footer): renamed to match
+        // the About footer's own "Running for" label - the two panels now
+        // describe the same underlying value with the same words.
+        return { label: "Running for", detail: DIAG_ISO_RE.test(detail) ? "" : (detail || "-") };
       case "Last sync":
         return { label: "Last sync", detail: DIAG_ISO_RE.test(detail) ? "Recorded" : (detail || "never") };
       case "WoW client build":
@@ -6243,11 +6438,30 @@ Views.settings = (function () {
     }
   }
 
+  // Round 32 (SETTINGS-SPEC.md section 2, Row 19): only these three checks
+  // get a tooltip - the rest (Tracked addons, Last sync, WoW client build,
+  // Addon catalogue, Addon search mirror) are left exactly as they read
+  // today, per the spec's own explicit list.
+  const DIAG_TOOLTIPS = {
+    "AddOns folder": "Furphy reads and writes files in your AddOns folder to install and update addons. A failure here usually means the folder couldn't be found, or Furphy doesn't have permission to write to it.",
+    "CurseForge": "Furphy checks curseforge.com to find and download addon updates. A failure here is usually your internet connection or a firewall blocking access - it can also mean curseforge.com is temporarily unavailable.",
+    "Disk space": "Furphy needs free space on the drive that holds your AddOns folder to download and install updates. A failure here means that drive is nearly full."
+  };
+
   function diagRow(c) {
     const plain = plainDiagRow(c);
+    const tooltipText = DIAG_TOOLTIPS[plain.label];
+    const nameChildren = [plain.label];
+    if (tooltipText) {
+      nameChildren.push(Utils.el("button", {
+        type: "button", class: "info-tip", tabindex: "0",
+        "aria-label": "More about " + plain.label, "aria-describedby": "app-tooltip",
+        dataset: { tooltip: tooltipText }
+      }, [Utils.icon("info")]));
+    }
     return Utils.el("div", { class: "diag-row" }, [
       Utils.el("span", { class: "diag-dot " + (c.ok ? "is-ok" : "is-fail") }),
-      Utils.el("span", { class: "diag-name" }, [plain.label]),
+      Utils.el("span", { class: "diag-name" }, nameChildren),
       Utils.el("span", { class: "diag-detail" }, [plain.detail || ""])
     ]);
   }
@@ -6469,7 +6683,7 @@ Views.settings = (function () {
     });
   }
 
-  return { render: render, bindOnce: bindOnce, rescan: rescan, renderUptimeOnly: renderUptimeOnly };
+  return { render: render, bindOnce: bindOnce, rescan: rescan, renderUptimeOnly: renderUptimeOnly, computeCoreText: computeCoreText };
 })();
 
 /* ==========================================================================
@@ -7225,7 +7439,12 @@ const App = (function () {
     document.addEventListener("keydown", function (ev) {
       if (ev.key === "Escape") {
         // Ordered by actual stacking (highest z-index first) so Escape always
-        // dismisses whatever is visually on top.
+        // dismisses whatever is visually on top. Round 32 (SETTINGS-SPEC.md
+        // section 3): the tooltip bubble (z-index 95) can render on top of
+        // any of the overlays below it, so it gets first refusal - closing
+        // it never also closes/affects whatever overlay happens to be open
+        // underneath.
+        if (Components.Tooltip.isOpen()) { Components.Tooltip.close(); return; }
         if (Components.Dropdown.isOpen()) { Components.Dropdown.close(); return; }
         if (Components.Lightbox.isOpen()) { Components.Lightbox.close(); return; }
         if (Components.Dialogs.escPressed()) return;
@@ -7284,6 +7503,14 @@ const App = (function () {
     Views.myAddons.bindOnce();
     Views.browse.bindOnce();
     Views.settings.bindOnce();
+    // Round 32 (SETTINGS-SPEC.md section 3): wires every static .info-tip
+    // already in the DOM at this point (Settings' own rows, plus the "Get
+    // new addons" CurseForge fallback tooltip) - hidden-but-present markup
+    // wires up fine, since this only adds event listeners. Views.settings.
+    // render() calls this again on every repaint to pick up the tooltips on
+    // its own dynamically-rebuilt rows (Diagnostics, Untracked folders, the
+    // CurseForge install-links control).
+    Components.Tooltip.initAll();
 
     await fetchPingInfo();
     // Round 12 (E19b): now that serverHost is known (Host.isNative() reads
@@ -7340,6 +7567,12 @@ document.addEventListener("DOMContentLoaded", function () {
     window.__furphyTest.ready = false;
     window.__furphyTest.App = App;
     window.__furphyTest.Store = Store;
+    // Round 32 (SETTINGS-SPEC.md section 6): lets the harness call
+    // Views.settings.computeCoreText(state) directly to prove it stays
+    // byte-identical to host/FurphyHost.cs's ComputeCore for both N=1 and
+    // N>1, without having to drive a real background-update cycle through
+    // the mock just to observe one string.
+    window.__furphyTest.Views = Views;
     initPromise.then(function () { window.__furphyTest.ready = true; });
   }
 });

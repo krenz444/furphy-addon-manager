@@ -26,8 +26,11 @@ THE APP
                   toolbar. "Update & Play" in the sidebar.
   Get new addons  switch between an in-app Wago search and the real CurseForge.com (open right inside the app
                   window) - both fully keyless. Paste a CurseForge link/ID or a wago.io link to install directly.
-  Settings        release channel (release / beta / alpha), auto-update on launch, folders Furphy doesn't manage
-                  yet (with one-click take over), diagnostics, open logs, force reinstall.
+  Settings        one page, two tiers - a few Essentials always on screen (release channel, auto-update on
+                  launch, spacing, theme) and an Advanced section for everything else (CurseForge options, game
+                  folders, folders Furphy doesn't manage yet with one-click take over, backups, diagnostics, open
+                  logs, force reinstall). Every row that needs more explaining has a small info icon - hover or
+                  tab to it for details.
 
 FILES (this folder)
   install.ps1 / Install Furphy.cmd   the installer (see NEW INSTALL above); -Uninstall removes the app cleanly
