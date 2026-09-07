@@ -45,7 +45,6 @@ $settings = @{
     port = 47899
     adFilter = $true
     cfFocus = $true
-    autoUpdateOnLaunch = $true
     backgroundUpdates = $false
     backgroundIntervalMinutes = 30
     runAtStartup = $false

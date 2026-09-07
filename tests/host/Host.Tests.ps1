@@ -175,7 +175,6 @@ function New-TrayTestLayout {
     if (-not (Test-Path -LiteralPath $settingsPath)) {
         $settings = [ordered]@{
             releaseType               = 1
-            autoUpdateOnLaunch        = $true
             port                      = $Port
             adFilter                  = $true
             cfFocus                   = $true

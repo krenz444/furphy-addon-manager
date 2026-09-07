@@ -119,7 +119,7 @@ if (Test-Path -LiteralPath $hostSrc) {
 # 4. Ensure settings.json exists (never overwrite an existing one).
 $settings = Join-Path $Dest 'settings.json'
 if (-not (Test-Path -LiteralPath $settings)) {
-    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "port": 47831 }' | Set-Content -LiteralPath $settings -Encoding Ascii
+    '{ "releaseType": 1, "port": 47831 }' | Set-Content -LiteralPath $settings -Encoding Ascii
     "created default settings.json"
 }
 
@@ -160,17 +160,16 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath $f) -Force }
     }
-    New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs'), (Join-Path $RepoPath 'launcher') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs') | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
     Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
     foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'NIGHT-REPORT-2026-09-05.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
     }
-    foreach ($f in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
-        $s = Join-Path $retail $f
-        if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "launcher\$f") -Force }
-    }
+    # Round 34: no more launcher\ dir - this installer no longer writes a
+    # per-flavour launcher pair (update-addons-and-launch.cmd / Launch WoW
+    # (Updated).vbs) for the repo mirror to pick up.
     # host\ sources + SDK assemblies for the repo (bin is a build output, pkg is the ignored nupkg)
     $rh = Join-Path $RepoPath 'host'
     New-Item -ItemType Directory -Force -Path $rh, (Join-Path $rh 'lib') | Out-Null

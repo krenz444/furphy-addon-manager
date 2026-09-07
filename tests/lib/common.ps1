@@ -394,9 +394,9 @@ function Stop-StaticServer {
 # Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
 # connection and never reads or responds - used to prove addon-sync.ps1's
 # FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL override actually reaches
-# the real HTTP call sites, and that the -Launcher wall-clock budget cap
-# bounds a real launch chain even when every network call would otherwise
-# hang for its own -TimeoutSec.
+# the real HTTP call sites, and that a caller's own -TimeoutSec is what
+# actually bounds a real run even when every network call would otherwise
+# hang forever waiting on a connection that never answers.
 # ---------------------------------------------------------------------
 
 function Start-BlackHoleListener {

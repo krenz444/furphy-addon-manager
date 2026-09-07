@@ -29,7 +29,7 @@
        Invoke-WebRequest redefinition - see that Context's own header
        comment for why Pester's Mock cmdlet does not reach this call)
        (case "1 match" also live-verified against the real network in
-       tests\integration\Cli.InstallRollbackLauncher.Tests.ps1's AtlasLootClassic install)
+       tests\integration\Cli.InstallRollback.Tests.ps1's AtlasLootClassic install)
    [x] concurrent mocked jobs on different flavours don't block   -> tests\integration\Server.Jobs.Tests.ps1
    [x] flavour-scoped endpoint 400 without ?flavour= (multi)      -> tests\integration\Server.State.Tests.ps1
        vs succeeds without it (single-flavour root)                 tests\integration\Server.State.Tests.ps1
@@ -53,7 +53,7 @@
 function Invoke-InstallPs1 {
     param([string]$WowPath)
     $installScript = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'install.ps1'
-    $args = @('-WowPath', $WowPath, '-NoShortcuts', '-NoProtocol', '-SkipAdopt')
+    $args = @('-WowPath', $WowPath, '-NoShortcuts', '-NoProtocol', '-SkipAdopt', '-Console')
     return Invoke-CliProcess -ScriptPath $installScript -ArgumentList $args -TimeoutSec 90
 }
 
@@ -83,7 +83,7 @@ Describe 'install.ps1 home-flavour ordering against the fixture (FLAVORS-SPEC S2
         $r.ExitCode | Should Be 0
         (Test-Path -LiteralPath (Join-Path $wowRoot '_classic_era_\AddonSync\addon-sync.ps1') -PathType Leaf) | Should Be $true
         # _ptr_ is still detected (installedFlavours includes it) but is never
-        # a home-flavour candidate, first-class-only launcher/shortcut rules
+        # a home-flavour candidate, first-class-only AddonSync/shortcut rules
         # (S2.1's FirstClass column) - confirm no AddonSync ever lands there.
         (Test-Path -LiteralPath (Join-Path $wowRoot '_ptr_\AddonSync') -PathType Container) | Should Be $false
     }

@@ -4,14 +4,14 @@
 
  Finds a WoW installation, copies the app into <home-flavour>\AddonSync
  (Retail when present, else the first-detected flavour - FLAVORS-SPEC
- S2.1 order), writes a "Launch WoW (Updated)" launcher pair into every
- installed first-class flavour's own folder (Retail/Classic/Classic Era
- - each carrying that flavour's -Flavor id and Battle.net product code),
- creates desktop shortcuts (one per first-class flavour; today's exact
- single unlabeled shortcut when only one is installed), registers the
- curseforge:// protocol handler, and adopts any addon folders already
- present in each installed flavour's AddOns - all without requiring a
- CurseForge API key.
+ S2.1 order), creates a single "Furphy Addon Manager" desktop shortcut,
+ registers the curseforge:// protocol handler, adopts any addon folders
+ already present in each installed flavour's AddOns, and removes any
+ launcher files/shortcuts a pre-Round-34 install left behind - all
+ without requiring a CurseForge API key. Round 34: this installer no
+ longer writes anything that launches or auto-updates-before-launching
+ WoW - the background service (addon-server.ps1's tray/scheduled sync)
+ already keeps addons updated on its own.
 
  Windows PowerShell 5.1 only. No modules, no external binaries, pure
  ASCII.
@@ -392,32 +392,29 @@ function Show-InstallConsole {
 # addon-server.ps1 carry as $Script:FlavourDefs, duplicated here per the
 # codebase's existing established pattern (every shared fact lives in
 # each file that needs it, never a cross-file import). install.ps1 only
-# needs the folder/label/first-class/Battle.net-code facts - never
-# client build numbers - so this is a deliberately smaller table than
-# the CLI/server copies (no Product/.build.info field).
+# needs the folder/label/first-class facts - never client build numbers,
+# never a Battle.net product code (Round 34 removed WoW-launching
+# entirely, see REMOVAL-SPEC.md CS-R10) - so this is a deliberately
+# smaller table than the CLI/server copies (no Product/.build.info
+# field).
 #
 # FirstClass mirrors S2.1's "First-class in v1?" column: only Retail,
-# Classic and Classic Era ever get a launcher pair or a desktop
-# shortcut (S7.2). PTR/XPTR/Beta are still detected (Find-WowRoot,
+# Classic and Classic Era are eligible for legacy-shortcut cleanup
+# naming (Remove-FurphyLegacyLauncherArtifacts below) and are checked
+# first when picking the home flavour for the app's own install.
+# PTR/XPTR/Beta are still detected (Find-WowRoot,
 # Get-InstalledFlavourDefs) so a PTR-only machine can still be found
 # and so the adopt step (S7.1) can offer to take over a PTR AddOns
-# folder too, but they never get a shortcut or a launcher pair.
-#
-# BattleNetCode/Reliable are S4.7's table - Retail's code is proven
-# reliable (this machine's own --exec="launch WoW" already works
-# today); every other code is community-sourced and NOT proven
-# reliable, which the generated launcher's own comment says honestly
-# (S4.7, S6.3) rather than promising a silent launch that might not
-# happen.
+# folder too.
 # =====================================================================
 
 $Script:FlavourDefs = @(
-    [PSCustomObject]@{ Id = 'retail';      Folder = '_retail_';      Label = 'Retail';      FirstClass = $true;  BattleNetCode = 'WoW';             Reliable = $true }
-    [PSCustomObject]@{ Id = 'classic';     Folder = '_classic_';     Label = 'Classic';     FirstClass = $true;  BattleNetCode = 'wow_classic';      Reliable = $false }
-    [PSCustomObject]@{ Id = 'classic_era'; Folder = '_classic_era_'; Label = 'Classic Era'; FirstClass = $true;  BattleNetCode = 'wow_classic_era';  Reliable = $false }
-    [PSCustomObject]@{ Id = 'ptr';         Folder = '_ptr_';         Label = 'PTR';         FirstClass = $false; BattleNetCode = 'wowt';             Reliable = $false }
-    [PSCustomObject]@{ Id = 'xptr';        Folder = '_xptr_';        Label = 'PTR (2)';     FirstClass = $false; BattleNetCode = 'wowxptr';          Reliable = $false }
-    [PSCustomObject]@{ Id = 'beta';        Folder = '_beta_';        Label = 'Beta';        FirstClass = $false; BattleNetCode = 'wow_beta';         Reliable = $false }
+    [PSCustomObject]@{ Id = 'retail';      Folder = '_retail_';      Label = 'Retail';      FirstClass = $true }
+    [PSCustomObject]@{ Id = 'classic';     Folder = '_classic_';     Label = 'Classic';     FirstClass = $true }
+    [PSCustomObject]@{ Id = 'classic_era'; Folder = '_classic_era_'; Label = 'Classic Era'; FirstClass = $true }
+    [PSCustomObject]@{ Id = 'ptr';         Folder = '_ptr_';         Label = 'PTR';         FirstClass = $false }
+    [PSCustomObject]@{ Id = 'xptr';        Folder = '_xptr_';        Label = 'PTR (2)';     FirstClass = $false }
+    [PSCustomObject]@{ Id = 'beta';        Folder = '_beta_';        Label = 'Beta';        FirstClass = $false }
 )
 
 function Test-FlavourInstalled {
@@ -552,10 +549,13 @@ function Set-InstallPathsFromWowRoot {
       the first-detected flavour in S2.1's fixed order
       (Get-InstalledFlavourDefs already returns its list in that order, so
       $installedFlavours[0] IS that first-detected flavour whenever Retail
-      is absent). Only Retail/Classic/Classic Era (S2.1's "first-class")
-      ever get a launcher pair or a desktop shortcut (S7.2) - PTR/XPTR/Beta
-      stay detected-but-quiet here exactly as they do everywhere else
-      (S2.5).
+      is absent). $firstClassInstalled/$multiFlavour (Retail/Classic/
+      Classic Era - S2.1's "first-class") drive only the install-message
+      wording ("home flavour: X" when more than one is installed) and
+      legacy-shortcut cleanup naming now that Round 34 removed the
+      per-flavour launcher pair/shortcut this used to gate - PTR/XPTR/
+      Beta stay detected-but-quiet here exactly as they do everywhere
+      else (S2.5).
     #>
     $script:homeFlavour = $null
     foreach ($f in $script:installedFlavours) { if ($f.Id -eq 'retail') { $script:homeFlavour = $f; break } }
@@ -576,37 +576,6 @@ if ($wowFound) {
     # an initial path to show/offer - its Browse handler still calls this
     # again if the user changes it.
     Set-InstallPathsFromWowRoot
-}
-
-# =====================================================================
-# 2. Battle.net.exe detection (best-effort; a default path is always
-#    returned so the generated launcher is never left with an empty
-#    target, even when detection genuinely can't find it here).
-# =====================================================================
-
-function Find-BattleNetExe {
-    $default = 'C:\Program Files (x86)\Battle.net\Battle.net.exe'
-    if (Test-Path -LiteralPath $default) { return $default }
-    $alt = 'C:\Program Files\Battle.net\Battle.net.exe'
-    if (Test-Path -LiteralPath $alt) { return $alt }
-    try {
-        $uninstKeys = @(
-            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Battle.net',
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Battle.net'
-        )
-        foreach ($k in $uninstKeys) {
-            if (Test-Path -LiteralPath $k) {
-                $prop = Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue
-                if ($prop -and $prop.InstallLocation) {
-                    $candidate = Join-Path -Path ([string]$prop.InstallLocation) -ChildPath 'Battle.net.exe'
-                    if (Test-Path -LiteralPath $candidate) { return $candidate }
-                }
-            }
-        }
-    } catch {
-        # Best-effort; fall through to the documented default below.
-    }
-    return $default
 }
 
 # =====================================================================
@@ -833,6 +802,96 @@ function Remove-InstallFolderWithRetry {
 }
 
 # =====================================================================
+# Round 34 (REMOVAL-SPEC.md CS-R12): legacy launcher-file/shortcut
+# cleanup, shared by BOTH -Uninstall and an ordinary upgrade run.
+#
+# Before Round 34, install.ps1 wrote a per-flavour launcher pair
+# (update-addons-and-launch.cmd / Launch WoW (Updated).vbs) into every
+# first-class flavour folder plus a matching Desktop shortcut. Round 34
+# removed WoW-launching entirely - this installer no longer writes any
+# of that - but the ONLY place that used to clean up a stale pair was
+# the -Uninstall branch below. An ordinary upgrade (install.ps1 run
+# again with no -Uninstall - exactly what shipping this removal looks
+# like) never called that cleanup, so a machine upgraded in place would
+# keep its stale launcher files/shortcut forever. This function is that
+# same cleanup, factored out so both call sites (the -Uninstall branch
+# below and Invoke-FurphyInstallSteps further down) share one file list
+# that can never drift apart.
+#
+# Launcher FILES (inside the WoW flavour folder, never the Desktop) are
+# removed unconditionally - they were never gated by -NoShortcuts even
+# in the original -Uninstall-only code. Only the DESKTOP SHORTCUT half
+# is gated, with the exact same two-layer safety this file already uses
+# everywhere else it touches the real Desktop: skipped entirely when
+# -NoShortcuts is passed, and skipped with a warning (even without
+# -NoShortcuts) when Test-LooksLikeScratchRun flags either path as a
+# scratch/test root (see the CS-F5 incident note on the -Uninstall
+# branch's own shortcut-removal block for why that second, code-level
+# guard exists - this reuses the identical check, not a weaker copy).
+#
+# Never touches "Furphy Addon Manager.lnk" itself - that shortcut is
+# the app's own, still created by every install and removed only by a
+# full -Uninstall, never by this legacy-artifact cleanup.
+# =====================================================================
+
+function Remove-FurphyLegacyLauncherArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$WowRootPath,
+        [Parameter(Mandatory = $true)][string]$AppDestPath
+    )
+    $removed = New-Object 'System.Collections.Generic.List[string]'
+    $failed = New-Object 'System.Collections.Generic.List[string]'
+
+    # Every known flavour folder, not just the ones currently installed/
+    # first-class - a stale pair can be left behind under any flavour
+    # folder from an older version, a since-removed flavour, or a
+    # re-install across versions of this installer.
+    foreach ($def in $Script:FlavourDefs) {
+        $flavourDir = Join-Path -Path $WowRootPath -ChildPath $def.Folder
+        foreach ($name in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
+            $p = Join-Path -Path $flavourDir -ChildPath $name
+            if (Test-Path -LiteralPath $p) {
+                if (Remove-InstallFileWithRetry -Path $p) {
+                    Write-Info "Removed legacy launcher file: $($def.Label)\$name"
+                    $removed.Add($p)
+                } else {
+                    $failed.Add($p)
+                    Write-Warn2 "Could not remove legacy launcher file (in use?): $($def.Label)\$name"
+                }
+            }
+        }
+    }
+
+    $looksScratch = (Test-LooksLikeScratchRun $WowRootPath) -or (Test-LooksLikeScratchRun $AppDestPath)
+    if ($looksScratch -and (-not $NoShortcuts)) {
+        Write-Warn2 'Target path looks like a scratch/test root but -NoShortcuts was not passed - skipping legacy Desktop shortcut cleanup for safety. Pass -NoShortcuts explicitly if this really is production.'
+    } elseif (-not $NoShortcuts) {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        $shortcutNames = New-Object 'System.Collections.Generic.List[string]'
+        $shortcutNames.Add('WoW (auto-update addons).lnk')
+        foreach ($def in $Script:FlavourDefs) {
+            if ($def.FirstClass) { $shortcutNames.Add("WoW - $($def.Label) (auto-update addons).lnk") }
+        }
+        foreach ($name in $shortcutNames) {
+            $lnk = Join-Path -Path $desktop -ChildPath $name
+            if (Test-Path -LiteralPath $lnk) {
+                if (Remove-InstallFileWithRetry -Path $lnk) {
+                    Write-Info "Removed legacy shortcut: $name"
+                    $removed.Add($lnk)
+                } else {
+                    $failed.Add($lnk)
+                    Write-Warn2 "Could not remove legacy shortcut (in use?): $name"
+                }
+            }
+        }
+    } else {
+        Write-Info 'Skipped legacy Desktop shortcut cleanup (-NoShortcuts).'
+    }
+
+    return [PSCustomObject]@{ Removed = $removed; Failed = $failed }
+}
+
+# =====================================================================
 # -Uninstall path
 # =====================================================================
 
@@ -1025,11 +1084,6 @@ if ($Uninstall) {
     # game-launcher files already gone but the app's own code still there.
     $failedRemovals = New-Object 'System.Collections.Generic.List[string]'
 
-    # FLAVORS-SPEC S7.2: remove every possible shortcut name (today's
-    # single unlabeled name plus every flavour's labeled variant) rather
-    # than trying to infer which naming convention was used when this
-    # copy was installed - harmless no-ops for names that don't exist.
-    #
     # [Environment]::GetFolderPath('Desktop') always resolves the REAL
     # machine Desktop - it is never scoped to -WowPath/$wowRoot. Gate
     # this whole block behind -NoShortcuts (mirroring the creation-side
@@ -1050,53 +1104,40 @@ if ($Uninstall) {
     # removal with a warning instead of proceeding, even if -NoShortcuts
     # was forgotten. It changes nothing for a genuine production install,
     # which never sits under any of those paths.
+    #
+    # Only "Furphy Addon Manager.lnk" itself is removed here - that
+    # shortcut is unique to a full -Uninstall (an ordinary upgrade must
+    # never delete it, it's the app's own). Round 34 (REMOVAL-SPEC.md
+    # CS-R12): every legacy launcher-file/WoW-shortcut this installer
+    # used to write (and no longer does) is cleaned up by the shared
+    # Remove-FurphyLegacyLauncherArtifacts call just below instead - the
+    # SAME function an ordinary upgrade run now also calls, so the file
+    # list can never drift between the two paths.
     $looksScratch = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScratchRun $appDest)
     if ($looksScratch -and (-not $NoShortcuts)) {
         Write-Warn2 'Target path looks like a scratch/test root but -NoShortcuts was not passed - skipping Desktop shortcut removal for safety. Pass -NoShortcuts explicitly if this really is production.'
     } elseif (-not $NoShortcuts) {
         $desktop = [Environment]::GetFolderPath('Desktop')
-        $shortcutNames = New-Object 'System.Collections.Generic.List[string]'
-        $shortcutNames.Add('Furphy Addon Manager.lnk')
-        $shortcutNames.Add('WoW (auto-update addons).lnk')
-        foreach ($def in $Script:FlavourDefs) {
-            if ($def.FirstClass) { $shortcutNames.Add("WoW - $($def.Label) (auto-update addons).lnk") }
-        }
-        foreach ($name in $shortcutNames) {
-            $lnk = Join-Path -Path $desktop -ChildPath $name
-            if (Test-Path -LiteralPath $lnk) {
-                # Round 33 defect fix (item 2): retry+backoff instead of one
-                # attempt, same as every other removal below.
-                if (Remove-InstallFileWithRetry -Path $lnk) {
-                    Write-Info "Removed shortcut: $name"
-                } else {
-                    $failedRemovals.Add($lnk)
-                    Write-Warn2 "Could not remove shortcut (in use?): $name"
-                }
+        $lnk = Join-Path -Path $desktop -ChildPath 'Furphy Addon Manager.lnk'
+        if (Test-Path -LiteralPath $lnk) {
+            # Round 33 defect fix (item 2): retry+backoff instead of one
+            # attempt, same as every other removal below.
+            if (Remove-InstallFileWithRetry -Path $lnk) {
+                Write-Info 'Removed shortcut: Furphy Addon Manager.lnk'
+            } else {
+                $failedRemovals.Add($lnk)
+                Write-Warn2 'Could not remove shortcut (in use?): Furphy Addon Manager.lnk'
             }
         }
     } else {
         Write-Info 'Skipped desktop shortcut removal (-NoShortcuts).'
     }
 
-    # Remove a launcher pair from every known flavour folder that might
-    # hold one (a machine could have been installed, had a flavour
-    # added/removed, or been re-installed across versions of this
-    # installer) - not just $firstClassInstalled, so a stale pair left
-    # behind in a since-removed flavour folder still gets cleaned up.
-    foreach ($def in $Script:FlavourDefs) {
-        $flavourDir = Join-Path -Path $wowRoot -ChildPath $def.Folder
-        foreach ($name in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
-            $p = Join-Path -Path $flavourDir -ChildPath $name
-            if (Test-Path -LiteralPath $p) {
-                if (Remove-InstallFileWithRetry -Path $p) {
-                    Write-Info "Removed launcher file: $($def.Label)\$name"
-                } else {
-                    $failedRemovals.Add($p)
-                    Write-Warn2 "Could not remove launcher file (in use?): $($def.Label)\$name"
-                }
-            }
-        }
-    }
+    # Round 34 (REMOVAL-SPEC.md CS-R12): remove any per-flavour launcher
+    # file / WoW Desktop shortcut this installer wrote before this round
+    # - the same cleanup an ordinary upgrade run now performs too.
+    $legacyCleanup = Remove-FurphyLegacyLauncherArtifacts -WowRootPath $wowRoot -AppDestPath $appDest
+    foreach ($f in $legacyCleanup.Failed) { $failedRemovals.Add($f) }
 
     if (Test-Path -LiteralPath $appDest) {
         $keepFiles = @('addons.json', 'settings.json', 'state.json', 'sync.log', 'server.log', 'last-run.txt', 'server.pid')
@@ -1290,7 +1331,7 @@ if (Test-Path -LiteralPath $versionSrc) {
 
 $settingsPath = Join-Path -Path $appDest -ChildPath 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath)) {
-    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "port": 47831 }' | Set-Content -LiteralPath $settingsPath -Encoding Ascii
+    '{ "releaseType": 1, "port": 47831 }' | Set-Content -LiteralPath $settingsPath -Encoding Ascii
     Write-Info 'Created default settings.json (no account or API key needed).'
 } else {
     Write-Info 'settings.json already exists - left as-is.'
@@ -1383,106 +1424,31 @@ foreach ($f in 'addon-sync.ps1', 'addon-server.ps1') {
 Write-Info 'Parse check ok.'
 
 # =====================================================================
-# 5. Launcher pair(s), rewritten for this machine's paths
-#    FLAVORS-SPEC S7.2: one pair per installed first-class flavour, each
-#    written into THAT flavour's own folder (so no filename collision -
-#    every flavour has its own <WowRoot>\<folder>\ to live in) and
-#    carrying that flavour's -Flavor id and Battle.net product code
-#    (S4.7). The single-flavour case's file content is byte-identical to
-#    every pre-flavours install (no -Flavor argument, no reliability
-#    comment line, Retail-only wording) - the "invisible at n=1" promise
-#    (principle 2) applies to these generated files too, not just the
-#    live app's own UI/API.
+# 5. Legacy launcher cleanup (Round 34, REMOVAL-SPEC.md CS-R12)
+#    This installer no longer writes a per-flavour launcher pair or a
+#    WoW Desktop shortcut - Round 34 removed WoW-launching entirely,
+#    since the background service already keeps addons updated on its
+#    own. An ordinary upgrade run (this is exactly that - no -Uninstall
+#    flag) previously never looked for a STALE pair/shortcut left behind
+#    by an older install, so this step (shared with the -Uninstall path
+#    above) runs unconditionally here to actually clean up an existing
+#    machine the moment its install is upgraded to this version.
 # =====================================================================
 
-Write-Step 'Writing launcher files'
+Write-Step 'Cleaning up legacy launcher files'
+Remove-FurphyLegacyLauncherArtifacts -WowRootPath $wowRoot -AppDestPath $appDest | Out-Null
 
-$battleNetExe = Find-BattleNetExe
 $cliPath = Join-Path -Path $appDest -ChildPath 'addon-sync.ps1'
-$launcherWritten = New-Object 'System.Collections.Generic.List[object]'
-
-foreach ($def in $firstClassInstalled) {
-    $flavourDir = Join-Path -Path $wowRoot -ChildPath $def.Folder
-    $launcherCmdPath = Join-Path -Path $flavourDir -ChildPath 'update-addons-and-launch.cmd'
-    $launcherVbsPath = Join-Path -Path $flavourDir -ChildPath 'Launch WoW (Updated).vbs'
-    $cmdBattleLine = "start `"`" `"$battleNetExe`" --exec=`"launch $($def.BattleNetCode)`""
-
-    if (-not $multiFlavour -and $def.Id -eq 'retail') {
-        # Byte-identical to every pre-flavours install.ps1's exact output.
-        $cmdLaunchLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$cliPath`" -Launcher -Quiet"
-        $cmdLines = @(
-            '@echo off',
-            'rem Updates all addons via AddonSync\addon-sync.ps1, then launches WoW retail via Battle.net.',
-            'rem Run hidden via "Launch WoW (Updated).vbs" - do not run this directly unless you want a console window.',
-            'rem Results: AddonSync\last-run.txt  History: AddonSync\sync.log',
-            $cmdLaunchLine,
-            $cmdBattleLine
-        )
-        # NOTE: a "'literal' + $var + 'literal'" expression used directly as
-        # an @(...) array element (as opposed to being assigned to a
-        # variable first, as above) has been observed on this machine to
-        # split into SEPARATE array elements instead of concatenating -
-        # each interpolated line is therefore built into its own named
-        # variable first, never inline inside the array literal.
-        $vbsRunLine = "sh.Run ""cmd /c """"$launcherCmdPath"""""", 0, False"
-        $vbsLines = @(
-            "' Silently updates addons via Furphy Addon Manager, then launches WoW retail.",
-            "' Window style 0 = fully hidden, no console flash, no focus steal.",
-            'Set sh = CreateObject("WScript.Shell")',
-            $vbsRunLine
-        )
-    } else {
-        # Multiple flavours installed, or a non-retail flavour: name the
-        # flavour explicitly and, per S4.7/S6.3, say honestly when the
-        # Battle.net launch itself isn't proven reliable (addons still
-        # update regardless - only the auto-launch step is in question).
-        $cmdLaunchLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$cliPath`" -Launcher -Flavor $($def.Id) -Quiet"
-        $reliabilityLine = if ($def.Reliable) {
-            "rem $($def.Label) launch via Battle.net is proven reliable."
-        } else {
-            "rem $($def.Label) launch via Battle.net is NOT proven reliable (community reports a flaky silent-launch for this product code) - addons still update either way; you may need to press Play yourself in Battle.net."
-        }
-        $cmdLines = @(
-            '@echo off',
-            "rem Updates all addons via AddonSync\addon-sync.ps1, then launches WoW ($($def.Label)) via Battle.net.",
-            'rem Run hidden via "Launch WoW (Updated).vbs" - do not run this directly unless you want a console window.',
-            'rem Results: AddonSync\last-run.txt  History: AddonSync\sync.log',
-            $reliabilityLine,
-            $cmdLaunchLine,
-            $cmdBattleLine
-        )
-        $vbsRunLine = "sh.Run ""cmd /c """"$launcherCmdPath"""""", 0, False"
-        $vbsLines = @(
-            "' Silently updates addons via Furphy Addon Manager, then launches WoW ($($def.Label)).",
-            "' Window style 0 = fully hidden, no console flash, no focus steal.",
-            'Set sh = CreateObject("WScript.Shell")',
-            $vbsRunLine
-        )
-    }
-
-    Set-Content -LiteralPath $launcherCmdPath -Value $cmdLines -Encoding Ascii
-    Set-Content -LiteralPath $launcherVbsPath -Value $vbsLines -Encoding Ascii
-    Write-Info "Wrote $launcherCmdPath"
-    Write-Info "Wrote $launcherVbsPath"
-    $launcherWritten.Add([PSCustomObject]@{ Def = $def; CmdPath = $launcherCmdPath; VbsPath = $launcherVbsPath; FlavourDir = $flavourDir })
-}
-
-if ($battleNetExe -ne 'C:\Program Files (x86)\Battle.net\Battle.net.exe' -and -not (Test-Path -LiteralPath $battleNetExe)) {
-    Write-Warn2 "Battle.net.exe was not found at $battleNetExe - the WoW launch step may not work until it is installed there."
-} elseif (-not (Test-Path -LiteralPath $battleNetExe)) {
-    Write-Warn2 "Battle.net.exe was not found. Update-and-launch will only update addons until Battle.net is installed."
-}
 
 # =====================================================================
-# 6. Desktop shortcuts
-#    FLAVORS-SPEC S7.2: single first-class flavour installed -> today's
-#    exact unlabeled shortcut name, zero visible change. More than one
-#    -> one labeled shortcut per flavour ("WoW - Classic (auto-update
-#    addons)"), each pointing at that flavour's own launcher pair.
+# 6. Desktop shortcut
+#    One shortcut, "Furphy Addon Manager.lnk", regardless of how many
+#    flavours are installed. Round 34 removed the per-flavour WoW
+#    launcher shortcut(s) along with WoW-launching itself.
 # =====================================================================
 
 if (-not $NoShortcuts) {
-    Write-Step 'Creating desktop shortcuts'
+    Write-Step 'Creating desktop shortcut'
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $wsh = New-Object -ComObject WScript.Shell
@@ -1495,28 +1461,11 @@ if (-not $NoShortcuts) {
         if (Test-Path -LiteralPath $iconIco) { $sc1.IconLocation = $iconIco }
         $sc1.Save()
         Write-Info 'Created shortcut: Furphy Addon Manager'
-
-        foreach ($lw in $launcherWritten) {
-            $def = $lw.Def
-            $shortcutName = if ($multiFlavour) { "WoW - $($def.Label) (auto-update addons).lnk" } else { 'WoW (auto-update addons).lnk' }
-            $sc2 = $wsh.CreateShortcut((Join-Path -Path $desktop -ChildPath $shortcutName))
-            $sc2.TargetPath = Join-Path -Path $env:SystemRoot -ChildPath 'System32\wscript.exe'
-            $sc2.Arguments = '"' + $lw.VbsPath + '"'
-            $sc2.WorkingDirectory = $lw.FlavourDir
-            $wowExe = Join-Path -Path $lw.FlavourDir -ChildPath 'Wow.exe'
-            if (Test-Path -LiteralPath $wowExe) {
-                $sc2.IconLocation = $wowExe
-            } elseif (Test-Path -LiteralPath $iconIco) {
-                $sc2.IconLocation = $iconIco
-            }
-            $sc2.Save()
-            Write-Info "Created shortcut: $shortcutName"
-        }
     } catch {
-        Write-Warn2 "Could not create desktop shortcuts: $($_.Exception.Message)"
+        Write-Warn2 "Could not create the desktop shortcut: $($_.Exception.Message)"
     }
 } else {
-    Write-Info 'Skipped desktop shortcuts (-NoShortcuts).'
+    Write-Info 'Skipped desktop shortcut (-NoShortcuts).'
 }
 
 # =====================================================================

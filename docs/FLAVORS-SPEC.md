@@ -13,9 +13,8 @@ Authoritative design. Synthesized from three independent proposals (`switcher`, 
 3. **Zero data loss, and reversible.** Existing Retail users' `addons.json`/`state.json`/`backups\` migrate through a copy-first, atomic, idempotent, one-time step with a documented manual undo. Nothing is ever deleted.
 4. **Never hardcode a value that a game patch will make wrong.** Classic (`_classic_`) is a *rolling progression* client — its correct CurseForge `gameVersionTypeId` and Wago `game_version` change over time. Resolve them **dynamically** from the installed client's own Interface number via a small, appendable range table — never a single "current expansion" literal.
 5. **Explicit over implicit.** Every addon-scoped API call names its flavour via `?flavour=`. No server-side "current active flavour" global is ever load-bearing for a data operation — only for UI convenience (§5.1).
-6. **Honest about what actually works.** Retail's `--exec="launch WoW"` is proven reliable. Non-retail Battle.net launch codes are not proven reliable (community evidence: silent auto-launch is flaky for non-`battlenet`-client products). Say so in the UI rather than promising a "Play" that might not happen.
-7. **Hardcore and Anniversary are realms, not flavours.** They run inside `_classic_era_` — one folder, one client, one AddonSync subtree. They are explained in copy, never modeled as separate ids.
-8. **Read-only, generic detection.** Flavour presence is derived from what's actually on disk (`Interface\AddOns` existing under a known-or-plausible folder name) plus `.build.info` as corroboration, never from asking the user to configure anything, and never by assuming a flavour is or isn't installed.
+6. **Hardcore and Anniversary are realms, not flavours.** They run inside `_classic_era_` — one folder, one client, one AddonSync subtree. They are explained in copy, never modeled as separate ids.
+7. **Read-only, generic detection.** Flavour presence is derived from what's actually on disk (`Interface\AddOns` existing under a known-or-plausible folder name) plus `.build.info` as corroboration, never from asking the user to configure anything, and never by assuming a flavour is or isn't installed.
 
 ---
 
@@ -79,7 +78,6 @@ A folder under `<WowRoot>` that is **not** one of the six known names, but (a) c
 
 - **"Classic"** — never "Classic Progression," never the current expansion's name as the label. The label is stable across patches; a *subtitle* (switcher tooltip, About row, Settings folder row) may show the live era resolved via §2.4, e.g. "Classic — Mists of Pandaria," decorative only, never required for function.
 - **"Classic Era"** always carries the subtitle/tooltip **"Includes Hardcore & Anniversary realms"** wherever there's room for one (switcher tooltip, Settings folder list, first-run detection dialog) — never inline in the compact switcher pill itself (word budget). This is the one, sufficient answer to "how are Hardcore/Anniversary explained": they are realm rulesets inside Classic Era's single client/folder, not separate flavours anywhere in the data model, detection, or switcher. Furphy manages addons per **client**, matching Blizzard's own folder layout, never per **realm**.
-- Recon surfaced a possibly-distinct Battle.net product code, `wow_classic_anniversary` (community source, unconfirmed against a real install) — if real, it affects only the *launch* product code (§4.6), never the flavour/folder model; Anniversary stays inside `classic_era` for every addon-management purpose.
 
 ---
 
@@ -87,7 +85,7 @@ A folder under `<WowRoot>` that is **not** one of the six known names, but (a) c
 
 ### 3.1 File layout
 
-The app's home stays at `<WowRoot>\_retail_\AddonSync` for any machine with Retail — unchanged path, unchanged shortcuts, unchanged protocol-handler target. Two levels up is `<WowRoot>`, already the app's own reference point today. Per-flavour data nests one level deeper:
+The app's home stays at `<WowRoot>\_retail_\AddonSync` for any machine with Retail — unchanged path, unchanged shortcut, unchanged protocol-handler target. Two levels up is `<WowRoot>`, already the app's own reference point today. Per-flavour data nests one level deeper:
 
 ```
 <WowRoot>\_retail_\AddonSync\
@@ -134,7 +132,7 @@ Runs once at CLI/server startup, before any path resolution, as `Invoke-FlavourM
 
 ```json
 {
-  "...existing fields unchanged...": "releaseType, autoUpdateOnLaunch, port, adFilter, cfFocus, hostWindow, hostTheme",
+  "...existing fields unchanged...": "releaseType, port, adFilter, cfFocus, hostWindow, hostTheme",
   "schemaVersion": 2,
   "activeFlavour": "retail",
   "showTestRealms": false
@@ -235,20 +233,7 @@ Checks `$r.supported_<field>_patches` non-empty exactly as today's retail-only c
 
 **Verified Wago `game_version` values (live UI dropdown, 2026-09-04):** `retail` (Retail), `mop` (Mists Classic), `cata` (Cataclysm Classic), `wotlk` (Wrath Classic), `bc` (Burning Crusade Classic), `classic` (Classic Era). No separate Wago value exists for a hypothetical Titan Reforged track — not wired.
 
-### 4.7 `-Launcher` mode per flavour
-
-`-Launcher -Flavor <id>` resolves that flavour's addons path/state, runs its sync, then hands off to addon-server.ps1's job system (existing architecture) to trigger the matching Battle.net product code:
-
-**Battle.net `--exec="launch <code>"` product codes** (sourced from `.build.info`'s own `Product` column, which is the TACT product code, plus community launcher data for codes not locally confirmable):
-
-| Flavour | Code | Reliability |
-|---|---|---|
-| Retail | `WoW` | **Proven reliable** — this machine's `.build.info` confirms `Product=wow`; this is exactly what the app already does today via `--exec="launch WoW"` (`client=battlenet`-style call). |
-| Classic | `wow_classic` | **Not proven reliable.** Community source (bnetlauncher, MIT, actively maintained) documents this class of product (`client=battlenet2`) as needing a fragile simulated-click Play-button workaround — the plain `--exec=` call often just opens Battle.net to the right tab without starting the game. |
-| Classic Era | `wow_classic_era` | Same caveat as Classic. A possibly-distinct `wow_classic_anniversary` code was found in community data (unconfirmed against a real install) — hedge with a Settings override (§6.4), never a folder split. |
-| PTR | `wowt` | Same `battlenet2` caveat. |
-
-Ship the honest, simple `--exec="launch <code>"` call for every flavour (consistent, minimal code, and it's the correct call to attempt) but **never claim a silent launch succeeded for non-retail** — see §6.3 for the UI wording split this implies.
+(Round 34, 2026-09-07: section 4.7, "`-Launcher` mode per flavour" - the per-flavour `-Launcher` handoff to Battle.net and its product-code table - was removed at Eric's request along with the CLI's `-Launcher` mode entirely. See CHANGELOG.md. Nothing replaces it: the background service already updates every flavour on its own schedule, so a per-flavour launch handoff is no longer needed.)
 
 ---
 
@@ -332,7 +317,7 @@ A compact segmented pill row, mounted once, directly under the nav row (`My Addo
 - **Entirely absent from the DOM** (not `display:none` — principle 2) when `installedFlavours.length <= 1`. This machine's UI is byte-for-byte what it is today.
 - Each pill shows only its short label — no inline subtitle (word budget). Classic Era's "Includes Hardcore & Anniversary realms" is the pill's tooltip/`aria-label` only.
 - Clicking a pill re-requests `/api/state?flavour=<id>`, swaps `Store.state.addons`/`freshness`/etc., and persists the choice to `settings.json`'s `activeFlavour` (fire-and-forget PATCH, not blocking the switch) so a reload lands back on the same flavour.
-- Active pill uses the existing accent-vs-outline convention. The switcher's active pill and "Update & Play" may both be accent-colored simultaneously — a deliberate, called-out exception to the one-accent-thing-onscreen rule, since they're never confused for the same action.
+- Active pill uses a neutral `is-active` background/text treatment (`.flavour-pill.is-active`, `ui\style.css`), not the accent color. (Round 34, 2026-09-07: this originally called out an exception where the switcher's active pill and the sidebar's "Update & Play" button could both be accent-colored at once - moot now that "Update & Play" is gone entirely and nothing in the app is accent-colored any more, see CHANGELOG.md.)
 
 ### 6.2 Badges — About, Settings, Job panel
 
@@ -342,11 +327,11 @@ A compact segmented pill row, mounted once, directly under the nav row (`My Addo
 
 No addon **row** ever carries more than one status pill (UX-SPEC's existing hard rule, preserved exactly) — because each view is scoped to one flavour at a time (§5.1/§6.1), this is never in tension the way a cross-flavour joined-row design would be.
 
-### 6.3 Update & Play / Update All
+### 6.3 Update All
 
-- Single flavour (today): button text stays exactly **"Update & Play"** for Retail — zero copy change, and the toast stays **"Launching WoW…"** — zero copy change.
-- Multiple flavours: the per-flavour button becomes **"Update & Play [Label]"** for Retail (e.g. "Update & Play Retail") and **"Update & Open Battle.net [Label]"** for every non-retail flavour — a different verb, set once, reflecting §4.7's honest reliability caveat: never silently overpromise a launch community evidence says is flaky. Toast for non-retail: **"Addons updated. Check Battle.net — you may need to press Play."**
-- A separate, always-visible **"Update All"** button (only rendered when >1 flavour installed) fires `{kind: "update-all-flavours"}` (§5.4) — syncs every installed, non-hidden flavour, launches nothing. This is the one bulk convenience grafted from the `all-at-once` proposal: it answers "get both ready before I decide which to play" in one click, without introducing a cross-flavour launch (launching two WoW clients at once is a real thing a player might not want, so launch stays per-flavour and explicit).
+(Round 34, 2026-09-07: this section originally also specced a per-flavour "Update & Play"/"Update & Open Battle.net" sidebar button with a reliability-caveat-driven copy split between flavours - removed entirely at Eric's request along with every launch-WoW feature; see CHANGELOG.md. Nothing replaces it.)
+
+A separate, always-visible **"Update All"** button (only rendered when >1 flavour installed) fires `{kind: "update-all-flavours"}` (§5.4) — syncs every installed, non-hidden flavour, launches nothing. This is the one bulk convenience grafted from the `all-at-once` proposal: it answers "get every flavour's addons current in one click" without introducing a cross-flavour launch concept, since the background service (not this button) is what actually keeps addons updated.
 
 ### 6.4 Get New Addons
 
@@ -356,8 +341,7 @@ No addon **row** ever carries more than one status pill (UX-SPEC's existing hard
 
 ### 6.5 Settings — new fields
 
-- **"Show test realms (PTR/Beta)"** toggle (§2.5), off by default, no explainer sentence (label states its own effect).
-- **"Launch product code override"** (advanced, empty by default) — the hedge against the unconfirmed Anniversary/Classic-Era launch-code ambiguity (§2.7, §4.7); only relevant if "Update & Open Battle.net" opens the wrong product for a given account.
+- **"Show test realms (PTR/Beta)"** toggle (section 2.5), off by default, no explainer sentence (label states its own effect). (Round 34, 2026-09-07: this section originally also specced a "Launch product code override" advanced setting - removed along with section 4.7's `-Launcher` mode it hedged for; see CHANGELOG.md.)
 
 ### 6.6 Copy table
 
@@ -367,14 +351,8 @@ No addon **row** ever carries more than one status pill (UX-SPEC's existing hard
 | Switcher pill (Classic) | "Classic" |
 | Switcher pill (Classic Era) | "Classic Era" — tooltip: "Includes Hardcore & Anniversary realms" |
 | Switcher pill (PTR) | "PTR" |
-| Update & Play, retail (unchanged) | "Update & Play" |
-| Update & Play, multi-flavour, retail pill | "Update & Play Retail" |
-| Non-retail play button | "Update & Open Battle.net Classic" |
 | Bulk sync button | "Update All" |
-| Retail launch toast (unchanged) | "Launching WoW…" |
-| Non-retail launch toast | "Addons updated. Check Battle.net — you may need to press Play." |
 | Settings > Advanced toggle | "Show test realms (PTR/Beta)" |
-| Settings > Advanced, override field | "Launch product code override (advanced, leave blank unless Launch opens the wrong game)" |
 | Settings > Advanced > Game folders row | "Retail: `<path>` [ Open ]" (one row per installed flavour) |
 | About, per-flavour build row | "Retail — 12.1.0.69587" |
 | About, missing build info | "— version unknown (launch this client once)" |
@@ -387,7 +365,7 @@ No addon **row** ever carries more than one status pill (UX-SPEC's existing hard
 
 ---
 
-## 7. Launchers, installer, shortcuts
+## 7. Installer, shortcut
 
 ### 7.1 install.ps1
 
@@ -397,11 +375,7 @@ App install target: per §3.1, `_retail_\AddonSync` when Retail is present (upgr
 
 **"Adopt existing addon folders"** (L448-496) runs once per **installed** flavour, not just the app's home flavour — a first-time install on a Retail+Classic machine offers to take over both AddOns folders' existing contents in the same first-run flow, one dialog per flavour in sequence (independent yes/no decisions), extending the existing take-over dialog (UX-SPEC §2.4) rather than merging into one list.
 
-### 7.2 Shortcuts + Battle.net product codes
-
-One "Launch WoW (Updated)" shortcut **per installed, non-hidden flavour**:
-- Single flavour (today): filename/label unchanged — `"WoW (auto-update addons)"` / `Launch WoW (Updated).vbs` — zero visible change.
-- Multiple flavours: `"WoW - Retail (auto-update addons)"`, `"WoW - Classic (auto-update addons)"`, etc. Each generated `.cmd` carries that flavour's `-Flavor <id>` into `addon-sync.ps1 -Launcher` and §4.7's matching Battle.net product code, with the same honest non-retail toast wording (§6.3) baked into the generated script's own output.
+(Round 34, 2026-09-07: section 7.2, "Shortcuts + Battle.net product codes" - the per-flavour "Launch WoW (Updated)" launcher-pair/shortcut scheme this doc originally specced here - was removed entirely at Eric's request; see CHANGELOG.md. install.ps1 creates exactly one Desktop shortcut regardless of flavour count, "Furphy Addon Manager.lnk" - see SPEC.md's own install.ps1 section.)
 
 ### 7.3 register-protocol.ps1
 
@@ -496,13 +470,13 @@ us|1|00000000000000000000000000000000|00000000000000000000000000000000|000000000
 
 ### CS-F4 — UI switcher + per-flavour views
 **Files:** `ui/app.js`, `ui/index.html`.
-- Switcher component (§6.1), entirely absent below 2 flavours; Update & Play / Update All (§6.3); Wago `game_version` param (§6.4); Settings folder list + About list (§6.2, §6.5); job-panel flavour badge; "Retail Patches" → "Patches" rename; install-flavour picker modal (§5.5/§6.4).
+- Switcher component (§6.1), entirely absent below 2 flavours; Update All (§6.3); Wago `game_version` param (§6.4); Settings folder list + About list (§6.2, §6.5); job-panel flavour badge; "Retail Patches" → "Patches" rename; install-flavour picker modal (§5.5/§6.4).
 - **Verify:** the `?mock=1` DOM-absence check and pill-switch check in §8.
 
-### CS-F5 — Installer + launchers
-**Files:** `install.ps1`, generated launcher `.cmd`/`.vbs` templates.
-- `Find-WowRoot` generalization (§7.1), per-flavour app-home selection, per-flavour "adopt existing folders" loop, per-flavour shortcut generation with honest non-retail launch wording (§7.2).
-- **Verify:** the `install.ps1`-against-no-`_retail_`-fixture check in §8; confirm shortcut count/labels/`-Flavor`/product-code correctness when all four fixture flavours are present (PTR excluded by default).
+### CS-F5 — Installer
+**Files:** `install.ps1`.
+- `Find-WowRoot` generalization (section 7.1), per-flavour app-home selection, per-flavour "adopt existing folders" loop. (Round 34, 2026-09-07: this change set originally also specced per-flavour shortcut/launcher-pair generation with honest non-retail launch wording (section 7.2) - removed at Eric's request along with every launch-WoW feature; see CHANGELOG.md. install.ps1 creates exactly one Desktop shortcut regardless of flavour count.)
+- **Verify:** the `install.ps1`-against-no-`_retail_`-fixture check in §8; confirm the app-home/adopt logic is correct when all four fixture flavours are present (PTR excluded by default).
 
 ### CS-F6 — Tray sync-all
 **Files:** wherever the tray updater lands once built (not present in this codebase snapshot — this change set is written against §5.6's contract, to be picked up when that feature starts).
@@ -510,7 +484,7 @@ us|1|00000000000000000000000000000000|00000000000000000000000000000000|000000000
 
 ### CS-F7 — Fixture + doc updates
 **Files:** new `test-fixtures\SyntheticWow\` tree in the build root; `SPEC.md`, `CHANGELOG.md`.
-- Build exactly the §8 tree; add a CHANGELOG.md round entry documenting the migration behavior, the rollback path (§3.3 point 7), and the non-retail launch-reliability caveat (§4.7) so neither is silently forgotten.
+- Build exactly the section 8 tree; add a CHANGELOG.md round entry documenting the migration behavior and the rollback path (section 3.3 point 7) so neither is silently forgotten. (Round 34, 2026-09-07: this bullet originally also called for documenting the non-retail launch-reliability caveat from section 4.7 - moot, that section was removed along with `-Launcher` itself; see CHANGELOG.md.)
 - **Verify:** every checkbox in §8 passes against the checked-in fixture; this becomes the standing regression check for every later change set touching flavour code.
 
 ---
@@ -523,7 +497,7 @@ Everything in UX-SPEC §9, plus, explicitly, for this feature:
 - Single tray mutex, single tray settings block (`backgroundUpdates`/`backgroundIntervalMinutes`/`runAtStartup` stay global, never per-flavour).
 - Single theme, single native host, single `FurphyHost.cs`.
 - `addons.json`/`state.json` record schema — no new fields on individual records (§3.2); flavour scoping is by folder location only.
-- Existing Retail-only shortcuts, launcher filenames, and toast wording (`"Launching WoW…"`) — byte-identical when `installedFlavours.length == 1`.
+- (Round 34, 2026-09-07: this bullet originally asserted the existing Retail-only shortcut/launcher filenames and toast wording stayed byte-identical at `installedFlavours.length == 1` - moot now that no launcher files or launch toasts exist at any flavour count; see CHANGELOG.md. `install.ps1` still creates exactly one Desktop shortcut, `Furphy Addon Manager.lnk`, regardless of flavour count.)
 - Existing `-Flavor`-omitted CLI invocations (scheduled tasks, manual scripts) — default to `retail`, unchanged output.
 - The one-status-pill-per-row UX rule — never violated by this design, because every view is scoped to one flavour at a time; no cross-flavour joined row is introduced.
 - No file outside `flavours\` is ever deleted during migration; the pre-move backup copy (§3.3) is never auto-deleted.

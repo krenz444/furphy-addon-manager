@@ -1187,7 +1187,6 @@ function Clear-CurrentJobIfMatches {
 function Get-DefaultSettings {
     return [PSCustomObject]@{
         releaseType        = 1
-        autoUpdateOnLaunch = $true
         port               = 47831
         # E19: adFilter is the native host's (host\FurphyHost.exe) CurseForge-
         # tab ad/tracker filter toggle. Originally OFF by default per Eric's
@@ -1293,7 +1292,6 @@ function Get-Settings {
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $result = Get-DefaultSettings
         if ($null -ne $obj.releaseType) { $result.releaseType = [int]$obj.releaseType }
-        if ($null -ne $obj.autoUpdateOnLaunch) { $result.autoUpdateOnLaunch = [bool]$obj.autoUpdateOnLaunch }
         if ($null -ne $obj.port) { $result.port = [int]$obj.port }
         # E19: adFilter/hostWindow - see Get-DefaultSettings. hostWindow is
         # copied through as whatever object shape is on disk (the host owns
@@ -1353,6 +1351,23 @@ function Get-Settings {
                 Write-ServerLog "Failed to rewrite settings.json while dropping legacy cfApiKey: $($_.Exception.Message)"
             }
         }
+        # Round 34 (2026-09-06, at Eric's explicit request): the "launch WoW"
+        # feature (and its "update addons before WoW starts" setting) is
+        # removed entirely - the background service already covers updates.
+        # Same drop-on-read pattern as the cfApiKey migration just above:
+        # $result (built from Get-DefaultSettings, which no longer has this
+        # property) never copies a stale autoUpdateOnLaunch value over, so
+        # it's already gone from the in-memory object; this just also
+        # rewrites the file on disk so it stops sitting there for good.
+        $legacyAutoUpdateProp = Get-Member -InputObject $obj -Name 'autoUpdateOnLaunch' -MemberType NoteProperty -ErrorAction SilentlyContinue
+        if ($null -ne $legacyAutoUpdateProp) {
+            try {
+                Save-Settings -Settings $result
+                Write-ServerLog 'Removed legacy autoUpdateOnLaunch from settings.json (launch-WoW feature removed 2026-09-06).'
+            } catch {
+                Write-ServerLog "Failed to rewrite settings.json while dropping legacy autoUpdateOnLaunch: $($_.Exception.Message)"
+            }
+        }
         return $result
     } catch {
         Write-ServerLog "Failed to read settings.json, using defaults: $($_.Exception.Message)"
@@ -1371,7 +1386,6 @@ function Get-SettingsView {
 
     return [PSCustomObject]@{
         releaseType        = $Settings.releaseType
-        autoUpdateOnLaunch = $Settings.autoUpdateOnLaunch
         port               = $Script:Port
         addonsPath         = (Resolve-EffectiveAddonsPath)
         wowRoot            = (Get-WowRootPath)
@@ -2258,7 +2272,7 @@ function Start-Job {
       S5.4's job.flavour field). Returns a hashtable:
         Busy  = $true  -> a job is already running for that flavour (Job holds it)
         Error = <text> -> could not start (bad params, process launch failed)
-        Job   = <job>  -> started (or, for launch/no-update, already finished)
+        Job   = <job>  -> started (or, for a job with nothing to do, already finished)
     #>
     param(
         [string]$Kind,
@@ -2291,50 +2305,6 @@ function Start-Job {
 
     $jobId = New-JobId
     $startedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-
-    # launch with updateFirst=false needs no CLI process: just start the game.
-    $updateFirst = [bool]($Params -and $Params.updateFirst)
-    if ($Kind -eq 'launch' -and (-not $updateFirst)) {
-        $job = [PSCustomObject]@{
-            id            = $jobId
-            kind          = 'launch'
-            params        = $Params
-            state         = 'running'
-            startedAt     = $startedAt
-            finishedAt    = $null
-            exitCode      = $null
-            log           = New-Object 'System.Collections.Generic.List[object]'
-            results       = New-Object 'System.Collections.Generic.List[object]'
-            error         = $null
-            # FLAVORS-SPEC.md CS-F2 S5.4: every job carries its own flavour.
-            flavour       = $Flavor
-            Process       = $null
-            OutFile       = $null
-            ErrFile       = $null
-            SyncLogOffset = 0
-            LaunchAfter   = $false
-        }
-        Add-JobToHistory -Job $job
-        Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
-        try {
-            Start-Process -FilePath 'C:\Program Files (x86)\Battle.net\Battle.net.exe' -ArgumentList '--exec="launch WoW"' | Out-Null
-            $job.results.Add([PSCustomObject]@{ status = 'Launched'; name = 'World of Warcraft' })
-            $job.state = 'done'
-            $job.exitCode = 0
-        } catch {
-            $job.state = 'failed'
-            $job.error = $_.Exception.Message
-        }
-        $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        Set-CurrentJobForFlavour -Flavor $Flavor -Job $null
-        # Round 3: this synchronous launch-without-update path completes
-        # entirely within this function and never goes through
-        # Update-JobStatus (there is no CLI child process behind it, so
-        # nothing to poll/tail), so it needs its own persistence call to
-        # land in state.json's job history like every other finished job.
-        Save-CheckState
-        return @{ Busy = $false; Job = $job }
-    }
 
     # E4: import can take anywhere from zero to several addon-sync.ps1
     # invocations chained in sequence (see Build-ImportPlan) rather than the
@@ -2391,7 +2361,6 @@ function Start-Job {
                 OutFile       = $null
                 ErrFile       = $null
                 SyncLogOffset = 0
-                LaunchAfter   = $false
             }
             Add-JobToHistory -Job $job
             Save-CheckState
@@ -2472,7 +2441,6 @@ function Start-Job {
                             OutFile       = $null
                             ErrFile       = $null
                             SyncLogOffset = 0
-                            LaunchAfter   = $false
                         }
                         Add-JobToHistory -Job $zeroJob
                         Save-CheckState
@@ -2517,7 +2485,6 @@ function Start-Job {
                             OutFile       = $null
                             ErrFile       = $null
                             SyncLogOffset = 0
-                            LaunchAfter   = $false
                         }
                         Add-JobToHistory -Job $askJob
                         Save-CheckState
@@ -2541,11 +2508,6 @@ function Start-Job {
     }
 
     $cliKind = $Kind
-    $launchAfter = $false
-    if ($Kind -eq 'launch') {
-        $cliKind = 'sync'
-        $launchAfter = $true
-    }
 
     # E12: a NEW Wago add/install (no existing record yet, so no projectId-
     # equivalent key to reuse) is posted as {source:'wago', slug, fileId?}
@@ -2581,8 +2543,7 @@ function Start-Job {
     }
 
     # CS1: -ProgressPath is threaded only for the job kinds UX-SPEC.md
-    # section 4.2 names (sync/check/add/install - $cliKind is already 'sync'
-    # for a launch-with-update, which counts). remove/rollback and the
+    # section 4.2 names (sync/check/add/install). remove/rollback and the
     # multi-phase import/switch-source kinds (built by their own Start-*Job
     # helpers, never reaching this single-phase path) get no progress file -
     # Update-JobStatus's read is likewise gated on $Job.ProgressPath being set.
@@ -2621,7 +2582,6 @@ function Start-Job {
         OutFile       = $outFile
         ErrFile       = $errFile
         SyncLogOffset = $syncLogOffset
-        LaunchAfter   = $launchAfter
         # CS1: $null for every job kind that gets no -ProgressPath (see
         # above) - Update-JobStatus's best-effort read no-ops on a falsy
         # ProgressPath exactly like Write-ProgressStep itself does CLI-side.
@@ -2864,7 +2824,6 @@ function Start-ImportJob {
         OutFile       = $null
         ErrFile       = $null
         SyncLogOffset = 0
-        LaunchAfter   = $false
         Phases        = $plan.Phases
         PhaseIndex    = -1
     }
@@ -2873,8 +2832,7 @@ function Start-ImportJob {
     if ($job.Phases.Count -eq 0) {
         # Every imported addon was already present with no pinnedFileId/
         # ignoreUpdates to (re)apply - SkipRows above already covered every
-        # row, so there is no CLI process to run at all (same immediate-
-        # finish shape as the launch-without-updateFirst case above).
+        # row, so there is no CLI process to run at all: finish immediately.
         $job.state = 'done'
         $job.exitCode = 0
         $job.finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -3101,7 +3059,6 @@ function Load-CheckState {
                     OutFile       = $null
                     ErrFile       = $null
                     SyncLogOffset = 0
-                    LaunchAfter   = $false
                     # E4: a reloaded job's saved state is never 'running'
                     # (the block above forces that), so Phases/PhaseIndex are
                     # never read for one - present here only so every Job
@@ -3190,8 +3147,8 @@ function Apply-JobCompletionSideEffects {
 
       Review fix (post-CS6): the failure branch only records
       LastCheckFailed/LastCheckError for the kinds that actually touch
-      CurseForge/Wago (the same 'sync','check','add','install','launch'
-      list Get-ComputedFreshness's own 'checking' condition already uses)
+      CurseForge/Wago (the same 'sync','check','add','install' list
+      Get-ComputedFreshness's own 'checking' condition already uses)
       - a failed 'remove'/'rollback'/other job no longer flips the
       app-wide freshness headline to "Couldn't check - Retry", since that
       headline's own Retry action only re-runs a check and has nothing to
@@ -3210,7 +3167,7 @@ function Apply-JobCompletionSideEffects {
     if (-not $flavor) { $flavor = 'retail' }
 
     if ($Job.state -eq 'failed') {
-        if (@('sync', 'check', 'add', 'install', 'launch') -contains $Job.kind) {
+        if (@('sync', 'check', 'add', 'install') -contains $Job.kind) {
             $Script:LastCheckFailedByFlavour[$flavor] = $true
             $errMsg = $Job.error
             if (-not $errMsg) { $errMsg = 'Unknown error' }
@@ -3474,7 +3431,6 @@ function Start-SwitchSourceJob {
         OutFile       = $null
         ErrFile       = $null
         SyncLogOffset = 0
-        LaunchAfter   = $false
         Phases        = $phases
         PhaseIndex    = -1
     }
@@ -3761,15 +3717,6 @@ function Update-JobStatus {
         $Job.state = 'done'
 
         Apply-JobCompletionSideEffects -Job $Job -Parsed $parsed
-
-        if ($Job.LaunchAfter) {
-            $Job.results.Add([PSCustomObject]@{ status = 'Launched'; name = 'World of Warcraft' })
-            try {
-                Start-Process -FilePath 'C:\Program Files (x86)\Battle.net\Battle.net.exe' -ArgumentList '--exec="launch WoW"' | Out-Null
-            } catch {
-                $Job.error = "Sync completed but failed to launch WoW: $($_.Exception.Message)"
-            }
-        }
     } else {
         $Job.state = 'failed'
         $errMsg = $stderr
@@ -3958,7 +3905,7 @@ function Get-ComputedFreshness {
     if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
     if (-not $Flavor) { $Flavor = 'retail' }
 
-    if ($CurrentJobView -and $CurrentJobView.state -eq 'running' -and (@('sync', 'check', 'add', 'install', 'launch') -contains $CurrentJobView.kind)) {
+    if ($CurrentJobView -and $CurrentJobView.state -eq 'running' -and (@('sync', 'check', 'add', 'install') -contains $CurrentJobView.kind)) {
         return 'checking'
     }
     if (Get-FlavourLastCheckFailed -Flavor $Flavor) {
@@ -5501,8 +5448,8 @@ function Test-DiagLastSync {
     <#
       Timestamp of the most recent completed sync, read from last-run.txt's
       own mtime (written by addon-sync.ps1 on every non-DryRun run, whether
-      launched through this server or the desktop shortcut's -Launcher path)
-      - a more universal signal than $Script:LastRun, which only ever
+      run through this server or manually) - a more universal signal than
+      $Script:LastRun, which only ever
       reflects a job run through THIS server instance. Falls back to
       $Script:LastRun.timestamp (in-memory, or reloaded from state.json at
       startup) when last-run.txt is not there yet, then to "never".
@@ -5800,7 +5747,7 @@ function Handle-JobsPost {
     }
 
     $kind = [string]$body.kind
-    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'launch', 'rollback', 'switch-source', 'add-by-slug', 'update-all-flavours')
+    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'rollback', 'switch-source', 'add-by-slug', 'update-all-flavours')
     if (-not ($validKinds -contains $kind)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: unknown kind '$kind'" }
         return
@@ -6280,9 +6227,6 @@ function Handle-SettingsPut {
             return
         }
         $settings.releaseType = $rt
-    }
-    if ($null -ne $body.autoUpdateOnLaunch) {
-        $settings.autoUpdateOnLaunch = ConvertTo-SettingsBool $body.autoUpdateOnLaunch
     }
     if ($null -ne $body.port) {
         # Round 20: same guarded-cast treatment as releaseType above.
@@ -7546,7 +7490,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.14.0'
+$Script:Version = '1.15.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

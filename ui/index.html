@@ -583,11 +583,6 @@
     </div>
 
     <div class="sidebar-bottom">
-      <button type="button" id="btn-update-play" class="btn btn-accent btn-block btn-lg">
-        <svg class="icon"><use href="#icon-play"></use></svg>
-        <span>Update &amp; Play</span>
-      </button>
-      <button type="button" id="btn-launch-wow" class="btn btn-ghost btn-block">Launch WoW</button>
       <!-- CS2 (UX-SPEC.md sections 1.1/2.1): the freshness headline (one of
            its two mounts - the other is atop My Addons) and the connectivity
            dot are two SEPARATE facts, no longer folded into one status-line
@@ -623,7 +618,9 @@
             <span>Check now</span>
           </button>
           <!-- CS2 (UX-SPEC.md sections 1.4/2.3): outline-styled, not accent -
-               "Update & Play" (sidebar) is the only accent button in the app. -->
+               Round 34 removed the sidebar's Update & Play button, so nothing
+               in the app is accent-colored any more; every action here stays
+               outline/ghost. -->
           <button type="button" id="btn-update-all" class="btn btn-outline">Update all</button>
           <button type="button" id="btn-add-addon" class="btn btn-outline">
             <svg class="icon"><use href="#icon-plus"></use></svg>
@@ -688,10 +685,9 @@
             <svg class="icon empty-icon"><use href="#icon-inbox"></use></svg>
             <h3>No addons yet</h3>
             <p>Add one by name, link, or ID.</p>
-            <!-- Review fix: was btn-accent, colliding with the persistent
-                 sidebar "Update & Play" CTA (#btn-update-play, itself never
-                 hidden at zero addons) - principle 4 (UX-SPEC.md section 1)
-                 says only that one button is ever accent-colored. -->
+            <!-- Review fix: was btn-accent. Round 34 removed the sidebar's
+                 Update & Play CTA entirely, so nothing in the app is
+                 accent-colored any more; these stay outline. -->
             <div class="empty-actions">
               <button type="button" class="btn btn-outline" id="myaddons-empty-add">Add addon</button>
               <button type="button" class="btn btn-outline" id="myaddons-empty-browse">Get new addons</button>
@@ -850,26 +846,6 @@
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-beta">
-                <span class="switch-track"><span class="switch-thumb"></span></span>
-              </label>
-            </div>
-            <!-- Round 17, Eric: "explain in the app how auto-update when
-                 launching wow works, note if it works or not by running wow
-                 without using the app at all" - a deliberate, requested
-                 exception to this group's zero-prose rule (UX-SPEC.md 6.1).
-                 Verified fact: this setting only gates the updater run
-                 Furphy's own launch chain performs (the "WoW (auto-update
-                 addons)" shortcut and Update & Play); Battle.net, WoW's own
-                 shortcut and Wow.exe itself run nothing - no hook, watcher
-                 or scheduled task exists outside Furphy's launch chain. -->
-            <div class="settings-row">
-              <div class="settings-row-text">
-                <div class="settings-row-label">Update addons before WoW starts</div>
-                <p class="muted-text">Runs when you start the game with the WoW (auto-update addons) shortcut or Update &amp; Play.</p>
-                <p class="muted-text">Starting WoW from Battle.net or its own shortcut skips the update.</p>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="toggle-autoupdate">
                 <span class="switch-track"><span class="switch-thumb"></span></span>
               </label>
             </div>
@@ -1245,8 +1221,8 @@
     <p class="form-msg" id="add-addon-error" hidden></p>
     <div class="dialog-footer">
       <button type="button" class="btn btn-ghost" id="add-addon-cancel">Cancel</button>
-      <!-- Review fix: was btn-accent, colliding with the sidebar's
-           persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+      <!-- Review fix: was btn-accent. Round 34 removed the sidebar's accent
+           CTA entirely, so nothing in the app is accent-colored any more. -->
       <button type="submit" class="btn btn-outline" id="add-addon-submit">Add</button>
     </div>
   </form>
@@ -1275,8 +1251,8 @@
   </div>
   <div class="dialog-footer">
     <button type="button" class="btn btn-ghost" id="welcome-skip">Skip</button>
-    <!-- Review fix: was btn-accent, colliding with the sidebar's
-         persistent "Update & Play" accent button (UX-SPEC.md 1/2.3). -->
+    <!-- Review fix: was btn-accent. Round 34 removed the sidebar's accent
+         CTA entirely, so nothing in the app is accent-colored any more. -->
     <button type="button" class="btn btn-outline" id="welcome-adopt">Take over all</button>
   </div>
 </div>

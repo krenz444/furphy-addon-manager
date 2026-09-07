@@ -3,9 +3,9 @@
  addon-sync.ps1
 
  Keeps World of Warcraft retail addons updated from CurseForge.
- Designed to run headless / hidden from a launcher before the game
- starts. Windows PowerShell 5.1 only. No modules, no external
- binaries, pure ASCII.
+ Designed to run headless / hidden, driven by the background service
+ or a manual sync. Windows PowerShell 5.1 only. No modules, no
+ external binaries, pure ASCII.
 
  LAYOUT (relative to the folder this script lives in):
    addon-sync.ps1   this script
@@ -20,7 +20,7 @@
    addon-sync.ps1 [-AddonsPath <path>] [-Add <id[]>] [-Remove <name-or-id[]>]
                   [-Status] [-Force] [-DryRun] [-Quiet] [-Only <id[]>]
                   [-FileId <id>] [-Unpin <id[]>] [-Ignore <id[]>]
-                  [-Unignore <id[]>] [-Files <id>] [-Scan] [-Json] [-Launcher]
+                  [-Unignore <id[]>] [-Files <id>] [-Scan] [-Json]
                   [-Rollback <id[]>] [-BuildInfoPath <path>]
 
    No switches            Sync every addon recorded in addons.json.
@@ -41,8 +41,10 @@
    -DryRun                Check CurseForge and report what would change.
                            Makes no downloads and no disk writes (sync.log
                            excepted).
-   -Quiet                 Suppress all console output. Used by the game
-                           launcher; everything still goes to sync.log.
+   -Quiet                 Suppress all console output. Used by non-
+                           interactive callers (the background service, a
+                           server-spawned job); everything still goes to
+                           sync.log.
    -Only <id> [<id> ...]  Restrict this sync (or -Force reinstall) to these
                            CurseForge project ids.
    -FileId <id>           Requires exactly one id in -Only or -Add; installs
@@ -57,18 +59,6 @@
                             record. No config change.
    -Json                   Machine-readable mode: print exactly one JSON
                             document to stdout and nothing else.
-   -Launcher                Launcher mode: reads settings.json and skips
-                            the sync (exit 0, no network) when
-                            autoUpdateOnLaunch is false; otherwise behaves
-                            like a normal sync. P1 perf pass: also skips the
-                            sync (exit 0, no network) when ROOT\state.json
-                            records this flavour's addons as checked within
-                            the last 10 minutes, and never lets the whole
-                            run take more than ~40 seconds wall-clock -
-                            once that budget is spent, remaining addons are
-                            reported Skipped (logged by name) rather than
-                            checked, so the game is never held up more than
-                            the task brief's 45-second cap.
    -LowPriority             Lowers this process's own scheduling priority
                             (BelowNormal) and opts into EcoQoS, the same
                             defense-in-depth addon-server.ps1 always applies
@@ -76,8 +66,8 @@
                             never competes with a foreground game for CPU.
                             Applied automatically (no need to pass this)
                             whenever -Json or -Quiet is set, since every
-                            non-interactive caller (a server-spawned job,
-                            the launcher chain) already passes one of those.
+                            non-interactive caller (a server-spawned job)
+                            already passes one of those.
    -Rollback <id> [<id> ...]  For each project id, reinstalls from the
                             locally archived zip of the version it was on
                             before its last update (ROOT\backups\<id>\
@@ -141,7 +131,7 @@
 
  EXIT CODES:
    0   Sync/Add/Remove/Status completed (individual addons may have failed;
-       the launcher should still start the game).
+       see the per-addon results for details).
    2   Unusable configuration: addons.json could not be parsed, or the
        AddOns path is missing/unresolvable.
 =====================================================================
@@ -163,7 +153,6 @@ param(
     [string]$Files,
     [switch]$Scan,
     [switch]$Json,
-    [switch]$Launcher,
     [switch]$LowPriority,
     [string[]]$Rollback,
     [string]$BuildInfoPath,
@@ -196,12 +185,11 @@ $script:CfUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537
 # $script:CfBaseUrl/$script:WagoBaseUrl rather than a literal host, so one
 # override point covers all of them. TEST-ONLY: nothing else in this file,
 # addon-server.ps1, or the real app ever sets these two variables - a real
-# user's launch always resolves to the real hosts below. This exists so an
+# user's run always resolves to the real hosts below. This exists so an
 # integration test can point both hosts at a local black-hole listener
-# (accepts a connection, never responds) and prove the -Launcher wall-clock
-# budget cap (Test-LauncherBudgetExceeded) actually bounds a real launch
-# chain even when every HTTP call would otherwise hang for its own
-# -TimeoutSec. An empty/whitespace-only value is treated the same as unset
+# (accepts a connection, never responds) and prove a sync run's own
+# -TimeoutSec actually bounds each HTTP call rather than hanging forever.
+# An empty/whitespace-only value is treated the same as unset
 # (falls back to the real host) - see the "ignored when empty" unit test in
 # tests\unit\Cli.BaseUrlOverride.Tests.ps1.
 $script:CfBaseUrl = 'https://www.curseforge.com'
@@ -306,8 +294,8 @@ function Write-Log {
 # this codebase's established pattern for shared logic between the two
 # scripts - see e.g. Invoke-FlavourMigration's own doc comment) - lowers
 # this process's scheduling priority/QoS so a background sync (a
-# server-spawned job, the tray's scheduled cycle, the launcher chain) never
-# competes with a foreground game for CPU. Best-effort throughout.
+# server-spawned job, the tray's scheduled cycle) never competes with a
+# foreground game for CPU. Best-effort throughout.
 function Set-FurphyLowPriority {
     try {
         [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
@@ -398,7 +386,7 @@ function Update-ProgressTallies {
          Skipped). Always increments checked (an addon finished, one way or
          another); Up-to-date also increments upToDate, Installed/Updated
          also increments updated, Failed also increments failed. Skipped
-         (launcher-budget skip) and anything else increments checked only.
+         and anything else increments checked only.
     #>
     param(
         [Parameter(Mandatory = $true)][hashtable]$Tallies,
@@ -670,10 +658,7 @@ function Invoke-CfRequest {
         $attempt++
         $shouldRetry = $false
         $lastError = $null
-        # Round 26 hardening: recomputed every attempt (not hoisted above
-        # the loop) so a retry after the 5s 429/403 backoff below still
-        # gets a freshly-shrunk value in -Launcher mode.
-        $timeoutSec = Get-LauncherAwareTimeoutSec -DefaultTimeoutSec 30
+        $timeoutSec = 30
         try {
             if ($OutFile) {
                 Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
@@ -929,10 +914,7 @@ function Invoke-WagoRequest {
         $attempt++
         $shouldRetry = $false
         $lastError = $null
-        # Round 26 hardening: see the matching comment in Invoke-CfRequest
-        # above - recomputed every attempt so a retry after the 5s 429/503
-        # backoff below still gets a freshly-shrunk value in -Launcher mode.
-        $timeoutSec = Get-LauncherAwareTimeoutSec -DefaultTimeoutSec 30
+        $timeoutSec = 30
         try {
             if ($OutFile) {
                 Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
@@ -2858,9 +2840,8 @@ function Get-Settings {
     )
 
     $defaults = [PSCustomObject]@{
-        releaseType        = 1
-        autoUpdateOnLaunch = $true
-        port               = 47831
+        releaseType = 1
+        port        = 47831
     }
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -2882,15 +2863,11 @@ function Get-Settings {
         $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
 
         $result = [PSCustomObject]@{
-            releaseType        = $defaults.releaseType
-            autoUpdateOnLaunch = $defaults.autoUpdateOnLaunch
-            port               = $defaults.port
+            releaseType = $defaults.releaseType
+            port        = $defaults.port
         }
         if ($null -ne $parsed.releaseType) {
             $result.releaseType = [int]$parsed.releaseType
-        }
-        if ($null -ne $parsed.autoUpdateOnLaunch) {
-            $result.autoUpdateOnLaunch = [bool]$parsed.autoUpdateOnLaunch
         }
         if ($null -ne $parsed.port) {
             $result.port = [int]$parsed.port
@@ -2917,177 +2894,6 @@ function Get-EffectiveMaxReleaseType {
         }
     }
     return $DefaultMax
-}
-
-function Get-StateUpdatesCheckedAtMinutesAgo {
-    <#
-      P1 perf pass (item 5, launch-chain cap): read-only lookup of "how many
-      minutes ago was this flavour's updatesCheckedAt", from the SHARED
-      ROOT\state.json addon-server.ps1 writes (see that script's
-      Save-CheckState/Load-CheckState) - never written by this script.
-      Returns $null when the file is missing/corrupt/has no usable
-      timestamp for this flavour (an unresolvable "never checked" answer
-      must never be mistaken for "just checked"). Tolerates both the
-      current per-flavour object shape ({retail: "...", classic: "..."})
-      and the pre-flavour flat-string shape (a bare ISO string, treated as
-      the 'retail' bucket) the same way Load-CheckState does. Never throws.
-    #>
-    param(
-        [Parameter(Mandatory = $true)][string]$RootPath,
-        [Parameter(Mandatory = $true)][string]$Flavor
-    )
-
-    $statePath = Join-Path -Path $RootPath -ChildPath 'state.json'
-    if (-not (Test-Path -LiteralPath $statePath)) { return $null }
-    try {
-        $raw = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop
-        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
-        if ($null -eq $obj.updatesCheckedAt) { return $null }
-
-        $iso = $null
-        if ($obj.updatesCheckedAt -is [string]) {
-            if ($Flavor -eq 'retail') { $iso = [string]$obj.updatesCheckedAt }
-        } else {
-            foreach ($p in $obj.updatesCheckedAt.PSObject.Properties) {
-                if ($p.Name -eq $Flavor) { $iso = [string]$p.Value; break }
-            }
-        }
-        if ([string]::IsNullOrWhiteSpace($iso)) { return $null }
-
-        $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
-        $checkedAt = [DateTime]::Parse($iso, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
-        return ((Get-Date).ToUniversalTime() - $checkedAt).TotalMinutes
-    } catch {
-        return $null
-    }
-}
-
-function Save-LauncherUpdatesCheckedAt {
-    <#
-      P1 perf pass follow-up: addon-sync.ps1 previously never wrote the
-      shared updatesCheckedAt timestamp it reads (Get-Stat-
-      eUpdatesCheckedAtMinutesAgo above) - only addon-server.ps1's
-      Complete-Job did, so a plain -Launcher run (no tray/server involved)
-      got no skip protection on a second launch seconds later, contradicting
-      the 10-minute-skip feature's own documented "checked by ANY means"
-      justification. This stamps THIS flavour's bucket with the current UTC
-      time, read-merge-write against ROOT\state.json so every other field
-      addon-server.ps1 owns (updateAvailable/lastRun/jobs/
-      wagoInertiaVersion) survives untouched - a concurrent server write
-      lost to this last-writer-wins race is the same accepted risk
-      Save-Config already carries for addons.json. Tolerates both the
-      current per-flavour object shape and the pre-flavour flat-string
-      shape (upgrades it to a per-flavour object, preserving the old value
-      under 'retail') the same way Load-CheckState does. Best-effort: a
-      write failure is logged, never thrown - this must not turn a
-      completed -Launcher sync into a launch failure.
-    #>
-    param(
-        [Parameter(Mandatory = $true)][string]$RootPath,
-        [Parameter(Mandatory = $true)][string]$Flavor
-    )
-
-    $statePath = Join-Path -Path $RootPath -ChildPath 'state.json'
-    try {
-        $obj = $null
-        if (Test-Path -LiteralPath $statePath) {
-            $raw = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop
-            if (-not [string]::IsNullOrWhiteSpace($raw)) {
-                $obj = $raw | ConvertFrom-Json -ErrorAction Stop
-            }
-        }
-        if (-not $obj) {
-            $obj = [PSCustomObject]@{}
-        }
-
-        $map = @{}
-        if ($null -ne $obj.updatesCheckedAt) {
-            if ($obj.updatesCheckedAt -is [string]) {
-                $map['retail'] = [string]$obj.updatesCheckedAt
-            } else {
-                foreach ($p in $obj.updatesCheckedAt.PSObject.Properties) {
-                    $map[$p.Name] = [string]$p.Value
-                }
-            }
-        }
-        $map[$Flavor] = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-
-        if (Get-Member -InputObject $obj -Name 'updatesCheckedAt' -MemberType NoteProperty) {
-            $obj.updatesCheckedAt = $map
-        } else {
-            $obj | Add-Member -MemberType NoteProperty -Name 'updatesCheckedAt' -Value $map
-        }
-
-        $json = ConvertTo-Json -InputObject $obj -Depth 8
-        $tmpPath = "$statePath.tmp"
-        $encoding = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
-        Move-Item -LiteralPath $tmpPath -Destination $statePath -Force
-    } catch {
-        Write-Log -Level 'WARN' -Message "Failed to persist updatesCheckedAt to state.json: $($_.Exception.Message)"
-    }
-}
-
-function Test-LauncherBudgetExceeded {
-    <#
-      P1 perf pass (item 5, launch-chain cap): pure, deterministic core of
-      the -Launcher wall-clock budget check - true once -Now is at least
-      -BudgetSeconds past -StartTime. Kept as its own small function
-      (rather than inlined into the per-addon loop) specifically so it can
-      be unit tested with synthetic timestamps instead of a real 40-second
-      wait.
-    #>
-    param(
-        [Parameter(Mandatory = $true)][DateTime]$StartTime,
-        [Parameter(Mandatory = $true)][int]$BudgetSeconds,
-        [DateTime]$Now = (Get-Date)
-    )
-
-    return (($Now - $StartTime).TotalSeconds -ge $BudgetSeconds)
-}
-
-function Get-LauncherAwareTimeoutSec {
-    <#
-      Round 26 hardening (review finding: "Launcher wall-clock budget can
-      still exceed 45s with 2+ slow CurseForge-sourced addons"): the
-      per-addon loop's Test-LauncherBudgetExceeded check only runs at the
-      TOP of each addon's turn, so two addons that each independently hang
-      for the full -TimeoutSec 30 on their own CurseForge/Wago HTTP call
-      could still cost ~60s combined even though neither single call
-      exceeded its own timeout - the loop's next budget check happens only
-      AFTER the first call already returned. This closes that gap at the
-      source: every CurseForge/Wago HTTP call site asks this function for
-      its timeout instead of hard-coding 30, and in -Launcher mode this
-      shrinks that timeout to whatever is actually left of the budget - so
-      a second (or third) addon's call can itself never run long enough to
-      push the total past the cap.
-
-      Not -Launcher (script:LauncherDeadline unset/null): returns
-      -DefaultTimeoutSec unchanged - no behavior change for a manual sync,
-      a server-driven job, -Add, -Pin, etc.
-
-      -Launcher: returns the lesser of -DefaultTimeoutSec and the seconds
-      remaining until script:LauncherDeadline, floored at
-      -MinimumTimeoutSec (a call is still given a small real chance to
-      complete/fail cleanly rather than being handed a 0/negative timeout,
-      which .NET's WebRequest.Timeout rejects outright) - so the FIRST
-      call in a launcher run still gets the full 30s (nothing left of the
-      budget has been spent yet), while a call starting near the end of
-      the budget is bounded to whatever time is actually left.
-    #>
-    param(
-        [int]$DefaultTimeoutSec = 30,
-        [int]$MinimumTimeoutSec = 5
-    )
-
-    if (-not $script:LauncherDeadline) {
-        return $DefaultTimeoutSec
-    }
-
-    $remaining = ($script:LauncherDeadline - (Get-Date)).TotalSeconds
-    $capped = [Math]::Min($DefaultTimeoutSec, [Math]::Ceiling($remaining))
-    return [Math]::Max($MinimumTimeoutSec, [int]$capped)
 }
 
 # =====================================================================
@@ -4026,8 +3832,8 @@ function ConvertTo-ExpandedStringArray {
     <#
       Windows PowerShell 5.1's own "powershell.exe -File script.ps1 ..."
       argument binding (the exact invocation this script is deployed
-      under everywhere - the launcher and addon-server.ps1's job dispatch
-      both use it) does not split a single comma-joined token, e.g.
+      under everywhere - addon-server.ps1's job dispatch uses it) does
+      not split a single comma-joined token, e.g.
       "1521253,911525" (quoted or not), into separate array elements the
       way a direct in-process call ("& $script -Remove 1521253,911525")
       does; it arrives as ONE element containing the literal comma. Since
@@ -4220,27 +4026,12 @@ $script:ProgressTallies = New-ProgressTallies
 
 # P1 perf pass (item 3): applied automatically whenever -Json or -Quiet is
 # set (every existing non-interactive caller already passes one of those -
-# a server-spawned job always uses -Json per SPEC, the launcher chain
-# always uses -Quiet) or when -LowPriority is passed explicitly. A plain
-# interactive run (a person typing addon-sync.ps1 -Status at a console)
-# stays at normal priority, unaffected.
+# a server-spawned job always uses -Json per SPEC) or when -LowPriority is
+# passed explicitly. A plain interactive run (a person typing
+# addon-sync.ps1 -Status at a console) stays at normal priority, unaffected.
 if ($LowPriority -or $Json -or $Quiet) {
     Set-FurphyLowPriority
 }
-
-# P1 perf pass (item 5, launch-chain cap): wall-clock zero for the whole
-# run, used only by -Launcher's own budget/skip-recently checks below - set
-# here, as early as possible, so it reflects true elapsed time from process
-# start (flavour detection/config load included), not just time spent in
-# the per-addon sync loop.
-$script:MainStartTime = Get-Date
-
-# Round 26 hardening: absolute deadline Get-LauncherAwareTimeoutSec shrinks
-# each CurseForge/Wago call's own -TimeoutSec against, once the -Launcher
-# per-addon loop below sets it from $script:MainStartTime + its budget.
-# Stays $null (every HTTP call keeps its normal fixed timeout) for every
-# non -Launcher code path.
-$script:LauncherDeadline = $null
 
 # ---- FLAVORS-SPEC S3.3: one-time, idempotent migration - before ANY path
 #      resolution below. Never fatal: a migration failure logs and this run
@@ -4379,48 +4170,6 @@ try {
         $effectiveBuildInfoPath = Get-DefaultBuildInfoPath -AddonsPathResolved $probeAddonsPath
     }
     $script:ClientBuildInfo = Get-ClientBuildInfo -BuildInfoPath $effectiveBuildInfoPath -Flavor $effectiveFlavor
-
-    # ---- -Launcher: gate on settings.autoUpdateOnLaunch, no network when disabled ----
-    if ($Launcher) {
-        $autoUpdateOnLaunch = $true
-        if ($settings -and ($null -ne $settings.autoUpdateOnLaunch)) {
-            $autoUpdateOnLaunch = [bool]$settings.autoUpdateOnLaunch
-        }
-        if (-not $autoUpdateOnLaunch) {
-            Write-Log -Level 'INFO' -Message 'auto-update disabled'
-            if ($Json) {
-                $jsonOut = [PSCustomObject]@{ action = 'sync'; flavour = $effectiveFlavor; installedFlavours = @($script:InstalledFlavours | ForEach-Object { $_.id }); results = @(); addons = $config.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
-                Write-Host (ConvertTo-Json -InputObject $jsonOut -Depth 10)
-            } elseif (-not $Quiet) {
-                Write-Host 'Auto-update on launch is disabled; skipping sync.'
-            }
-            exit 0
-        }
-
-        # P1 perf pass (item 5, skip-if-recently-checked): if this flavour's
-        # addons were checked (by ANY means - a server-driven Check now, the
-        # tray's own scheduled cycle, or a previous -Launcher run - the
-        # source doesn't matter, only recency) within the last 10 minutes,
-        # trust that and launch immediately rather than paying a fresh
-        # network round trip for every single WoW relaunch in a short
-        # window (crash recovery, alt-tabbing out and back via the
-        # shortcut). Read-only, no network - a missing/corrupt/unreadable
-        # state.json (Get-StateUpdatesCheckedAtMinutesAgo's own null return)
-        # degrades to "never checked", i.e. proceeds with a normal sync,
-        # exactly like today's behavior.
-        $recentCheckMinutesAgo = Get-StateUpdatesCheckedAtMinutesAgo -RootPath $scriptRootPath -Flavor $effectiveFlavor
-        if (($null -ne $recentCheckMinutesAgo) -and ($recentCheckMinutesAgo -ge 0) -and ($recentCheckMinutesAgo -lt 10)) {
-            $recentMsg = "recently checked ($([math]::Round($recentCheckMinutesAgo, 1)) min ago) - skipping update check"
-            Write-Log -Level 'INFO' -Message $recentMsg
-            if ($Json) {
-                $jsonOut = [PSCustomObject]@{ action = 'sync'; flavour = $effectiveFlavor; installedFlavours = @($script:InstalledFlavours | ForEach-Object { $_.id }); results = @(); addons = $config.ToArray(); clientBuild = $script:ClientBuildInfo.clientBuild; clientInterface = $script:ClientBuildInfo.clientInterface }
-                Write-Host (ConvertTo-Json -InputObject $jsonOut -Depth 10)
-            } elseif (-not $Quiet) {
-                Write-Host $recentMsg
-            }
-            exit 0
-        }
-    }
 
     # ---- -Status: read-only, no network ----
     if ($Status) {
@@ -5063,53 +4812,7 @@ try {
     $progressIndex = 0
     Write-ProgressStep -Total $toSync.Count -Index 0 -Addon $null -Phase 'queued'
 
-    # P1 perf pass (item 5, launch-chain cap): -Launcher must never delay
-    # the game more than ~45s total (task brief). Each Sync-SingleAddon call
-    # already has its own per-request timeouts (this never interrupts one
-    # mid-flight) - this only stops STARTING another addon's check once the
-    # budget is spent. 40s (not 45) leaves margin for the small fixed costs
-    # around the loop itself (flavour detection, config load, the Battle.net
-    # hand-off the launcher .cmd runs immediately after this process exits).
-    # Never active outside -Launcher - a manual/server-driven sync or check
-    # is never time-boxed this way.
-    $Script:LauncherBudgetSeconds = 40
-    $Script:LauncherBudgetExceeded = $false
-
-    # Round 26 hardening: also arms Get-LauncherAwareTimeoutSec (used by
-    # every CurseForge/Wago HTTP call site) so a slow call started by the
-    # SECOND (or later) addon in this loop is itself bounded to whatever is
-    # left of the budget, instead of always getting its own fresh 30s -
-    # closes the gap where two-or-more independently-hanging calls could
-    # compound past the 45s task-brief cap even though neither one alone
-    # exceeded -TimeoutSec 30 (this check above only runs between addons,
-    # never interrupting a call already in flight).
-    if ($Launcher) {
-        $script:LauncherDeadline = $script:MainStartTime.AddSeconds($Script:LauncherBudgetSeconds)
-    }
-
     foreach ($record in $toSync) {
-        if ($Launcher -and (-not $Script:LauncherBudgetExceeded)) {
-            if (Test-LauncherBudgetExceeded -StartTime $script:MainStartTime -BudgetSeconds $Script:LauncherBudgetSeconds) {
-                $Script:LauncherBudgetExceeded = $true
-            }
-        }
-        if ($Launcher -and $Script:LauncherBudgetExceeded) {
-            $skipLabel = $record.name
-            if (-not $skipLabel) {
-                if ($record.source -eq 'wago') {
-                    $skipLabel = "wago:$($record.slug)"
-                } else {
-                    $skipLabel = "project $($record.projectId)"
-                }
-            }
-            Write-Log -Level 'WARN' -Message "Launcher budget ($($Script:LauncherBudgetSeconds)s) exceeded - skipping remaining addon check: $skipLabel"
-            $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $record.name; Version = $record.version; ProjectId = $record.projectId; FileId = $record.fileId; WagoSlug = $record.slug })
-            $progressIndex = $progressIndex + 1
-            $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FinishedStatus 'Skipped'
-            Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $skipLabel -Phase 'skipped'
-            continue
-        }
-
         # E12: reference-equality membership check replaces the pre-E12
         # int64 HashSet.Contains - toSync is itself already exactly
         # onlyRecords/addedRecords when hasOnly/hasAdd (see above), so every
@@ -5212,18 +4915,6 @@ try {
         } catch {
             Write-Log -Level 'ERROR' -Message "Failed to save addons.json: $($_.Exception.Message)"
         }
-    }
-
-    # P1 perf pass follow-up: a -Launcher run that reaches here completed a
-    # real check (whether or not the budget above skipped some addons partway
-    # through - the same "attempted a check" bar addon-server.ps1's own
-    # Complete-Job uses, not "everything came back up to date"), so stamp the
-    # shared timestamp now - this is the actual write the 10-minute skip rule
-    # above has always claimed a "previous -Launcher run" provides. Never
-    # runs for -Status/-Files/other read-only paths, which exit long before
-    # reaching here.
-    if ($Launcher) {
-        Save-LauncherUpdatesCheckedAt -RootPath $scriptRootPath -Flavor $effectiveFlavor
     }
 
     # ---- Determine the action label for -Json reporting ----

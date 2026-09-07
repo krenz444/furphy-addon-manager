@@ -222,7 +222,7 @@ const Mock = (function () {
   // FLAVORS-SPEC.md CS-F4: activeFlavour/showTestRealms join the mock
   // settings shape too (S3.4 - same plain client-writable pattern as
   // adFilter/cfFocus), round-tripped by the PUT handler below.
-  const mockSettings = { releaseType: 1, autoUpdateOnLaunch: true, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false };
+  const mockSettings = { releaseType: 1, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false };
 
   // FLAVORS-SPEC.md CS-F4 (section 8's own acceptance item / task brief's own
   // "?mock=1&flavours=3" verify step): ?mock=1&flavours=N (2-4) fakes an
@@ -429,14 +429,7 @@ const Mock = (function () {
   // -ProgressPath for. Every other kind (remove/rollback/import/switch-
   // source) keeps the plain line-by-line log animation below, same as
   // before this pass.
-  // Review fix: "launch" belongs here too when updateFirst is true (Update
-  // & Play) - the real server always runs that as a full progress-tracked
-  // sync before launching (see addon-server.ps1's Start-Job $cliKind
-  // mapping); see buildProgressPlan's own "launch" branch below for how
-  // updateFirst:false (Launch WoW, no update) still ends up with zero
-  // targets and skips straight to the plain 300ms finish, matching the real
-  // server's synchronous no-CLI-process path for that case.
-  const PROGRESS_KINDS = ["sync", "check", "add", "install", "launch"];
+  const PROGRESS_KINDS = ["sync", "check", "add", "install"];
 
   function jobLines(kind) {
     if (kind === "check") return ["Checking 5 addons against CurseForge...", "Auctionator: update available (5.21.0)", "Bagnon: update available (10.9)", "Check complete."];
@@ -444,7 +437,6 @@ const Mock = (function () {
     if (kind === "add") return ["Resolving project...", "Downloading latest file...", "Installed."];
     if (kind === "remove") return ["Removing addon and its folders...", "Removed."];
     if (kind === "install") return ["Downloading selected version...", "Installed."];
-    if (kind === "launch") return ["Running pre-launch sync...", "Sync complete.", "Launching World of Warcraft..."];
     if (kind === "rollback") return ["Restoring previous version from local backup...", "Rolled back."];
     if (kind === "import") return ["Adding new addons...", "Applying pinned versions...", "Applying ignore flags...", "Import complete."];
     return ["Working..."];
@@ -571,43 +563,6 @@ const Mock = (function () {
           if (a.fileId !== params.fileId) { a.fileId = params.fileId; a.installedAt = new Date().toISOString(); job.results = [{ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }]; }
           else { job.results = [{ status: "Pinned", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }]; }
         }
-      } else if (kind === "launch") {
-        // E5: mirrors addon-server.ps1's real behavior - updateFirst runs a
-        // full sync (same per-addon logic as the "sync" branch above,
-        // including a fresh lastRun) before the Launched row is appended, so
-        // the results panel's per-row "What changed" control is exercisable
-        // from Update & Play too, not just a plain install/sync.
-        const updateFirst = params && params.updateFirst;
-        job.results = [];
-        if (updateFirst) {
-          addons.forEach(function (a) {
-            if (a.ignoreUpdates) { job.results.push({ status: "Ignored", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }); return; }
-            // Review fix: mirrors "sync"'s own forcedFailMockKey handling
-            // (see buildProgressPlan's "launch" branch) - without this, an
-            // Update & Play run's forced-fail target reported "Updated" here
-            // while job.progress's final write for it said "failed", which
-            // both broke the done-with-failures panel for this kind and
-            // disagreed with mapFinalPhase's own comment that job.results
-            // and job.progress must always agree on a target's outcome.
-            if (forcedFailMockKey && mockKey(a) === forcedFailMockKey) {
-              job.results.push({ status: "Failed", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
-              return;
-            }
-            if (a.updateAvailable) {
-              a.previousFileId = a.fileId;
-              a.previousVersion = a.version;
-              a.version = a.updateAvailable.version;
-              a.fileId = a.updateAvailable.fileId;
-              a.installedAt = new Date().toISOString();
-              a.updateAvailable = null;
-              job.results.push({ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
-            } else {
-              job.results.push({ status: "Up-to-date", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId });
-            }
-          });
-          lastRun = { timestamp: new Date().toISOString(), summary: job.results.length + " processed, then launched", rows: job.results.map(function (r) { return { status: r.status, name: r.name, version: r.version, projectId: r.projectId, wagoSlug: r.wagoSlug }; }) };
-        }
-        job.results.push({ status: "Launched", name: "World of Warcraft" });
       } else if (kind === "rollback") {
         const a = addons.find(function (x) { return mockKey(x) === params.projectId; });
         if (a && a.previousFileId !== null && a.previousFileId !== undefined) {
@@ -727,25 +682,6 @@ const Mock = (function () {
     } else if (kind === "install") {
       const a = addons.find(function (x) { return mockKey(x) === (params && params.projectId); });
       targets = [{ label: a ? a.name : ("project " + (params && params.projectId)), ref: a || null, status: "Installed" }];
-    } else if (kind === "launch") {
-      // Review fix: mirrors finalizeJobResults' own "launch" branch above -
-      // updateFirst:false (Launch WoW, no update) leaves targets empty, so
-      // runProgressJob's total===0 fast path fires and this job finishes in
-      // ~300ms with no progress bar at all, matching the real server's
-      // synchronous no-CLI-process path for that case. updateFirst:true
-      // (Update & Play) walks every addon (not filtered by an `ids` list -
-      // launch has none), mapping an ignored addon straight to "Ignored" so
-      // it never becomes forced-fail bait.
-      const updateFirst = params && params.updateFirst;
-      if (updateFirst) {
-        targets = addons.map(function (a) {
-          if (a.ignoreUpdates) return { label: a.name, ref: a, status: "Ignored" };
-          return { label: a.name, ref: a, status: a.updateAvailable ? "Updated" : "Up-to-date" };
-        });
-        for (let i = targets.length - 1; i >= 0; i--) {
-          if (targets[i].status === "Updated") { forcedFailMockKey = mockKey(targets[i].ref); targets[i].status = "Failed"; break; }
-        }
-      }
     }
     return { targets: targets, forcedFailMockKey: forcedFailMockKey };
   }
@@ -773,7 +709,7 @@ const Mock = (function () {
       return;
     }
 
-    const hasInstallPhases = kind === "sync" || kind === "add" || kind === "install" || kind === "launch";
+    const hasInstallPhases = kind === "sync" || kind === "add" || kind === "install";
     const phaseSeq = hasInstallPhases ? ["checking", "downloading", "installing"] : ["checking"];
     // +1 per target: phaseSeq's own steps, plus the one final mapped-phase
     // write after them (see nextPhase below) - both cost one setTimeout
@@ -868,7 +804,7 @@ const Mock = (function () {
       return job;
     }
 
-    // Every other kind (remove/rollback/import/switch-source/launch) keeps
+    // Every other kind (remove/rollback/import/switch-source) keeps
     // the plain line-by-line log animation - unchanged from before CS1,
     // and never gets a -ProgressPath server-side either (see Start-Job).
     const lines = jobLines(kind);
@@ -1073,7 +1009,6 @@ const Mock = (function () {
       if (p === "/api/settings" && method === "GET") return currentSettings();
       if (p === "/api/settings" && method === "PUT") {
         if (typeof body.releaseType === "number") mockSettings.releaseType = body.releaseType;
-        if (typeof body.autoUpdateOnLaunch === "boolean") mockSettings.autoUpdateOnLaunch = body.autoUpdateOnLaunch;
         if (typeof body.port === "number") mockSettings.port = body.port;
         if (typeof body.adFilter === "boolean") mockSettings.adFilter = body.adFilter;
         if (typeof body.cfFocus === "boolean") mockSettings.cfFocus = body.cfFocus;
@@ -1247,7 +1182,7 @@ const Mock = (function () {
     // is gone - Eric: "WoW's out-of-date warning... get rid of this it
     // doesn't do anything."
     return {
-      releaseType: mockSettings.releaseType, autoUpdateOnLaunch: mockSettings.autoUpdateOnLaunch, port: mockSettings.port,
+      releaseType: mockSettings.releaseType, port: mockSettings.port,
       addonsPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns", wowRoot: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
       adFilter: mockSettings.adFilter, cfFocus: mockSettings.cfFocus, hostWindow: mockSettings.hostWindow,
       // Round 18 (tray stage B)
@@ -1679,7 +1614,7 @@ const Api = (function () {
   // install/add-by-slug (never a bulk add, never a Wago target) must reach
   // the server with NO ?flavour= at all when the caller didn't name one, so
   // Start-Job's own auto/refuse/ask resolution (S5.5) can run. Every other
-  // kind - sync/check/remove/rollback/switch-source/launch/import, a bulk
+  // kind - sync/check/remove/rollback/switch-source/import, a bulk
   // add, or any Wago-sourced add/install - is scoped to one flavour's own
   // addons.json/AddOns folder already, so it needs the active flavour
   // supplied automatically or the server 400s "flavour required".
@@ -1718,7 +1653,7 @@ const Api = (function () {
     // one must reach the server with no ?flavour= at all so its own S5.5
     // ask/auto resolution can run) is auto-scoped to the active flavour once
     // more than one is installed - every existing call site (checkForUpdates,
-    // updateAll, updateAndPlay, etc.) needs no change of its own. At n<=1
+    // updateAll, etc.) needs no change of its own. At n<=1
     // flavour this is always undefined, so every URL/body stays exactly
     // what it was before this change set.
     postJob: function (kind, params, flavour) {
@@ -2010,7 +1945,6 @@ const Store = (function () {
       if (p.source === "wago" && p.slug) return pid === "wago:" + p.slug;
       return Utils.normalizeId(p.projectId) === pid;
     }
-    if (j.kind === "launch") return true; // a launch job runs a full sync first
     // E4: an import job's params carry the whole imported addons[] list -
     // "Installing..." only lights up rows actually named in that file.
     if (j.kind === "import") return (p.addons || []).some(function (a) { return Number(a.projectId) === pid; });
@@ -2032,8 +1966,8 @@ const Store = (function () {
   // same way Store.addonKey does - both the real server's rows (a literal
   // passthrough of the CLI's -Json rows, which always carry projectId/
   // wagoSlug) and the mock's now carry that data on every row. Falls back to
-  // a name match only against rows with no key data at all (e.g. the
-  // synthetic "Launched" row), matching the old behavior for those.
+  // a name match only against rows with no key data at all, matching the
+  // old behavior for those.
   function lastRunStatusFor(addon) {
     if (!state.lastRun || !state.lastRun.rows) return null;
     const rows = state.lastRun.rows;
@@ -2233,9 +2167,9 @@ Components.Dialogs = (function () {
     Utils.qs("#confirm-message").textContent = opts.message || "";
     const okBtn = Utils.qs("#confirm-ok");
     okBtn.textContent = opts.confirmLabel || "Confirm";
-    // Review fix: was btn-accent for the non-destructive case, colliding
-    // with the sidebar's "Update & Play" - the only accent button the app
-    // is allowed to have on screen at once (UX-SPEC.md section 1/2.3).
+    // Review fix: was btn-accent for the non-destructive case. Round 34
+    // removed the app's one accent CTA entirely, so nothing is accent-
+    // colored any more (UX-SPEC.md section 1/2.3).
     okBtn.className = "btn " + (opts.danger === false ? "btn-outline" : "btn-danger");
     show("confirm");
     return new Promise(function (resolve) { confirmResolve = resolve; });
@@ -2616,7 +2550,7 @@ Components.Chip = (function () {
 
   function forJobStatus(status) {
     const map = {
-      "Updated": "chip-success", "Installed": "chip-success", "Removed": "chip-success", "Launched": "chip-success",
+      "Updated": "chip-success", "Installed": "chip-success", "Removed": "chip-success",
       "Unpinned": "chip-success", "Unignored": "chip-success", "Up-to-date": "chip-success", "Rolled-back": "chip-success",
       "Would-update": "chip-warning", "Pinned": "chip-info", "Ignored": "chip-muted", "Skipped": "chip-muted",
       "Failed": "chip-danger"
@@ -3205,10 +3139,10 @@ Components.Drawer = (function () {
 
   // Review fix: these were all btn-accent, which meant the drawer's own
   // primary action rendered in the exact same accent color as the sidebar's
-  // persistent "Update & Play" button whenever the drawer was open - two
-  // accent buttons on screen at once. UX-SPEC.md section 1/2.3 are explicit
-  // that Update & Play is the ONLY accent button in the app; everything
-  // else (including this drawer action) is outline/ghost/menu.
+  // old persistent CTA whenever the drawer was open - two accent buttons on
+  // screen at once. Round 34 removed that sidebar CTA entirely, so nothing
+  // in the app is accent-colored any more; this drawer action stays
+  // outline/ghost/menu too (UX-SPEC.md section 1/2.3).
   function primaryActionButton(addon, fallbackName) {
     const d = Store.state.drawer;
     const pid = d.projectId;
@@ -3720,15 +3654,7 @@ Components.JobPanel = (function () {
   // sites) - every other kind (remove/rollback/import/switch-source) has no
   // progress object at all, and keeps the plain title-bar-only view this
   // panel always had.
-  // Review fix: "launch" belongs here too - addon-server.ps1's Start-Job
-  // (see the $cliKind mapping right above the Job object literal) always
-  // runs a "launch" job's CLI process as $cliKind='sync' when updateFirst is
-  // true (Update & Play), so -ProgressPath is threaded and job.progress is
-  // populated exactly like a real "sync" job; a launchOnly (updateFirst:
-  // false) job never reaches a CLI process at all (see the synchronous
-  // no-CLI branch in Start-Job) and finishes before job.progress.total is
-  // ever > 0, so showProgress below still correctly stays false for it.
-  const PROGRESS_KINDS = ["sync", "check", "add", "install", "launch"];
+  const PROGRESS_KINDS = ["sync", "check", "add", "install"];
 
   // CS2: job.progress is a single overwritten snapshot (the server's
   // best-effort read of one progress.json file), not a per-addon history -
@@ -3841,8 +3767,8 @@ Components.JobPanel = (function () {
     if (!results || !results.length) return "No changes.";
     const counts = {};
     results.forEach(function (r) { counts[r.status] = (counts[r.status] || 0) + 1; });
-    const order = ["Updated", "Installed", "Removed", "Launched", "Rolled-back", "Pinned", "Unpinned", "Ignored", "Unignored", "Would-update", "Up-to-date", "Skipped", "Failed"];
-    const labels = { "Updated": "updated", "Installed": "installed", "Removed": "removed", "Launched": "launched", "Rolled-back": "rolled back", "Pinned": "pinned", "Unpinned": "unpinned", "Ignored": "ignored", "Unignored": "unignored", "Would-update": "update available", "Up-to-date": "up to date", "Skipped": "skipped", "Failed": "failed" };
+    const order = ["Updated", "Installed", "Removed", "Rolled-back", "Pinned", "Unpinned", "Ignored", "Unignored", "Would-update", "Up-to-date", "Skipped", "Failed"];
+    const labels = { "Updated": "updated", "Installed": "installed", "Removed": "removed", "Rolled-back": "rolled back", "Pinned": "pinned", "Unpinned": "unpinned", "Ignored": "ignored", "Unignored": "unignored", "Would-update": "update available", "Up-to-date": "up to date", "Skipped": "skipped", "Failed": "failed" };
     const parts = [];
     order.forEach(function (status) {
       if (counts[status]) {
@@ -3858,7 +3784,7 @@ Components.JobPanel = (function () {
   function titleFor(job) {
     if (Store.state.jobLabel) return Store.state.jobLabel;
     if (!job) return "Working…";
-    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", launch: "Launching World of Warcraft", rollback: "Rolling back version", import: "Loading addon list", "switch-source": "Reinstalling from another source" };
+    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", rollback: "Rolling back version", import: "Loading addon list", "switch-source": "Reinstalling from another source" };
     return map[job.kind] || "Working…";
   }
 
@@ -3885,12 +3811,10 @@ Components.JobPanel = (function () {
   // than threading a second done-tense string through every call site, this
   // rewrites the SAME label's leading gerund to its past-tense form via an
   // ordered prefix list (longest/most-specific match first, since several
-  // share a leading word - e.g. "Updating & launching" vs plain "Updating").
-  // Any label that doesn't start with a known gerund (there is none today,
-  // but a future call site's wording could drift) is returned unchanged
-  // rather than risking a garbled rewrite.
+  // share a leading word). Any label that doesn't start with a known
+  // gerund (there is none today, but a future call site's wording could
+  // drift) is returned unchanged rather than risking a garbled rewrite.
   const PAST_TENSE_PATTERNS = [
-    [/^Updating & launching/, "Updated & launched"],
     [/^Checking for updates/, "Checked for updates"],
     [/^Force reinstalling/, "Force reinstalled"],
     [/^Rolling back/, "Rolled back"],
@@ -3902,7 +3826,6 @@ Components.JobPanel = (function () {
     [/^Removing/, "Removed"],
     [/^Reinstalling/, "Reinstalled"],
     [/^Loading/, "Loaded"],
-    [/^Launching/, "Launched"],
     [/^Syncing/, "Synced"]
   ];
   function pastTenseLabel(label) {
@@ -3915,7 +3838,7 @@ Components.JobPanel = (function () {
   }
 
   // E5: a per-row "What changed" control for a just-Updated/Installed addon.
-  // Guarded on r.projectId being present (every real sync/add/install/launch
+  // Guarded on r.projectId being present (every real sync/add/install
   // result row carries one per SPEC's documented results shape).
   function whatChangedButton(r) {
     if (r.status !== "Updated" && r.status !== "Installed") return null;
@@ -4050,10 +3973,10 @@ Components.JobPanel = (function () {
     // CS2 (UX-SPEC.md section 4.3): determinate n-of-N bar + current-item
     // phase line, driven directly by job.progress - the primary view for
     // any job kind the CLI reports progress for, replacing the old
-    // log-only panel. Every other kind (remove/rollback/import/switch-
-    // source, and a launchOnly launch job) has no job.progress at all, so
-    // this whole block just stays hidden and the panel falls back to its
-    // title bar + Details, same as always.
+    // log-only panel. Every other kind (remove/rollback/import/
+    // switch-source) has no job.progress at all, so this whole block just
+    // stays hidden and the panel falls back to its title bar + Details,
+    // same as always.
     const progressWrap = Utils.qs("#job-progress-wrap");
     const showProgress = running && PROGRESS_KINDS.indexOf(job.kind) !== -1 && job.progress && job.progress.total > 0;
     progressWrap.hidden = !showProgress;
@@ -4683,9 +4606,6 @@ const Actions = (function () {
     else Components.Drawer.open(projectId, { tab: "versions" });
   }
 
-  function updateAndPlay() { return startJob("launch", { updateFirst: true }, "Updating & launching World of Warcraft"); }
-  function launchOnly() { return startJob("launch", { updateFirst: false }, "Launching World of Warcraft"); }
-
   async function toggleIgnore(projectId, ignore) {
     try {
       const res = await Api.setIgnore(projectId, ignore);
@@ -5010,7 +4930,7 @@ const Actions = (function () {
     startJob: startJob, resumeJobWithFlavour: resumeJobWithFlavour, setActiveFlavour: setActiveFlavour, updateAllFlavours: updateAllFlavours, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, uninstallApp: uninstallApp, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
-    updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
+    toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
     whatChanged: whatChanged, importAddons: importAddons,
@@ -5626,9 +5546,9 @@ Views.browse = (function () {
     const busy = Store.jobActingOn(entry.key);
     const btn = tracked
       ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
-      // Review fix: was btn-accent - Browse cards can render alongside the
-      // sidebar's own "Update & Play" accent button; only that one is ever
-      // accent-colored per UX-SPEC.md section 1/2.3.
+      // Review fix: was btn-accent. Round 34 removed the sidebar's accent
+      // CTA entirely, so nothing in the app is accent-colored any more
+      // (UX-SPEC.md section 1/2.3).
       : Utils.el("button", { type: "button", class: "btn btn-outline", disabled: busy, onclick: function (ev) {
           ev.stopPropagation();
           if (entry.source === "wago") Actions.installLatestWago(entry.slug, entry.name);
@@ -6000,7 +5920,6 @@ Views.settings = (function () {
     // it back off on its own is what un-checks alpha too (see bindOnce).
     Utils.qs("#toggle-beta").checked = Number(s.releaseType) === 2 || Number(s.releaseType) === 3;
     Utils.qs("#toggle-alpha").checked = Number(s.releaseType) === 3;
-    Utils.qs("#toggle-autoupdate").checked = !!s.autoUpdateOnLaunch;
 
     Utils.qs("#about-version").textContent = App.getServerVersion() || "—";
     // UX-SPEC.md §7/§8: "Client build number" was removed from My Addons and
@@ -6622,7 +6541,6 @@ Views.settings = (function () {
       const beta = alpha || Utils.qs("#toggle-beta").checked;
       Actions.saveSettings({ releaseType: alpha ? 3 : (beta ? 2 : 1) });
     });
-    Utils.qs("#toggle-autoupdate").addEventListener("change", function (ev) { Actions.saveSettings({ autoUpdateOnLaunch: ev.target.checked }); });
     // FLAVORS-SPEC.md CS-F4 (section 2.5/6.5): saveSettings' own
     // App.renderChrome() call already repaints the switcher (Store.
     // visibleFlavours() reads this same setting), so PTR/XPTR/Beta appear
@@ -7116,26 +7034,10 @@ const App = (function () {
     Components.Freshness.render("sidebar-freshness", { dotOnly: true });
     renderUpdateAllButton();
     // FLAVORS-SPEC.md CS-F4: the switcher/Update All pair (zero DOM at <=1
-    // visible flavour) and the "Update & Play" label (section 6.3).
+    // visible flavour).
     Components.Switcher.render();
-    renderUpdatePlayButton();
     applyBusyToStaticButtons();
     Components.Drawer.refresh();
-  }
-
-  // FLAVORS-SPEC.md CS-F4 (section 6.3/copy table): unchanged text/toast at
-  // <=1 VISIBLE flavour (principle 2) - "Update & Play [Label]" for Retail,
-  // "Update & Open Battle.net [Label]" for every other flavour once the
-  // switcher exists, reflecting whichever pill is currently active.
-  function renderUpdatePlayButton() {
-    const btn = Utils.qs("#btn-update-play");
-    const span = btn && btn.querySelector("span");
-    if (!span) return;
-    const visible = Store.visibleFlavours();
-    if (visible.length <= 1) { span.textContent = "Update & Play"; return; }
-    const active = Store.state.activeFlavour;
-    const meta = visible.filter(function (f) { return f.id === active; })[0] || visible[0];
-    span.textContent = (!meta || meta.id === "retail") ? ("Update & Play " + (meta ? meta.label : "Retail")) : ("Update & Open Battle.net " + meta.label);
   }
 
   // CS2 (UX-SPEC.md section 2.1): connectivity ("can the UI reach the local
@@ -7158,14 +7060,12 @@ const App = (function () {
   }
 
   // CS2 (UX-SPEC.md section 2.3 / copy table §7): "Update all" is kept but
-  // now outline-styled - on the main dashboard, the sidebar's "Update & Play"
-  // is the one accent-colored call to action against which "Update all" and
-  // the per-row Update pills should read as secondary (a handful of other
-  // dialog/empty-state buttons elsewhere in the app are also accent-styled
-  // as their own one-primary-CTA-per-dialog choice; this scoping is about
-  // the dashboard's own competing buttons, not a whole-app rule) - and
-  // hidden entirely once a completed check found nothing to update, not
-  // just disabled, so no dead button sits there.
+  // stays outline-styled - Round 34 removed the sidebar's accent CTA
+  // entirely, so nothing in the app is accent-colored any more (a handful of
+  // dialog/empty-state buttons elsewhere are their own one-primary-CTA-per-
+  // dialog choice, unrelated to this dashboard) - and hidden entirely once a
+  // completed check found nothing to update, not just disabled, so no dead
+  // button sits there.
   function renderUpdateAllButton() {
     const btn = Utils.qs("#btn-update-all");
     // Review fix (F2): scope the button's own count to what updateAll()
@@ -7194,7 +7094,7 @@ const App = (function () {
     // treatment. "Ignore selected" does NOT start a job (sequential fast
     // POST .../ignore calls), matching the per-row kebab's "Ignore updates"/
     // "Stop ignoring" entry, which has never been busy-gated either.
-    ["btn-update-play", "btn-launch-wow", "btn-check-updates", "btn-add-addon", "myaddons-empty-add", "myaddons-bulk-update", "myaddons-bulk-uninstall"].forEach(function (id) {
+    ["btn-check-updates", "btn-add-addon", "myaddons-empty-add", "myaddons-bulk-update", "myaddons-bulk-uninstall"].forEach(function (id) {
       const btn = document.getElementById(id);
       if (!btn) return;
       btn.disabled = busy;
@@ -7298,15 +7198,8 @@ const App = (function () {
         // job panel (Components.JobPanel.wholeJobFailureReason), and the
         // toast itself is just a transient nudge to look at the panel - the
         // raw text stays reachable only behind that panel's own Details.
-        // FLAVORS-SPEC.md CS-F4 (section 6.3/copy table): a non-Retail
-        // launch's own honest toast - never a silent "Launching WoW…"
-        // overpromise, per section 4.7's launch-reliability caveat. Retail
-        // (job.flavour is 'retail', or absent on a single-flavour machine)
-        // keeps today's exact wording via the unchanged summarize() branch.
         const summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job)
-          : (job.kind === "launch" && job.flavour && job.flavour !== "retail")
-            ? "Addons updated. Check Battle.net — you may need to press Play."
-            : Components.JobPanel.summarize(job.results);
+          : Components.JobPanel.summarize(job.results);
         Components.Toast.show(summary, job.state === "failed" ? "error" : "success");
         notifyIfUpdatesFound(job);
       } catch (err) {
@@ -7577,9 +7470,6 @@ const App = (function () {
 
   function wireGlobal() {
     Utils.qsa(".nav-item").forEach(function (btn) { btn.addEventListener("click", function () { switchView(btn.dataset.view); }); });
-
-    Utils.qs("#btn-update-play").addEventListener("click", function () { Actions.updateAndPlay(); });
-    Utils.qs("#btn-launch-wow").addEventListener("click", function () { Actions.launchOnly(); });
 
     Utils.qs("#drawer-backdrop").addEventListener("click", function () { Components.Drawer.close(); });
     Utils.qs("#drawer-close").addEventListener("click", function () { Components.Drawer.close(); });

@@ -162,7 +162,7 @@ Describe 'Update-ProgressTallies (pure)' {
         $tUpdated.updated | Should Be 1
     }
 
-    It '-FinishedStatus ''Skipped'' (launcher-budget skip) increments checked only' {
+    It '-FinishedStatus ''Skipped'' (e.g. a budget/dedup skip) increments checked only' {
         $t = Update-ProgressTallies -Tallies (New-ProgressTallies) -FinishedStatus 'Skipped'
         $t.checked | Should Be 1
         $t.updated | Should Be 0

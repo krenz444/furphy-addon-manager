@@ -42,7 +42,12 @@ $results = New-ResultsCollector -Suite 'static:banned-terms'
 $bannedPhrases = @(
     'project id', 'file id', 'release type', 'interface version',
     'stale-minor', 'adopting', 'untracked', 'keyless',
-    'instawow-data', 'addon-radar.com'
+    'instawow-data', 'addon-radar.com',
+    # Round 34 (removed at Eric's request, 2026-09-07 - see CHANGELOG.md):
+    # the launch-WoW feature and its copy are gone entirely; fail the
+    # build if any of these ever reappear in visible UI text.
+    'Update & Play', 'Launch WoW', 'update-addons-and-launch',
+    'Update & Open Battle.net'
 )
 $bannedWords = @('toc', 'compat', 'stale', 'adopt', 'digest', 'indexed')
 

@@ -26,6 +26,63 @@ Describe 'install.ps1 dot-source guard' {
     }
 }
 
+Describe 'install.ps1 $Script:FlavourDefs (Round 34, REMOVAL-SPEC.md CS-R10: no more launch-only columns)' {
+    # $Script:FlavourDefs sits ABOVE the dot-source guard (it is read by
+    # Find-WowRoot/Get-InstalledFlavourDefs, both pure detection helpers),
+    # so it is available here exactly like the scoping helpers above -
+    # nothing below the guard (Invoke-FurphyInstallSteps, the -Uninstall
+    # block, Remove-FurphyLegacyLauncherArtifacts) ever runs just from
+    # dot-sourcing.
+    It 'no longer carries BattleNetCode or Reliable - only Id/Folder/Label/FirstClass' {
+        foreach ($def in $Script:FlavourDefs) {
+            $propNames = @($def.PSObject.Properties.Name)
+            ($propNames -contains 'BattleNetCode') | Should Be $false
+            ($propNames -contains 'Reliable') | Should Be $false
+            ($propNames -contains 'Id') | Should Be $true
+            ($propNames -contains 'Folder') | Should Be $true
+            ($propNames -contains 'Label') | Should Be $true
+            ($propNames -contains 'FirstClass') | Should Be $true
+        }
+    }
+
+    It 'keeps the exact six flavours in FLAVORS-SPEC S2.1 order' {
+        (($Script:FlavourDefs | ForEach-Object { $_.Id }) -join ',') | Should Be 'retail,classic,classic_era,ptr,xptr,beta'
+    }
+
+    It 'Retail/Classic/Classic Era are still first-class; PTR/XPTR/Beta are not (legacy-shortcut cleanup naming still needs this)' {
+        $firstClassIds = ($Script:FlavourDefs | Where-Object { $_.FirstClass } | ForEach-Object { $_.Id })
+        (($firstClassIds -join ',')) | Should Be 'retail,classic,classic_era'
+    }
+}
+
+Describe 'install.ps1 legacy-launcher name list (Round 34, REMOVAL-SPEC.md CS-R12) stays only in Remove-FurphyLegacyLauncherArtifacts' {
+    # Remove-FurphyLegacyLauncherArtifacts itself sits BELOW the guard
+    # (it deletes files, same as Remove-InstallFileWithRetry/
+    # Remove-InstallFolderWithRetry, which also have no unit coverage here
+    # for the same reason - see tests\integration\Server.Uninstall.Tests.ps1
+    # for their live-filesystem coverage) so it cannot be invoked from a
+    # dot-sourced load. This is a static regression guard instead: the
+    # exact two legacy filenames must appear together, and only together,
+    # everywhere install.ps1 still mentions them (the -Uninstall path's
+    # call to the shared function, the shared function's own definition,
+    # and Invoke-FurphyInstallSteps' call to the shared function) - if a
+    # future edit reintroduces a THIRD, separate copy of this name list
+    # instead of reusing the shared function, this test catches the drift.
+    $Script:InstallSource = Get-Content -Raw -LiteralPath $Script:InstallScript
+
+    It 'defines Remove-FurphyLegacyLauncherArtifacts exactly once' {
+        ([regex]::Matches($Script:InstallSource, 'function Remove-FurphyLegacyLauncherArtifacts\b')).Count | Should Be 1
+    }
+
+    It 'the legacy .cmd/.vbs filename pair appears only inside that one shared function''s body (no second, drifted copy elsewhere)' {
+        ([regex]::Matches($Script:InstallSource, [regex]::Escape("'update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs'"))).Count | Should Be 1
+    }
+
+    It 'both the -Uninstall path and Invoke-FurphyInstallSteps call the shared cleanup function (not a hand-rolled duplicate)' {
+        ([regex]::Matches($Script:InstallSource, 'Remove-FurphyLegacyLauncherArtifacts\s+-WowRootPath')).Count | Should Be 2
+    }
+}
+
 Describe 'install.ps1 per-install scoping (round 32)' {
     $Script:ScratchRoot = Join-Path $env:TEMP ('furphy-scope-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $Script:ScratchRoot -Force | Out-Null

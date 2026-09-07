@@ -5,9 +5,7 @@
   needs BEFORE dot-sourcing addon-sync.ps1 (the assignment that reads them
   runs unconditionally near the top of the file, before the dot-source
   guard), then reads back $script:CfBaseUrl/$script:WagoBaseUrl - never
-  makes a real HTTP call itself (see tests\integration\
-  Cli.LauncherBudgetOverride.Tests.ps1 for the real-process, real-call-site
-  end-to-end proof of the same contract).
+  makes a real HTTP call itself.
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')

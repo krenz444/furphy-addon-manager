@@ -1192,23 +1192,6 @@ button.freshness-headline:hover { color: var(--danger-hover); }
 .btn-block { width: 100%; }
 .btn-lg { height: 40px; font-size: 14px; }
 
-/* Review fix (F3): the sidebar's one accent CTA (FLAVORS-SPEC.md 6.3's
-   spec'd "Update & Open Battle.net Classic"/"...Classic Era" labels) can
-   overflow this button's own pill at the app's default window size once a
-   non-Retail flavour is active - let it wrap to two lines instead of
-   spilling text past the rounded edge. Scoped to this one button only
-   (shared .btn/.btn-lg are used elsewhere and must stay single-line).
-   .sidebar-bottom is a flex column with no fixed height, so a taller
-   button here just pushes "Launch WoW" down a few px - nothing overlaps. */
-#btn-update-play {
-  white-space: normal;
-  height: auto;
-  min-height: 40px;
-  line-height: 1.25;
-  text-align: center;
-  padding: 8px 14px;
-}
-
 .icon-btn {
   display: inline-flex;
   align-items: center;

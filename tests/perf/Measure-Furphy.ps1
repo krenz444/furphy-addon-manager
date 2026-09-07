@@ -113,10 +113,7 @@ function Get-FurphyRole {
             # a quote, or start-of-string) so this only matches the actual
             # -File target, never free text elsewhere on the command line.
             if ($clLower -match '[\\"'']addon-server\.ps1') { return 'server' }
-            if ($clLower -match '[\\"'']addon-sync\.ps1') {
-                if ($clLower -match '(^|\s)-launcher(\s|$)') { return 'sync-cli-launcher' }
-                return 'sync-cli-job'
-            }
+            if ($clLower -match '[\\"'']addon-sync\.ps1') { return 'sync-cli-job' }
             return $null
         }
         '^furphyhost(\.exe)?$' {

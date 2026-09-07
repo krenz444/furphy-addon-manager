@@ -104,7 +104,7 @@ function New-ScratchInstall {
     $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'uninstall-wowroot')
     $appDest = Join-Path -Path $wowRoot -ChildPath '_retail_\AddonSync'
     New-Item -ItemType Directory -Path $appDest -Force | Out-Null
-    '{ "releaseType": 1, "autoUpdateOnLaunch": true, "port": 47899 }' |
+    '{ "releaseType": 1, "port": 47899 }' |
         Set-Content -LiteralPath (Join-Path $appDest 'settings.json') -Encoding Ascii
 
     $installScript = Join-Path -Path $Script:FurphyBuildRoot 'install.ps1'

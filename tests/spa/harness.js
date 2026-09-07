@@ -578,6 +578,21 @@
       return hits.length === 0;
     });
 
+    // Round 34 (REMOVAL-SPEC.md): Eric asked to remove every feature that
+    // launches or auto-updates-before-launching WoW - the sidebar's Update &
+    // Play / Launch WoW buttons and the Settings auto-update-on-launch row
+    // are gone for good. Scans real rendered body text (not just markup) so
+    // a regression that re-adds any of this copy anywhere in the app fails
+    // here, mirroring tests\static\Test-BannedTerms.ps1's own addition of
+    // these same phrases for the static-HTML sweep.
+    checkTry("no launch-feature strings anywhere in the rendered DOM (Update & Play / Launch WoW / before WoW starts - Round 34 removed WoW launching entirely)", function () {
+      const bodyText = win.document.body.textContent || "";
+      const launchPhrases = ["Update & Play", "Launch WoW", "before WoW starts", "Update & Open Battle.net", "update-addons-and-launch"];
+      const hits = launchPhrases.filter(function (p) { return bodyText.indexOf(p) !== -1; });
+      if (hits.length) check("launch-feature string hits (detail)", false, hits.join(", "));
+      return hits.length === 0 && !q(win, "#btn-update-play") && !q(win, "#btn-launch-wow");
+    });
+
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
@@ -741,8 +756,13 @@
     // ---- Negative: rows this spec explicitly marks "tooltip: none" carry
     // NO .info-tip - both directions matter per the spec's own acceptance
     // line, not just "every listed row has one".
-    checkTry("'Update addons before WoW starts' (locked, permanently-visible helper lines) has NO tooltip", function () {
-      return labelInfoTip(win, ".settings-row-label", "Update addons before WoW starts") === null;
+    // Round 34 (REMOVAL-SPEC.md CS-R4/CS-R15): the "Update addons before WoW
+    // starts" row (and its #toggle-autoupdate checkbox) is gone entirely -
+    // replaces the old "has NO tooltip" check on that row (dead now that the
+    // row itself doesn't exist) with an assertion that the row/control are
+    // absent altogether.
+    checkTry("Settings has no 'Update addons before WoW starts' row or #toggle-autoupdate control (Round 34 removed the autoUpdateOnLaunch setting)", function () {
+      return !q(win, "#toggle-autoupdate") && labelInfoTip(win, ".settings-row-label", "Update addons before WoW starts") === undefined;
     });
     checkTry("the ad-filter row's own main label has NO tooltip (only its fallback line does)", function () {
       const row = q(win, "#browsing-adfilter-row .settings-row-label");

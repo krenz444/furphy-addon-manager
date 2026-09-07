@@ -1092,7 +1092,7 @@ Recomputed from scratch with a fresh WCAG relative-luminance + alpha-composite s
 
 **Concept:** the freed flex space between the nav and `.sidebar-bottom` becomes a lit pedestal for one large cat — sitting upright, three-step tapered ears, a gold helm nested between them, open filled rune-blue eye squares, whiskers, a cream chest blaze, crossed front paws, a curled tail — anchored on a low stone ledge that carries a faint dashed rune-circle underfoot and a second, smaller cat curled asleep beside a tiny dagger prop. The round-19 bookshelf/torch/motes scene (`.arcane-alcove`) is unchanged and keeps its own slot below the hero, now read as the wider room the ledge sits in rather than the theme's primary cat-bearing scene.
 
-**Technique:** `.nav` gives up its `flex: 1` (scoped to this theme only — every other theme's `.nav` is untouched) and a new `.arcane-hero` flex sibling, sitting between `</nav>` and `.arcane-alcove` in the sidebar markup, takes over that role instead, so it — not empty space — owns whatever room a tall window frees up. Its inline `<svg class="arcane-hero-cat">` (`preserveAspectRatio="xMidYMax meet"`, bottom-anchored, centered rather than stretched full-width so it reads as a spotlit pedestal) is sized via `height: clamp(110px, 22vh, 160px)`: the 110px floor keeps the default ≈1056×720 window from feeling starved, the 160px ceiling keeps a very tall window's cat from growing without bound. Below a ≈460px window height there is no longer room for nav + a 110px cat + `.sidebar-bottom` without collision, so — the same "vanish rather than overlap" contract every other theme's sidebar decoration already follows — the whole hero slot collapses to nothing instead of crowding or clipping the nav, the CTAs, the status dots, or the wordmark. Motion is a tail sway, an eye blink every ≈6s, and a slow glow pulse, every one of it gated behind one `@media (prefers-reduced-motion: reduce)` block.
+**Technique:** `.nav` gives up its `flex: 1` (scoped to this theme only — every other theme's `.nav` is untouched) and a new `.arcane-hero` flex sibling, sitting between `</nav>` and `.arcane-alcove` in the sidebar markup, takes over that role instead, so it — not empty space — owns whatever room a tall window frees up. Its inline `<svg class="arcane-hero-cat">` (`preserveAspectRatio="xMidYMax meet"`, bottom-anchored, centered rather than stretched full-width so it reads as a spotlit pedestal) is sized via `height: clamp(110px, 22vh, 160px)`: the 110px floor keeps the default ≈1056×720 window from feeling starved, the 160px ceiling keeps a very tall window's cat from growing without bound. Below a ≈460px window height there is no longer room for nav + a 110px cat + `.sidebar-bottom` without collision, so — the same "vanish rather than overlap" contract every other theme's sidebar decoration already follows — the whole hero slot collapses to nothing instead of crowding or clipping the nav, the status dot, or the wordmark. (Round 34, 2026-09-07: this originally said "the CTAs" - the sidebar had two buttons, "Update & Play"/"Launch WoW", at the time this was written; both are gone now, see CHANGELOG.md, and this section's own pixel numbers need the same live re-measurement flagged at the top of section 9.5.) Motion is a tail sway, an eye blink every ≈6s, and a slow glow pulse, every one of it gated behind one `@media (prefers-reduced-motion: reduce)` block.
 
 **CSS** (`ui/style.css`, appended after the §7.3 token block):
 
@@ -1917,6 +1917,25 @@ All 20 pairs clear their floor; no hex change was required. This document's own 
 
 ### 9.5 Signature touch: sidebar snowfall (`ui/index.html`, `ui/style.css`)
 
+**STALE GEOMETRY FLAG (Round 34, 2026-09-07):** every pixel height/overlap
+number in this section (9.5.5's slot mechanics and its geometry table, the
+acceptance-checklist line near the end of this file) was measured against
+`.sidebar-bottom` while it still held the "Update & Play"/"Launch WoW"
+buttons Eric asked removed this round (see CHANGELOG.md's Round 34 entry).
+Removing those two buttons (~40-44px each, `btn-lg`/`btn`, plus their 8px
+gap) frees roughly 90-110px that `.snow-scene`'s `flex: 1 1 auto` slot
+absorbs directly (9.5.5's own mechanics below need no code change - the
+layout math already does the right thing); the single most consequential
+stale number is the 845x539/flavours=3 row, predicted to newly clear the
+109px "vanish rather than clip" floor and become visible at a size it was
+never reviewed at before. This is an arithmetic prediction, not a live
+measurement - CS-R21 in the Round 34 removal spec calls for
+re-measuring every table below with `getBoundingClientRect` against the
+real running app once the button removal (CS-R4/CS-R5) has landed, and
+getting a design sign-off on the newly-visible case if it does turn out
+visible. Not done as part of this pass - tests/docs work only, no live
+browser measurement.
+
 #### 9.5.1 Original touch - superseded
 
 Snow Day originally shipped (this round, before the redo below) with soft, out-of-focus snowflakes drifting in the naturally-empty lower portion of the sidebar's `.nav` column: a fixed 88px band of five faint radial-gradient dots pinned to `.nav`'s own bottom edge via `.nav::after`, gated by a `@container snow-day-nav (max-height: 220px)` kill switch and animated with a bounded `translate`/`opacity` ping-pong. No markup changes were needed for that version - it was pure `.nav::after` decoration.
@@ -2089,7 +2108,7 @@ Identical technique to `.arcane-hero` (sections 7.15-7.16): `:root[data-theme="s
 - 845x539, single flavour: `.nav` `{top:75, bottom:191, height:116}`; `.snow-scene` `{top:207, bottom:380, height:173, display:block}` (16px gap to `.nav`); `.sidebar-bottom` `{top:396, bottom:523}` (16px gap to the scene). Scene visible (173px > 109px floor) - reads as a complete snow diorama.
 - 845x539, flavours=3 (the tallest nav configuration in the set): `.nav` `{top:75, bottom:290, height:215}`; `.snow-scene` box computes to `{top:306, bottom:380, height:74}` - below the 109px floor, so `.snow-scene-sky`/`.snow-scene-ground`/`.snow-layer` are all `display:none` via the container query (confirmed live, not just by inspection); `.sidebar-bottom` unchanged at `{top:396, bottom:523}` (16px gap to the scene box regardless). Zero overlap, zero clipping - the scene vanishes cleanly rather than showing a fragment.
 - 2024x1273, single flavour: `.nav` `{top:75, bottom:191}`; `.snow-scene` `{top:207, bottom:1114, height:907}` (16px gap to `.nav`); `.sidebar-bottom` `{top:1130, bottom:1257}` (16px gap to the scene). Fully visible - the falling-snow layers fill the entire freed height, reading as "it's snowing" at a glance.
-- 2024x1273, flavours=3 (Eric's own real setup): `.nav` `{top:75, bottom:290}`; `.snow-scene` `{top:306, bottom:1114, height:808}` (16px gap to `.nav`); `.sidebar-bottom` `{top:1130, bottom:1257}` (16px gap to the scene). Fully visible, no overlap with the flavour pills/Update All button above or the Update & Play/status dots below.
+- 2024x1273, flavours=3 (Eric's own real setup): `.nav` `{top:75, bottom:290}`; `.snow-scene` `{top:306, bottom:1114, height:808}` (16px gap to `.nav`); `.sidebar-bottom` `{top:1130, bottom:1257}` (16px gap to the scene). Fully visible, no overlap with the flavour pills/Update All button above or the status dot below. (Round 34, 2026-09-07: the "Update & Play" button this line used to also name is gone - see CHANGELOG.md - these specific pixel numbers predate its removal and need live re-measurement; see the section 9.5 note near the top of this file.)
 
 In every configuration `.snow-scene`'s `left`/`right` exactly match `.nav`'s own (`12`/`219`) - never wider than the sidebar's content column - and `overflow: hidden` plus each `.snow-layer`'s oversized `-140px` inset guarantee nothing bleeds past those bounds even mid-animation. `.arcane-hero` (Arcane Library) and `.lofi-cityscape` (Lofi Night) were spot-checked at 845x539 in the same session and render pixel-identical to their pre-existing geometry - `.snow-scene` stays `display: none` on both themes, exactly like `.arcane-hero` and `.lofi-cityscape` stay `display: none` on every theme that isn't their own.
 
@@ -2146,7 +2165,7 @@ const DEFAULT_THEME = "tokyo-rain";
 - [ ] `ui/index.html` carries the section 9.5.3 `.snow-scene` markup immediately after `</nav>`, before the Lofi Night block; `.snow-scene` is `display: none` on every other theme (confirmed on `arcane-library` and `lofi`).
 - [ ] `.theme-swatch[data-theme-value="snow-day"]` renders the correct preview colors in Settings > Appearance.
 - [ ] Live-computed contrast audit passes Snow Day against the generic 4.5:1 floor `tests/spa/theme-audit.js` applies to non-default themes (section 9.4 shows it in fact clears the stricter default-theme floors too, with no hex change needed).
-- [ ] The snowfall signature touch never overlaps the Update & Play button, the status dot, the nav buttons, or the wordmark, at 845x539 and 2024x1273, both single-flavour and `flavours=3` (section 9.5.5 - four configurations, all verified).
+- [ ] The snowfall signature touch never overlaps the status dot, the nav buttons, or the wordmark, at 845x539 and 2024x1273, both single-flavour and `flavours=3` (section 9.5.5 - four configurations, all verified). (Round 34, 2026-09-07: this checklist line originally also named the "Update & Play" button - removed entirely at Eric's request along with every launch-WoW feature, see CHANGELOG.md; the pixel geometry throughout this section's own tables needs live re-measurement against the button-free sidebar - see CS-R21 in the removal spec - not yet done as of this pass.)
 - [ ] The scene disappears cleanly (no partial/clipped remnant) when `.snow-scene`'s own real height drops below the `@container snow-scene (max-height: 109px)` threshold (verified live at flavours=3/845x539, where the box is 74px).
 - [ ] Only `transform`/`opacity` are animated in the signature touch (the three `.snow-layer` drift loops); it is static under `prefers-reduced-motion: reduce`.
 - [ ] `.arcane-hero` (Arcane Library) and `.lofi-cityscape` (Lofi Night) render pixel-identical to their pre-existing geometry at 845x539 - unaffected by the `.snow-scene` addition.

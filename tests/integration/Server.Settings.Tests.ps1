@@ -22,7 +22,6 @@ Describe 'GET/PUT /api/settings' {
             $r.Ok | Should Be $true
             $s = $r.Body
             $s.releaseType | Should Be 1
-            $s.autoUpdateOnLaunch | Should Be $true
             $s.port | Should Be 47899
             $s.adFilter | Should Be $true
             $s.cfFocus | Should Be $true
@@ -36,6 +35,11 @@ Describe 'GET/PUT /api/settings' {
             # confirm the removed feature really is gone from the response.
             ($s.PSObject.Properties.Name -contains 'cfApiKey') | Should Be $false
             ($s.PSObject.Properties.Name -contains 'hasApiKey') | Should Be $false
+            # no autoUpdateOnLaunch field exists any more (Round 34, removed
+            # at Eric's request 2026-09-07 - see CHANGELOG.md) - confirm the
+            # removed feature really is gone from the response, same pattern
+            # as the cfApiKey removal above.
+            ($s.PSObject.Properties.Name -contains 'autoUpdateOnLaunch') | Should Be $false
         }
 
         It 'PUT releaseType=2 round-trips' {
@@ -92,17 +96,20 @@ Describe 'GET/PUT /api/settings' {
             $r.StatusCode | Should Be 400
         }
 
-        It 'bool fields (autoUpdateOnLaunch etc.) COERCE rather than reject an invalid value - no 400 exists for these' {
-            # ConvertTo-SettingsBool: recognized falsy strings -> false ...
-            $rFalse = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body '{"autoUpdateOnLaunch":"false"}'
-            $rFalse.Ok | Should Be $true
-            $rFalse.Body.autoUpdateOnLaunch | Should Be $false
-            # ... any other non-empty string -> true (bare [bool] cast semantics)
-            $rTrue = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body '{"autoUpdateOnLaunch":"banana"}'
-            $rTrue.Ok | Should Be $true
-            $rTrue.Body.autoUpdateOnLaunch | Should Be $true
-            # restore
-            Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ autoUpdateOnLaunch = $true } | Out-Null
+        It 'PUT silently ignores a stale client sending autoUpdateOnLaunch (Round 34, removed at Eric''s request 2026-09-07)' {
+            # Round 34 removed the autoUpdateOnLaunch setting entirely (see
+            # CHANGELOG.md); this is no longer a bool field to COERCE (that
+            # coverage moved off this key onto whichever bool field the
+            # PUT hostTheme/other Its below still exercise) - a stale
+            # client (an old cached SPA bundle, a leftover browser tab)
+            # that still sends the key must not 400 and must not have it
+            # come back on the response or a later GET.
+            $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body '{"autoUpdateOnLaunch":true}'
+            $r.Ok | Should Be $true
+            ($r.Body.PSObject.Properties.Name -contains 'autoUpdateOnLaunch') | Should Be $false
+
+            $g = Invoke-Api -Port 47899 -Method Get -Path '/api/settings'
+            ($g.Body.PSObject.Properties.Name -contains 'autoUpdateOnLaunch') | Should Be $false
         }
 
         It 'PUT hostTheme with an uppercase name is rejected 400' {

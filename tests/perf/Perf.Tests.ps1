@@ -11,7 +11,9 @@
  that: a real fake-Wow.exe + real addon-server.ps1 + real --tray + a real
  (minimized) host window, sampled with the same tests\perf\Measure-Furphy.ps1
  bench P0-P2 used by hand, now asserted against fixed tolerances instead of
- eyeballed - plus the -Launcher fresh-check budget.
+ eyeballed. (Round 34, 2026-09-07: the -Launcher fresh-check budget test
+ that used to live here was removed along with -Launcher itself - see
+ CHANGELOG.md.)
 
  FULL-RUN-ONLY BY DESIGN (like fixture-acceptance/the theme audit): the
  tray's own WorkerLoop always waits ~90s before its first cycle (by
@@ -68,7 +70,6 @@ $Script:MaxNewTcpConnections = 0         # task brief: "zero NEW outbound"
 $Script:MaxServerRequestsInWindow = 2    # task brief: "at most 2 SPA polls" (POLL_GAME_MS=60000 in ui\app.js -> 1-2 polls/90s)
 $Script:MaxServerLogGrowthBytes = 2048   # task brief: "< 2 KB"
 $Script:ResumeTimeoutSec = 60            # task brief
-$Script:LauncherFreshCheckMaxSec = 3     # task brief
 
 $Script:HostBinDir = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'host\bin'
 $Script:HostCsPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'host\FurphyHost.cs'
@@ -117,7 +118,7 @@ function New-PerfAppRoot {
     '[]' | Set-Content -LiteralPath (Join-Path $Root 'flavours\retail\addons.json') -Encoding UTF8
 
     $settings = [ordered]@{
-        releaseType = 1; autoUpdateOnLaunch = $true; port = $Port; adFilter = $true; cfFocus = $true
+        releaseType = 1; port = $Port; adFilter = $true; cfFocus = $true
         hostWindow = $null; hostTheme = $null; backgroundUpdates = $true; backgroundIntervalMinutes = 30
         runAtStartup = $false; schemaVersion = 2; activeFlavour = 'retail'; showTestRealms = $false
     }
@@ -331,45 +332,5 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             } | Stop-Process -Force -ErrorAction SilentlyContinue
             Stop-TestServer -Server $server
         }
-    }
-
-    It '-Launcher with a fresh updatesCheckedAt finishes in under 3 seconds (launch-chain budget, P1 skip-if-recently-checked)' {
-        # Same shape as tests\integration\Cli.InstallRollbackLauncher.Tests.ps1's
-        # own "-Launcher skip-if-recently-checked" Describe (real otherwise-
-        # checkable addon record on file, so the skip has to fire BEFORE any
-        # per-addon path, not just "there was nothing to check anyway") -
-        # this copy asserts the tighter <3s perf budget specifically,
-        # instead of that Describe's own more forgiving <8s correctness bound.
-        $wowRoot = Copy-Fixture
-        $tempRoot = New-TempRoot -Name 'perf-launcher-budget'
-        $cliPath = Join-Path $tempRoot 'addon-sync.ps1'
-        Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination $cliPath -Force
-
-        $settings = @{ releaseType = 1; autoUpdateOnLaunch = $true; port = 47831; schemaVersion = 2 }
-        ConvertTo-Json -InputObject $settings -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'settings.json') -Encoding UTF8
-
-        $flavourDir = Join-Path $tempRoot 'flavours\retail'
-        New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
-        $record = [PSCustomObject]@{
-            name = 'PerfBudgetAddon'; projectId = 424243; fileId = 1000; version = '1.0.0'
-            fileName = 'PerfBudgetAddon-1.0.0.zip'
-            installedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            folders = @('PerfBudgetAddon'); author = $null; ignoreUpdates = $false
-            pinnedFileId = $null; releaseType = $null; previousFileId = $null; previousVersion = $null
-        }
-        ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
-
-        $state = @{ updatesCheckedAt = @{ retail = (Get-Date).ToUniversalTime().AddSeconds(-30).ToString('yyyy-MM-ddTHH:mm:ssZ') } }
-        ConvertTo-Json -InputObject $state -Depth 4 | Set-Content -LiteralPath (Join-Path $tempRoot 'state.json') -Encoding UTF8
-
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 15 -ArgumentList @(
-            '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
-            '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns'))
-        $sw.Stop()
-
-        $r.ExitCode | Should Be 0
-        @($r.Json.results).Count | Should Be 0
-        ($sw.Elapsed.TotalSeconds -lt $Script:LauncherFreshCheckMaxSec) | Should Be $true
     }
 }

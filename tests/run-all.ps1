@@ -10,8 +10,8 @@
 
  LAYERS, IN ORDER: static -> unit -> integration -> host -> spa ->
  fixture-acceptance -> perf ("zero impact on gameplay" pass, P3: a real
- fake-Wow.exe + server + tray + host-window steady-state window, plus the
- -Launcher fresh-check budget - see tests\perf\Perf.Tests.ps1).
+ fake-Wow.exe + server + tray + host-window steady-state window -
+ see tests\perf\Perf.Tests.ps1).
 
  PARAMS
    -Quick        Runs static/unit/integration/host/spa only (skips

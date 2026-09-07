@@ -10,10 +10,11 @@ NEW INSTALL
   click Run. Furphy only writes inside your WoW folder and never asks for admin access. On most machines one
   small window then opens with a single Install button (or a folder picker if it can't find WoW); on some
   machines you may see plain console text instead - that's fine, it does the same thing. Either way it finds
-  your WoW folder, copies the app into <WoW>\_retail_\AddonSync, writes the launcher pair, creates both desktop
-  shortcuts, registers curseforge:// install links, registers Furphy in Windows' own Settings > Apps list, and
-  adopts any addons already in your AddOns folder. Safe to re-run any time (upgrades the app, adopts anything
-  new, never touches your addon list or settings).
+  your WoW folder, copies the app into <WoW>\_retail_\AddonSync, creates the desktop shortcut, registers
+  curseforge:// install links, registers Furphy in Windows' own Settings > Apps list, and adopts any addons
+  already in your AddOns folder. Safe to re-run any time (upgrades the app, adopts anything new, never touches
+  your addon list or settings - and cleans up any leftover launcher files from an older install, if you're
+  upgrading from before 2026-09-07).
 
   Advanced: "irm <url>/install.ps1 | iex" also works from PowerShell if you'd rather skip the downloaded file -
   not the recommended path for most people, since it skips the readable console log a normal install shows you.
@@ -26,12 +27,12 @@ UNINSTALL (three equivalent ways)
   you where your addon list/settings/logs were left. Or run "install.ps1 -Uninstall" directly from an unzipped
   copy of the app - the same mechanism the three paths above use.
 
-TWO WAYS IN
-  Desktop shortcut "WoW (auto-update addons)"  -> silently updates everything, then launches WoW via Battle.net.
-  Desktop shortcut "Furphy Addon Manager"      -> opens the app (installed list, updates, versions, browse, settings).
-  Both are safe to use any time; the app refuses to run two operations at once. The tray icon's right-click menu
-  also has its own Start with Windows / Update addons in the background checkboxes and an Uninstall option -
-  see UNINSTALL above.
+ONE WAY IN
+  Desktop shortcut "Furphy Addon Manager" opens the app (installed list, updates, versions, browse, settings).
+  The tray icon's own background service keeps your addons updated on its own schedule (its "Update addons in
+  the background" checkbox), so there's nothing else to click just to stay current - it pauses automatically
+  while WoW is actually running. The app refuses to run two operations at once. The tray icon's right-click
+  menu also has its own Start with Windows checkbox and an Uninstall option - see UNINSTALL above.
 
 NO API KEY NEEDED
   Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up, no
@@ -41,23 +42,22 @@ THE APP
   My Addons       installed addons with version, update badges, status (up to date / update available / pinned /
                   ignored), per-addon menu: Update, Versions (install any specific version), Pin/Unpin, Ignore
                   updates, Roll back, Uninstall, Open on CurseForge/Wago. "Check now" and "Update all" in the
-                  toolbar. "Update & Play" in the sidebar.
+                  toolbar.
   Get new addons  switch between an in-app Wago search and the real CurseForge.com (open right inside the app
                   window) - both fully keyless. Paste a CurseForge link/ID or a wago.io link to install directly.
-  Settings        one page, two tiers - a few Essentials always on screen (release channel, auto-update on
-                  launch, spacing, theme) and an Advanced section for everything else (CurseForge options, game
-                  folders, folders Furphy doesn't manage yet with one-click take over, backups, diagnostics, open
-                  logs, force reinstall). Every row that needs more explaining has a small info icon - hover or
-                  tab to it for details.
+  Settings        one page, two tiers - a few Essentials always on screen (release channel, spacing, theme) and
+                  an Advanced section for everything else (CurseForge options, game folders, folders Furphy
+                  doesn't manage yet with one-click take over, backups, diagnostics, open logs, force reinstall).
+                  Every row that needs more explaining has a small info icon - hover or tab to it for details.
 
 FILES (this folder)
   install.ps1 / Install Furphy.cmd   the installer (see NEW INSTALL above); -Uninstall removes the app cleanly
-  addon-sync.ps1      the updater (command line; the app and the launcher both use it)
+  addon-sync.ps1      the updater (command line; the app and the background service both use it)
   addon-server.ps1    the local server behind the app (http://localhost:47831, only reachable from this PC)
   Addon Manager.vbs   starts the server hidden and opens the app window (Edge app mode)
   ui\                 the app's HTML/JS/CSS (no internet resources, works offline except the addon sources)
   addons.json         your addon list and installed state (project id, file id, version, folders, pin/ignore flags)
-  settings.json       release channel, auto-update flag, port
+  settings.json       release channel, background-update flag, port
   VERSION             the installed version (also reported by the app's Settings -> About)
   last-run.txt        result table of the most recent update run
   sync.log            everything the updater did          server.log   everything the server did

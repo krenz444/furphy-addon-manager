@@ -1,5 +1,27 @@
 # Furphy Addon Manager - changelog
 
+## Round 34 (1.15.0: no more game launching)
+
+Eric's ask, verbatim: "ok, we probably dont need to have anything that
+connects to the game at this point, as in, we dont need a button to launch
+wow, and we dont need to have it run auto updates before launching wow,
+since we now have a service running in the background -- get rid of those
+features entirely."
+
+Removed every feature that launched or auto-updated-before-launching
+World of Warcraft: the "Update & Play" and "Launch WoW" sidebar buttons,
+the "Update addons before WoW starts" setting, the per-flavour launcher
+files the installer used to write into each WoW client folder, the
+matching Desktop shortcut(s), the server's launch job kind, and the
+CLI's -Launcher mode (including its Battle.net product-code table and
+45-second launch budget). The background update service already updates
+addons on its own schedule, so a launch-time update path is redundant;
+game-mode detection (never updating while WoW is running) is unchanged.
+Existing installs have their stale launcher files and shortcut removed
+automatically the next time the installer runs, and a stale
+autoUpdateOnLaunch key is dropped from settings.json automatically the
+next time the server reads it.
+
 ## Round 33 (1.14.0: uninstall from the tray, the app and Windows; a one-window installer; easier downloads)
 
 Eric's requests, verbatim: "from the taskbar, i need a right click option to

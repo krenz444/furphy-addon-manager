@@ -262,16 +262,10 @@ Describe 'Job-history retention never loses a running job' {
 
 Describe 'Get-ComputedFreshness' {
 
-    It 'reports "checking" while a sync/check/add/install/launch job is running' {
+    It 'reports "checking" while a sync/check/add/install job is running' {
         Initialize-JobState
         $Script:CurrentFlavour = 'retail'
         $jobView = [PSCustomObject]@{ state = 'running'; kind = 'sync' }
-        (Get-ComputedFreshness -CurrentJobView $jobView -Flavor 'retail') | Should Be 'checking'
-    }
-
-    It 'a running job of an unrelated kind (e.g. "launch" with updateFirst false is still "launch") is also "checking" per the documented kind list' {
-        Initialize-JobState
-        $jobView = [PSCustomObject]@{ state = 'running'; kind = 'launch' }
         (Get-ComputedFreshness -CurrentJobView $jobView -Flavor 'retail') | Should Be 'checking'
     }
 

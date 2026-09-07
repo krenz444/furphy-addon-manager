@@ -188,7 +188,7 @@ Describe 'Round 28: progress.json tallies pass through to job.progress on a real
       Confirmed live: `-Add 900000011,900000012,900000013` against the
       real curseforge.com API leaves addons.json as `[]`.
 
-      Fixed the way Cli.InstallRollbackLauncher.Tests.ps1's offline rollback
+      Fixed the way Cli.InstallRollback.Tests.ps1's offline rollback
       Describe already does it: hand-craft the addons.json records directly
       (next to the copied addon-sync.ps1 under $root - Start-TestServer
       already put one there - never under $wowRoot, which only affects
