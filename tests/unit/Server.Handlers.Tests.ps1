@@ -19,6 +19,36 @@ function Open-InBrowser {
     $Script:FurphyTestOpenedUrl = $Url
 }
 
+# Round 33: shadows the real Start-Process cmdlet (a function outranks a
+# cmdlet in command lookup) so Handle-Open's explorer.exe / notepad.exe
+# launches never actually happen under test - what WOULD have launched is
+# recorded in $Script:FurphyTestStartedProcess for the test to inspect.
+function Start-Process {
+    param([string]$FilePath, $ArgumentList, [switch]$PassThru, $WindowStyle, [switch]$Wait, [switch]$NoNewWindow)
+    $Script:FurphyTestStartedProcess = [PSCustomObject]@{ FilePath = $FilePath; Arguments = (@($ArgumentList) -join ' ') }
+}
+
+function New-FakeWowRoot {
+    <# A throwaway <WowRoot>\<flavour folder>\Interface\AddOns tree under tests\.tmp - never the real install. #>
+    param([string[]]$FlavourFolders = @('_retail_'))
+    $wowRoot = New-TempRoot -Name 'wowroot-open'
+    foreach ($f in $FlavourFolders) {
+        New-Item -ItemType Directory -Path (Join-Path (Join-Path $wowRoot $f) 'Interface\AddOns') -Force | Out-Null
+    }
+    return $wowRoot
+}
+
+function Use-FakeWowRoot {
+    <# Points path resolution at -WowRoot and stashes -Flavour exactly the way Invoke-Route does for a request carrying ?flavour=<id> (Set-CurrentFlavourContext). #>
+    param([string]$WowRoot, [string]$Flavour = 'retail')
+    $Script:AddonsPathOverride = $null
+    $Script:WowRootOverride = $WowRoot
+    $Script:BuildInfoPathOverride = $null
+    $Script:Root = New-TempRoot -Name 'approot-open'
+    Set-CurrentFlavourContext -Flavor $Flavour
+    $Script:FurphyTestStartedProcess = $null
+}
+
 function Initialize-JobState {
     <# Minimal script-scope state Handle-JobsGetOne/Add-JobToHistory/Get-ComputedFreshness need - normally set up by the "# Startup" section this dot-source guard skips. #>
     $Script:Jobs = New-Object 'System.Collections.Generic.List[object]'
@@ -116,6 +146,73 @@ Describe 'Handle-Open (POST /api/open, what=url)' {
         $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -JsonBody @{ what = 'launch-the-missiles' }
         Handle-Open -Context $ctx -RouteMatch @{}
         $ctx.Response.StatusCode | Should Be 400
+    }
+}
+
+# Round 33: Settings > Advanced > Game folders. "World of Warcraft folder" >
+# "Open" had been wired to 'folder' (the AddOns SUBfolder) and "AddOns
+# folder" > "Open" to 'addons' (addons.json in Notepad) - neither opened
+# what its row showed. Invisible under ?mock=1 (whose /api/open stub
+# answered ok for anything), so these pin the real handler's behaviour.
+Describe 'Handle-Open (POST /api/open, what=wowfolder / folder / addons - Settings > Game folders, round 33)' {
+
+    It "'wowfolder' opens the flavour's own WoW folder (<WowRoot>\_retail_, the path the Settings row shows) in Explorer - not the AddOns subfolder" {
+        $wowRoot = New-FakeWowRoot
+        Use-FakeWowRoot -WowRoot $wowRoot
+        $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -JsonBody @{ what = 'wowfolder' }
+        Handle-Open -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        (Get-FakeResponseBody -Context $ctx).ok | Should Be $true
+        $Script:FurphyTestStartedProcess.FilePath | Should Be 'explorer.exe'
+        $Script:FurphyTestStartedProcess.Arguments | Should Be ('"' + (Join-Path $wowRoot '_retail_') + '"')
+    }
+
+    It "'folder' still opens the AddOns folder (<WowRoot>\_retail_\Interface\AddOns) in Explorer - unchanged, now behind the 'AddOns folder' row's button" {
+        $wowRoot = New-FakeWowRoot
+        Use-FakeWowRoot -WowRoot $wowRoot
+        $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -JsonBody @{ what = 'folder' }
+        Handle-Open -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:FurphyTestStartedProcess.FilePath | Should Be 'explorer.exe'
+        $Script:FurphyTestStartedProcess.Arguments | Should Be ('"' + (Join-Path $wowRoot '_retail_\Interface\AddOns') + '"')
+    }
+
+    It "both targets follow the request's flavour (?flavour=classic via Set-CurrentFlavourContext) - a multi-flavour row opens ITS folder, not the active flavour's" {
+        $wowRoot = New-FakeWowRoot -FlavourFolders @('_retail_', '_classic_')
+        Use-FakeWowRoot -WowRoot $wowRoot -Flavour 'classic'
+
+        $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -Query '?flavour=classic' -JsonBody @{ what = 'folder' }
+        Handle-Open -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:FurphyTestStartedProcess.Arguments | Should Be ('"' + (Join-Path $wowRoot '_classic_\Interface\AddOns') + '"')
+
+        $Script:FurphyTestStartedProcess = $null
+        $ctx2 = New-FakeHttpContext -Method 'POST' -Path '/api/open' -Query '?flavour=classic' -JsonBody @{ what = 'wowfolder' }
+        Handle-Open -Context $ctx2 -RouteMatch @{}
+        $ctx2.Response.StatusCode | Should Be 200
+        $Script:FurphyTestStartedProcess.Arguments | Should Be ('"' + (Join-Path $wowRoot '_classic_') + '"')
+    }
+
+    It "'wowfolder' for a flavour whose folder does not exist is a 400 'World of Warcraft folder not found' and launches nothing" {
+        $wowRoot = New-FakeWowRoot
+        Use-FakeWowRoot -WowRoot $wowRoot -Flavour 'classic'
+        $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -JsonBody @{ what = 'wowfolder' }
+        Handle-Open -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 400
+        (Get-FakeResponseBody -Context $ctx).error | Should Be 'World of Warcraft folder not found'
+        $Script:FurphyTestStartedProcess | Should Be $null
+    }
+
+    It "'addons' (now Backup & troubleshooting's 'Open addon list file') still opens the request flavour's addons.json in Notepad - demoted, not deleted" {
+        $wowRoot = New-FakeWowRoot
+        Use-FakeWowRoot -WowRoot $wowRoot
+        New-Item -ItemType Directory -Path (Split-Path -Path $Script:AddonsJsonPath -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $Script:AddonsJsonPath -Value '[]' -Encoding Ascii
+        $ctx = New-FakeHttpContext -Method 'POST' -Path '/api/open' -JsonBody @{ what = 'addons' }
+        Handle-Open -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:FurphyTestStartedProcess.FilePath | Should Be 'notepad.exe'
+        $Script:FurphyTestStartedProcess.Arguments | Should Be ('"' + $Script:AddonsJsonPath + '"')
     }
 }
 

@@ -1,5 +1,68 @@
 # Furphy Addon Manager - changelog
 
+## Round 33 (1.13.1: Game folder buttons open what their labels say)
+
+Settings > Advanced > Game folders had two buttons that opened the
+wrong things - the wiring bug Round 32 flagged and deliberately left
+open (SETTINGS-SPEC.md section 5, item 4; UX-SPEC 6.2). "World of
+Warcraft folder" > "Open" (labelled "Open folder" before Round 32)
+opened the AddOns subfolder (`Interface\AddOns`), not the folder shown
+beside it; "AddOns folder" > "Open" opened `addons.json` in Notepad, not
+a folder at all. `?mock=1` could never show this - its `/api/open` stub
+answered `{ok:true}` for any target - so it was found by reading
+`Handle-Open` directly. Cause: `ui/app.js` wired the first button to
+the pre-existing `'folder'` target (the AddOns folder, the only folder
+target there was) and the second to `'addons'` (a troubleshooting
+target that opens the config file), and no target ever opened the WoW
+folder itself. The multi-flavour per-row "Open" buttons (Round 19) had
+the same wiring plus a second defect: they sent their flavour in the
+POST body, which the server never reads (`Get-QueryFlavour` reads
+`?flavour=` only), so every row opened the active flavour's folder
+rather than its own.
+
+Fix: a new `'wowfolder'` `/api/open` target opens `Get-WowRootPath` -
+the exact path the row displays - in Explorer (400 "World of Warcraft
+folder not found" when it does not exist), and "World of Warcraft
+folder" > "Open" calls it. "AddOns folder" > "Open" now calls
+`'folder'`. The per-row buttons pass their flavour as `?flavour=<id>`
+(`Api.openWhat`/`Actions.openWhat` gained a third argument) so
+`'folder'` resolves that row's own path. `'addons'` is unchanged
+server-side and moves to Settings > Advanced > Backup & troubleshooting
+as **"Open addon list file"** beside "Open logs folder", with its own
+tooltip per Round 32's one-tooltip-per-row rule - demoted, not deleted
+(UX-SPEC 1.3); with more than one flavour installed it sends the active
+flavour explicitly. Labels and the Round 32 tooltips are unchanged. The
+`?mock=1` `/api/open` stub now 400s an unknown target the way the
+server does.
+
+Tests: `tests/unit/Server.Handlers.Tests.ps1` gains five cases with
+`Start-Process` shadowed to record what would launch - `'wowfolder'`
+and `'folder'` against a throwaway `<WowRoot>\_retail_\Interface\AddOns`
+tree, both following `?flavour=classic` through
+`Set-CurrentFlavourContext`, the missing-folder 400, and `'addons'`
+still opening Notepad (file: 23/23 pass). Verified live against the
+real server on port 47877, rooted at a scratch
+`Fake WoW (x86)\_retail_\AddonSync` (spaces and parentheses in the path,
+resolution by the same parent walk-up production uses): clicking each
+button in the real page opened `_retail_`, `_retail_\Interface\AddOns`
+and the app root respectively, confirmed by enumerating Explorer's open
+windows via `Shell.Application`; with a second `_classic_` client added,
+the Retail and Classic rows' "Open" buttons posted `?flavour=retail` /
+`?flavour=classic` and opened each flavour's own AddOns folder, and
+"Open addon list file" opened `flavours\retail\addons.json` in Notepad.
+On a root with no addon list yet, that last button reports the existing
+"addons.json not found" message. Docs: SPEC (the `/api/open` line and a
+new round-33 section), UX-SPEC 6.2 (Game folders, Backup &
+troubleshooting).
+
+Found, not fixed (test harness only): `tests\lib\common.ps1`'s
+`Start-TestServer` passes `-Root` through `Start-Process -ArgumentList`
+unquoted, so a root path containing spaces is split and the child
+server starts mis-rooted (`/api/settings` reported `addonsPath` as
+`WoW`). Every existing test uses space-free `tests\.tmp` roots, so
+nothing in the suite hits it; the live check above launched the server
+with a quoted argument string instead.
+
 ## Round 32 (1.13.0: Settings made simple, tooltips everywhere)
 
 Eric's requests, verbatim: "after these do a full settings ui/ux audit,

@@ -1201,7 +1201,17 @@ const Mock = (function () {
         if (/^[a-z0-9-]+$/i.test(url)) return { slug: url };
         return { __status: 404, error: "not found" };
       }
-      if (p === "/api/open" && method === "POST") return { ok: true };
+      if (p === "/api/open" && method === "POST") {
+        // Round 33: mirror the real Handle-Open's "unknown what" 400 so a
+        // mis-wired button surfaces under ?mock=1 too - this stub used to
+        // answer {ok:true} for ANY target, which is exactly how the Game
+        // folders buttons opening the wrong things stayed invisible here.
+        // The server's switch is the authority; keep this list in step.
+        const knownOpenTargets = ["log", "serverlog", "wowfolder", "folder", "addons", "curseforge", "lastrun", "backups", "logs", "url", "cf-window"];
+        const what = body && body.what;
+        if (knownOpenTargets.indexOf(what) === -1) return { __status: 400, error: "unknown what: " + what };
+        return { ok: true };
+      }
       if (p === "/api/shutdown" && method === "POST") return { ok: true };
       return { __status: 404, error: "no mock route for " + method + " " + p };
     }
@@ -1746,7 +1756,12 @@ const Api = (function () {
     wagoGallery: function (slug) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug) + "/gallery"); },
     wagoResolve: function (url) { return request("GET", "/api/wago/resolve" + qs({ url: url })); },
 
-    openWhat: function (what, extra) { return request("POST", "/api/open", Object.assign({ what: what }, extra || {})); },
+    // Round 33: the optional third arg appends ?flavour=<id>. The server
+    // resolves a request's flavour from the QUERY STRING only
+    // (Get-QueryFlavour), never from the POST body, so the multi-flavour
+    // Game folders rows must send it this way for 'folder' to open THAT
+    // row's AddOns folder rather than the active flavour's.
+    openWhat: function (what, extra, flavour) { return request("POST", "/api/open" + qs({ flavour: flavour }), Object.assign({ what: what }, extra || {})); },
     shutdown: function () { return request("POST", "/api/shutdown"); }
   };
 })();
@@ -4667,8 +4682,8 @@ const Actions = (function () {
     }
   }
 
-  async function openWhat(what, extra) {
-    try { await Api.openWhat(what, extra); }
+  async function openWhat(what, extra, flavour) {
+    try { await Api.openWhat(what, extra, flavour); }
     catch (err) { Components.Toast.show("Couldn't open that: " + describeError(err), "error"); }
   }
 
@@ -5931,12 +5946,12 @@ Views.settings = (function () {
   // FLAVORS-SPEC.md CS-F4 (section 6.2/copy table): today's exact two rows
   // (#settings-game-single), untouched, at <=1 installed flavour; one row
   // per installed flavour (#settings-game-multi) once there's more than one.
-  // The per-flavour "Open" button passes its own flavour along (Actions.
-  // openWhat's extra arg) for forward-compatibility - the server's own
-  // /api/open 'folder' target has no per-flavour resolution yet (untouched
-  // by this change set, addon-server.ps1 is outside CS-F4's file list), so
-  // every row's button currently opens the same default flavour's folder
-  // until a future round wires that up; see this function's own notesForNext.
+  // Round 33: each row's "Open" button opens THAT flavour's AddOns folder
+  // (the path shown on the row) - its flavour id travels as ?flavour=<id>
+  // (Actions.openWhat's third arg), the only place the server reads a
+  // flavour from (Get-QueryFlavour). Before this the id was sent in the
+  // POST body, which the server ignored, so every row's button opened the
+  // active flavour's folder instead of its own.
   function renderGameFolders(s) {
     // Deliberately the RAW installed count, not visibleFlavours() - this is
     // an informational/troubleshooting list (like About's build list below),
@@ -5954,7 +5969,7 @@ Views.settings = (function () {
           Utils.el("div", { class: "settings-row-label" }, [f.label]),
           Utils.el("div", { class: "settings-row-value" }, [f.addonsPath || "—"])
         ]),
-        Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openWhat("folder", { flavour: f.id }); } }, ["Open"])
+        Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openWhat("folder", null, f.id); } }, ["Open"])
       ]));
     });
   }
@@ -6551,8 +6566,17 @@ Views.settings = (function () {
     // inside buildThemeGrid itself), never rebuilt by render().
     buildThemeGrid();
 
-    Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("folder"); });
-    Utils.qs("#btn-open-addons").addEventListener("click", function () { Actions.openWhat("addons"); });
+    // Round 33: each Game folders button opens what its own row shows.
+    // "World of Warcraft folder" (s.wowRoot, e.g. ...\_retail_) -> the
+    // 'wowfolder' /api/open target (new, addon-server.ps1 Handle-Open);
+    // "AddOns folder" (s.addonsPath) -> 'folder' (Interface\AddOns in
+    // Explorer). Before this the first was wired to 'folder' (so it opened
+    // the AddOns SUBfolder, not the folder shown beside it) and the second
+    // to 'addons' (addons.json in Notepad - not a folder at all) - the
+    // wiring bug Round 32's SETTINGS-SPEC.md section 5, item 4 flagged.
+    // 'addons' itself moves to Backup & troubleshooting, below.
+    Utils.qs("#btn-open-wowfolder").addEventListener("click", function () { Actions.openWhat("wowfolder"); });
+    Utils.qs("#btn-open-addons").addEventListener("click", function () { Actions.openWhat("folder"); });
     // CS4 (UX-SPEC.md 6.2): the four separate "Open sync log / Open last run
     // report / Open server log / Open backups folder" buttons collapse into
     // one "Open logs folder" button, backed by a new server-side /api/open
@@ -6564,6 +6588,16 @@ Views.settings = (function () {
     // delete - still reachable by any other caller), just no longer wired to
     // their own individual buttons here.
     Utils.qs("#btn-open-logs").addEventListener("click", function () { Actions.openWhat("logs"); });
+    // Round 33: the 'addons' target (the raw addon list, addons.json, in
+    // Notepad) stays reachable here per UX-SPEC.md 1.3 (demote, don't
+    // delete) now that the Game folders "AddOns folder" button opens the
+    // folder its label promises. addons.json is per flavour, so with more
+    // than one installed the active flavour is sent explicitly (the same
+    // rule Api.postJob applies) rather than leaning on the server's
+    // settings.json activeFlavour fallback.
+    Utils.qs("#btn-open-addonlist").addEventListener("click", function () {
+      Actions.openWhat("addons", null, Store.hasMultipleFlavours() ? Store.state.activeFlavour : undefined);
+    });
 
     // Round 17: the manual "Refresh the addon list from CurseForge" button
     // (and its Api.cfCatalogueRefresh call) is gone - the catalogue still

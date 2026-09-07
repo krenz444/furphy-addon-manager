@@ -6737,7 +6737,37 @@ function Handle-Open {
                 # Same quoting requirement as 'log' above (spaces/parens in ROOT).
                 Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $Script:ServerLogPath + '"')
             }
+            'wowfolder' {
+                # Round 33: Settings > Advanced > Game folders' "World of
+                # Warcraft folder" row. That row displays Get-SettingsView's
+                # `wowRoot` field, which is Get-WowRootPath - the flavour's
+                # own folder (e.g. <WowRoot>\_retail_), NOT the AddOns
+                # subfolder - so this opens exactly the path shown beside
+                # the button. Until this target existed, ui\app.js wired
+                # that row's button to 'folder' below (the AddOns
+                # subfolder) and the "AddOns folder" row's button to
+                # 'addons' (addons.json in Notepad): neither button opened
+                # what its own row promised (the wiring bug Round 32's
+                # SETTINGS-SPEC.md section 5, item 4 flagged and left
+                # open). Flavour-aware the same way 'folder' is -
+                # Resolve-EffectiveAddonsPath reads $Script:CurrentFlavour,
+                # stashed per request by Set-CurrentFlavourContext from
+                # ?flavour=.
+                $wowFolder = Get-WowRootPath
+                if ($wowFolder -and (Test-Path -LiteralPath $wowFolder -PathType Container)) {
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $wowFolder + '"')
+                } else {
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'World of Warcraft folder not found' }
+                    return
+                }
+            }
             'folder' {
+                # The AddOns folder (Interface\AddOns) in Explorer. As of
+                # round 33 this backs Settings > Advanced > Game folders'
+                # "AddOns folder" row (single flavour) and every per-flavour
+                # row (multi-flavour - ?flavour=<id> picks which one; the
+                # UI used to send the flavour in the POST body, which
+                # nothing here ever read).
                 $addonsPath = Resolve-EffectiveAddonsPath
                 if ($addonsPath -and (Test-Path -LiteralPath $addonsPath)) {
                     Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $addonsPath + '"')
@@ -6747,6 +6777,12 @@ function Handle-Open {
                 }
             }
             'addons' {
+                # The request flavour's addons.json in Notepad - a
+                # troubleshooting target. Round 33 moved it off the Game
+                # folders "AddOns folder" row (whose label promised the
+                # folder, not this file) to Settings > Advanced > Backup &
+                # troubleshooting's "Open addon list file" button, per
+                # UX-SPEC.md 1.3 (demote, don't delete). Unchanged here.
                 if (Test-Path -LiteralPath $Script:AddonsJsonPath) {
                     Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $Script:AddonsJsonPath + '"')
                 } else {
