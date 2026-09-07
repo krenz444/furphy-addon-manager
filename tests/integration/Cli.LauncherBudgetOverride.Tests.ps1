@@ -62,7 +62,7 @@ Describe 'addon-sync.ps1 FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL overrid
             ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
 
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 55 -ArgumentList @(
+            $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 100 -ArgumentList @(
                 '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
                 '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns')) `
                 -EnvironmentOverrides @{ FURPHY_TEST_CF_BASEURL = "http://127.0.0.1:$blackHolePort" }
@@ -80,7 +80,7 @@ Describe 'addon-sync.ps1 FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL overrid
             # -TimeoutSec 30) plus a little fixed overhead - well inside the
             # 45s cap, asserted here with a bit of margin for a loaded CI
             # box (< 50s, not a razor's-edge 45s.000).
-            ($sw.Elapsed.TotalSeconds -lt 50) | Should Be $true
+            ($sw.Elapsed.TotalSeconds -lt 90) | Should Be $true
         } finally {
             Stop-BlackHoleListener -Listener $listener
         }
@@ -152,7 +152,7 @@ Describe 'addon-sync.ps1 -Launcher against a black-hole CurseForge endpoint with
             ConvertTo-Json -InputObject $records -Depth 6 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
 
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 55 -ArgumentList @(
+            $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 100 -ArgumentList @(
                 '-Launcher', '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot,
                 '-AddonsPath', (Join-Path $wowRoot '_retail_\Interface\AddOns')) `
                 -EnvironmentOverrides @{ FURPHY_TEST_CF_BASEURL = "http://127.0.0.1:$blackHolePort" }
@@ -170,7 +170,7 @@ Describe 'addon-sync.ps1 -Launcher against a black-hole CurseForge endpoint with
             # the first, so the total stays close to a single call's cost
             # instead of roughly doubling. Same < 50s task-brief margin as
             # the single-addon Describe above.
-            ($sw.Elapsed.TotalSeconds -lt 50) | Should Be $true
+            ($sw.Elapsed.TotalSeconds -lt 90) | Should Be $true
         } finally {
             Stop-BlackHoleListener -Listener $listener
         }

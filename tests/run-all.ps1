@@ -88,6 +88,28 @@ $ProgressPreference = 'SilentlyContinue'
 
 . (Join-Path $PSScriptRoot 'lib\common.ps1')
 
+$Script:RunAllLockPath = Join-Path $Script:FurphyTmpRoot 'run-all.lock'
+
+function Test-ProcessAlive {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return $false }
+    try { Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null; return $true } catch { return $false }
+}
+
+$existingLockOwner = $null
+if (Test-Path -LiteralPath $Script:RunAllLockPath) {
+    try { $existingLockOwner = [int]((Get-Content -LiteralPath $Script:RunAllLockPath -Raw -ErrorAction Stop).Trim()) } catch { $existingLockOwner = $null }
+}
+if ($existingLockOwner -and (Test-ProcessAlive -ProcessId $existingLockOwner)) {
+    Write-Host "FATAL: another tests\run-all.ps1 (PID $existingLockOwner) already owns tests\.tmp\run-all.lock in this build root - two concurrent full runs collide on port 47899, the 47890-47897 static-server pool, the hygiene sweep, and FurphyHost.exe's per-port tray mutex. Wait for PID $existingLockOwner to finish, or if it is confirmed gone, delete tests\.tmp\run-all.lock and retry." -ForegroundColor Red
+    exit 1
+}
+if (Test-PortOpen -Port 47899 -TimeoutMs 300) {
+    Write-Host "FATAL: port 47899 is already LISTENING and no live run-all.ps1 owns tests\.tmp\run-all.lock - refusing to start rather than silently adopting or killing whatever is there. Free port 47899 first, then retry." -ForegroundColor Red
+    exit 1
+}
+[string]$PID | Set-Content -LiteralPath $Script:RunAllLockPath -Encoding Ascii -Force
+
 try {
     Import-Module Pester -RequiredVersion 3.4.0 -ErrorAction Stop -Force
 } catch {
@@ -314,13 +336,17 @@ function Invoke-HygieneSweep {
     } catch { }
 
     if (Test-Path -LiteralPath $Script:FurphyTmpRoot) {
-        $before = @(Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Force -ErrorAction SilentlyContinue).Count
-        Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Force -ErrorAction SilentlyContinue | ForEach-Object {
-            try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop } catch {
-                Write-Host "  WARN: could not remove $($_.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
+        # Never sweep away THIS run's own run-all.lock, or a second
+        # run-all.ps1 started moments later would see no lock and start
+        # concurrently anyway - removed explicitly, once, after the run.
+        $lockLeafName = Split-Path -Path $Script:RunAllLockPath -Leaf
+        $sweepItems = @(Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $lockLeafName })
+        foreach ($item in $sweepItems) {
+            try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch {
+                Write-Host "  WARN: could not remove $($item.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
-        Write-Host "  ok: tests\.tmp swept ($before item(s) found, removed where possible)"
+        Write-Host "  ok: tests\.tmp swept ($($sweepItems.Count) item(s) found, removed where possible; run-all.lock preserved)"
     }
 }
 
@@ -390,7 +416,7 @@ if ($layersToRun -contains 'host') {
 if ($layersToRun -contains 'spa') {
     $layer = New-LayerReport -Name 'spa'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-SpaHarness.ps1') -DisplayName 'spa: Run-SpaHarness'
+    Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-SpaHarness.ps1') -DisplayName 'spa: Run-SpaHarness' -TimeoutSec 300
     if (-not $Quick) {
         Invoke-ScriptCheck -Layer $layer -Path (Join-Path $Script:FurphyTestsRoot 'spa\Run-ThemeAudit.ps1') -DisplayName 'spa: Run-ThemeAudit (15 themes, full-only)' -TimeoutSec 300
     }
@@ -438,6 +464,7 @@ if ($layersToRun -contains 'perf') {
     # 'Hygiene sweep (pre-flight)' above and the header comment's
     # "Review fix" note.)
     Invoke-HygieneSweep -Label 'Hygiene sweep'
+    try { Remove-Item -LiteralPath $Script:RunAllLockPath -Force -ErrorAction SilentlyContinue } catch { }
 } # end finally
 
 $runStopwatch.Stop()

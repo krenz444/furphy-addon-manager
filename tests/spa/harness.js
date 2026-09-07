@@ -25,11 +25,14 @@
   function resultsEl() { return document.getElementById("results"); }
 
   function writeResults() {
-    try { resultsEl().textContent = JSON.stringify(results); } catch (e) { /* keep going */ }
+    try {
+      resultsEl().textContent = JSON.stringify(results, function (k, v) { return (typeof k === "string" && k.indexOf("_") === 0) ? undefined : v; });
+    } catch (e) { /* keep going */ }
   }
 
   function beginPhase(name) {
-    currentPhase = { name: name, checks: [], consoleErrors: [] };
+    if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
+    currentPhase = { name: name, checks: [], consoleErrors: [], startedAt: new Date().toISOString(), _startedAtMs: Date.now() };
     results.phases.push(currentPhase);
     statusEl().textContent = "phase: " + name;
     writeResults();
@@ -710,6 +713,8 @@
       "More about Save / load your addon list",
       "More about Open logs folder",
       "More about Force reinstall all",
+      "More about Open addon list file",
+      "More about Uninstall Furphy Addon Manager",
       "More about Run",
       "More about Copy report",
       "More about WoW client build",
@@ -722,7 +727,15 @@
       });
     });
     checkTry("exactly " + STATIC_TOOLTIP_ARIA_LABELS.length + " static settings tooltips present (no extras, none missing)", function () {
-      return qa(win, "#view-settings .info-tip[data-tooltip]").length === STATIC_TOOLTIP_ARIA_LABELS.length;
+      const actualLabels = qa(win, "#view-settings .info-tip[data-tooltip]")
+        .map(function (b) { return b.getAttribute("aria-label"); });
+      const missing = STATIC_TOOLTIP_ARIA_LABELS.filter(function (l) { return actualLabels.indexOf(l) === -1; });
+      const extra = actualLabels.filter(function (l) { return STATIC_TOOLTIP_ARIA_LABELS.indexOf(l) === -1; });
+      if (missing.length || extra.length) {
+        check("static settings tooltip mismatch (detail)", false,
+          "missing: [" + missing.join(", ") + "]; extra: [" + extra.join(", ") + "]");
+      }
+      return missing.length === 0 && extra.length === 0;
     });
 
     // ---- Negative: rows this spec explicitly marks "tooltip: none" carry
@@ -805,9 +818,11 @@
     checkTry("Advanced holds exactly 5 VISIBLE top-level .settings-group boxes on a single-flavour, no-PTR mock (6th, WoW versions, exists in the DOM but stays [hidden] here)", function () {
       return qa(win, ".settings-advanced-body > .settings-group").filter(visible).length === 5;
     });
-    checkTry("Backup & troubleshooting merges Save/load + Troubleshooting + Diagnostics into one box with 3 sub-groups", function () {
+    // DISTRIBUTION-SPEC.md section 3.2 adds a 4th sub-group (Row 20,
+    // Uninstall) to this same box, after Diagnostics.
+    checkTry("Backup & troubleshooting merges Save/load + Troubleshooting + Diagnostics + Uninstall into one box with 4 sub-groups", function () {
       const box = q(win, "#settings-backup-troubleshooting");
-      return !!box && box.classList.contains("settings-group") && qa(win, "#settings-backup-troubleshooting > .settings-subgroup").length === 3;
+      return !!box && box.classList.contains("settings-group") && qa(win, "#settings-backup-troubleshooting > .settings-subgroup").length === 4;
     });
 
     // ---- CurseForge install-links row (Row 8, Eric's named complaint): the
@@ -922,6 +937,124 @@
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
+  // ------------------------------------------------------------------
+  // Phase 7 (DISTRIBUTION-SPEC.md sections 3.2/3.4): Settings > Backup &
+  // troubleshooting's "Uninstall Furphy Addon Manager" row - the button
+  // itself, the shared confirm dialog's exact copy (including the derived
+  // "kept at <appDest>" clause), the 409 busy path, and the 202 success
+  // path's full-screen "being removed" state with polling actually
+  // stopped. The busy path is forced deterministically via the mock's own
+  // ?uninstallBusy=1 test-only param (same convention as ?game=1/
+  // ?flavours=N above) rather than timing a real mock job's running
+  // window - three separate frames (one per outcome, plus the unforced one
+  // the copy checks run against) so entering the one-way uninstalling
+  // state in the success frame can never bleed into the other two.
+  // ------------------------------------------------------------------
+  async function openAdvancedAndFindUninstallButton(win) {
+    const summary = q(win, "#settings-advanced summary");
+    if (summary) await clickAndSettle(win, summary, 150);
+    return q(win, "#btn-uninstall-app");
+  }
+
+  async function phaseUninstall() {
+    beginPhase("uninstall (DISTRIBUTION-SPEC.md sections 3.2/3.4)");
+
+    // ---- Button + confirm dialog copy, on a plain unforced frame.
+    const copyWin = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(copyWin, 8000);
+    const copyBtn = await openAdvancedAndFindUninstallButton(copyWin);
+    checkTry("Uninstall Furphy Addon Manager button present, danger-styled, in Backup & troubleshooting", function () {
+      return !!copyBtn && text(copyBtn) === "Uninstall Furphy Addon Manager" && copyBtn.classList.contains("btn-danger-outline");
+    });
+    if (copyBtn) {
+      await clickAndSettle(copyWin, copyBtn, 250);
+      const dialogShown = visible(q(copyWin, "#dialog-confirm"));
+      checkTry("confirm dialog shows the exact title and message, with the derived addon-list path", function () {
+        if (!dialogShown) return false;
+        const title = text(q(copyWin, "#confirm-title"));
+        const msg = text(q(copyWin, "#confirm-message"));
+        return title === "Uninstall Furphy Addon Manager?" &&
+          msg === "This removes Furphy's program files, its Start with Windows setting, and the CurseForge install-link handler. Your addons stay installed in WoW. Your addon list is kept at C:\\Program Files (x86)\\World of Warcraft\\_retail_\\AddonSync so reinstalling brings it back.";
+      });
+      checkTry("confirm dialog's OK button reads 'Uninstall' and is danger-styled", function () {
+        const okBtn = q(copyWin, "#confirm-ok");
+        return !!okBtn && text(okBtn) === "Uninstall" && okBtn.classList.contains("btn-danger");
+      });
+      if (dialogShown) {
+        const cancelBtn = q(copyWin, "#confirm-cancel");
+        if (cancelBtn) await clickAndSettle(copyWin, cancelBtn, 150);
+      }
+    } else {
+      check("confirm dialog shows the exact title and message, with the derived addon-list path", false, "#btn-uninstall-app not found");
+      check("confirm dialog's OK button reads 'Uninstall' and is danger-styled", false, "#btn-uninstall-app not found");
+    }
+    checkTry("cancelling the confirm dialog leaves the app running normally (no uninstalling state entered)", function () {
+      return copyWin.__furphyTest.App.isUninstalling() === false && visible(q(copyWin, "#app")) && !visible(q(copyWin, "#app-closing-overlay"));
+    });
+
+    // ---- 409 busy path.
+    const busyWin = await loadFrame("?mock=1&test=1&view=settings&uninstallBusy=1");
+    await waitForReady(busyWin, 8000);
+    const busyBtn = await openAdvancedAndFindUninstallButton(busyWin);
+    if (busyBtn) {
+      await clickAndSettle(busyWin, busyBtn, 250);
+      const busyDialogShown = visible(q(busyWin, "#dialog-confirm"));
+      if (busyDialogShown) {
+        await clickAndSettle(busyWin, q(busyWin, "#confirm-ok"), 400);
+        checkTry("409 response shows the plain-language busy toast and leaves the app running (not uninstalling)", function () {
+          const toasts = qa(busyWin, "#toast-container .toast-body").map(function (el) { return text(el); });
+          const sawBusyToast = toasts.some(function (t) { return t === "Furphy is updating an addon right now. Try again in a minute."; });
+          return sawBusyToast && busyWin.__furphyTest.App.isUninstalling() === false && visible(q(busyWin, "#app"));
+        });
+      } else {
+        check("409 response shows the plain-language busy toast and leaves the app running (not uninstalling)", false, "confirm dialog never opened");
+      }
+    } else {
+      check("409 response shows the plain-language busy toast and leaves the app running (not uninstalling)", false, "#btn-uninstall-app not found");
+    }
+
+    // ---- 202 success path, on a separate unforced frame.
+    const successWin = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(successWin, 8000);
+    const successBtn = await openAdvancedAndFindUninstallButton(successWin);
+    if (successBtn) {
+      await clickAndSettle(successWin, successBtn, 250);
+      const successDialogShown = visible(q(successWin, "#dialog-confirm"));
+      if (successDialogShown) {
+        await clickAndSettle(successWin, q(successWin, "#confirm-ok"), 400);
+        checkTry("202 response shows the full-screen 'being removed' state, hides the app shell, and stops polling", function () {
+          const overlay = q(successWin, "#app-closing-overlay");
+          const shell = q(successWin, "#app");
+          const overlayText = text(overlay);
+          return visible(overlay) && !visible(shell) &&
+            overlayText.indexOf("Furphy is being removed") !== -1 &&
+            overlayText.indexOf("You can close this window") !== -1 &&
+            successWin.__furphyTest.App.isUninstalling() === true;
+        });
+        checkTry("no error or warning toast appears once the app enters the uninstalling state (a dropped connection here is expected, never an error)", function () {
+          return qa(successWin, "#toast-container .toast-error, #toast-container .toast-warning").length === 0;
+        });
+      } else {
+        check("202 response shows the full-screen 'being removed' state, hides the app shell, and stops polling", false, "confirm dialog never opened");
+      }
+    } else {
+      check("202 response shows the full-screen 'being removed' state, hides the app shell, and stops polling", false, "#btn-uninstall-app not found");
+    }
+
+    checkTry("no banned UX-SPEC.md section 11 term appears in the uninstall confirm dialog or full-screen state, across all three frames", function () {
+      const hits = [];
+      [copyWin, busyWin, successWin].forEach(function (w) {
+        const combined = (text(q(w, "#dialog-confirm")) + " " + text(q(w, "#app-closing-overlay"))).toLowerCase();
+        BANNED_PHRASES.concat(["curseforge://"]).forEach(function (p) { if (combined.indexOf(p) !== -1) hits.push(p); });
+        BANNED_WORDS.forEach(function (w2) { if (new RegExp("\\b" + w2 + "\\b", "i").test(combined)) hits.push(w2); });
+      });
+      if (hits.length) check("uninstall banned-term hits (detail)", false, hits.join(", "));
+      return hits.length === 0;
+    });
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
   async function main() {
     await phaseDefault();
     await phaseFlavours();
@@ -929,7 +1062,9 @@
     await phaseTheme();
     await phaseViewDeepLink();
     await phaseSettingsAudit();
+    await phaseUninstall();
 
+    if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;
     results.finishedAt = new Date().toISOString();
     const total = results.phases.reduce(function (n, p) { return n + p.checks.length; }, 0);

@@ -120,6 +120,31 @@ Remove-Item -LiteralPath $stageRoot -Recurse -Force
 
 $sizeKb = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1KB)
 Write-Host "Built $zipPath ($sizeKb KB)"
+
+# DISTRIBUTION-SPEC.md fix 8: a second, IDENTICALLY-NAMED-every-release
+# asset so GitHub's own stable /releases/latest/download/<name> link (the
+# landing page's and README's "Download" button) never goes stale - that
+# mechanism only works when the asset filename never changes between
+# releases, unlike FurphyAddonManager-<version>.zip above. Made a
+# permanent, enforced step here (not a release-checklist line someone can
+# forget) by having package.ps1 itself refuse to finish without it -
+# see the "fail loudly if either is missing" check right below.
+$latestZipPath = Join-Path -Path $DistDir -ChildPath 'FurphyAddonManager-latest.zip'
+Copy-Item -LiteralPath $zipPath -Destination $latestZipPath -Force
+Write-Host "Built $latestZipPath (byte-identical copy of $zipName)"
+
+if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
+    throw "package.ps1: FAILED - the versioned zip is missing after build: $zipPath"
+}
+if (-not (Test-Path -LiteralPath $latestZipPath -PathType Leaf)) {
+    throw "package.ps1: FAILED - FurphyAddonManager-latest.zip is missing after build: $latestZipPath"
+}
+$versionedBytes = (Get-Item -LiteralPath $zipPath).Length
+$latestBytes = (Get-Item -LiteralPath $latestZipPath).Length
+if ($versionedBytes -ne $latestBytes) {
+    throw "package.ps1: FAILED - FurphyAddonManager-latest.zip ($latestBytes bytes) is not byte-identical to $zipName ($versionedBytes bytes)"
+}
+
 Write-Host ''
-Write-Host 'Release step (manual, on demand):'
-Write-Host "  gh release create v$version `"$zipPath`""
+Write-Host 'Release step (manual, on demand) - ATTACH BOTH ZIPS, every release (fix 8):'
+Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`""

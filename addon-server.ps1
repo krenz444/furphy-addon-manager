@@ -3574,6 +3574,38 @@ function Complete-SwitchSourcePhase {
     return $Job
 }
 
+function Wait-ProcessOutputDrained {
+    <#
+      Round 34 (live incident 2026-09-06 21:18, job 119): a "Check now" whose
+      CLI exited 0 with a complete 34-addon result was marked FAILED with
+      "CLI exited with code 0" and an empty results[]. Start-Process
+      -RedirectStandardOutput does NOT hand the child a file handle: the
+      PARENT pumps the child's stdout through an asynchronous
+      OutputDataReceived handler into a buffered StreamWriter that is only
+      flushed and closed on the child's Exited event - which fires AFTER
+      Process.HasExited turns true. Every finalize path in this file read
+      the .out file on the very poll that first saw HasExited, so a CLI
+      that emits its one JSON document right before exiting could be read
+      as empty (or truncated) and the job failed although the sync was
+      fine. The no-timeout WaitForExit() overload is documented to block
+      until that asynchronous output handling has completed; call it once
+      the process is known to have exited, then confirm the file has
+      content (a short bounded wait, so a child that legitimately printed
+      nothing does not stall the poll). Regression test:
+      tests\unit\Server.OutputDrain.Tests.ps1.
+    #>
+    param($Process, [string]$OutFile, [int]$MaxWaitMs = 1500)
+    try { if ($null -ne $Process) { $Process.WaitForExit() } } catch { }
+    if (-not $OutFile) { return }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($MaxWaitMs)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $len = 0
+        try { if (Test-Path -LiteralPath $OutFile) { $len = (Get-Item -LiteralPath $OutFile).Length } } catch { $len = 0 }
+        if ($len -gt 0) { return }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Update-JobStatus {
     <#
       Refreshes one job: while it is still running, tails sync.log since the
@@ -3671,6 +3703,11 @@ function Update-JobStatus {
         return $Job
     }
 
+    # Round 34: HasExited is true, but the redirected stdout may still be in
+    # flight inside this process's async writer - drain it before ANY of the
+    # finalize paths below (single-phase, import, switch-source) read .out.
+    Wait-ProcessOutputDrained -Process $Job.Process -OutFile $Job.OutFile
+
     # E4: an 'import' job's process is one PHASE of a possibly-multi-step
     # sequence (see Build-ImportPlan/Complete-ImportPhase) rather than the
     # whole job, so its own finalize/advance logic is entirely separate from
@@ -3739,6 +3776,13 @@ function Update-JobStatus {
         if (-not $errMsg -and $parseError) { $errMsg = "Could not parse CLI output as JSON: $parseError" }
         if (-not $errMsg) { $errMsg = "CLI exited with code $exitCode" }
         $Job.error = $errMsg
+
+        # Round 34: keep the raw output of a failed job for diagnosis (the
+        # normal cleanup below deletes .out/.err). Small, and only on failure.
+        try {
+            if (Test-Path -LiteralPath $Job.OutFile) { Copy-Item -LiteralPath $Job.OutFile -Destination ($Job.OutFile + '.failed') -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $Job.ErrFile) { Copy-Item -LiteralPath $Job.ErrFile -Destination ($Job.ErrFile + '.failed') -Force -ErrorAction SilentlyContinue }
+        } catch { }
 
         # CS1 (UX-SPEC.md section 4.2): mirrors the success branch's own
         # Apply-JobCompletionSideEffects call just above - $Job.state/.error
@@ -3963,6 +4007,8 @@ function Invoke-Cli {
             try { $proc.Kill() } catch { }
             throw "CLI call timed out after $TimeoutSec seconds"
         }
+        # Round 34: the timed WaitForExit returns before the redirected output is flushed.
+        Wait-ProcessOutputDrained -Process $proc -OutFile $outFile
 
         $exitCode = $proc.ExitCode
         # ReadAllText, not Get-Content (see Update-JobStatus): the text may end up in a JSON error response.
@@ -4047,6 +4093,8 @@ function Invoke-ProtocolScript {
             try { $proc.Kill() } catch { }
             throw "register-protocol.ps1 -$Switch timed out after $TimeoutSec seconds"
         }
+        # Round 34: the timed WaitForExit returns before the redirected output is flushed.
+        Wait-ProcessOutputDrained -Process $proc -OutFile $outFile
 
         $exitCode = $proc.ExitCode
         $stdout = ''
@@ -6395,6 +6443,38 @@ function Get-TrayStatePath {
     return Join-Path -Path $Script:Root -ChildPath 'tray-state.json'
 }
 
+function Test-LooksLikeScratchRun {
+    <#
+      Round 33 (DISTRIBUTION-SPEC.md section 5.4/"Installed-Apps
+      registration refresh at startup"): independent, code-level heuristic
+      that -Path looks like a scratch/test root rather than a real
+      production install - duplicated VERBATIM from install.ps1's own
+      Test-LooksLikeScratchRun, per this codebase's established "every
+      shared fact lives in each file that needs it" convention (the same
+      reasoning already used for $Script:FlavourDefs/Get-StartupValueName's
+      own port-scoping logic). Used only to gate the Installed-Apps
+      registry write below - a test server on 47899 already skips it via
+      the plain port check, but a hypothetical server started on the
+      PRODUCTION port 47831 against a scratch root (never done by this
+      round's own tests - see the file's HARD RULES - but defended against
+      anyway, exactly like install.ps1 defends the Run-value/Installed-Apps
+      removal the same way) must not write into the real user's
+      Installed-Apps key either.
+    #>
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    $p = $Path.ToLowerInvariant()
+    $tempDir = $null
+    try { $tempDir = [System.IO.Path]::GetTempPath() } catch { $tempDir = $null }
+    if ($tempDir) {
+        $tempDir = $tempDir.ToLowerInvariant().TrimEnd('\')
+        if ($p.StartsWith($tempDir)) { return $true }
+    }
+    if ($p -match '\\scratch(\\|$)') { return $true }
+    if ($p -match '\\fixtures\\wowroot(\\|$)') { return $true }
+    return $false
+}
+
 function Get-StartupValueName {
     <#
       Round 29 live-safety: the HKCU Run value name this server reads and
@@ -6485,6 +6565,97 @@ function Test-StartupRegistered {
         return ([string]$prop.PSObject.Properties[$valueName].Value -ceq (Get-TrayRunValue))
     } catch {
         return $false
+    }
+}
+
+# =====================================================================
+# Round 33 (DISTRIBUTION-SPEC.md section 5.4): Installed-Apps registration
+# REFRESH at startup - so an already-installed user who just upgraded (ran
+# a newer zip's install.ps1, or will next time) still gets a working
+# Windows Settings > Apps entry even before that next reinstall, since this
+# server itself restarts far more often than install.ps1 ever re-runs.
+# Gated to "port 47831 AND not a scratch root" (Update-InstalledAppsRegistration
+# below) - never fires for any test server on 47899, and defends the real
+# key even in the hypothetical case of a scratch root somehow started on
+# the production port (see Test-LooksLikeScratchRun's own comment above).
+# =====================================================================
+
+function Get-InstalledAppsSizeKB {
+    <# Duplicate of install.ps1's Get-InstallEstimatedSizeKB - see that
+       function's own comment for why this never throws. #>
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return 0 }
+    try {
+        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if (-not $sum) { return 0 }
+        return [int][math]::Round($sum / 1024)
+    } catch {
+        return 0
+    }
+}
+
+function Get-InstalledAppsUninstallString {
+    <#
+      Duplicate of install.ps1's Get-InstallUninstallString (section 5.4's
+      "try the server, else copy+launch" one-liner) - kept as its own copy
+      here rather than importing install.ps1, per this codebase's
+      established convention of never dot-sourcing one script from
+      another. Pure string composition; never touches the registry, the
+      filesystem or the network itself.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][string]$WowRootPath
+    )
+    $originUrl = "http://localhost:$Port"
+    $apiUrl = "http://localhost:$Port/api/uninstall"
+    $installPs1 = Join-Path -Path $AppDest -ChildPath 'install.ps1'
+    $installPs1Esc = $installPs1.Replace("'", "''")
+    $wowRootEsc = $WowRootPath.Replace("'", "''")
+
+    $inner = "try { Invoke-RestMethod -Method Post -Uri '$apiUrl' -TimeoutSec 2 -Headers @{Origin='$originUrl'} } catch { `$t = Join-Path `$env:TEMP ('FurphyUninstall-' + [guid]::NewGuid() + '.ps1'); Copy-Item '$installPs1Esc' `$t; Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',`$t,'-WowPath','$wowRootEsc','-Uninstall' }"
+
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + $inner + '"'
+}
+
+function Update-InstalledAppsRegistration {
+    <#
+      Writes/refreshes HKCU:\...\Uninstall\FurphyAddonManager - ONLY when
+      THIS server is running on the real production port (47831) from a
+      NON-scratch root (Test-LooksLikeScratchRun). Every other port or a
+      scratch root writes NOTHING, so no test server on 47899 can ever
+      create or touch this key. Best-effort: any failure is logged and
+      swallowed, never blocks startup.
+    #>
+    if ($Script:Port -ne 47831) { return }
+    if (Test-LooksLikeScratchRun -Path $Script:Root) { return }
+
+    try {
+        $wowRootPath = Get-FlavourWowRootPath -Flavor 'retail'
+        if (-not $wowRootPath) { $wowRootPath = Get-FlavourWowRootPath }
+        if (-not $wowRootPath) {
+            Write-ServerLog 'Update-InstalledAppsRegistration: could not resolve a WoW root - skipped.'
+            return
+        }
+        $keyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager'
+        if (-not (Test-Path -LiteralPath $keyPath)) {
+            New-Item -Path $keyPath -Force | Out-Null
+        }
+        $uninstallCmd = Get-InstalledAppsUninstallString -Port $Script:Port -AppDest $Script:Root -WowRootPath $wowRootPath
+        Set-ItemProperty -LiteralPath $keyPath -Name 'DisplayName' -Value 'Furphy Addon Manager' -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'DisplayVersion' -Value $Script:Version -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'Publisher' -Value 'krenz444' -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'InstallLocation' -Value $Script:Root -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'DisplayIcon' -Value (Join-Path -Path $Script:Root -ChildPath 'icon.ico') -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'EstimatedSize' -Value (Get-InstalledAppsSizeKB -Path $Script:Root) -Type DWord
+        Set-ItemProperty -LiteralPath $keyPath -Name 'NoModify' -Value 1 -Type DWord
+        Set-ItemProperty -LiteralPath $keyPath -Name 'NoRepair' -Value 1 -Type DWord
+        Set-ItemProperty -LiteralPath $keyPath -Name 'UninstallString' -Value $uninstallCmd -Type String
+        Set-ItemProperty -LiteralPath $keyPath -Name 'QuietUninstallString' -Value $uninstallCmd -Type String
+        Write-ServerLog 'Refreshed the Installed-Apps (Windows Settings > Apps) registry entry.'
+    } catch {
+        Write-ServerLog "Update-InstalledAppsRegistration failed: $($_.Exception.Message)"
     }
 }
 
@@ -6953,6 +7124,146 @@ function Handle-Open {
     Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
 }
 
+function Handle-Uninstall {
+    <#
+      POST /api/uninstall (DISTRIBUTION-SPEC.md section 3.4/5.3): shaped
+      almost exactly like Handle-Shutdown just below - reuses that same
+      $Script:CurrentJobByFlavour busy-check loop rather than a second copy
+      of it (the FLAVORS-SPEC.md CS-F2 S5.4 rule: refuse while ANY flavour
+      has a job running, not just the request's own resolved flavour).
+      Origin-header CSRF is already enforced by Invoke-Route for every
+      non-GET route before this handler ever runs (Test-SameOriginRequest),
+      matching /api/shutdown/settings/startup/*.
+
+      Steps (section 5.3's invariant - this IS the one place the busy-check
+      actually lives; every other trigger relies on "no server reachable
+      implies no job can be running" instead of re-checking):
+        1. Busy -> 409 plain-language body, nothing else happens (this
+           check runs REGARDLESS of dryRun - it is a read, not a side
+           effect, and a selftest run needs the same busy-routing answer a
+           real caller would get).
+        2. Copy $Script:Root\install.ps1 to a fresh GUID-suffixed %TEMP%
+           path (fix 2 is what makes this file exist to copy at all).
+        3. Launch that copy detached, hidden, with -WowPath <resolved
+           wowRoot> -Uninstall. -NoShortcuts/-NoProtocol are never sent by
+           the real UI (Actions.uninstallApp posts no body) - they exist
+           ONLY so this round's own tests can request them, exactly as
+           every other -Uninstall exercised in this codebase's test suite
+           already requires (never touch the real Desktop/protocol
+           registration from an automated run).
+
+           Round 33 defect fix: install.ps1 -Uninstall now shows a plain-
+           language WinForms MessageBox at the end by default (this whole
+           process runs -WindowStyle Hidden, so that box is otherwise the
+           ONLY visible sign a real user gets that their uninstall
+           finished, or finished with leftovers). {"quiet":true} in the
+           body forwards -Quiet to the spawned copy, suppressing it - the
+           real UI never sends this (a real uninstall from Settings must
+           show the result), it exists ONLY so this codebase's own
+           automated tests can request it, same shape as noShortcuts/
+           noProtocol above, so a detached unattended test run never
+           blocks forever on MessageBox.Show waiting for a click that will
+           never come.
+        4. Respond 200 {"ok":true} once the copy is launched.
+        5. $Script:ShuttingDown = $true right after responding - the
+           existing main loop already polls this and exits, freeing the
+           port, exactly like Handle-Shutdown.
+
+      dryRun (round 33 fix for the round-32 "uninstall dry run is not
+      actually dry" finding): when the request body carries
+      {"dryRun":true} (FurphyHost.cs's RunUninstallSequence sends this on
+      every --tray-selftest run and nowhere else), this handler still runs
+      the busy-check and the WoW-root resolution above - so the caller
+      gets the exact same routing answer (200/409/500) a real call would
+      get - but returns BEFORE step 2 (the Copy-Item), so no temp script
+      is ever written, no process is ever launched, and
+      $Script:ShuttingDown is never set. A dry run can therefore never
+      tear down a live server, no matter what fixture reaches it.
+    #>
+    param($Context, $RouteMatch)
+
+    $anyRunning = $false
+    foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+        if ($cj) {
+            $refreshed = Update-JobStatus -Job $cj
+            if ($refreshed -and $refreshed.state -eq 'running') { $anyRunning = $true }
+        }
+    }
+    if ($anyRunning) {
+        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'Furphy is updating an addon right now. Try again in a minute.' }
+        return
+    }
+
+    $noShortcuts = $false
+    $noProtocol = $false
+    $dryRun = $false
+    # Round 33 defect fix (item 3): install.ps1 -Uninstall now shows a
+    # plain-language WinForms MessageBox at the end by default (so a real
+    # user running this exact route - Settings' own uninstall button -
+    # actually sees the outcome, since this whole script runs -WindowStyle
+    # Hidden and every Write-Warn2 line would otherwise be invisible). The
+    # real UI (Actions.uninstallApp) never sends this field, so a real
+    # uninstall still shows the box; only this codebase's own automated
+    # tests set it true, exactly like noShortcuts/noProtocol/dryRun above,
+    # so a detached, unattended test run never blocks forever on
+    # MessageBox.Show waiting for a click that will never come.
+    $quiet = $false
+    try {
+        $body = Read-Body -Context $Context
+        if ($body) {
+            if ($body.PSObject.Properties.Match('noShortcuts').Count -gt 0) { $noShortcuts = [bool]$body.noShortcuts }
+            if ($body.PSObject.Properties.Match('noProtocol').Count -gt 0) { $noProtocol = [bool]$body.noProtocol }
+            if ($body.PSObject.Properties.Match('dryRun').Count -gt 0) { $dryRun = [bool]$body.dryRun }
+            if ($body.PSObject.Properties.Match('quiet').Count -gt 0) { $quiet = [bool]$body.quiet }
+        }
+    } catch {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
+        return
+    }
+
+    $wowRootPath = Get-FlavourWowRootPath -Flavor 'retail'
+    if (-not $wowRootPath) { $wowRootPath = Get-FlavourWowRootPath }
+    if (-not $wowRootPath) {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = 'Could not resolve the WoW folder for this install.' }
+        return
+    }
+
+    if ($dryRun) {
+        # Routing proven (not busy, WoW root resolves) - stop here. No
+        # Copy-Item, no Start-Process, no $Script:ShuttingDown: this
+        # request must be a no-op on the server's own state no matter
+        # which fixture or port it lands on.
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; dryRun = $true }
+        return
+    }
+
+    $tempCopy = Join-Path -Path $env:TEMP -ChildPath ('FurphyUninstall-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        Copy-Item -LiteralPath (Join-Path -Path $Script:Root -ChildPath 'install.ps1') -Destination $tempCopy -Force
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = "Could not prepare the uninstaller: $($_.Exception.Message)" }
+        return
+    }
+
+    try {
+        $psArgs = New-Object 'System.Collections.Generic.List[string]'
+        $psArgs.Add('-NoProfile'); $psArgs.Add('-ExecutionPolicy'); $psArgs.Add('Bypass')
+        $psArgs.Add('-File'); $psArgs.Add((ConvertTo-SafeProcessArg $tempCopy))
+        $psArgs.Add('-WowPath'); $psArgs.Add((ConvertTo-SafeProcessArg $wowRootPath))
+        $psArgs.Add('-Uninstall')
+        if ($noShortcuts) { $psArgs.Add('-NoShortcuts') }
+        if ($noProtocol) { $psArgs.Add('-NoProtocol') }
+        if ($quiet) { $psArgs.Add('-Quiet') }
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -WindowStyle Hidden | Out-Null
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = "Could not launch the uninstaller: $($_.Exception.Message)" }
+        return
+    }
+
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
+    $Script:ShuttingDown = $true
+}
+
 function Handle-Shutdown {
     param($Context, $RouteMatch)
 
@@ -7022,6 +7333,8 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/wago/addons/(?<slug>[^/]+)$'; Handler = 'Handle-WagoAddonDetails' }
     @{ Method = 'POST'; Pattern = '^/api/open$'; Handler = 'Handle-Open' }
     @{ Method = 'POST'; Pattern = '^/api/shutdown$'; Handler = 'Handle-Shutdown' }
+    # Round 33 (DISTRIBUTION-SPEC.md section 3.4)
+    @{ Method = 'POST'; Pattern = '^/api/uninstall$'; Handler = 'Handle-Uninstall' }
 )
 
 function Test-SameOriginRequest {
@@ -7233,7 +7546,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.13.0'
+$Script:Version = '1.14.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -7397,6 +7710,16 @@ if (-not $Port -or $Port -le 0) {
     }
 }
 $Script:Port = $Port
+
+# Round 33 (DISTRIBUTION-SPEC.md section 5.4): best-effort Installed-Apps
+# refresh, gated entirely inside Update-InstalledAppsRegistration itself
+# (production port + non-scratch root only) - see that function's own
+# comment. Placed here, immediately after $Script:Port is finally known and
+# after Set-CurrentFlavourContext/Load-CheckState above have already run
+# (Get-FlavourWowRootPath needs $Script:CurrentFlavour), and before the
+# HttpListener binds - registry I/O is cheap and this must never race a
+# client's very first request.
+Update-InstalledAppsRegistration
 
 function Remove-OldJobFiles {
     <# Deletes job\*.out/*.err files older than 1 day, run once at startup. #>

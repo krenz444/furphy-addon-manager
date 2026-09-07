@@ -2081,6 +2081,27 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .settings-footer-item { display: inline-flex; align-items: center; gap: 4px; }
 .settings-footer-sep { color: var(--text-faint); }
 
+/* DISTRIBUTION-SPEC.md section 3.4: the plain full-screen state
+   App.enterUninstallingState() swaps in for the whole page (#app is
+   hidden alongside it) once POST /api/uninstall succeeds. Highest z-index
+   in the app - once this shows, nothing else should ever paint over it -
+   and OverlayTracker.open() (called at the same time) hides the embedded
+   CurseForge WebView2 pane too, which always paints above ordinary HTML
+   regardless of z-index otherwise. Uses theme tokens only, same as every
+   other surface, since a viewer could be on any of the 16 themes right up
+   until the moment they uninstall. */
+.app-closing-overlay {
+  position: fixed; inset: 0; z-index: 999;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-0); color: var(--text);
+}
+.app-closing-card {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  max-width: 380px; padding: 24px; text-align: center;
+}
+.app-closing-card .icon { width: 40px; height: 40px; color: var(--success); }
+.app-closing-card p { margin: 0; font-size: 15px; line-height: 1.5; color: var(--text); }
+
 /* ==========================================================================
    Drawer
    ========================================================================== */

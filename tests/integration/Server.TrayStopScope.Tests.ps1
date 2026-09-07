@@ -122,12 +122,20 @@ Describe 'Tray stop signal is scoped per port (round 29 live-safety fix)' -Tags 
             $procB.HasExited | Should Be $false
         } finally {
             Stop-TestServer -Server $server
+            $procAId = if ($procA) { $procA.Id } else { 0 }
+            $procBId = if ($procB) { $procB.Id } else { 0 }
             try {
                 if ($procA -and -not $procA.HasExited) { Stop-Process -Id $procA.Id -Force -ErrorAction SilentlyContinue }
             } catch { }
             try {
                 if ($procB -and -not $procB.HasExited) { Stop-Process -Id $procB.Id -Force -ErrorAction SilentlyContinue }
             } catch { }
+            # Wait for BOTH to actually be gone before returning control to
+            # Pester - the next file (Server.Uninstall.Tests.ps1) takes its
+            # own live tray-pid snapshot immediately on entry and will see a
+            # still-exiting procB as a spurious extra pid otherwise.
+            if ($procAId) { Wait-ProcessReallyGone -ProcessId $procAId -TimeoutSec 5 | Out-Null }
+            if ($procBId) { Wait-ProcessReallyGone -ProcessId $procBId -TimeoutSec 5 | Out-Null }
         }
     }
 }

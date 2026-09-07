@@ -4067,6 +4067,24 @@ boot();
         public bool RunAtStartup;
     }
 
+    // DISTRIBUTION-SPEC.md section 5.3 - result of one call to
+    // TrayForm.RunUninstallSequence, surfaced both to the click handler
+    // (MenuUninstall_Click) and, when dryRun was true, to the
+    // --tray-selftest marker as "uninstallDryRun" so a test can prove the
+    // routing decision without ever spawning a real uninstall.
+    internal class UninstallOutcome
+    {
+        public string Route;             // "server" or "fallback"
+        public bool Busy;
+        public int? PostStatus;
+        public bool NetworkError;
+        public bool InstallScriptFound;  // only meaningful when Route == "fallback"
+        public string WowRootResolved;   // only meaningful when Route == "fallback"
+        public string TempCopyPath;      // only set when actually launched (not dryRun)
+        public bool Launched;
+        public string Error;
+    }
+
     internal static class TraySettingsReader
     {
         public const int DefaultIntervalMinutes = 120;
@@ -4480,6 +4498,11 @@ boot();
         private ToolStripMenuItem _startupMenuItem;
         private ToolStripMenuItem _statusMenuItem;
         private ToolStripMenuItem _checkNowMenuItem;
+        // DISTRIBUTION-SPEC.md section 2.1/2.2: mirrors _startupMenuItem's
+        // own shape (checkbox, read-fresh-on-open) and the new "Uninstall
+        // Furphy Addon Manager..." item respectively.
+        private ToolStripMenuItem _backgroundUpdatesMenuItem;
+        private ToolStripMenuItem _uninstallMenuItem;
 
         private EventWaitHandle _stopEvent;
         private readonly AutoResetEvent _manualTrigger = new AutoResetEvent(false);
@@ -4714,6 +4737,26 @@ boot();
             _startupMenuItem.Click += new EventHandler(MenuStartup_Click);
             _menu.Items.Add(_startupMenuItem);
 
+            // DISTRIBUTION-SPEC.md section 2.1 - mirrors _startupMenuItem
+            // immediately above (same checkbox shape, always enabled, no
+            // confirm dialog), backed by the exact same backgroundUpdates
+            // field TraySettingsReader already exposes to the scheduling
+            // loop further down in this file.
+            _backgroundUpdatesMenuItem = new ToolStripMenuItem("Update addons in the background");
+            _backgroundUpdatesMenuItem.CheckOnClick = false;
+            _backgroundUpdatesMenuItem.Checked = TraySettingsReader.Read(_settingsPath).BackgroundUpdates;
+            _backgroundUpdatesMenuItem.Click += new EventHandler(MenuBackgroundUpdates_Click);
+            _menu.Items.Add(_backgroundUpdatesMenuItem);
+
+            _menu.Items.Add(new ToolStripSeparator());
+
+            // DISTRIBUTION-SPEC.md section 2.2 - trailing "..." (standard
+            // Windows convention) since this opens a confirm dialog rather
+            // than acting immediately.
+            _uninstallMenuItem = new ToolStripMenuItem("Uninstall Furphy Addon Manager...");
+            _uninstallMenuItem.Click += new EventHandler(MenuUninstall_Click);
+            _menu.Items.Add(_uninstallMenuItem);
+
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem quitItem = new ToolStripMenuItem("Quit");
@@ -4725,7 +4768,17 @@ boot();
 
         private void Menu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            RefreshMenuState();
+        }
+
+        // Extracted from Menu_Opening unchanged (behavior identical) so
+        // CollectMenuItemLabels below can drive the exact same refresh
+        // from --tray-selftest, off the UI thread via Invoke, through one
+        // implementation instead of two that could drift apart.
+        private void RefreshMenuState()
+        {
             try { _startupMenuItem.Checked = StartupRegistry.Exists(_startupValueName); } catch { }
+            try { _backgroundUpdatesMenuItem.Checked = TraySettingsReader.Read(_settingsPath).BackgroundUpdates; } catch { }
 
             string status;
             string core;
@@ -4740,6 +4793,39 @@ boot();
                 _checkNowMenuItem.Text = running ? "Checking..." : "Check for updates now";
             }
             catch { }
+            // DISTRIBUTION-SPEC.md section 2.2 - "optional, zero-cost
+            // hardening" graft: reuses the exact same running boolean that
+            // already gates "Check for updates now" rather than a second
+            // state machine. This narrows, but is not itself, the real
+            // busy-uninstall safety net - that is RunUninstallSequence's
+            // own server-authoritative check via the fix 5 invariant.
+            try { _uninstallMenuItem.Enabled = !running; } catch { }
+        }
+
+        // DISTRIBUTION-SPEC.md ask: "Expose the final menu item labels ...
+        // in the --tray-selftest marker ... so the verifier can prove them
+        // without clicking a real tray." Reads the live menu after a
+        // RefreshMenuState pass so the listing matches exactly what a real
+        // menu-open would show at this instant; marshaled onto the UI
+        // thread the same way SetTooltip/ShowBalloon already do for other
+        // ToolStrip/NotifyIcon state touched from a background thread.
+        private List<string> CollectMenuItemLabels()
+        {
+            List<string> labels = new List<string>();
+            try
+            {
+                MethodInvoker work = delegate()
+                {
+                    RefreshMenuState();
+                    foreach (ToolStripItem item in _menu.Items)
+                    {
+                        labels.Add(item is ToolStripSeparator ? "-" : item.Text);
+                    }
+                };
+                if (IsHandleCreated) { Invoke(work); } else { work(); }
+            }
+            catch { }
+            return labels;
         }
 
         private void MenuOpen_Click(object sender, EventArgs e)
@@ -4766,17 +4852,105 @@ boot();
         private void MenuStartup_Click(object sender, EventArgs e)
         {
             bool currentlyOn = StartupRegistry.Exists(_startupValueName);
+            bool newRunAtStartup;
             if (currentlyOn)
             {
                 StartupRegistry.Disable(_startupValueName);
+                newRunAtStartup = false;
                 LogHost("[tray] Start with Windows disabled via menu");
             }
             else
             {
                 StartupRegistry.Enable(_startupValueName, _exePath);
+                newRunAtStartup = true;
                 LogHost("[tray] Start with Windows enabled via menu");
             }
+            // DISTRIBUTION-SPEC.md section 3.1 (fix 4): this click used to
+            // only touch the registry, silently drifting from settings.
+            // json's own runAtStartup field (which only /api/startup/
+            // register|unregister wrote) until the Settings screen's next
+            // poll self-corrected it. Mirrors the exact HostFiles.
+            // UpdateJsonObject pattern MainForm already uses at its own two
+            // call sites (SaveWindowBounds/PersistThemeIfChanged).
+            HostFiles.UpdateJsonObject(_settingsPath, delegate(Dictionary<string, object> dict)
+            {
+                dict["runAtStartup"] = newRunAtStartup;
+            });
             try { _startupMenuItem.Checked = StartupRegistry.Exists(_startupValueName); } catch { }
+        }
+
+        // DISTRIBUTION-SPEC.md section 2.1 - mirrors MenuStartup_Click's
+        // own shape (read fresh, flip, write, re-sync the checkbox) but
+        // writes straight to settings.json's backgroundUpdates field
+        // instead of the registry, since that field is this setting's only
+        // source of truth - the same file the Settings screen's own toggle
+        // and WaitForNextCycle's scheduling loop further down both read.
+        private void MenuBackgroundUpdates_Click(object sender, EventArgs e)
+        {
+            TrayBackgroundSettings current = TraySettingsReader.Read(_settingsPath);
+            bool newValue = !current.BackgroundUpdates;
+            HostFiles.UpdateJsonObject(_settingsPath, delegate(Dictionary<string, object> dict)
+            {
+                dict["backgroundUpdates"] = newValue;
+            });
+            LogHost("[tray] Update addons in the background set to " + newValue.ToString() + " via menu");
+            try { _backgroundUpdatesMenuItem.Checked = newValue; } catch { }
+
+            if (!newValue)
+            {
+                // The icon disappearing here is correct, not a bug to
+                // route around (section 2.1) - WaitForNextCycle already
+                // exits the tray once it next notices backgroundUpdates is
+                // false; this just makes that happen immediately instead
+                // of waiting up to its own ~60s poll slice, with a
+                // one-time explanatory balloon so the vanishing icon
+                // doesn't read as "did my click just break something?" to
+                // a novice.
+                ShowBalloonText("Background updates turned off - Furphy's tray icon will now close.", ToolTipIcon.Info);
+                try { _stopEvent.Set(); } catch { }
+            }
+        }
+
+        // DISTRIBUTION-SPEC.md section 2.2. Confirm first (No is the
+        // default button - an accidental Enter/Space must never confirm),
+        // then run the section 5.3 mechanism for real (dryRun:false) and
+        // react to its outcome. RunUninstallSequence itself holds the ONLY
+        // "server reachable vs. fall back to copy+launch" decision logic,
+        // so this click, Settings' own POST /api/uninstall caller, and
+        // Windows' Installed-Apps UninstallString all converge on the same
+        // invariant (fix 5) rather than three separate copies of it.
+        private void MenuUninstall_Click(object sender, EventArgs e)
+        {
+            string appDest = ResolveAppDest();
+            string message =
+                "This removes Furphy's program files, its Start with Windows\n" +
+                "setting, and the CurseForge install-link handler.\n\n" +
+                "Your addons stay installed in WoW. Your addon list is kept at\n" +
+                appDest + " so reinstalling brings it back.\n\n" +
+                "Uninstall now?";
+            DialogResult choice = MessageBox.Show(
+                message,
+                "Uninstall Furphy Addon Manager?",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (choice != DialogResult.Yes)
+            {
+                return;
+            }
+
+            LogHost("[tray] uninstall confirmed via menu");
+            UninstallOutcome outcome = RunUninstallSequence(false);
+            if (outcome.Busy)
+            {
+                MessageBox.Show(
+                    "Furphy is updating an addon right now. Try Uninstall again in a minute.",
+                    "Furphy Addon Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+            try { _stopEvent.Set(); } catch { }
         }
 
         private void MenuQuit_Click(object sender, EventArgs e)
@@ -5685,6 +5859,153 @@ boot();
         private string PingUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping"; }
         private string JobsUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs"; }
         private string JobUrl(string id) { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs/" + id; }
+        private string UninstallUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/uninstall"; }
+
+        // DISTRIBUTION-SPEC.md section 3.2/5.3 - the same folder both
+        // Settings' Row 20 confirm text and the tray's own confirm text
+        // name as "<appDest>": wherever settings.json actually lives,
+        // which is this install's program folder (host\, ui\ and the
+        // .ps1 files all live alongside it). Falls back to the exe's own
+        // directory only if settings.json could not be located at all
+        // (should not happen in a real install; keeps the dialog from
+        // ever showing a blank path).
+        private string ResolveAppDest()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_settingsPath))
+                {
+                    return Path.GetDirectoryName(_settingsPath);
+                }
+            }
+            catch { }
+            return _exeDir;
+        }
+
+        // DISTRIBUTION-SPEC.md section 5.3/5.4 - the fallback copy+launch
+        // of install.ps1 passes -WowPath explicitly rather than leaving
+        // install.ps1 to auto-detect (Find-WowRoot's own registry/drive
+        // scan), so an uninstall always targets the exact WoW root Furphy
+        // is actually installed under even on a machine with more than one
+        // WoW install. install.ps1 itself computes
+        // $appDest = Join-Path (Join-Path $wowRoot $homeFlavour.Folder) 'AddonSync'
+        // at install time (see its own section 1) - this is that same
+        // relationship walked in reverse from settings.json's own folder:
+        // appDest's parent is the home flavour folder (e.g. _retail_), and
+        // that folder's parent is the WoW root.
+        private string ResolveWowRootForUninstall()
+        {
+            try
+            {
+                string appDest = ResolveAppDest();
+                if (string.IsNullOrEmpty(appDest)) return null;
+                DirectoryInfo flavourDir = Directory.GetParent(appDest);
+                if (flavourDir == null) return null;
+                DirectoryInfo wowRootDir = Directory.GetParent(flavourDir.FullName);
+                if (wowRootDir == null) return null;
+                return wowRootDir.FullName;
+            }
+            catch { return null; }
+        }
+
+        // DISTRIBUTION-SPEC.md section 5.3, "what the C# code actually
+        // does on Yes" (deliberately thin, per fix 9 - no WM_CLOSE P/Invoke
+        // anywhere in this file; that lives once, inside install.ps1
+        // itself). dryRun (true only from --tray-selftest's
+        // RunSelftestSequence) performs the exact same POST against this
+        // instance's own port and the exact same fallback decision, but
+        // stops short of the actual File.Copy/Process.Start/
+        // _stopEvent.Set() side effects, so a selftest run can prove the
+        // routing decision without ever spawning a real uninstall.
+        //
+        // Round 33 fix (round-32 finding: "dry run is not actually dry"):
+        // dryRun is now also sent to the SERVER as {"dryRun":true} in the
+        // POST body, and addon-server.ps1's Handle-Uninstall honors it by
+        // returning before its own Copy-Item/Start-Process/ShuttingDown
+        // side effects. Previously this flag only ever gated the CLIENT's
+        // own fallback branch below - the POST itself fired unconditionally,
+        // so a dry run against a live, idle, reachable server would have
+        // triggered a real server-side uninstall+teardown.
+        private UninstallOutcome RunUninstallSequence(bool dryRun)
+        {
+            UninstallOutcome outcome = new UninstallOutcome();
+            string postBody = dryRun ? "{\"dryRun\":true}" : "{\"dryRun\":false}";
+            HttpResult result = Http.PostJson(UninstallUrl(), postBody, 1800);
+            outcome.NetworkError = result.NetworkError;
+            outcome.PostStatus = result.NetworkError ? (int?)null : (int?)result.StatusCode;
+
+            if (!result.NetworkError && result.StatusCode >= 200 && result.StatusCode < 300)
+            {
+                outcome.Route = "server";
+                outcome.Busy = false;
+                LogHost("[tray] uninstall: server accepted (status " +
+                    result.StatusCode.ToString(CultureInfo.InvariantCulture) + ")" + (dryRun ? " [dry run]" : ""));
+                if (!dryRun) { try { _stopEvent.Set(); } catch { } }
+                return outcome;
+            }
+
+            if (!result.NetworkError && result.StatusCode == 409)
+            {
+                outcome.Route = "server";
+                outcome.Busy = true;
+                LogHost("[tray] uninstall: server reports busy" + (dryRun ? " [dry run]" : ""));
+                return outcome;
+            }
+
+            // Server not reachable (or answered with anything else) - per
+            // the fix 5 invariant ("no server reachable on this install's
+            // own configured port implies no sync job can be in progress
+            // for it"), safe to proceed straight to the local copy+launch
+            // fallback with no busy-check of its own.
+            outcome.Route = "fallback";
+            outcome.Busy = false;
+            string installScriptPath = HostFiles.FindUpward(_exeDir, "install.ps1", 4);
+            outcome.InstallScriptFound = !string.IsNullOrEmpty(installScriptPath);
+            string wowRoot = ResolveWowRootForUninstall();
+            outcome.WowRootResolved = wowRoot;
+            LogHost("[tray] uninstall: server unreachable, falling back (installScriptFound=" +
+                outcome.InstallScriptFound.ToString() + " wowRoot=" + (wowRoot == null ? "(null)" : wowRoot) + ")" +
+                (dryRun ? " [dry run]" : ""));
+
+            if (!dryRun)
+            {
+                try
+                {
+                    if (outcome.InstallScriptFound)
+                    {
+                        string tempCopy = Path.Combine(Path.GetTempPath(),
+                            "FurphyUninstall-" + Guid.NewGuid().ToString("N") + ".ps1");
+                        File.Copy(installScriptPath, tempCopy, true);
+                        outcome.TempCopyPath = tempCopy;
+
+                        ProcessStartInfo psi = new ProcessStartInfo();
+                        psi.FileName = "powershell.exe";
+                        string args = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+                            tempCopy + "\" -Uninstall";
+                        if (!string.IsNullOrEmpty(wowRoot))
+                        {
+                            args += " -WowPath \"" + wowRoot + "\"";
+                        }
+                        psi.Arguments = args;
+                        psi.UseShellExecute = false;
+                        psi.CreateNoWindow = true;
+                        Process p = Process.Start(psi);
+                        if (p != null) { p.Dispose(); }
+                        outcome.Launched = true;
+                    }
+                    else
+                    {
+                        LogHost("[tray] uninstall: install.ps1 not found under this install - cannot fall back");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    outcome.Error = ex.Message;
+                    LogHost("[tray] uninstall fallback failed: " + ex.Message);
+                }
+            }
+            return outcome;
+        }
 
         // Starts addon-server.ps1 exactly as Addon Manager.vbs does, but
         // from C# with no window flash (UseShellExecute=false,
@@ -5812,7 +6133,18 @@ boot();
             List<string> names = (status == "done_failed") ? failedNames : updatedNames;
             string text = JoinNamesTruncated(names, 4);
             ToolTipIcon icon = (status == "done_failed") ? ToolTipIcon.Warning : ToolTipIcon.Info;
+            ShowBalloonText(text, icon);
+        }
 
+        // DISTRIBUTION-SPEC.md section 2.1 - factored out of ShowBalloon
+        // unchanged so the new "Update addons in the background" one-time
+        // balloon (MenuBackgroundUpdates_Click) funnels through the exact
+        // same _balloonShown/_balloonText plumbing the cycle-complete
+        // balloon above (and the --tray-selftest marker's own
+        // balloonShown/balloonText fields) already rely on, rather than a
+        // second, parallel balloon mechanism.
+        private void ShowBalloonText(string text, ToolTipIcon icon)
+        {
             lock (_stateLock)
             {
                 _balloonShown = true;
@@ -5979,6 +6311,8 @@ boot();
             marker["balloonShown"] = false;
             marker["balloonText"] = null;
             marker["clickOutcome"] = null;
+            marker["menuItems"] = new List<string>();
+            marker["uninstallDryRun"] = null;
             WriteMarker(marker);
         }
 
@@ -6025,6 +6359,15 @@ boot();
                 }
             }
             catch { }
+
+            // DISTRIBUTION-SPEC.md section 2.2/5.3 - dryRun:true so this
+            // never actually spawns install.ps1 -Uninstall or tears down
+            // this process; it still makes the real POST /api/uninstall
+            // call against this instance's own scratch server (whatever
+            // that route currently answers), proving the exact same
+            // decision logic a real click would exercise.
+            UninstallOutcome uninstallDryRun = RunUninstallSequence(true);
+            List<string> menuItemsForMarker = CollectMenuItemLabels();
 
             string tooltip;
             string lastResult;
@@ -6099,6 +6442,20 @@ boot();
             marker["balloonShown"] = balloonShown;
             marker["balloonText"] = balloonText;
             marker["clickOutcome"] = clickAction;
+
+            // DISTRIBUTION-SPEC.md ask: "Expose the final menu item labels
+            // and the uninstall dry-run outcome in the --tray-selftest
+            // marker ... so the verifier can prove them without clicking a
+            // real tray."
+            marker["menuItems"] = menuItemsForMarker;
+            Dictionary<string, object> uninstallDryRunMarker = new Dictionary<string, object>();
+            uninstallDryRunMarker["route"] = uninstallDryRun.Route;
+            uninstallDryRunMarker["busy"] = uninstallDryRun.Busy;
+            uninstallDryRunMarker["postStatus"] = uninstallDryRun.PostStatus.HasValue ? (object)(long)uninstallDryRun.PostStatus.Value : null;
+            uninstallDryRunMarker["networkError"] = uninstallDryRun.NetworkError;
+            uninstallDryRunMarker["installScriptFound"] = uninstallDryRun.InstallScriptFound;
+            uninstallDryRunMarker["wowRootResolved"] = uninstallDryRun.WowRootResolved;
+            marker["uninstallDryRun"] = uninstallDryRunMarker;
 
             WriteMarker(marker);
             // FinalizeExit() is called by RunSelftestSequenceSafe's

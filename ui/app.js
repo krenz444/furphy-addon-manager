@@ -1213,6 +1213,31 @@ const Mock = (function () {
         return { ok: true };
       }
       if (p === "/api/shutdown" && method === "POST") return { ok: true };
+      // DISTRIBUTION-SPEC.md section 3.4/5.3: mirrors Handle-Uninstall's own
+      // busy-check (the same currentJob-running signal every other job-post
+      // mock route above already reuses) so the harness can exercise the
+      // real busy path without racing a real mock job's timing - but a job
+      // being genuinely mid-flight is a real, if narrow, window to hit by
+      // chance too. `?uninstallBusy=1` (same test-only-param convention as
+      // ?game=1/?flavours=N above) forces the 409 branch deterministically
+      // for the harness, independent of any job state.
+      if (p === "/api/uninstall" && method === "POST") {
+        const forceBusy = new URLSearchParams(location.search).get("uninstallBusy") === "1";
+        if (forceBusy || (currentJob && currentJob.state === "running")) {
+          return { __status: 409, error: "Furphy is updating an addon right now. Try again in a minute." };
+        }
+        // NOTE (round-32 finding #5): this mock intentionally answers 202
+        // on success; the REAL server (addon-server.ps1's Handle-Uninstall,
+        // Send-Json ... -StatusCode 200) and DISTRIBUTION-SPEC.md section
+        // 3.4/5.3 both specify 200. This is a deliberate, harmless mismatch
+        // ONLY because Actions.uninstallApp branches on "any 2xx" below -
+        // do NOT "fix" the real server to 202 to match this mock, and do
+        // NOT "fix" this mock to 200 assuming the two drifted by accident;
+        // either edit is unnecessary churn. If a future change ever makes
+        // the exact status code matter, change both together and drop this
+        // note.
+        return { __status: 202, ok: true };
+      }
       return { __status: 404, error: "no mock route for " + method + " " + p };
     }
   };
@@ -1762,7 +1787,14 @@ const Api = (function () {
     // Game folders rows must send it this way for 'folder' to open THAT
     // row's AddOns folder rather than the active flavour's.
     openWhat: function (what, extra, flavour) { return request("POST", "/api/open" + qs({ flavour: flavour }), Object.assign({ what: what }, extra || {})); },
-    shutdown: function () { return request("POST", "/api/shutdown"); }
+    shutdown: function () { return request("POST", "/api/shutdown"); },
+
+    // DISTRIBUTION-SPEC.md section 3.4: Settings > Backup & troubleshooting's
+    // "Uninstall Furphy Addon Manager" row. Same shape as shutdown above -
+    // no body, and the caller (Actions.uninstallApp) treats any 2xx as
+    // success regardless of the literal status code (200 vs 202), exactly
+    // like every other Api call already does via request()'s res.ok check.
+    uninstallApp: function () { return request("POST", "/api/uninstall"); }
   };
 })();
 
@@ -4403,6 +4435,63 @@ const Actions = (function () {
 
   function forceReinstallAll() { return startJob("sync", { force: true }, "Force reinstalling all addons"); }
 
+  // DISTRIBUTION-SPEC.md section 3.2: derives the "<appDest>" clause in the
+  // whole-app uninstall confirm dialog from the same addonsPath Settings
+  // already renders (renderGameFolders reads this exact field) rather than
+  // asking the server for a new one - install.ps1/addon-server.ps1 both
+  // define appDest as the home flavour's own "...\Interface\AddOns"
+  // sibling, "...\AddonSync" (install.ps1: $appDest = Join-Path $homeDir
+  // 'AddonSync', $addonsPath = Join-Path $homeDir 'Interface\AddOns'), so
+  // stripping that fixed suffix and appending AddonSync reproduces it
+  // exactly. Falls back to a path-free sentence rather than ever asserting
+  // a wrong folder if addonsPath doesn't end in the expected suffix (should
+  // not happen, but this text ships either way if it does).
+  function computeAppDest() {
+    const s = Store.state.settings;
+    const addonsPath = s && s.addonsPath;
+    if (!addonsPath) return null;
+    const suffix = "\\Interface\\AddOns";
+    const lower = addonsPath.toLowerCase();
+    if (lower.length <= suffix.length || lower.slice(-suffix.length) !== suffix.toLowerCase()) return null;
+    return addonsPath.slice(0, addonsPath.length - suffix.length) + "\\AddonSync";
+  }
+
+  function uninstallConfirmMessage() {
+    const appDest = computeAppDest();
+    const keptClause = appDest ? ("kept at " + appDest) : "kept on this PC";
+    return "This removes Furphy's program files, its Start with Windows setting, and the CurseForge install-link handler. Your addons stay installed in WoW. Your addon list is " + keptClause + " so reinstalling brings it back.";
+  }
+
+  // DISTRIBUTION-SPEC.md section 3.4. Deliberately named uninstallApp, not
+  // uninstall - Actions.uninstall (above) and the per-addon "Uninstall"
+  // dropdown item already mean "remove one addon"; keeping the whole-app
+  // action's name visibly distinct avoids ever confusing the two. On
+  // confirm, POST /api/uninstall - any 2xx (the real server answers 200,
+  // Handle-Shutdown's own shape; the mock answers 202) means the server is
+  // tearing itself down, so App.enterUninstallingState() takes over from
+  // here (stops polling, swaps in the plain "being removed" full-screen
+  // state) - no redirect, nothing else to do client-side. A 409 means a
+  // sync job is running (Handle-Uninstall's own busy-check); every other
+  // failure gets the generic error toast every other Api call already uses.
+  async function uninstallApp() {
+    const ok = await Components.Dialogs.confirm({
+      title: "Uninstall Furphy Addon Manager?",
+      message: uninstallConfirmMessage(),
+      confirmLabel: "Uninstall"
+      // danger not passed - Components.Dialogs.confirm defaults to
+      // btn-danger unless danger:false is explicit (SETTINGS-SPEC.md
+      // section 3.2: "confirmLabel: 'Uninstall', danger: true").
+    });
+    if (!ok) return;
+    try {
+      await Api.uninstallApp();
+      App.enterUninstallingState();
+    } catch (err) {
+      if (err.status === 409) Components.Toast.show("Furphy is updating an addon right now. Try again in a minute.", "warning");
+      else Components.Toast.show("Couldn't uninstall: " + describeError(err), "error");
+    }
+  }
+
   // Round 4 fix: reverse-dependency check before uninstalling. requiredDeps
   // (E3) names another package's declared dependency by ITS folder name(s),
   // not its display name, so matching has to go through addon.folders -
@@ -4919,7 +5008,7 @@ const Actions = (function () {
 
   return {
     startJob: startJob, resumeJobWithFlavour: resumeJobWithFlavour, setActiveFlavour: setActiveFlavour, updateAllFlavours: updateAllFlavours, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
-    forceReinstallAll: forceReinstallAll, uninstall: uninstall, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
+    forceReinstallAll: forceReinstallAll, uninstall: uninstall, uninstallApp: uninstallApp, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     updateAndPlay: updateAndPlay, launchOnly: launchOnly, toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings,
@@ -5936,6 +6025,13 @@ Views.settings = (function () {
     const reinstall = Utils.qs("#btn-force-reinstall");
     reinstall.disabled = busy;
     if (busy) reinstall.title = "Another task is running"; else reinstall.removeAttribute("title");
+    // DISTRIBUTION-SPEC.md section 2.2's "optional, zero-cost hardening" for
+    // the tray's own Uninstall item, mirrored here for the Settings row -
+    // this narrows, but is not the actual safety net for, the busy-uninstall
+    // case; the real safety net is Handle-Uninstall's own in-memory check.
+    const uninstallBtn = Utils.qs("#btn-uninstall-app");
+    uninstallBtn.disabled = busy;
+    if (busy) uninstallBtn.title = "Another task is running"; else uninstallBtn.removeAttribute("title");
     // Round 32 (SETTINGS-SPEC.md section 3): re-scan for any .info-tip this
     // pass just (re)built (Diagnostics rows, Untracked folders rows, the
     // CurseForge install-links control) - already-wired static rows are
@@ -6688,6 +6784,12 @@ Views.settings = (function () {
       if (ok) Actions.forceReinstallAll();
     });
 
+    // DISTRIBUTION-SPEC.md section 3.2/3.4: Actions.uninstallApp owns the
+    // confirm dialog, the POST, and the success/busy/error handling below it -
+    // this handler is just the click-to-action wire, same shape as every
+    // other button in this file.
+    Utils.qs("#btn-uninstall-app").addEventListener("click", function () { Actions.uninstallApp(); });
+
     Utils.qs("#btn-run-diagnostics").addEventListener("click", function () { runDiagnostics(); });
     Utils.qs("#btn-copy-diagnostics").addEventListener("click", async function () {
       const text = diagnosticsReportText();
@@ -6921,6 +7023,12 @@ const App = (function () {
   let pendingFlavourChoiceShownId = null;
   let autoCheckTimer = null;
   let uptimeTimer = null;
+  // DISTRIBUTION-SPEC.md section 3.4: true from the moment Actions.
+  // uninstallApp's POST succeeds until this page is torn down. Every polling
+  // loop below checks this before rescheduling itself, and markOnline
+  // short-circuits on it too - the server going away moments later is the
+  // expected, deliberate outcome here, never a "lost connection" error.
+  let uninstalling = false;
   let serverVersion = null;
   let serverUptimeAtFetch = null;
   let serverUptimeFetchedAt = null;
@@ -7166,8 +7274,10 @@ const App = (function () {
   }
 
   function pollJob(jobId) {
+    if (uninstalling) return; // DISTRIBUTION-SPEC.md section 3.4: poll stops once the app is uninstalling
     clearTimeout(jobPollTimer);
     jobPollTimer = setTimeout(async function () {
+      if (uninstalling) return;
       try {
         const job = await Api.getJob(jobId);
         Store.state.job = job;
@@ -7324,6 +7434,14 @@ const App = (function () {
   }
 
   function markOnline(err) {
+    // DISTRIBUTION-SPEC.md section 3.4: the server going away moments after
+    // a successful uninstall POST is the expected, deliberate outcome, never
+    // a "Lost connection to the server." error - and by this point #app
+    // (which #banner-offline lives inside) is already hidden anyway. Every
+    // polling loop that could reach here is already stopped
+    // (enterUninstallingState), so this only guards against a call already
+    // in flight the instant the flag flipped.
+    if (uninstalling) return;
     const wasOnline = Store.state.online;
     if (err) {
       Store.state.online = false;
@@ -7356,12 +7474,40 @@ const App = (function () {
   }
 
   function scheduleIdlePoll() {
+    if (uninstalling) return; // DISTRIBUTION-SPEC.md section 3.4: poll stops once the app is uninstalling
     const delay = Store.state.gameRunning ? POLL_GAME_MS
       : (Store.state.online === false ? POLL_OFFLINE_MS : POLL_ONLINE_MS);
     idleTimer = setTimeout(async function () {
+      if (uninstalling) return;
       if (!Store.isBusy()) await reloadState(false); // the 800ms job poller already covers the busy window
       scheduleIdlePoll();
     }, delay);
+  }
+
+  // DISTRIBUTION-SPEC.md section 3.4: called once Actions.uninstallApp's
+  // POST /api/uninstall comes back successfully (any 2xx). Stops every
+  // polling loop this module owns (idle state poll, job poll, the 30-minute
+  // auto-check, and the uptime ticker - Views.settings.render() itself is
+  // never called again either, since #app is hidden), then swaps the whole
+  // page for the plain "being removed" full-screen state. No redirect and
+  // nothing to undo - this is a one-way transition for the life of the page.
+  function enterUninstallingState() {
+    if (uninstalling) return;
+    uninstalling = true;
+    clearTimeout(idleTimer);
+    clearTimeout(jobPollTimer);
+    clearInterval(autoCheckTimer);
+    clearInterval(uptimeTimer);
+    const shell = Utils.qs("#app");
+    if (shell) shell.hidden = true;
+    const overlay = Utils.qs("#app-closing-overlay");
+    if (overlay) overlay.hidden = false;
+    // Same reason every other overlay in this app calls this (Components.
+    // Dialogs/Dropdown/Lightbox) - a WebView2 child window (the embedded
+    // CurseForge pane, if it happened to be open) always paints above
+    // ordinary HTML regardless of z-index, so this is the only way to be
+    // sure this final screen is what the user actually sees.
+    OverlayTracker.open();
   }
 
   function isUpdatesCheckStale() {
@@ -7584,7 +7730,14 @@ const App = (function () {
     switchView: switchView, renderCurrentView: renderCurrentView, renderChrome: renderChrome,
     onJobStarted: onJobStarted, attachToJob: attachToJob, reloadState: reloadState, init: init,
     getServerVersion: function () { return serverVersion; }, getServerUptime: currentUptime,
-    getServerHost: function () { return serverHost; }
+    getServerHost: function () { return serverHost; },
+    // DISTRIBUTION-SPEC.md section 3.4 (Settings > Uninstall Furphy Addon
+    // Manager). isUninstalling is a read-only testability hook (mirrors the
+    // getServerVersion/getServerHost getters above) so tests\spa\harness.js
+    // can confirm polling actually stopped without timing-sensitive
+    // "did another network call happen" assertions.
+    enterUninstallingState: enterUninstallingState,
+    isUninstalling: function () { return uninstalling; }
   };
 })();
 

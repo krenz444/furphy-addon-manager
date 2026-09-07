@@ -69,7 +69,12 @@ function Wait-MarkerFile {
 }
 
 function Wait-ProcessExit {
-    param([System.Diagnostics.Process]$Process, [int]$TimeoutSec = 15)
+    # Timing-budget hardening: was 15s. This is harness teardown slack
+    # (message-loop exit / mutex release AFTER the marker is already
+    # written), not a product guarantee - 15s left no margin under
+    # concurrent-suite CPU contention (reproduced: the "skips the cycle"
+    # It failing this exact assertion, line 384). Raised uniformly to 30s.
+    param([System.Diagnostics.Process]$Process, [int]$TimeoutSec = 30)
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
@@ -329,7 +334,7 @@ Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
             # A real PNG, not an empty/placeholder file.
             (Get-Item -LiteralPath $marker.capturePath).Length | Should BeGreaterThan 100
 
-            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+            Wait-ProcessExit -Process $hostProc | Should Be $true
         } finally {
             if ($hostProc -and -not $hostProc.HasExited) {
                 try { $hostProc.Kill() } catch { }
@@ -381,7 +386,7 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
             [int]$marker.exitCode | Should Be 0
             $marker.mutexHeld | Should Be $true
 
-            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+            Wait-ProcessExit -Process $hostProc | Should Be $true
         } finally {
             if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
             if ($wowFakeProc -and -not $wowFakeProc.HasExited) { try { Stop-Process -Id $wowFakeProc.Id -Force -ErrorAction SilentlyContinue } catch { } }
@@ -472,7 +477,54 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
             $tooltipHistory.Count | Should BeGreaterThan 0
             (@($tooltipHistory | Where-Object { $_ -match 'Updating \d+ of \d+' }).Count) | Should Be 0
 
-            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+            # Round 33 regression coverage (round-32 finding #4): the
+            # marker.menuItems array Builder H added this round had never
+            # been asserted automatically - only verified by hand. Exact
+            # order/labels per BuildContextMenu/CollectMenuItemLabels
+            # (host\FurphyHost.cs): Open / status line / Check now / sep /
+            # Start with Windows / background updates / sep / Uninstall /
+            # sep / Quit. The status line (index 1) is intentionally
+            # compared against marker.menuStatusText rather than a
+            # hardcoded string - RefreshMenuState sets _statusMenuItem.Text
+            # from the exact same _coreText the tooltip uses, so this
+            # proves that "menu and tooltip must never disagree" invariant
+            # instead of pinning today's specific status wording.
+            $menuItems = @($marker.menuItems)
+            $menuItems.Count | Should Be 10
+            $menuItems[0] | Should Be 'Open Furphy Addon Manager'
+            $menuItems[1] | Should Be $marker.menuStatusText
+            $menuItems[2] | Should Be 'Check for updates now'
+            $menuItems[3] | Should Be '-'
+            $menuItems[4] | Should Be 'Start with Windows'
+            $menuItems[5] | Should Be 'Update addons in the background'
+            $menuItems[6] | Should Be '-'
+            $menuItems[7] | Should Be 'Uninstall Furphy Addon Manager...'
+            $menuItems[8] | Should Be '-'
+            $menuItems[9] | Should Be 'Quit'
+
+            # Round 33 regression coverage (round-32 finding #4, second
+            # half): marker.uninstallDryRun's shape. This cycle self-starts
+            # addon-server.ps1 on 47899 (serverStarted true above) and the
+            # fixture's WoW root resolves cleanly, so RunUninstallSequence's
+            # real POST /api/uninstall (with {"dryRun":true} - round-32
+            # finding #2's fix) reaches a live, idle, reachable server and
+            # gets a real 200 back - proving the round-32/round-33 fix
+            # actually holds: a dry run against a genuinely live server
+            # returns success WITHOUT tearing that server down (serverStarted
+            # stays true and Wait-ProcessExit below still succeeds only
+            # because the CYCLE finishes and the tray exits on its own, not
+            # because the dry-run uninstall call shut anything down).
+            $marker.uninstallDryRun | Should Not Be $null
+            $marker.uninstallDryRun.route | Should Be 'server'
+            $marker.uninstallDryRun.busy | Should Be $false
+            [int]$marker.uninstallDryRun.postStatus | Should Be 200
+            $marker.uninstallDryRun.networkError | Should Be $false
+            # Only meaningful on the 'fallback' route - unset (default)
+            # here since the dry-run POST was answered by the server.
+            $marker.uninstallDryRun.installScriptFound | Should Be $false
+            $marker.uninstallDryRun.wowRootResolved | Should Be $null
+
+            Wait-ProcessExit -Process $hostProc | Should Be $true
 
             # Real registry check, independent of the marker's own claim.
             $prop = Get-ItemProperty -LiteralPath $keyPath -Name $valueName -ErrorAction SilentlyContinue
@@ -574,7 +626,7 @@ Describe 'Host --tray-selftest (tray) - single-flavour tooltip/icon/balloon hist
             $marker.balloonShown | Should Be $false
             $marker.clickOutcome | Should Be 'launch'
 
-            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+            Wait-ProcessExit -Process $hostProc | Should Be $true
         } finally {
             if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
             Stop-Straggler-FurphyHost -Needle $needle
@@ -586,7 +638,7 @@ Describe 'Host --tray-selftest (tray) - single-flavour tooltip/icon/balloon hist
         }
     }
 
-    It 'a real single-flavour forced-update cycle: tooltipHistory shows "Updating <Name> (1 of 1" then ends "Updated 1 at", balloon names it' {
+    It 'a real single-flavour forced-update cycle: tooltipHistory shows "Updating <Name> (1 of 1" then ends "Updated 1 addon at", balloon names it' {
         if (-not (Ensure-HostBuilt)) {
             Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
             return
@@ -640,13 +692,13 @@ Describe 'Host --tray-selftest (tray) - single-flavour tooltip/icon/balloon hist
             $tooltipHistory = @($marker.tooltipHistory)
             $updatingPattern = 'Updating ' + [regex]::Escape($addonName) + ' \(1 of 1'
             (@($tooltipHistory | Where-Object { $_ -match $updatingPattern }).Count) | Should BeGreaterThan 0
-            $tooltipHistory[$tooltipHistory.Count - 1] | Should Match 'Updated 1 at'
+            $tooltipHistory[$tooltipHistory.Count - 1] | Should Match 'Updated 1 addon at'
 
             $marker.balloonShown | Should Be $true
             [string]$marker.balloonText | Should Match ([regex]::Escape($addonName))
             $marker.clickOutcome | Should Be 'launch'
 
-            Wait-ProcessExit -Process $hostProc -TimeoutSec 15 | Should Be $true
+            Wait-ProcessExit -Process $hostProc | Should Be $true
         } finally {
             if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
             Stop-Straggler-FurphyHost -Needle $needle

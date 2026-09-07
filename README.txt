@@ -4,16 +4,34 @@ Keeps your retail addons updated from CurseForge and Wago Addons, and gives you 
 them. No API key required for any of this - see NO API KEY NEEDED below.
 
 NEW INSTALL
-  Run "Install Furphy.cmd" (or "install.ps1" from PowerShell) from the folder this file is in. It finds your WoW
-  folder, copies the app into <WoW>\_retail_\AddonSync, writes the launcher pair, creates both desktop shortcuts,
-  registers curseforge:// install links, and adopts any addons already in your AddOns folder. Safe to re-run any
-  time (upgrades the app, adopts anything new, never touches your addon list or settings). "install.ps1 -Uninstall"
-  removes the app cleanly and tells you where your addon list/settings/logs were left.
+  Download the zip, right-click it and choose Extract All, open the extracted folder, then double-click
+  "Install Furphy.cmd" (or run "install.ps1" from PowerShell). Windows may show a small "Open File - Security
+  Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate yet -
+  click Run. Furphy only writes inside your WoW folder and never asks for admin access. On most machines one
+  small window then opens with a single Install button (or a folder picker if it can't find WoW); on some
+  machines you may see plain console text instead - that's fine, it does the same thing. Either way it finds
+  your WoW folder, copies the app into <WoW>\_retail_\AddonSync, writes the launcher pair, creates both desktop
+  shortcuts, registers curseforge:// install links, registers Furphy in Windows' own Settings > Apps list, and
+  adopts any addons already in your AddOns folder. Safe to re-run any time (upgrades the app, adopts anything
+  new, never touches your addon list or settings).
+
+  Advanced: "irm <url>/install.ps1 | iex" also works from PowerShell if you'd rather skip the downloaded file -
+  not the recommended path for most people, since it skips the readable console log a normal install shows you.
+
+UNINSTALL (three equivalent ways)
+  - Right-click the tray icon -> Uninstall Furphy Addon Manager...
+  - Inside the app: Settings -> Backup & troubleshooting -> Uninstall Furphy Addon Manager
+  - Windows' own Settings -> Apps -> Furphy Addon Manager -> Uninstall
+  All three remove the app files, the Start with Windows setting, and the curseforge:// registration, and tell
+  you where your addon list/settings/logs were left. Or run "install.ps1 -Uninstall" directly from an unzipped
+  copy of the app - the same mechanism the three paths above use.
 
 TWO WAYS IN
   Desktop shortcut "WoW (auto-update addons)"  -> silently updates everything, then launches WoW via Battle.net.
   Desktop shortcut "Furphy Addon Manager"      -> opens the app (installed list, updates, versions, browse, settings).
-  Both are safe to use any time; the app refuses to run two operations at once.
+  Both are safe to use any time; the app refuses to run two operations at once. The tray icon's right-click menu
+  also has its own Start with Windows / Update addons in the background checkboxes and an Uninstall option -
+  see UNINSTALL above.
 
 NO API KEY NEEDED
   Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up, no

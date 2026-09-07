@@ -121,6 +121,7 @@ Describe 'Tray lifecycle and start-with-Windows registration' -Tags 'Tray' {
             # normal stop step) and always remove the Run value regardless
             # of how far the test got.
             try { Invoke-Api -Port 47899 -Method Post -Path '/api/tray/stop' -TimeoutSec 5 | Out-Null } catch { }
+            if ($trayPid) { Wait-ProcessReallyGone -ProcessId $trayPid -TimeoutSec 5 | Out-Null }
             if ($registeredByThisTest) {
                 try { Invoke-Api -Port 47899 -Method Post -Path '/api/startup/unregister' -TimeoutSec 5 | Out-Null } catch { }
             }
@@ -137,6 +138,7 @@ Describe 'Tray lifecycle and start-with-Windows registration' -Tags 'Tray' {
                     Where-Object { ($_.CommandLine -match '--tray') -and (($_.CommandLine -match '--port\s+4789\d') -or ([string]$_.ExecutablePath -notlike '*\Program Files*')) }
                 foreach ($s in @($stragglers)) {
                     try { Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+                    Wait-ProcessReallyGone -ProcessId $s.ProcessId -TimeoutSec 5 | Out-Null
                 }
             } catch { }
             Stop-TestServer -Server $server

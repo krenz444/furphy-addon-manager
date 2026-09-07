@@ -1121,6 +1121,21 @@
                   </div>
                   <div class="diag-list" id="diagnostics-list"></div>
                 </div>
+
+                <!-- DISTRIBUTION-SPEC.md section 3.2: Row 20, a new final
+                     cluster in this same shared box - the single most
+                     destructive control on the whole Settings screen,
+                     placed at the bottom of the least accidentally-
+                     clickable Advanced group. Opens the same shared confirm
+                     dialog every other destructive action here already uses
+                     (Components.Dialogs.confirm, wired in Actions.
+                     uninstallApp) - no new modal markup. -->
+                <div class="settings-subgroup" id="settings-uninstall">
+                  <span class="btn-tip-group">
+                    <button type="button" class="btn btn-danger-outline" id="btn-uninstall-app">Uninstall Furphy Addon Manager</button>
+                    <button type="button" class="info-tip" tabindex="0" aria-label="More about Uninstall Furphy Addon Manager" aria-describedby="app-tooltip" data-tooltip="Removes Furphy's program files from this PC. Your addons and your saved addon list are kept - reinstalling picks up right where you left off."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                  </span>
+                </div>
               </section>
 
             </div>
@@ -1272,6 +1287,21 @@
     <svg class="icon"><use href="#icon-close"></use></svg>
   </button>
   <img id="lightbox-img" src="" alt="">
+</div>
+
+<!-- ===================== Uninstall in progress ===================== -->
+<!-- DISTRIBUTION-SPEC.md section 3.4: App.enterUninstallingState() shows
+     this and hides #app once POST /api/uninstall succeeds. Plain, final,
+     and not dismissible - there is nothing left to do here, the server is
+     already tearing itself down. Worded to hold up whether this page is
+     running inside the native host (which gets its own WM_CLOSE moments
+     later, per DISTRIBUTION-SPEC.md section 5.3) or in a plain browser tab
+     (which does not) - "you can close this window" is true either way. -->
+<div class="app-closing-overlay" id="app-closing-overlay" hidden role="alert">
+  <div class="app-closing-card">
+    <svg class="icon"><use href="#icon-check-circle"></use></svg>
+    <p>Furphy is being removed. You can close this window.</p>
+  </div>
 </div>
 
 <script src="app.js" defer></script>

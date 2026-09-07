@@ -667,6 +667,27 @@ function Stop-TestServer {
     }
 }
 
+function Wait-ProcessReallyGone {
+    <#
+      Polls until -ProcessId no longer resolves to a live process (Get-
+      Process returns nothing), or -TimeoutSec elapses. Stop-Process
+      -Force (TerminateProcess) is not synchronous - a caller that moves
+      on immediately can still observe the process as alive for a short
+      window. Any cleanup that hands off shared OS state to the next
+      test/Describe (a per-port named Mutex, a shared HKCU value, a
+      shared port, or a shared live-tray-pid snapshot) must wait here
+      first, not assume Stop-Process's own return means "gone".
+    #>
+    param([int]$ProcessId, [int]$TimeoutSec = 5)
+    if ($ProcessId -le 0) { return $true }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Milliseconds 150
+    }
+    return -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
 # ---------------------------------------------------------------------
 # HTTP API calls (Origin header helpers - non-GET requires a same-origin
 # Origin/Referer or addon-server.ps1's CSRF guard 403s the request, see

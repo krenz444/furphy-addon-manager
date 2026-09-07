@@ -1,6 +1,220 @@
 # Furphy Addon Manager - changelog
 
-## Round 33 (1.13.1: Game folder buttons open what their labels say)
+## Round 33 (1.14.0: uninstall from the tray, the app and Windows; a one-window installer; easier downloads)
+
+Eric's requests, verbatim: "from the taskbar, i need a right click option to
+uninstall furphy addon manager, and a way to disable the auto update
+service, as well as disable running it automatically on startup / from in
+the app, i need this functionality as well, if possible / from outside the
+app, i want to think of the best way to distribute this easily onto other
+people computers from the repo or download link without any difficulty for
+the below average tech savvy wow player." Synthesized into
+`DISTRIBUTION-SPEC.md` (new this round, shipped in this folder, ASCII-only
+- the authoritative source for every fix, wire-up, and piece of copy below)
+from two competing designer drafts and a judge's decision, with ten
+required fixes named up front. ("Taskbar" meant the tray icon's right-click
+menu, confirmed at task start.)
+
+**Uninstall, from three places, one converging mechanism.** Right-click the
+tray icon and choose "Uninstall Furphy Addon Manager..." (a confirm dialog,
+No highlighted by default so an accidental Enter never confirms it);
+Settings > Backup & troubleshooting > "Uninstall Furphy Addon Manager"
+(reuses the same confirm modal every other destructive Settings button
+already uses); or Windows' own Settings > Apps > Furphy Addon Manager >
+Uninstall, now a real, working entry for the first time (see the
+Installed-Apps registry key below). All three end up running the same
+sequence: if Furphy's local server is reachable, it's asked first (and
+correctly refuses with a plain-language message if an addon is mid-update);
+if it isn't reachable, a fresh copy of `install.ps1 -Uninstall` runs
+instead, since no reachable server on this install's own port means no
+update job can possibly be running for it. Either path removes Furphy's
+program files, its Start with Windows entry, the CurseForge install-link
+handler, and the new Installed-Apps registry key - and leaves your addons,
+your addon list, your settings, and your logs exactly where they are, so
+reinstalling picks up right where you left off. `install.ps1` now also
+ships a copy of itself into every install (it couldn't uninstall itself
+before this round) and, before closing anything, asks Furphy's own open
+window to close on its own first.
+
+**One new tray checkbox covers both "disable the auto-update service" and
+"from in the app."** "Update addons in the background" joins "Start with
+Windows" on the tray's right-click menu - the exact same setting, same
+label, as the one already in Settings > Essentials, so there's only ever
+one on/off switch to think about no matter where you flip it. Turning it
+off from the tray closes the tray icon right away (with a one-time balloon
+explaining why, so it never reads as "did my click just break something"),
+instead of waiting for the icon's own background timer to notice. The two
+in-app asks Eric named - disabling background updates and disabling
+startup from inside Furphy - already shipped in Round 32's Settings
+audit (Essentials > Updates, "Update addons in the background" and "Start
+with Windows") and needed no new code this round, just a pointer here in
+case they went unnoticed.
+
+**Fixed, real bug, found during this round's own testing:** the tray's
+"Start with Windows" click used to update the Windows registry but never
+told `settings.json` about it, so the two could silently drift apart until
+the Settings screen's own next poll self-corrected. Both now update
+together, every time.
+
+**A serious near-miss, and what it changed.** Testing the new uninstall
+path against an isolated scratch install (as every test this round is
+required to run) surfaced a real, pre-existing bug: `install.ps1
+-Uninstall`'s "Start with Windows" removal had no scoping at all, and
+briefly took down Eric's actual, live Start-with-Windows registration
+during this round's own research pass (restored by hand within the
+minute). That scoping gap is now fixed everywhere a registry value this
+feature touches gets removed - the production name is used only for a
+production-configured install; anything else (including every test this
+round runs) gets a distinctly-named value that can never collide with the
+real one. **If "Start with Windows" isn't currently on in your own Furphy
+tray, turn it back on** - see `DISTRIBUTION-SPEC.md` section 0 for the
+full incident record.
+
+**Distribution: same zip, an optional one-window installer, and a real
+download page.** The install path stays exactly what it's always been - a
+zip plus `Install Furphy.cmd` - no compiled, downloaded installer .exe
+this round (an unsigned one would trip Windows' full-screen SmartScreen
+block, which today's plain script never does; see `DISTRIBUTION-SPEC.md`
+section 6.7 for the full reasoning and the paid-signing options on the
+table for later). What's new: `install.ps1` can now open one small window
+- "Furphy found World of Warcraft in `<path>`," one Install button, a
+progress bar, then a success screen with Open/Launch buttons - instead of
+only a console; if that window can't be built for any reason (an old
+machine, an unusual DPI setting), it falls straight through to the
+existing, already-tested console flow, unchanged. A new GitHub Pages
+landing page (`site/index.html`, static, no build step) gives new players
+one big Download button and five plain-language steps instead of a bare
+repository file list. Windows may still show its usual one-click "Open
+File - Security Warning" box the first time - stated plainly everywhere
+this matters, landing page included: **"Windows may show a small 'Open
+File - Security Warning' box the first time you run Install Furphy.cmd,
+since it isn't signed with a paid certificate yet - click Run. Furphy only
+writes inside your WoW folder and never asks for admin access."**
+`package.ps1` now also attaches a second, always-identically-named zip
+(`FurphyAddonManager-latest.zip`) to every release, so the landing page's
+download link never points at a stale version.
+
+**New route:** `POST /api/uninstall` (`addon-server.ps1`) - refuses with a
+409 and a plain-language body while any addon update is running, otherwise
+answers success immediately and spawns the actual removal, mirroring the
+existing `/api/shutdown` shape and CSRF rule exactly.
+
+See `DISTRIBUTION-SPEC.md` for the full design, including the exact tray
+menu order, the Settings row's confirm-dialog copy, the Installed-Apps
+registry field list, and the complete novice install/uninstall test plan.
+
+**Fixer pass (uninstall dry-run made real, plus test coverage).** Fixed
+four findings from this round's own verifier pass, without touching any of
+the ten required-fix behavior above:
+
+**`--tray-selftest`'s uninstall "dry run" is now actually dry, server-side
+too.** Previously `RunUninstallSequence(dryRun)`'s `if (!dryRun)` guards
+only ever wrapped the CLIENT's own fallback copy+launch and the tray's own
+`_stopEvent.Set()` - the real `POST /api/uninstall` fired unconditionally
+regardless of `dryRun`, so a selftest run against a live, idle, reachable
+server would have triggered a REAL server-side uninstall+teardown. Fixed
+in both halves: `FurphyHost.cs`'s `RunUninstallSequence` now sends
+`{"dryRun":true}` in the POST body on a dry run, and `addon-server.ps1`'s
+`Handle-Uninstall` reads that flag and returns success right after its
+existing busy-check and WoW-root resolution - before the `Copy-Item`,
+`Start-Process`, and `$Script:ShuttingDown` that make an uninstall real.
+The busy-check itself still runs identically either way (it's a read, not
+a side effect), so a dry run still proves the exact routing decision a
+real call would make.
+
+**New test coverage, the busy/409 branch of `Handle-Uninstall`** (had zero
+coverage before): `tests\integration\Server.Uninstall.Tests.ps1` gained a
+Describe that seeds a few slow, genuinely-still-running bogus-CurseForge-id
+jobs (the same established trick `Server.Jobs.Tests.ps1` already uses for
+its own per-flavour-busy Describe) and asserts the 409 plain-language body,
+that nothing was removed, and that the scratch server stayed alive.
+
+**New test coverage, the `--tray-selftest` marker's `menuItems` and
+`uninstallDryRun` fields** (previously verified by hand only):
+`tests\host\Host.Tests.ps1`'s real-cycle Describe now asserts the exact
+10-item menu array (status line compared against `marker.menuStatusText`
+rather than a hardcoded string, proving the "menu and tooltip must never
+disagree" invariant instead of pinning today's wording) and the full
+`uninstallDryRun` shape (`route`/`busy`/`postStatus`/`networkError`/
+`installScriptFound`/`wowRootResolved`) for a dry run against a real,
+self-started, reachable scratch server.
+
+**Documented, not changed:** `ui/app.js`'s SPA mock answers `202` on a
+successful `/api/uninstall`; the real server and `DISTRIBUTION-SPEC.md`
+both specify `200`. `Actions.uninstallApp` branches on "any 2xx" so this
+was never a functional bug - added an explicit comment at the mock's own
+route so a future pass doesn't "fix" the real server to `202` thinking it
+was chasing a spec that actually says `200`.
+
+**Second fixer pass (a real uninstall left the whole `host\` folder
+behind).** The round-33 verifier reproduced, 2/2, a defect in the exact two
+uninstall paths Eric asked for most - from the app, and from the tray while
+the window is open. With a real host window open, `POST /api/uninstall`
+correctly stopped the server, closed the window (`Close-InstallMainWindow`'s
+`WM_CLOSE`), and waited out the `FurphyHost.exe` process itself - but never
+waited for that window's WebView2 child processes (`msedgewebview2.exe`
+renderer/gpu/crashpad/network, spawned under
+`host\bin\FurphyHost.exe.WebView2\EBWebView`), which can keep a file locked
+for a moment after `FurphyHost.exe` has already exited. The single
+`Remove-Item -Recurse -Force` on the whole `host\` folder then hit that one
+locked file, threw, and abandoned the entire folder - exe, DLLs, `lib\`,
+sources, about 1 MB - while still reporting a clean uninstall. Fixed in
+`install.ps1`'s uninstall sequence only (no second `WM_CLOSE`/P-Invoke copy
+elsewhere, per fix 9):
+  - `Wait-InstallHostAndWebView2Exit` (new) now waits, after the existing
+    process wait, for every `FurphyHost.exe` under the install folder
+    (tray AND a main window, not just the tray's own path) and every
+    `msedgewebview2.exe` whose `--user-data-dir` resolves under it, polling
+    up to 20 seconds, then force-closes anything still standing.
+  - `Remove-InstallFolderWithRetry`/`Remove-InstallFileWithRetry` (new)
+    remove a folder file-by-file with 5-attempt/300-4800ms backoff per
+    item, instead of one `Remove-Item -Recurse -Force` for the whole tree -
+    so one still-locked file can no longer abandon everything alongside it.
+  - Every step and failure is now written to
+    `%TEMP%\FurphyUninstall-<stamp>.log`, leftovers (if any) are appended to
+    the existing `README-leftover.txt`, and install.ps1 -Uninstall now
+    shows a plain-language result MessageBox by default (both real
+    callers - the tray and Settings' own button - run this hidden, so this
+    box was the only way either could ever surface an outcome to the
+    person who asked for it). `-Console`/`-Quiet` suppress it for the
+    console flow and this codebase's own tests; `POST /api/uninstall`
+    gained a matching `{"quiet":true}` body field (same shape as
+    `noShortcuts`/`noProtocol`/`dryRun`) forwarded as `-Quiet`, sent only by
+    this suite's own tests, never by the real UI.
+  - New regression coverage in `tests\integration\Server.Uninstall.Tests.ps1`:
+    opens a real scratch `host\bin\FurphyHost.exe --port 47899 --view
+    settings` window, confirms a live WebView2 child under it, uninstalls
+    through the real `POST /api/uninstall` route, then asserts the window,
+    its WebView2 children, and the entire `host\` folder are gone with
+    zero leftovers, and that the uninstall log agrees - all while the real
+    production Run value, Installed-Apps key, and live tray stay untouched.
+
+**Correction (third fixer pass): the "zero leftovers" claim above was not
+fully accurate.** The round-33 verifier found this fix's own retry logic
+still conflated "the target is already gone" with "the target is still
+locked": `Remove-InstallFileWithRetry`'s `Remove-Item` throws
+`ItemNotFoundException` ("Cannot find path ... because it does not exist"),
+not a sharing-violation error, when a file it is retrying against has
+already vanished on its own between attempts - reproduced 3/3 on isolated
+cold scratch installs against
+`host\bin\FurphyHost.exe.WebView2\EBWebView\lockfile`, a WebView2/Chromium
+profile lockfile with its own delayed/pending-delete semantics. The old
+code treated that throw exactly like a genuinely-still-locked file: it
+never checked whether the path was actually gone before retrying or giving
+up, so a file that had already been removed by something else still got
+counted as a failed removal, which in turn kept the (by then completely
+empty) `host\` folder itself from being deleted. Fixed by checking
+`Test-Path` immediately after any `Remove-Item` throw, on every attempt,
+not just the last - "the path is gone" is the real goal regardless of who
+removed it; a file that is genuinely still locked still retries and can
+still fail exactly as before. Re-verified with 9 cold, isolated runs of the
+real-window regression test above (fresh `powershell.exe` process per run,
+never a warmed-up suite) - 9/9 passed - since the underlying race is
+timing-sensitive and a single warmed-up pass previously looked clean while
+cold runs did not.
+
+**Game folders buttons open what their labels say** (merged into this round from the checkout's commit 50c3698, which carried this fix as "Round 33 (1.13.1)" before this round's own Round 33 existed; the code comments say "Round 33" and stay correct).
+
 
 Settings > Advanced > Game folders had two buttons that opened the
 wrong things - the wiring bug Round 32 flagged and deliberately left
@@ -62,6 +276,29 @@ server starts mis-rooted (`/api/settings` reported `addonsPath` as
 `WoW`). Every existing test uses space-free `tests\.tmp` roots, so
 nothing in the suite hits it; the live check above launched the server
 with a quoted argument string instead.
+
+**Checks no longer fail with "CLI exited with code 0".** Live incident,
+2026-09-06 21:18, job 119: a "Check now" whose CLI ran cleanly, checked all
+34 addons, and exited 0 was marked FAILED anyway, with an empty results[]
+and the message "CLI exited with code 0". Root cause: `Start-Process
+-RedirectStandardOutput` does not hand the child process a file handle -
+the parent pumps the child's stdout through an asynchronous
+OutputDataReceived handler into a buffered writer that is only flushed and
+closed on the child's Exited event, which fires AFTER
+`Process.HasExited` turns true. Every finalize path in `addon-server.ps1`
+read the job's `.out` file on the very poll that first saw `HasExited`, so
+a CLI that printed its one JSON result document right before exiting could
+have that write land after the read, making a perfectly good sync look
+empty or truncated. Fix: a new `Wait-ProcessOutputDrained` helper calls the
+child process's no-timeout `WaitForExit()` overload (documented to block
+until the asynchronous output pump has actually finished) before any
+finalize path touches the `.out` file, then confirms the file has content
+with a short bounded wait so a child that legitimately printed nothing
+never stalls the poll. A job that still ends up failed keeps `.out.failed`
+and `.err.failed` copies of its captured output alongside the normal
+failure message, so a real failure keeps its own diagnostics instead of
+losing them to the same drain wait. Regression test:
+`tests\unit\Server.OutputDrain.Tests.ps1` (3/3 passing).
 
 ## Round 32 (1.13.0: Settings made simple, tooltips everywhere)
 

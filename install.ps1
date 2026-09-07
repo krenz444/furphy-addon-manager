@@ -48,7 +48,27 @@ param(
     [switch]$NoShortcuts,
     [switch]$NoProtocol,
     [switch]$SkipAdopt,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    # DISTRIBUTION-SPEC.md section 6.2/fix 6: forces the plain console flow,
+    # skipping the WinForms install wizard entirely - never guesses, never
+    # attempts Add-Type/Form construction at all. Every automated test in
+    # this repo MUST pass this (a wizard run headless would call
+    # ShowDialog(), which blocks forever with nothing to click). Also the
+    # documented manual escape hatch for a machine where the wizard's
+    # automatic construction-failure fallback (section 6.2) doesn't apply
+    # cleanly for some other reason.
+    [switch]$Console,
+    # Round 33 defect fix: suppresses ONLY the final WinForms result
+    # MessageBox that -Uninstall now shows by default (see the end of the
+    # -Uninstall block below) - unlike -Console this does not force the
+    # console install flow, it is meaningful on -Uninstall alone. Every
+    # automated -Uninstall test in this repo passes -Console already,
+    # which also suppresses the box (a headless test process must never
+    # call MessageBox.Show and hang waiting for a click); -Quiet exists as
+    # a second, narrower way to say the same thing for a caller that wants
+    # console/wizard behavior untouched but still must not show a dialog
+    # (none today, but the two are intentionally independent switches).
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,18 +76,69 @@ $ProgressPreference = 'SilentlyContinue'
 $SourceRoot = $PSScriptRoot
 if (-not $SourceRoot) { $SourceRoot = Split-Path -Path $MyInvocation.MyCommand.Path -Parent }
 
+# Round 33 defect fix (item 3): $Script:UninstallLogPath is $null for the
+# whole life of a normal install run (and stays $null right up until the
+# -Uninstall block below sets it, a few lines into its own flow) - Write-
+# InstallLogLine is therefore a silent no-op everywhere except inside an
+# actual -Uninstall run, without needing a second parallel set of logging
+# calls: hooking it into Write-Step/Write-Info/Write-Warn2 below means
+# every existing call site throughout the whole uninstall sequence (the
+# process-wait loops, the registry removals, every per-item removal
+# failure, the final summary) already writes "every step and every
+# failure" into the uninstall log for free, with zero new call sites to
+# remember to add and keep in sync as the sequence changes.
+$Script:UninstallLogPath = $null
+function Write-InstallLogLine {
+    param([string]$Message)
+    if (-not $Script:UninstallLogPath) { return }
+    try {
+        $stamped = (Get-Date -Format 'HH:mm:ss.fff') + '  ' + $Message
+        Add-Content -LiteralPath $Script:UninstallLogPath -Value $stamped -Encoding Ascii
+    } catch {
+        # Never let logging itself break the uninstall.
+    }
+}
+
 function Write-Step {
     param([string]$Message)
     Write-Host ''
     Write-Host "== $Message ==" -ForegroundColor Cyan
+    Update-WizardProgress -Message $Message
+    Write-InstallLogLine "== $Message =="
 }
 function Write-Info {
     param([string]$Message)
     Write-Host "  $Message"
+    Update-WizardProgress -Message $Message
+    Write-InstallLogLine "  $Message"
 }
 function Write-Warn2 {
     param([string]$Message)
     Write-Host "  WARNING: $Message" -ForegroundColor Yellow
+    Update-WizardProgress -Message "WARNING: $Message"
+    Write-InstallLogLine "  WARNING: $Message"
+}
+
+# DISTRIBUTION-SPEC.md section 6.2, fix 6 (chosen progress mechanism):
+# every Write-Step/Write-Info/Write-Warn2 call above already runs
+# unconditionally throughout the unchanged install steps - piggybacking the
+# wizard's progress label + DoEvents() pump onto those exact same call
+# sites means the install logic itself needs zero changes to report
+# progress into the Form. $Script:WizardActive/$Script:WizardProgressLabel
+# are $false/$null for the whole life of a console-only run (this function
+# then does nothing beyond the immediate early return), and are set only
+# from inside Show-InstallWizard's own Install-button click handler.
+$Script:WizardActive = $false
+$Script:WizardProgressLabel = $null
+function Update-WizardProgress {
+    param([string]$Message)
+    if (-not $Script:WizardActive) { return }
+    try {
+        if ($Script:WizardProgressLabel) { $Script:WizardProgressLabel.Text = $Message }
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch {
+        # Must never block/abort the install itself.
+    }
 }
 
 # Round 20: independent, code-level heuristic (not caller discipline alone)
@@ -131,6 +202,189 @@ function Get-InstallTrayStopEventName {
     if ($port -ne 47831) { return ('FurphyAddonManager.TrayStop.' + $port) }
     if (Test-LooksLikeScratchRun -Path $AppDest) { return $null }
     return 'FurphyAddonManager.TrayStop'
+}
+
+# Round 33 (DISTRIBUTION-SPEC.md fix 3/section 5.4): the Installed-Apps
+# registry subkey name uses the EXACT SAME literal as the Start-with-Windows
+# Run value name computed above ("FurphyAddonManager" / "FurphyAddonManager.
+# Test" / $null for a scratch run on the production port) - this is not a
+# coincidence, it is fix 3's explicit instruction to reuse Get-
+# InstallStartupValueName's scratch/null rule rather than re-deriving the
+# same scoping decision a second time in a second function that could drift
+# out of sync with it. Kept as its own named function (not just called
+# directly at each call site) so both call sites - the writer at the end of
+# a normal install and the remover in -Uninstall - read the same one name
+# from the same one place, and so a unit test can assert on this specific
+# registry-key-name contract by name, independent of the Run-value one ever
+# changing for an unrelated reason.
+function Get-InstallAppsKeyName {
+    param([string]$AppDest)
+    return Get-InstallStartupValueName -AppDest $AppDest
+}
+
+# DISTRIBUTION-SPEC.md section 5.4: EstimatedSize (KB) for the Installed-Apps
+# key - a plain recursive file-size sum, rounded to the nearest KB. Never
+# throws (a missing/unreadable path is worth 0, not a fatal install error);
+# 0 is also exactly right for "install just started, nothing copied yet"
+# callers, if this is ever called that early.
+function Get-InstallEstimatedSizeKB {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return 0 }
+    try {
+        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if (-not $sum) { return 0 }
+        return [int][math]::Round($sum / 1024)
+    } catch {
+        return 0
+    }
+}
+
+# DISTRIBUTION-SPEC.md section 5.4: builds the ONE command line used for both
+# UninstallString and QuietUninstallString - "try the server, else copy the
+# bundled install.ps1 to %TEMP% and launch it" (section 5.3's invariant),
+# so Windows' own Settings > Apps entry is a third caller of the identical
+# converging mechanism the tray (2.2) and Settings' own button (3.4) already
+# use, not a special case. Pure string composition - never touches the
+# registry, the filesystem, or the network itself; the caller (Invoke-
+# FurphyInstallSteps) is what writes the returned string into the registry.
+function Get-InstallUninstallString {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][string]$WowRootPath
+    )
+    # Single-quoted PowerShell string literals throughout the inner
+    # -Command body (never double quotes) so the whole thing can be wrapped
+    # in one outer -Command "..." with nothing inside it that needs
+    # escaping against that outer double-quote - the one exception is a
+    # literal single quote that could appear INSIDE a path itself, doubled
+    # per PowerShell's own single-quote escaping rule (''), defensively,
+    # even though no WoW/Furphy install path is expected to ever contain one.
+    $originUrl = "http://localhost:$Port"
+    $apiUrl = "http://localhost:$Port/api/uninstall"
+    $installPs1 = Join-Path -Path $AppDest -ChildPath 'install.ps1'
+    $installPs1Esc = $installPs1.Replace("'", "''")
+    $wowRootEsc = $WowRootPath.Replace("'", "''")
+
+    $inner = "try { Invoke-RestMethod -Method Post -Uri '$apiUrl' -TimeoutSec 2 -Headers @{Origin='$originUrl'} } catch { `$t = Join-Path `$env:TEMP ('FurphyUninstall-' + [guid]::NewGuid() + '.ps1'); Copy-Item '$installPs1Esc' `$t; Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',`$t,'-WowPath','$wowRootEsc','-Uninstall' }"
+
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + $inner + '"'
+}
+
+# DISTRIBUTION-SPEC.md fix 9: mirrors host\FurphyHost.cs's AppConstants.
+# WindowTitleFor(port) exactly (production port -> the bare literal, any
+# other port -> a "[test <port>]"-suffixed title) - duplicated here per the
+# codebase's own established "every shared fact lives in each file that
+# needs it" convention (the same reasoning already used for
+# Test-LooksLikeScratchRun/$Script:FlavourDefs above). Computing this from
+# THIS install's own port (never a hardcoded literal) is what makes it safe
+# to WM_CLOSE-by-title from inside -Uninstall: a scratch/test install can
+# never resolve to the one title a real, live production window would be
+# using.
+function Get-InstallWindowTitle {
+    param([int]$Port)
+    if ($Port -eq 47831) { return 'Furphy Addon Manager' }
+    return "Furphy Addon Manager [test $Port]"
+}
+
+$Script:FurphyWin32Loaded = $false
+function Initialize-InstallWin32Type {
+    <# Add-Type is not safe to call twice for the same type name in one
+       process - guard so both Close-InstallMainWindow and
+       Hide-InstallConsole (and a caller that somehow triggers both) never
+       double-register it. #>
+    if ($Script:FurphyWin32Loaded) { return }
+    if (-not ('FurphyInstall.Win32' -as [type])) {
+        Add-Type -Namespace FurphyInstall -Name Win32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+public static extern System.IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool PostMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@
+    }
+    $Script:FurphyWin32Loaded = $true
+}
+
+function Close-InstallMainWindow {
+    <#
+      DISTRIBUTION-SPEC.md fix 9/section 5.3 step 3: the ONE WM_CLOSE-by-
+      window-title implementation in the whole project - best-effort asks
+      any open Furphy MAIN WINDOW carrying THIS install's own port-scoped
+      title (Get-InstallWindowTitle) to close, before the existing
+      FurphyHost-process wait loop starts waiting. Never throws; a missing
+      window (nothing open, or a different port's window) is a silent
+      no-op - this must never block or fail the rest of -Uninstall.
+    #>
+    param([int]$Port)
+    try {
+        Initialize-InstallWin32Type
+        $title = Get-InstallWindowTitle -Port $Port
+        # PowerShell marshals a bare $null onto a .NET string parameter as
+        # an empty string, not a true null reference - FindWindow then
+        # searches for a window with an EMPTY class name and never matches
+        # anything real. [NullString]::Value marshals as a genuine null
+        # pointer, matching any class name, exactly like C#'s own literal
+        # `null` does at the call sites in host\FurphyHost.cs.
+        $hwnd = [FurphyInstall.Win32]::FindWindow([NullString]::Value, $title)
+        if ($hwnd -ne [IntPtr]::Zero) {
+            $WM_CLOSE = 0x0010
+            [FurphyInstall.Win32]::PostMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+            Write-Info 'Asked the open Furphy window to close.'
+        }
+    } catch {
+        # Best-effort only.
+    }
+}
+
+function Hide-InstallConsole {
+    <# DISTRIBUTION-SPEC.md fix 6: hide THIS process's own console window,
+       called only after Show-InstallWizard's Form has been fully
+       constructed (never before - see that function's own comment). #>
+    try {
+        Initialize-InstallWin32Type
+        $SW_HIDE = 0
+        $hwnd = [FurphyInstall.Win32]::GetConsoleWindow()
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [FurphyInstall.Win32]::ShowWindow($hwnd, $SW_HIDE) | Out-Null
+        }
+    } catch {
+        # Best-effort only - a failure here must never block the install;
+        # worst case the console just stays visible behind the Form.
+    }
+}
+
+function Show-InstallConsole {
+    <#
+      Undoes Hide-InstallConsole - called once the wizard's own Form has
+      closed (success or error screen dismissed), right before this
+      process exits. Necessary because powershell.exe -File, launched from
+      "Install Furphy.cmd" (a plain .cmd double-click, the documented
+      novice path), shares its PARENT cmd.exe's own console window rather
+      than owning a private one - hiding it hides that SAME window for the
+      wrapping .cmd too, so without this, the .cmd's trailing `pause` line
+      would sit waiting for a keypress inside a window nobody can see,
+      leaving an orphaned process behind forever. Safe/harmless to call
+      even when the console was never hidden in the first place (Console
+      mode, or a Form-construction failure that never called Hide-
+      InstallConsole at all).
+    #>
+    try {
+        Initialize-InstallWin32Type
+        $SW_SHOW = 5
+        $hwnd = [FurphyInstall.Win32]::GetConsoleWindow()
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [FurphyInstall.Win32]::ShowWindow($hwnd, $SW_SHOW) | Out-Null
+        }
+    } catch {
+        # Best-effort only.
+    }
 }
 
 # =====================================================================
@@ -257,39 +511,72 @@ $script:FurphyDotSourced = ($MyInvocation.InvocationName -eq '.') -or ($MyInvoca
 if ($script:FurphyDotSourced) { return }
 
 $wowRoot = Find-WowRoot -Override $WowPath
-if (-not $wowRoot) {
+$installedFlavours = New-Object 'System.Collections.Generic.List[object]'
+if ($wowRoot) { $installedFlavours = Get-InstalledFlavourDefs -WowRootPath $wowRoot }
+# DISTRIBUTION-SPEC.md section 6.2: a plain install run (not -Uninstall,
+# not -Console) no longer exits 2 immediately on "not found" - it falls
+# through to Show-InstallWizard further down, whose own folder-picker
+# screen is exactly this same recovery path, just graphical instead of a
+# console message. -Uninstall and -Console both need a resolved $appDest
+# right now (uninstall never shows a wizard at all; -Console is the
+# explicit "skip the wizard entirely" escape hatch, including for every
+# automated test in this repo - a wizard run headless would call
+# ShowDialog() and hang forever with nothing to click), so both still fail
+# fast here exactly as before this round.
+$wowFound = ($wowRoot -and $installedFlavours.Count -gt 0)
+if (-not $wowFound -and ($Uninstall -or $Console)) {
     Write-Host ''
-    Write-Host 'ERROR: Could not find a World of Warcraft installation.' -ForegroundColor Red
+    if (-not $wowRoot) {
+        Write-Host 'ERROR: Could not find a World of Warcraft installation.' -ForegroundColor Red
+    } else {
+        Write-Host "ERROR: No known WoW client folder (with Interface\AddOns) was found under $wowRoot." -ForegroundColor Red
+    }
     Write-Host '       Pass -WowPath "<your WoW folder>" (the one that contains _retail_, _classic_, _classic_era_, etc).' -ForegroundColor Red
     exit 2
 }
 
-$installedFlavours = Get-InstalledFlavourDefs -WowRootPath $wowRoot
-if ($installedFlavours.Count -eq 0) {
-    Write-Host ''
-    Write-Host "ERROR: No known WoW client folder (with Interface\AddOns) was found under $wowRoot." -ForegroundColor Red
-    Write-Host '       Pass -WowPath "<your WoW folder>" (the one that contains _retail_, _classic_, _classic_era_, etc).' -ForegroundColor Red
-    exit 2
+function Set-InstallPathsFromWowRoot {
+    <#
+      (Re)computes every path derived from $script:wowRoot/
+      $script:installedFlavours - $homeFlavour, $homeDir, $addonsPath,
+      $appDest, $firstClassInstalled, $multiFlavour - into script scope.
+      Called once below for the normal top-to-bottom console/-Uninstall
+      flow, and again from Show-InstallWizard's own Browse-folder handler
+      if the user picks a WoW folder there (auto-detection found nothing,
+      or the user wants a different one) - keeping this computation in one
+      function is what lets both callers stay byte-identical instead of
+      two copies of the same five lines drifting apart.
+
+      FLAVORS-SPEC S3.1: home flavour = Retail when installed (upgrade
+      path, byte-identical to every machine that has it today); otherwise
+      the first-detected flavour in S2.1's fixed order
+      (Get-InstalledFlavourDefs already returns its list in that order, so
+      $installedFlavours[0] IS that first-detected flavour whenever Retail
+      is absent). Only Retail/Classic/Classic Era (S2.1's "first-class")
+      ever get a launcher pair or a desktop shortcut (S7.2) - PTR/XPTR/Beta
+      stay detected-but-quiet here exactly as they do everywhere else
+      (S2.5).
+    #>
+    $script:homeFlavour = $null
+    foreach ($f in $script:installedFlavours) { if ($f.Id -eq 'retail') { $script:homeFlavour = $f; break } }
+    if (-not $script:homeFlavour) { $script:homeFlavour = $script:installedFlavours[0] }
+
+    $script:homeDir = Join-Path -Path $script:wowRoot -ChildPath $script:homeFlavour.Folder
+    $script:addonsPath = Join-Path -Path $script:homeDir -ChildPath 'Interface\AddOns'
+    $script:appDest = Join-Path -Path $script:homeDir -ChildPath 'AddonSync'
+
+    $script:firstClassInstalled = @($script:installedFlavours | Where-Object { $_.FirstClass })
+    $script:multiFlavour = ($script:firstClassInstalled.Count -gt 1)
 }
 
-# FLAVORS-SPEC S3.1: home flavour = Retail when installed (upgrade path,
-# byte-identical to every machine that has it today); otherwise the
-# first-detected flavour in S2.1's fixed order (Get-InstalledFlavourDefs
-# already returns its list in that order, so $installedFlavours[0] IS
-# that first-detected flavour whenever Retail is absent).
-$homeFlavour = $null
-foreach ($f in $installedFlavours) { if ($f.Id -eq 'retail') { $homeFlavour = $f; break } }
-if (-not $homeFlavour) { $homeFlavour = $installedFlavours[0] }
-
-$homeDir = Join-Path -Path $wowRoot -ChildPath $homeFlavour.Folder
-$addonsPath = Join-Path -Path $homeDir -ChildPath 'Interface\AddOns'
-$appDest = Join-Path -Path $homeDir -ChildPath 'AddonSync'
-
-# Only Retail/Classic/Classic Era (S2.1's "first-class") ever get a
-# launcher pair or a desktop shortcut (S7.2) - PTR/XPTR/Beta stay
-# detected-but-quiet here exactly as they do everywhere else (S2.5).
-$firstClassInstalled = @($installedFlavours | Where-Object { $_.FirstClass })
-$multiFlavour = ($firstClassInstalled.Count -gt 1)
+if ($wowFound) {
+    # -Uninstall and -Console both need this resolved right away (see the
+    # check above); a plain wizard-eligible run with WoW already
+    # auto-detected also resolves it now, purely so Show-InstallWizard has
+    # an initial path to show/offer - its Browse handler still calls this
+    # again if the user changes it.
+    Set-InstallPathsFromWowRoot
+}
 
 # =====================================================================
 # 2. Battle.net.exe detection (best-effort; a default path is always
@@ -323,11 +610,312 @@ function Find-BattleNetExe {
 }
 
 # =====================================================================
+# Round 33 defect fix: WebView2-children-outlive-FurphyHost.exe uninstall
+# leftover (DISTRIBUTION-SPEC.md fix 9 follow-up).
+#
+# Reproduced 2/2 with a REAL scratch host window open: Close-
+# InstallMainWindow's WM_CLOSE and the pre-existing $trayExePath-only wait
+# loop above both only ever watch the FurphyHost.exe PROCESS - never its
+# WebView2 child processes (msedgewebview2.exe renderer/gpu/crashpad/
+# network, spawned under host\bin\FurphyHost.exe.WebView2\EBWebView).
+# Those children can still be unwinding and holding file/profile-folder
+# locks for a short window after FurphyHost.exe itself has already
+# exited, which is exactly what made the single Remove-Item -Recurse
+# -Force on the whole host\ folder below throw, get swallowed into
+# $failedRemovals, and leave ~1 MB of app files (plus a fresh
+# host\bin\FurphyHost.exe.WebView2 profile folder) behind on the two most
+# common real uninstall paths (from the app, from the tray while the
+# window is open).
+# =====================================================================
+
+function Get-InstallLiveAppDestProcesses {
+    <#
+      Every FurphyHost.exe (tray OR a main window - any FurphyHost.exe
+      whose own exe path resolves under $AppDest, not just one specific
+      known path) and every msedgewebview2.exe child spawned FOR this
+      install (matched by --user-data-dir on its own command line
+      containing $AppDest) that is alive right now. Read-only - never
+      touches a process whose own path/command-line does not resolve
+      under $AppDest, so a real production tray/window running from an
+      entirely different install is never matched here.
+    #>
+    param([Parameter(Mandatory = $true)][string]$AppDestNorm)
+    $found = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='FurphyHost.exe' OR Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue
+    } catch {
+        $procs = $null
+    }
+    if (-not $procs) { return $found }
+    foreach ($p in $procs) {
+        try {
+            if ($p.Name -eq 'FurphyHost.exe') {
+                $exePath = [string]$p.ExecutablePath
+                if ($exePath -and $exePath.ToLowerInvariant().Contains($AppDestNorm)) { $found.Add($p) }
+            } elseif ($p.Name -eq 'msedgewebview2.exe') {
+                $cmd = [string]$p.CommandLine
+                if ($cmd -and $cmd.ToLowerInvariant().Contains('--user-data-dir') -and $cmd.ToLowerInvariant().Contains($AppDestNorm)) {
+                    $found.Add($p)
+                }
+            }
+        } catch {
+            # A process that exited between the CIM query and here, or an
+            # access-denied read - either way, not something to act on.
+        }
+    }
+    return $found
+}
+
+function Wait-InstallHostAndWebView2Exit {
+    <#
+      Waits (polling every $PollMs, up to $TimeoutMs total - defaults 300ms/
+      20s per the task brief) for every live FurphyHost.exe and
+      msedgewebview2.exe process under $AppDest (Get-
+      InstallLiveAppDestProcesses) to exit on their own, called AFTER
+      Close-InstallMainWindow and the pre-existing $trayExePath wait loop
+      above, and BEFORE the file-removal loop below ever touches host\.
+
+      If anything is still alive once the timeout elapses, force-
+      terminates ONLY those specific pids (Stop-Process -Force - safe
+      because they are Furphy's own child processes for THIS install and
+      the user already confirmed the uninstall), then waits once more,
+      briefly, for the kill to actually release file handles before
+      returning. Never throws - a failure to enumerate or kill is logged
+      as a warning and the removal loop's own per-item retry (Remove-
+      InstallFileWithRetry/Remove-InstallFolderWithRetry) is what actually
+      protects the removal itself if a lock somehow still outlives this.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [int]$TimeoutMs = 20000,
+        [int]$PollMs = 300,
+        [int]$SettleTimeoutMs = 3000
+    )
+    $appDestNorm = $AppDest.TrimEnd('\').ToLowerInvariant()
+
+    $waitedMs = 0
+    $remaining = Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm
+    while ($remaining.Count -gt 0 -and $waitedMs -lt $TimeoutMs) {
+        Start-Sleep -Milliseconds $PollMs
+        $waitedMs += $PollMs
+        $remaining = Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm
+    }
+
+    $forceKilled = New-Object 'System.Collections.Generic.List[string]'
+    if ($remaining.Count -gt 0) {
+        Write-Warn2 "$($remaining.Count) Furphy process(es) under $AppDest still running after $([int]($TimeoutMs/1000))s - closing them:"
+        foreach ($p in $remaining) {
+            $label = "$($p.Name) (pid $($p.ProcessId))"
+            try {
+                Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction Stop
+                Write-Warn2 "  Terminated $label"
+                $forceKilled.Add($label)
+            } catch {
+                Write-Warn2 "  Could not terminate $label - $($_.Exception.Message)"
+            }
+        }
+        $settledMs = 0
+        while ($settledMs -lt $SettleTimeoutMs) {
+            Start-Sleep -Milliseconds 250
+            $settledMs += 250
+            if ((Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm).Count -eq 0) { break }
+        }
+    } else {
+        Write-Info 'Host window and any WebView2 child processes have exited.'
+    }
+
+    return [PSCustomObject]@{ ForceKilled = $forceKilled }
+}
+
+function Remove-InstallFileWithRetry {
+    <#
+      Removes a single file (or empty directory - Remove-Item -Force works
+      on both with no -Recurse needed) with retry+backoff instead of
+      failing on the first locked-file error: 5 attempts total, waiting
+      300/600/1200/2400/4800 ms between them (item 2 of the fix - a
+      WebView2 child's lock is typically released within the first second
+      or two of Wait-InstallHostAndWebView2Exit above already having run,
+      so this is defense-in-depth for a lock from something else
+      entirely, e.g. AV/indexer/OneDrive momentarily opening the file).
+      Returns $true once removed, $false if it is still locked after every
+      attempt.
+
+      Round-33-fixer-round-2: Remove-Item throwing is NOT proof the target
+      is still locked - a WebView2/Chromium profile lockfile (and similar
+      delayed/pending-delete files) can vanish on its own, out from under
+      us, between our Test-Path-free attempts, in which case Remove-Item
+      throws ItemNotFoundException ("Cannot find path ... because it does
+      not exist") even though nothing is actually wrong. The real goal is
+      "the path is gone", not "we personally deleted it" - so after EVERY
+      throw (not just the last), check whether the path has already
+      disappeared (by us, by the OS, by whatever else) and treat that as
+      success before deciding whether to retry or give up. A path that is
+      still genuinely present (still locked) falls through unchanged to
+      the existing retry/fail behavior.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $delays = @(300, 600, 1200, 2400, 4800)
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            return $true
+        } catch {
+            if (-not (Test-Path -LiteralPath $Path)) {
+                # Already gone - whoever/whatever removed it, the goal is met.
+                return $true
+            }
+            if ($attempt -ge $delays.Count) {
+                Write-InstallLogLine "  FAILED to remove after $($delays.Count + 1) attempts: $Path - $($_.Exception.Message)"
+                return $false
+            }
+            Start-Sleep -Milliseconds $delays[$attempt]
+        }
+    }
+    return $false
+}
+
+function Remove-InstallFolderWithRetry {
+    <#
+      Removes a directory tree file-by-file rather than one single
+      Remove-Item -Recurse -Force on the whole tree (item 2 of the fix -
+      this IS the root cause of the round-33 defect: one file the
+      WebView2 loader/a crashpad process still briefly held open under
+      host\ made the old single Remove-Item throw and abandon the ENTIRE
+      folder, exe/DLLs/lib/sources and all, not just that one file).
+      Enumerates every file first and removes each with Remove-
+      InstallFileWithRetry, then removes now-empty subdirectories
+      deepest-first (also with retry), then the top folder itself.
+      Returns the list of paths (files, subfolders, or the top folder)
+      that could not be removed - empty means the whole tree is gone.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $leftover = New-Object 'System.Collections.Generic.List[string]'
+    if (-not (Test-Path -LiteralPath $Path)) { return $leftover }
+
+    try {
+        $allFiles = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)
+    } catch {
+        $allFiles = @()
+    }
+    foreach ($f in $allFiles) {
+        if (-not (Remove-InstallFileWithRetry -Path $f.FullName)) {
+            $leftover.Add($f.FullName)
+        }
+    }
+
+    try {
+        # Deepest-first (longest path first) so a child folder is always
+        # attempted, and confirmed empty or added to $leftover, before its
+        # own parent is ever attempted.
+        $allDirs = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } -Descending)
+    } catch {
+        $allDirs = @()
+    }
+    foreach ($d in $allDirs) {
+        $stillHasChildren = $false
+        try {
+            $stillHasChildren = ((Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)
+        } catch { }
+        if ($stillHasChildren) {
+            $leftover.Add($d.FullName)
+        } elseif (-not (Remove-InstallFileWithRetry -Path $d.FullName)) {
+            $leftover.Add($d.FullName)
+        }
+    }
+
+    if ($leftover.Count -eq 0) {
+        if (-not (Remove-InstallFileWithRetry -Path $Path)) {
+            $leftover.Add($Path)
+        }
+    }
+    return $leftover
+}
+
+# =====================================================================
 # -Uninstall path
 # =====================================================================
 
 if ($Uninstall) {
+    # Self-relaunch safety net: every OTHER uninstall trigger (tray,
+    # Settings' own button, Windows' Installed-Apps entry -
+    # DISTRIBUTION-SPEC.md section 5.3) already copies install.ps1 to a
+    # fresh %TEMP% path BEFORE running -Uninstall, precisely so the copy
+    # doing the actual deleting never executes out of the very folder it is
+    # about to remove. A user who instead navigates into $appDest and
+    # double-clicks/runs install.ps1 -Uninstall directly skips that
+    # convention entirely - catch that one remaining case here, the one
+    # place all three other triggers already avoid needing to: if THIS copy
+    # is running from inside $appDest, hop to a %TEMP% copy of itself
+    # first and let that copy do the real work. FURPHY_INSTALL_RELAUNCHED
+    # is an explicit, unmissable guard against relaunching more than once
+    # (the %TEMP% copy's own $SourceRoot is %TEMP%, never $appDest, so the
+    # path comparison below would already read false there on its own -
+    # kept anyway rather than relying on that alone).
+    $sourceLooksLikeAppDest = $false
+    try {
+        $normSource = $SourceRoot.TrimEnd('\').ToLowerInvariant()
+        $normDest = $appDest.TrimEnd('\').ToLowerInvariant()
+        $sourceLooksLikeAppDest = ($normSource -eq $normDest)
+    } catch { }
+
+    if ($sourceLooksLikeAppDest -and (-not $env:FURPHY_INSTALL_RELAUNCHED)) {
+        Write-Step 'Relaunching from a temporary copy before removing the install folder'
+        $tempCopy = Join-Path -Path $env:TEMP -ChildPath ('FurphyUninstall-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Copy-Item -LiteralPath (Join-Path -Path $SourceRoot -ChildPath 'install.ps1') -Destination $tempCopy -Force
+            $relaunchArgs = New-Object 'System.Collections.Generic.List[string]'
+            $relaunchArgs.Add('-NoProfile'); $relaunchArgs.Add('-ExecutionPolicy'); $relaunchArgs.Add('Bypass')
+            $relaunchArgs.Add('-File'); $relaunchArgs.Add($tempCopy)
+            $relaunchArgs.Add('-WowPath'); $relaunchArgs.Add($wowRoot)
+            $relaunchArgs.Add('-Uninstall')
+            if ($NoShortcuts) { $relaunchArgs.Add('-NoShortcuts') }
+            if ($NoProtocol) { $relaunchArgs.Add('-NoProtocol') }
+            $env:FURPHY_INSTALL_RELAUNCHED = '1'
+            # Deliberately NOT -WindowStyle Hidden and NOT detached from
+            # this console (-NoNewWindow): unlike the tray/Settings/
+            # Installed-Apps triggers (which always run hidden - section
+            # 5.3), this specific path exists for a person who ran
+            # install.ps1 -Uninstall directly and is watching this same
+            # console, so the relaunched copy's own Write-Step/Write-Info
+            # output should keep appearing right here, not vanish into a
+            # hidden child. -Wait blocks until it finishes so this
+            # process's own exit code still reflects the real outcome.
+            $relaunchProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $relaunchArgs.ToArray() -NoNewWindow -PassThru -Wait
+            exit $relaunchProc.ExitCode
+        } catch {
+            Write-Warn2 "Could not relaunch from a temporary copy, continuing in place: $($_.Exception.Message)"
+        }
+    }
+
+    # Round 33 defect fix (item 3): open the per-run uninstall log now, so
+    # every Write-Step/Write-Info/Write-Warn2 call from here to the end of
+    # this block (already the ONLY logging call sites the whole sequence
+    # uses) is captured - "every step and every failure" - without a
+    # second parallel set of log-writing calls. Never set before this
+    # point: the temp-copy relaunch guard above intentionally runs BEFORE
+    # this (its own Write-Warn2, if hit, logs to nothing) so the log that
+    # actually matters is the one written by the copy that does the real
+    # work, not a stub from the process that immediately re-executed
+    # itself elsewhere.
+    try {
+        $logStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $Script:UninstallLogPath = Join-Path -Path $env:TEMP -ChildPath ("FurphyUninstall-$logStamp.log")
+        "Furphy Addon Manager uninstall log - $(Get-Date -Format 'u') - target: $appDest" |
+            Set-Content -LiteralPath $Script:UninstallLogPath -Encoding Ascii
+    } catch {
+        $Script:UninstallLogPath = $null
+    }
+
     Write-Step "Uninstalling Furphy Addon Manager from $appDest"
+
+    # DISTRIBUTION-SPEC.md fix 9/section 5.3 step 3: best-effort ask any
+    # open Furphy MAIN WINDOW for THIS install's own port to close, before
+    # the FurphyHost-process wait loop below starts waiting - gives that
+    # loop something proactive to do besides wait and warn. The ONLY
+    # WM_CLOSE-by-window-title implementation in the whole project (do not
+    # add a second one in host\FurphyHost.cs).
+    Close-InstallMainWindow -Port (Get-InstallPort -AppDest $appDest)
 
     # Round 18 (tray stage B): stop any running tray before touching files -
     # the app files removal below deletes host\ (FurphyHost.exe included,
@@ -401,6 +989,22 @@ if ($Uninstall) {
         }
     }
 
+    # Round 33 defect fix (item 1): the wait above only ever watched
+    # $trayExePath's OWN --tray process. A MAIN WINDOW instance of the
+    # exact same exe (opened from the app itself, or from the tray's
+    # "Open" - the two most common real uninstall paths Eric asked for)
+    # was never waited for at all, and neither was either instance's
+    # WebView2 child processes - both can still be exiting/unwinding for a
+    # short window after Close-InstallMainWindow's WM_CLOSE, which is what
+    # let the Remove-Item below hit a still-locked file under host\ and
+    # abandon the whole folder. Always runs (not gated on $trayExePath
+    # existing) and covers every FurphyHost.exe under $appDest, tray and
+    # window alike.
+    $processWait = Wait-InstallHostAndWebView2Exit -AppDest $appDest
+    if ($processWait.ForceKilled.Count -gt 0) {
+        Write-Warn2 "Had to force-close $($processWait.ForceKilled.Count) leftover Furphy process(es) before removing files: $($processWait.ForceKilled -join ', ')"
+    }
+
     if (-not $NoProtocol) {
         $regScript = Join-Path -Path $appDest -ChildPath 'register-protocol.ps1'
         if (Test-Path -LiteralPath $regScript) {
@@ -460,12 +1064,13 @@ if ($Uninstall) {
         foreach ($name in $shortcutNames) {
             $lnk = Join-Path -Path $desktop -ChildPath $name
             if (Test-Path -LiteralPath $lnk) {
-                try {
-                    Remove-Item -LiteralPath $lnk -Force
+                # Round 33 defect fix (item 2): retry+backoff instead of one
+                # attempt, same as every other removal below.
+                if (Remove-InstallFileWithRetry -Path $lnk) {
                     Write-Info "Removed shortcut: $name"
-                } catch {
+                } else {
                     $failedRemovals.Add($lnk)
-                    Write-Warn2 "Could not remove shortcut (in use?): $name - $($_.Exception.Message)"
+                    Write-Warn2 "Could not remove shortcut (in use?): $name"
                 }
             }
         }
@@ -483,12 +1088,11 @@ if ($Uninstall) {
         foreach ($name in @('update-addons-and-launch.cmd', 'Launch WoW (Updated).vbs')) {
             $p = Join-Path -Path $flavourDir -ChildPath $name
             if (Test-Path -LiteralPath $p) {
-                try {
-                    Remove-Item -LiteralPath $p -Force
+                if (Remove-InstallFileWithRetry -Path $p) {
                     Write-Info "Removed launcher file: $($def.Label)\$name"
-                } catch {
+                } else {
                     $failedRemovals.Add($p)
-                    Write-Warn2 "Could not remove launcher file (in use?): $($def.Label)\$name - $($_.Exception.Message)"
+                    Write-Warn2 "Could not remove launcher file (in use?): $($def.Label)\$name"
                 }
             }
         }
@@ -513,26 +1117,57 @@ if ($Uninstall) {
             $itemFullName = $_.FullName
             if ($_.PSIsContainer) {
                 if ($keepDirs -notcontains $itemName) {
-                    try {
-                        Remove-Item -LiteralPath $itemFullName -Recurse -Force
-                    } catch {
-                        $failedRemovals.Add($itemFullName)
-                        Write-Warn2 "Could not remove folder (in use?): $itemName - $($_.Exception.Message)"
+                    # Round 33 defect fix (item 2): remove the tree
+                    # file-by-file with retry, rather than one single
+                    # Remove-Item -Recurse -Force that throws (and abandons
+                    # the WHOLE folder - this exact 'host' directory is
+                    # what the round-33 defect left behind) the moment it
+                    # hits even one still-locked file.
+                    $folderLeftover = Remove-InstallFolderWithRetry -Path $itemFullName
+                    if ($folderLeftover.Count -gt 0) {
+                        foreach ($lf in $folderLeftover) { $failedRemovals.Add($lf) }
+                        Write-Warn2 "Could not fully remove folder (in use?): $itemName - $($folderLeftover.Count) item(s) still locked"
                     }
                 }
             } elseif ($keepFiles -notcontains $itemName) {
-                try {
-                    Remove-Item -LiteralPath $itemFullName -Force
-                } catch {
+                if (-not (Remove-InstallFileWithRetry -Path $itemFullName)) {
                     $failedRemovals.Add($itemFullName)
-                    Write-Warn2 "Could not remove file (in use?): $itemName - $($_.Exception.Message)"
+                    Write-Warn2 "Could not remove file (in use?): $itemName"
                 }
             }
         }
         Write-Info "App files removed from $appDest"
-        Write-Info "Your addon list, settings and logs are still there: $appDest"
+        Write-Info "Your addon list, settings, logs and backups are kept: $appDest"
+        try {
+            $leftoverNote = Join-Path -Path $appDest -ChildPath 'README-leftover.txt'
+            "Furphy's addon list and settings are kept here. Safe to delete by hand if you don't plan to reinstall." |
+                Set-Content -LiteralPath $leftoverNote -Encoding Ascii
+        } catch {
+            # Optional/cheap per DISTRIBUTION-SPEC.md section 5.3 - never fatal.
+        }
     } else {
         Write-Info "$appDest did not exist - nothing to remove."
+    }
+
+    # DISTRIBUTION-SPEC.md section 5.3 step 8/fix 3: the Installed-Apps key
+    # is removed with the SAME scoping guard as the Run value above, from
+    # its very first commit (Get-InstallAppsKeyName forwards to
+    # Get-InstallStartupValueName - see that function's own comment) - a
+    # scratch/test root on the production port owns neither name and
+    # touches neither key.
+    $appsKeyName = Get-InstallAppsKeyName -AppDest $appDest
+    if ($null -eq $appsKeyName) {
+        Write-Info 'Scratch/test install on the production port - the real Installed-Apps entry is left alone.'
+    } else {
+        try {
+            $appsKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $appsKeyName
+            if (Test-Path -LiteralPath $appsKeyPath) {
+                Remove-Item -LiteralPath $appsKeyPath -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Info "Removed the Windows Settings > Apps entry ($appsKeyName)."
+            }
+        } catch {
+            Write-Warn2 "Could not remove the Installed-Apps registry entry: $($_.Exception.Message)"
+        }
     }
 
     Write-Info "Your AddOns folder(s) were not touched."
@@ -541,11 +1176,79 @@ if ($Uninstall) {
         Write-Warn2 "$($failedRemovals.Count) item(s) could not be removed because they were in use - close any running Furphy/CurseForge window or program holding them open and re-run -Uninstall:"
         foreach ($f in $failedRemovals) { Write-Warn2 "  $f" }
         Write-Host 'Uninstall completed with warnings.' -ForegroundColor Yellow
+
+        # Round 33 defect fix (item 3): fold the leftover list into the
+        # README-leftover.txt the removal loop above already wrote, so a
+        # user who only ever looks in the folder (never the console/log)
+        # still sees exactly what is left and why - not just the generic
+        # "your addon list is kept here" note.
+        if (Test-Path -LiteralPath $appDest) {
+            try {
+                $leftoverNote = Join-Path -Path $appDest -ChildPath 'README-leftover.txt'
+                $noteLines = New-Object 'System.Collections.Generic.List[string]'
+                $noteLines.Add('')
+                $noteLines.Add('The following items could not be removed because they were still in use:')
+                foreach ($f in $failedRemovals) { $noteLines.Add("  $f") }
+                $noteLines.Add('Close any running Furphy/CurseForge window or program holding them open, then delete them by hand or re-run the uninstaller.')
+                Add-Content -LiteralPath $leftoverNote -Value $noteLines -Encoding Ascii
+            } catch {
+                # Optional/cheap - never fatal.
+            }
+        }
     } else {
         Write-Host 'Uninstall complete.' -ForegroundColor Green
     }
+
+    Write-InstallLogLine ''
+    Write-InstallLogLine "Uninstall finished. Failed removals: $($failedRemovals.Count)"
+    if ($Script:UninstallLogPath) { Write-Info "Uninstall log: $Script:UninstallLogPath" }
+
+    # Round 33 defect fix (item 3): surface the outcome in plain language,
+    # not just the console/log, since both real callers (Handle-Uninstall
+    # in addon-server.ps1, the tray's RunUninstallSequence in
+    # FurphyHost.cs) run this whole script -WindowStyle Hidden today -
+    # every Write-Warn2 line above is otherwise invisible to whoever just
+    # asked to uninstall. Shown by default; -Console and -Quiet both
+    # suppress it (every automated test in this repo passes -Console
+    # already, which must never call MessageBox.Show and hang headless
+    # waiting for a click that will never come).
+    if (-not $Console -and -not $Quiet) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            if ($failedRemovals.Count -gt 0) {
+                $shown = @($failedRemovals | Select-Object -First 10)
+                $moreCount = $failedRemovals.Count - $shown.Count
+                $msg = "Most of Furphy was removed, but these files were still in use:`r`n`r`n" + ($shown -join "`r`n")
+                if ($moreCount -gt 0) { $msg += "`r`n... and $moreCount more (see README-leftover.txt)" }
+                $msg += "`r`n`r`nDelete the folder $appDest after a restart to finish."
+                [System.Windows.Forms.MessageBox]::Show($msg, 'Furphy Addon Manager', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            } else {
+                $msg = "Furphy Addon Manager was removed. Your addons stay installed in WoW; your addon list was kept at $appDest."
+                [System.Windows.Forms.MessageBox]::Show($msg, 'Furphy Addon Manager', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            }
+        } catch {
+            Write-Warn2 "Could not show the uninstall result dialog: $($_.Exception.Message)"
+        }
+    }
+
     exit 0
 }
+
+function Invoke-FurphyInstallSteps {
+    <#
+      DISTRIBUTION-SPEC.md section 6.2/6.3: steps 3-8 of the installer,
+      unchanged from before this round - wrapped in a function purely so
+      BOTH the plain console flow and Show-InstallWizard's Install-button
+      click handler can call the exact same code (the spec's own promise:
+      "only how progress/success is presented changes; the underlying
+      file-system steps are unchanged"). Every Write-Step/Write-Info/
+      Write-Warn2 call inside already doubles as the wizard's progress-pump
+      (Update-WizardProgress, defined near the top of this file) with zero
+      changes needed here. Reads $wowRoot/$appDest/$homeFlavour/etc from
+      script scope (set by Set-InstallPathsFromWowRoot before this is ever
+      called) rather than taking parameters, since a console run and a
+      wizard run both already share that same script-scoped state.
+    #>
 
 # =====================================================================
 # 3. Copy the app into <home-flavour>\AddonSync (never overwrite user state)
@@ -921,6 +1624,51 @@ if (-not $SkipAdopt) {
 }
 
 # =====================================================================
+# 9. Installed-Apps registration (DISTRIBUTION-SPEC.md section 5.4) -
+#    written at install time AND re-written on every upgrade (this
+#    function runs on every install.ps1 call that reaches here, upgrade or
+#    fresh), scoped the SAME way as the Run value (fix 3: Get-
+#    InstallAppsKeyName forwards to Get-InstallStartupValueName) - a
+#    scratch/test root on the production port owns neither name and
+#    writes neither key. HKCU only, never HKLM - no admin needed, matching
+#    every other registry write this file already makes.
+# =====================================================================
+
+Write-Step 'Registering with Windows Settings > Apps'
+$installAppsKeyName = Get-InstallAppsKeyName -AppDest $appDest
+if ($null -eq $installAppsKeyName) {
+    Write-Info 'Scratch/test install on the production port - skipped (nothing of its own to register).'
+} else {
+    try {
+        $installVersion = '0.0.0'
+        $versionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
+        if (Test-Path -LiteralPath $versionFile) {
+            $vt = ([IO.File]::ReadAllText($versionFile)).Trim()
+            if ($vt.Length -gt 0) { $installVersion = $vt }
+        }
+        $installPort = Get-InstallPort -AppDest $appDest
+        $installAppsKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $installAppsKeyName
+        if (-not (Test-Path -LiteralPath $installAppsKeyPath)) {
+            New-Item -Path $installAppsKeyPath -Force | Out-Null
+        }
+        $uninstallCmd = Get-InstallUninstallString -Port $installPort -AppDest $appDest -WowRootPath $wowRoot
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'DisplayName' -Value 'Furphy Addon Manager' -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'DisplayVersion' -Value $installVersion -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'Publisher' -Value 'krenz444' -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'InstallLocation' -Value $appDest -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'DisplayIcon' -Value (Join-Path -Path $appDest -ChildPath 'icon.ico') -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'EstimatedSize' -Value (Get-InstallEstimatedSizeKB -Path $appDest) -Type DWord
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'NoModify' -Value 1 -Type DWord
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'NoRepair' -Value 1 -Type DWord
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'UninstallString' -Value $uninstallCmd -Type String
+        Set-ItemProperty -LiteralPath $installAppsKeyPath -Name 'QuietUninstallString' -Value $uninstallCmd -Type String
+        Write-Info 'Windows Settings > Apps now lists Furphy Addon Manager with a working Uninstall entry.'
+    } catch {
+        Write-Warn2 "Could not write the Installed-Apps registry entry: $($_.Exception.Message)"
+    }
+}
+
+# =====================================================================
 # Done
 # =====================================================================
 
@@ -932,4 +1680,179 @@ if ($installedFlavours.Count -gt 1) {
     Write-Info ("Flavours: " + (($installedFlavours | ForEach-Object { $_.Label }) -join ', '))
 }
 Write-Info 'No CurseForge API key needed - Get new addons and installs both work out of the box.'
-exit 0
+}
+
+# =====================================================================
+# Dispatch: console flow vs. the optional WinForms wizard
+# (DISTRIBUTION-SPEC.md section 6.2)
+# =====================================================================
+
+function Show-InstallWizard {
+    <#
+      DISTRIBUTION-SPEC.md section 6.2/6.3: optional WinForms front end,
+      built with the exact same Add-Type -AssemblyName System.Windows.
+      Forms/System.Drawing mechanism host\build-host.ps1 already proves
+      works with zero extra tooling on a real end-user machine (E19).
+      Wraps the EXISTING, unchanged install logic (Invoke-
+      FurphyInstallSteps) - only how progress/success is PRESENTED changes
+      here, never the underlying file-system steps.
+
+      Throws if the Form itself cannot be constructed (old machine, unusual
+      DPI, non-interactive/CI session) - the caller (the dispatch block
+      below) catches that and falls straight through to the existing,
+      unmodified console flow (fix 6's MANDATORY fallback). The console is
+      hidden (Hide-InstallConsole) only once construction has fully
+      succeeded, per fix 6 - never before. Once past construction, any
+      error from Invoke-FurphyInstallSteps itself is caught INSIDE the
+      click handler below and shown as a plain-language error screen, not
+      re-thrown - so a mid-install failure never triggers the console
+      fallback a SECOND time; only a genuine construction failure does.
+    #>
+    param([string]$InitialWowRoot)
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Furphy Addon Manager - Install'
+    $form.ClientSize = New-Object System.Drawing.Size(480, 230)
+    $form.StartPosition = 'CenterScreen'
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.AutoScaleMode = 'Font'
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.AutoSize = $false
+    $lblStatus.Size = New-Object System.Drawing.Size(440, 40)
+    $lblStatus.Location = New-Object System.Drawing.Point(20, 16)
+    if ($InitialWowRoot) {
+        $lblStatus.Text = "Furphy found World of Warcraft in $InitialWowRoot"
+    } else {
+        $lblStatus.Text = 'Furphy could not find World of Warcraft automatically. Choose your WoW folder below.'
+    }
+    $form.Controls.Add($lblStatus)
+
+    $txtPath = New-Object System.Windows.Forms.TextBox
+    $txtPath.Location = New-Object System.Drawing.Point(20, 60)
+    $txtPath.Size = New-Object System.Drawing.Size(340, 24)
+    $txtPath.Text = [string]$InitialWowRoot
+    $txtPath.ReadOnly = $true
+    $form.Controls.Add($txtPath)
+
+    $btnBrowse = New-Object System.Windows.Forms.Button
+    $btnBrowse.Text = 'Browse...'
+    $btnBrowse.Location = New-Object System.Drawing.Point(370, 58)
+    $btnBrowse.Size = New-Object System.Drawing.Size(90, 26)
+    $form.Controls.Add($btnBrowse)
+
+    $progressLabel = New-Object System.Windows.Forms.Label
+    $progressLabel.AutoSize = $false
+    $progressLabel.Size = New-Object System.Drawing.Size(340, 60)
+    $progressLabel.Location = New-Object System.Drawing.Point(20, 100)
+    $progressLabel.Text = ''
+    $form.Controls.Add($progressLabel)
+
+    $btnInstall = New-Object System.Windows.Forms.Button
+    $btnInstall.Text = 'Install'
+    $btnInstall.Location = New-Object System.Drawing.Point(370, 170)
+    $btnInstall.Size = New-Object System.Drawing.Size(90, 32)
+    $btnInstall.Enabled = [bool]$InitialWowRoot
+    $form.Controls.Add($btnInstall)
+
+    $btnBrowse.Add_Click({
+        $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
+        $fbd.Description = 'Select your World of Warcraft folder (the one containing _retail_, _classic_, etc)'
+        if ($fbd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:wowRoot = $fbd.SelectedPath
+            $script:installedFlavours = Get-InstalledFlavourDefs -WowRootPath $script:wowRoot
+            if ($script:installedFlavours.Count -gt 0) {
+                Set-InstallPathsFromWowRoot
+                $txtPath.Text = $script:wowRoot
+                $btnInstall.Enabled = $true
+                $lblStatus.Text = "Furphy found World of Warcraft in $($script:wowRoot)"
+            } else {
+                [System.Windows.Forms.MessageBox]::Show('No WoW client folder was found there. Pick the folder that contains _retail_, _classic_, etc.', 'Furphy Addon Manager', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            }
+        }
+    })
+
+    $btnInstall.Add_Click({
+        $btnInstall.Enabled = $false
+        $btnBrowse.Enabled = $false
+        $Script:WizardActive = $true
+        $Script:WizardProgressLabel = $progressLabel
+        try {
+            Invoke-FurphyInstallSteps
+            $Script:WizardActive = $false
+            $lblStatus.Text = 'Furphy Addon Manager is installed.'
+            $progressLabel.Text = "App: $($script:appDest)`r`nNothing in your AddOns folder was touched."
+            $btnInstall.Visible = $false
+            $btnClose = New-Object System.Windows.Forms.Button
+            $btnClose.Text = 'Close'
+            $btnClose.Location = New-Object System.Drawing.Point(370, 170)
+            $btnClose.Size = New-Object System.Drawing.Size(90, 32)
+            $btnClose.Add_Click({ $form.Close() })
+            $form.Controls.Add($btnClose)
+            $btnOpen = New-Object System.Windows.Forms.Button
+            $btnOpen.Text = 'Open Furphy Addon Manager'
+            $btnOpen.Location = New-Object System.Drawing.Point(20, 170)
+            $btnOpen.Size = New-Object System.Drawing.Size(220, 32)
+            $btnOpen.Add_Click({
+                try {
+                    $vbs = Join-Path -Path $script:appDest -ChildPath 'Addon Manager.vbs'
+                    if (Test-Path -LiteralPath $vbs) {
+                        Start-Process -FilePath 'wscript.exe' -ArgumentList @('"' + $vbs + '"')
+                    }
+                } catch { }
+                $form.Close()
+            })
+            $form.Controls.Add($btnOpen)
+        } catch {
+            $Script:WizardActive = $false
+            $lblStatus.Text = 'Something went wrong during install:'
+            $progressLabel.Text = $_.Exception.Message
+            $btnInstall.Text = 'Close'
+            $btnInstall.Enabled = $true
+            $btnInstall.Add_Click({ $form.Close() })
+        }
+    })
+
+    # Fix 6: construction succeeded up to here - hide the console ONLY now,
+    # then hand control to the Form's own message loop. If ANYTHING above
+    # this line throws, the caller's catch block runs instead and the
+    # console was never touched.
+    Hide-InstallConsole
+    [void]$form.ShowDialog()
+}
+
+if ($Console) {
+    # The explicit skip-the-wizard escape hatch (also what every automated
+    # test in this repo passes - a wizard run headless would call
+    # ShowDialog() and hang forever with nothing to click). WoW-not-found
+    # with -Console already exited 2 earlier, so $wowFound is guaranteed
+    # true here and Set-InstallPathsFromWowRoot already ran above.
+    Invoke-FurphyInstallSteps
+    exit 0
+}
+
+try {
+    $initialPathForWizard = $null
+    if ($wowFound) { $initialPathForWizard = $wowRoot }
+    Show-InstallWizard -InitialWowRoot $initialPathForWizard
+    # The wizard's Form has closed (success or error screen dismissed) -
+    # un-hide the console before exiting, see Show-InstallConsole's own
+    # comment for why this matters even though nothing here writes to it.
+    Show-InstallConsole
+    exit 0
+} catch {
+    Write-Warn2 "Could not show the install wizard, falling back to the console flow: $($_.Exception.Message)"
+    if (-not $wowFound) {
+        Write-Host ''
+        Write-Host 'ERROR: Could not find a World of Warcraft installation.' -ForegroundColor Red
+        Write-Host '       Pass -WowPath "<your WoW folder>" (the one that contains _retail_, _classic_, _classic_era_, etc).' -ForegroundColor Red
+        exit 2
+    }
+    Invoke-FurphyInstallSteps
+    exit 0
+}

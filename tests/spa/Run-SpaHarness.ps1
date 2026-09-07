@@ -38,6 +38,12 @@ param(
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 
 $Script:VirtualTimeBudgetMs = 60000
+$Script:MsedgeTimeoutSec = 150   # under run-all.ps1's own outer budget for
+                                  # this script (see the run-all.ps1 hunk
+                                  # below) so a genuine hang is caught HERE
+                                  # first, with real diagnostics, instead of
+                                  # the outer wrapper silently Kill()-ing
+                                  # this process and orphaning msedge.exe.
 
 function Find-Msedge {
     $candidates = @(
@@ -97,14 +103,69 @@ try {
 
     $stdoutPath = Join-Path $devRoot 'edge.out.log'
     $stderrPath = Join-Path $devRoot 'edge.err.log'
-    $proc = Start-Process -FilePath $msedgePath -ArgumentList $edgeArgs -PassThru -Wait -NoNewWindow `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+    # Adaptation (verified live, reproduced 3/3 in a controlled side-by-
+    # side test): the Start-Process CMDLET's -PassThru process object never
+    # reliably exposes .ExitCode once -RedirectStandardOutput/
+    # -RedirectStandardError are also used and -Wait is NOT also passed
+    # (came back $null here even after WaitForExit()+.Refresh() - a real,
+    # repeatable quirk on this machine, not a timing fluke) - exactly the
+    # same quirk tests\lib\common.ps1's own Invoke-CliProcess already
+    # documents and works around ("IMPORTANT #2" in its header comment).
+    # Driving [System.Diagnostics.Process] directly, reading both streams
+    # via true .NET async Tasks started immediately after Start() and
+    # awaited via .Result (the same deadlock-safe pattern
+    # Invoke-CliProcess uses - reading synchronously only after
+    # WaitForExit can deadlock once a stream fills its OS pipe buffer),
+    # reports ExitCode correctly while still supporting the internal
+    # timeout + tree-kill Patch 5 needs (Start-Process has no timeout
+    # parameter of its own).
+    $argString = ($edgeArgs | ForEach-Object { ConvertTo-Win32QuotedArg $_ }) -join ' '
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $msedgePath
+    $psi.Arguments = $argString
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $edgeExited = $false
+    $edgeStdout = ''
+    $edgeStderr = ''
+    $edgeExitCode = $null
+    try {
+        [void]$proc.Start()
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $edgeExited = $proc.WaitForExit($Script:MsedgeTimeoutSec * 1000)
+        if (-not $edgeExited) {
+            # taskkill /T /F kills the whole process tree (msedge.exe + its
+            # renderer children) - Process.Kill() alone (no tree-kill overload
+            # on .NET Framework/PowerShell 5.1) would leave orphans running.
+            try { & taskkill.exe /PID $proc.Id /T /F | Out-Null } catch { }
+            $proc.WaitForExit(5000) | Out-Null
+        }
+        $edgeStdout = $stdoutTask.Result
+        $edgeStderr = $stderrTask.Result
+        # Must be read here, inside the try, before Dispose() below - once
+        # disposed the .ExitCode property is gone (this was the actual bug
+        # in an earlier draft of this fix: reading it after the finally's
+        # Dispose() silently came back blank instead of throwing).
+        if ($edgeExited) { $edgeExitCode = $proc.ExitCode }
+    } finally {
+        try { $proc.Dispose() } catch { }
+    }
+    try { $edgeStdout | Set-Content -LiteralPath $stdoutPath -Encoding UTF8 } catch { }
+    try { $edgeStderr | Set-Content -LiteralPath $stderrPath -Encoding UTF8 } catch { }
 
     if (Test-Path -LiteralPath $stdoutPath) {
         Copy-Item -LiteralPath $stdoutPath -Destination $dumpPath -Force
     }
 
-    Add-Result -Collector $results -Name 'msedge --dump-dom exited 0' -Passed ($proc.ExitCode -eq 0) -Message ("exit code " + $proc.ExitCode)
+    Add-Result -Collector $results -Name 'msedge exited within its own budget' -Passed $edgeExited -Message "budget=${Script:MsedgeTimeoutSec}s"
+    Add-Result -Collector $results -Name 'msedge --dump-dom exited 0' -Passed ($edgeExited -and $edgeExitCode -eq 0) -Message ($(if ($edgeExited) { "exit code " + $edgeExitCode } else { 'force-killed - see prior result' }))
 
     $dom = if (Test-Path -LiteralPath $dumpPath) { Get-Content -LiteralPath $dumpPath -Raw -Encoding UTF8 } else { '' }
     Add-Result -Collector $results -Name 'dump-dom produced non-empty output' -Passed ($dom.Length -gt 0)

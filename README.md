@@ -8,7 +8,7 @@ Everything works out of the box, with nothing to sign up for and nothing to conf
 
 ## Multiple WoW versions
 
-Furphy also manages Classic and Classic Era addons, not just Retail — it detects whichever of Retail/Classic/Classic Era/PTR is actually installed on your machine and, once more than one is, shows a small switcher pill row so you can flip between them (each keeps its own addon list, freshness check, and an "Update All" button to sync everything at once); on a Retail-only machine like the one this app is usually installed on, none of that appears at all — every screen, file, and API response stays exactly as it is today. Classic's CurseForge/Wago version match is resolved live from your installed client's own build number, not hardcoded, so it keeps working correctly as Classic itself progresses through future expansions. See `FLAVORS-SPEC.md` for the full design if you're curious how it works.
+Furphy also manages Classic and Classic Era addons, not just Retail - it detects whichever of Retail/Classic/Classic Era/PTR is actually installed on your machine and, once more than one is, shows a small switcher pill row so you can flip between them (each keeps its own addon list, freshness check, and an "Update All" button to sync everything at once); on a Retail-only machine like the one this app is usually installed on, none of that appears at all - every screen, file, and API response stays exactly as it is today. Classic's CurseForge/Wago version match is resolved live from your installed client's own build number, not hardcoded, so it keeps working correctly as Classic itself progresses through future expansions. See `FLAVORS-SPEC.md` for the full design if you're curious how it works.
 
 ## Requirements
 
@@ -19,23 +19,38 @@ Furphy also manages Classic and Classic Era addons, not just Retail — it detec
 
 ## Install
 
-1. Download the latest zip from the project's Releases page (or clone this repo).
-2. Unzip it anywhere, then run **`Install Furphy.cmd`**. A console window shows what it's doing.
-3. That's it. The installer:
+1. Download the latest zip - from the project's [Releases page](https://github.com/krenz444/furphy-addon-manager/releases/latest) (or the download button on the [landing page](https://krenz444.github.io/furphy-addon-manager/), if it's live), or clone this repo.
+2. Right-click the zip and choose **Extract All...** (use Explorer's own unzip, not a third-party tool - it's what carries the "downloaded from the internet" flag through to the next step correctly).
+3. Open the extracted folder and double-click **`Install Furphy.cmd`**.
+4. Windows may show a small "Open File - Security Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate yet - click Run. Furphy only writes inside your WoW folder and never asks for admin access.
+5. On most machines, one small window opens: "Furphy found World of Warcraft in `<path>`" with a single **Install** button (or a folder picker if it can't find WoW - point it at your WoW folder and click Install). A progress bar shows while it copies files and builds the native host, then a success screen offers **Open Furphy Addon Manager** and **Launch WoW (auto-update addons)**. On some machines you may see the console-only flow instead of that window - that's fine, it does exactly the same thing, just as plain text.
+
+Either way, the installer:
    - finds your WoW retail folder (registry, then common install paths - or pass `-WowPath "<your WoW folder>"` if it can't)
    - copies the app into `<WoW>\_retail_\AddonSync\`
    - writes the "update addons, then launch WoW" launcher into `<WoW>\_retail_\`
    - creates two desktop shortcuts: **Furphy Addon Manager** (the app) and **WoW (auto-update addons)** (silent update + launch)
    - registers `curseforge://` install links (from CurseForge.com's own Install buttons) to open here instead of the CurseForge desktop app, unless you pass `-NoProtocol`
+   - registers Furphy in Windows' own **Settings > Apps** list, with a working Uninstall entry
    - scans your existing `AddOns` folder and adopts anything it recognizes (CurseForge or Wago), so addons you already had become managed - reinstalling each from its source, so give it a minute; skip with `-SkipAdopt`
 
 Re-running the installer is safe: it upgrades the app in place and adopts anything new, without touching your addon list, settings, or an addon it already manages.
 
 Command-line options: `-WowPath <path>`, `-NoShortcuts`, `-NoProtocol`, `-SkipAdopt`, `-Uninstall`.
 
+**Advanced users:** `irm <releases-zip-or-raw-script-url>/install.ps1 | iex` also works if you'd rather install from a PowerShell one-liner than a downloaded file - it bypasses the execution-policy prompt entirely, since `iex` runs the script in-session rather than as a file. Not the recommended path for most people: it skips the one clear signal a normal install gives you, the readable console log, and it assumes you already know how to open PowerShell.
+
 ## Uninstall
 
-Run `install.ps1 -Uninstall` (or `Install Furphy.cmd -Uninstall` from a console) from the unzipped folder. It removes the app files, both desktop shortcuts, and the `curseforge://` registration. Your `AddOns` folder and this tool's own addon list/settings/logs (`addons.json`, `settings.json`, `state.json`, `sync.log`, `server.log`) are left in place, in case you reinstall later; the console output tells you exactly where they are.
+Three equivalent ways to remove Furphy, all doing the same thing under the hood:
+
+- **Right-click the tray icon** and choose **Uninstall Furphy Addon Manager...**.
+- **Inside the app:** Settings > Backup & troubleshooting > **Uninstall Furphy Addon Manager**.
+- **Windows' own Settings > Apps > Furphy Addon Manager > Uninstall.**
+
+Any of the three removes the app files, the Start with Windows setting, the `curseforge://` registration, and the Windows Settings > Apps entry itself. Your `AddOns` folder and this tool's own addon list/settings/logs (`addons.json`, `settings.json`, `state.json`, `sync.log`, `server.log`) are left in place, in case you reinstall later - a short text file is left in the app's own folder pointing at exactly where.
+
+You can also run `install.ps1 -Uninstall` (or `Install Furphy.cmd -Uninstall` from a console) directly from an unzipped copy of the app - the same mechanism the three paths above use.
 
 ## Performance
 
@@ -55,7 +70,7 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 ## What it does
 
 - **Update on launch** - the "WoW (auto-update addons)" shortcut runs the updater hidden, then starts WoW through Battle.net. No console flash.
-- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required), trimmed by default to just its search results - no CurseForge header, filter sidebar, cookie banner, or footer clutter (toggle it off in Settings > Advanced if you want the page as-is) - with ads and trackers on that page also filtered by default (same Settings > Advanced toggle to turn off); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; **update addons in the background** on a timer, plus **start with Windows**, both optional and off by default; 15 themes, picked from a swatch grid (Arcane Library default - cats mixed with Warcraft-flavored fantasy, dark by default - plus Vaporwave, Lofi Night, Dark, Light, and ten more - Terminal Green, Arctic Ice, Art Deco, Alpine Dawn, Matcha, Desert Night, Tokyo Rain, Brushed Steel, Aurora Sky, Strawberry Cream); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics) one click away; "Update & Play".
+- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required), trimmed by default to just its search results - no CurseForge header, filter sidebar, cookie banner, or footer clutter (toggle it off in Settings > Advanced if you want the page as-is) - with ads and trackers on that page also filtered by default (same Settings > Advanced toggle to turn off); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; **update addons in the background** on a timer, plus **start with Windows**, both optional and off by default and both toggleable from the tray icon's own right-click menu as well as from Settings; **uninstall** from the tray menu, from Settings, or from Windows' own Settings > Apps, all three doing the same clean removal (addons and your addon list stay in WoW either way); 15 themes, picked from a swatch grid (Arcane Library default - cats mixed with Warcraft-flavored fantasy, dark by default - plus Vaporwave, Lofi Night, Dark, Light, and ten more - Terminal Green, Arctic Ice, Art Deco, Alpine Dawn, Matcha, Desert Night, Tokyo Rain, Brushed Steel, Aurora Sky, Strawberry Cream); Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics) one click away; "Update & Play".
 - **Two sources** - CurseForge and Wago Addons, side by side: install, pin, ignore, roll back and check dependencies/compatibility on either, no key needed for either. Wago is searched in-app; CurseForge is the real website, embedded in the app window itself (or a side window on an older install).
 - **Safety** - a failed download never touches the installed copy; only folders that came from a package are ever deleted; every update keeps the previous zip for rollback.
 
