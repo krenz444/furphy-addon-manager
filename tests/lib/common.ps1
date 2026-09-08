@@ -600,7 +600,40 @@ function Start-TestServer {
     if ($WowRoot) { $argList.Add('-WowRoot'); $argList.Add($WowRoot) }
     foreach ($a in $ExtraArgs) { $argList.Add($a) }
 
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
+    # Round-1-fixer (verifier findings 1 and 4): almost every caller of this
+    # helper has zero interest in Wago at all, yet
+    # Initialize-WagoGrowthSnapshots used to run an unconditional, real
+    # crawl against the live addons.wago.io on every fresh server startup -
+    # a genuine live-safety/politeness regression paid independently by
+    # ~86 integration tests, and (via a related host-side path) the root
+    # cause of a 100%-reproducible tests\host\Host.Tests.ps1:450 failure.
+    # Skip that crawl by default for this spawned child UNLESS the caller
+    # has itself already opted into real Wago-crawl behavior by pointing
+    # FURPHY_TEST_WAGO_BASEURL at a local stub before calling this function
+    # (exactly what the Wago-specific integration Describes in
+    # tests\integration\Server.WagoBrowse.Tests.ps1 do around their own
+    # Start-TestServer call) or by setting the skip var itself for some
+    # other reason. The env var is set only long enough for Start-Process
+    # to inherit it into the child's own environment block, then restored
+    # to its exact prior value (not merely removed) so it can never leak
+    # into any later Start-Process call in this same test session.
+    $originalSkipGrowthEnv = $env:FURPHY_TEST_SKIP_WAGO_GROWTH
+    $skipGrowthEnvChanged = $false
+    if ([string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL) -and [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_WAGO_GROWTH)) {
+        $env:FURPHY_TEST_SKIP_WAGO_GROWTH = '1'
+        $skipGrowthEnvChanged = $true
+    }
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
+    } finally {
+        if ($skipGrowthEnvChanged) {
+            if ($null -eq $originalSkipGrowthEnv) {
+                Remove-Item Env:\FURPHY_TEST_SKIP_WAGO_GROWTH -ErrorAction SilentlyContinue
+            } else {
+                $env:FURPHY_TEST_SKIP_WAGO_GROWTH = $originalSkipGrowthEnv
+            }
+        }
+    }
 
     # Round 26 (hardening, item 1): one 60-second overall budget covering
     # both the TCP-level wait AND the ping-retry wait (was a fixed ~15s +

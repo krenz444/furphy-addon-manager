@@ -1,5 +1,107 @@
 # Furphy Addon Manager - changelog
 
+## Round 35 (1.16.0: browse Wago by category, popular, recently updated, and what is gaining)
+
+Eric's ask, verbatim: "for wago, i need a really good category based
+interactive browsing experience, i want users to be able to sort by
+popular, new, categories, rising in popularity, installs during the
+current season, etc." Synthesized into `WAGO-BROWSE-SPEC.md` (shipped
+in this folder, ASCII-only, the authoritative source for every field
+name, line anchor, and piece of copy below) from two competing UI
+designs, a server/snapshot data design, and a judge's adversarial
+review of both - ten of Wago's own facts (verified live, no key
+required, no key added) drove which of Eric's five words could ship
+honestly and which needed an honest substitute.
+
+**The honesty mapping - decided once, binding everywhere it appears:**
+
+| Eric's word            | Ships as                                                | Why |
+|-------------------------|----------------------------------------------------------|-----|
+| Popular                 | "Popular" tab (default)                                  | Directly supported - Wago's own default order, zero extra cost |
+| Categories               | Persistent category chip strip, 29 real categories + All | Directly supported, server order verbatim |
+| New                     | "Recently updated" tab                                    | Wago exposes no creation date anywhere - this is a page-local re-sort by each addon's own last-updated date, not a fabricated global recency order |
+| Rising in popularity     | "Gaining this week" tab                                   | Not available from Wago at any price - a Furphy-owned measurement from Furphy's own daily snapshots, clearly labeled as such everywhere it appears |
+| Installs during the current season | Not shipped, under any label, anywhere | Not available from Wago in any form - lifetime totals only, no season concept exists |
+
+The words "new," "rising," "trending," and "this season" never appear
+as a label, a tab name, or a tooltip anywhere in the Wago segment.
+"Gaining this week" is the only new-data-adjacent string in the whole
+design, and every one of its surfaces says outright that it is a
+Furphy measurement, not a Wago one: the tab's own tooltip ("Furphy's
+own measurement, not a number Wago publishes."), the not-ready state
+("Still gathering data," an honest earliest-possible date rather than
+a promised schedule, plus the real number of snapshots captured so
+far), the ready state's page-level currency line ("Based on downloads
+Furphy measured through `<date>` - looking only at Wago's current top
+~150 popular addons."), and each row's own delta ("+`<N>` since
+`<date>`" beside a leading rank number).
+
+**What shipped.** The Wago side of Get New Addons gains a four-segment
+sort control - Popular / Recently updated / Name (A-Z) / Gaining this
+week - and a persistent category chip strip (all 29 of Wago's own
+categories plus All, in Wago's own server order, collapsed by default
+behind a "More categories +N" toggle) above the results list, plus a
+"Load more" button that pages 15 rows at a time. Every result row now
+shows author, summary, downloads, and updated-date whenever Wago's own
+card actually supplied them - fields the row template has had since
+launch but which were hardcoded to blank until this round. Selecting a
+category updates the search box's own placeholder ("Search in
+`<Category>`...") and the result count; selecting Gaining this week
+visibly disables both the search box and every category chip (Wago's
+own contract for that mode ignores both) with a shared note explaining
+why, since a control that quietly does nothing truthful is exactly the
+class of bug this codebase's principles already forbid elsewhere.
+Opening the Wago segment while a WoW client is running now shows "Wago
+browsing pauses while a WoW client is running. It'll pick back up once
+you close the game." instead of a blank list or a silent network
+request.
+
+**Gaining this week - the mechanism.** Once a day at most (opportunistically,
+whenever the server happens to restart, never on a live timer, and
+never while WoW is running), Furphy crawls up to 10 pages of Wago's own
+popular listing per installed WoW version and saves a snapshot to disk.
+Once two snapshots exist for a version, 5 to 9 days apart, "Gaining
+this week" compares them and ranks every addon whose downloads actually
+rose. This can take a little while to have anything to show after a
+fresh install - the not-ready screen says exactly how many snapshots
+exist so far and the earliest date it could possibly be ready, never a
+promise. It only ever looks at Wago's current top ~150 popular addons,
+and it is never split by category or search - a category- or
+search-scoped version would need roughly 29x today's request budget
+and a new snapshot format entirely, so it is a named, permanent
+limitation, not a bug to fix later.
+
+**A real bug fixed, not just new behavior:** the existing Wago search
+handler had never actually checked whether WoW was running before this
+round - every browse fetch went out to Wago regardless of game state,
+an ungated hole in the app's own "no network while WoW runs" rule (a
+rule already correctly enforced elsewhere in the same file, for a
+different Wago-touching code path). Fixed: a live Wago fetch for
+Popular/Recently updated/Name is now skipped whenever WoW is running,
+answering instantly from an already-warm cache if one exists or with
+the honest game-running message above if it doesn't - never a network
+call either way. "Gaining this week" was never affected by this bug in
+the first place, since it only ever reads its own snapshot file from
+disk.
+
+**Politeness budget, unchanged and respected.** Every live Wago request
+this round makes - browse or snapshot crawl alike - goes through the
+same 300ms-paced, cache-first, retry-once-on-429/503 path every
+existing Wago call already uses. The daily snapshot crawl adds at most
+~10 requests per installed WoW version per day (one flavour on the
+overwhelmingly common single-flavour machine, six at the theoretical
+ceiling), gated off entirely while WoW runs and skipped again if a
+version's own file was captured within the last 20 hours - nothing
+about this round turns Wago browsing into a crawl against the real
+site.
+
+`/api/wago/search` (the pre-existing endpoint) keeps answering exactly
+as it always has, for any existing caller - `/api/wago/browse` is a new
+route added alongside it, not a breaking rename. See
+`WAGO-BROWSE-SPEC.md` for the full server contract, snapshot format,
+and test plan, and `UX-SPEC.md` section 5.1 / section 11 for the dated
+UI supersession notes this round adds.
+
 ## Round 34 (1.15.0: no more game launching)
 
 Eric's ask, verbatim: "ok, we probably dont need to have anything that

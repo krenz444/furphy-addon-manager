@@ -5173,7 +5173,22 @@ boot();
             if (!pingOk)
             {
                 outcome.ServerStarted = TryStartServer();
-                DateTime pingDeadline = DateTime.UtcNow.AddSeconds(20);
+                // Round-1-fixer (verifier finding 1, defense in depth):
+                // widened from 20s to 60s. A legitimate first-run (or
+                // 20h-gate-elapsed) Wago growth-snapshot crawl
+                // (Initialize-WagoGrowthSnapshots) runs before the server
+                // accepts any connection at all, and a real multi-flavour
+                // installation (up to 6 distinct game_versions x 10 pages
+                // each) can plausibly take longer than 20s end to end (a
+                // measured 3-flavour fixture took 17.1s) - this is now the
+                // rare non-test-mode case (see TryStartServer's own
+                // FURPHY_TEST_SKIP_WAGO_GROWTH forwarding above), but a real
+                // user's first run should not spuriously report the tray as
+                // "unreachable" just because it is still doing its one-time
+                // startup work. Stop-event responsiveness inside the loop
+                // below is unchanged, so this only makes a legitimately slow
+                // start more patient, never a broken server slower to report.
+                DateTime pingDeadline = DateTime.UtcNow.AddSeconds(60);
                 while (DateTime.UtcNow < pingDeadline)
                 {
                     if (Http.GetString(PingUrl(), 2000) != null) { pingOk = true; break; }
@@ -6022,10 +6037,37 @@ boot();
             {
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "powershell.exe";
-                psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + _addonServerScriptPath + "\"";
+                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + _addonServerScriptPath + "\"";
+
+                // Round-1-fixer (verifier finding 1): forward this host's
+                // own test-only -WowFakeProcessName override to the
+                // addon-server.ps1 child it spawns, so the two processes'
+                // Test-GameRunning agree instead of the server's own probe
+                // being blind to the host's fake-WoW override. Both
+                // -WowFakeProcessName here and --wow-fake/SelftestActive
+                // above are documented as never set by a real launch, so
+                // their mere presence also doubles as a "this is a test
+                // run" signal - used below to skip the Wago growth-snapshot
+                // crawl the child would otherwise run unconditionally at
+                // startup (addon-server.ps1's FURPHY_TEST_SKIP_WAGO_GROWTH),
+                // which was blocking RunCycle's ping-wait deadline during
+                // host-layer tests that have zero interest in Wago
+                // (tests\host\Host.Tests.ps1:450, 100% reproducible before
+                // this fix).
+                bool testMode = !string.IsNullOrEmpty(_options.WowFakeProcessName) || _options.SelftestActive;
+                if (!string.IsNullOrEmpty(_options.WowFakeProcessName))
+                {
+                    arguments += " -WowFakeProcessName \"" + _options.WowFakeProcessName + "\"";
+                }
+                psi.Arguments = arguments;
+
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 psi.WorkingDirectory = Path.GetDirectoryName(_addonServerScriptPath);
+                if (testMode)
+                {
+                    psi.EnvironmentVariables["FURPHY_TEST_SKIP_WAGO_GROWTH"] = "1";
+                }
                 Process p = Process.Start(psi);
                 if (p != null) { p.Dispose(); }
                 LogHost("[tray] started addon-server.ps1");

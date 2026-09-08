@@ -1,0 +1,254 @@
+{
+  "component": "Home",
+  "props": {
+    "errors": {},
+    "user": null,
+    "__inertiaFlash": null,
+    "search": null,
+    "game_version": "retail",
+    "sort": null,
+    "category": null,
+    "allCategories": [
+      {
+        "id": 1,
+        "display_name": "Chat & Communication"
+      },
+      {
+        "id": 2,
+        "display_name": "Auction & Economy"
+      },
+      {
+        "id": 3,
+        "display_name": "Audio & Video"
+      },
+      {
+        "id": 4,
+        "display_name": "PvP"
+      },
+      {
+        "id": 6,
+        "display_name": "Artwork"
+      },
+      {
+        "id": 7,
+        "display_name": "Data Export"
+      },
+      {
+        "id": 8,
+        "display_name": "Guild"
+      },
+      {
+        "id": 9,
+        "display_name": "Bags & Inventory"
+      },
+      {
+        "id": 10,
+        "display_name": "Libraries"
+      },
+      {
+        "id": 11,
+        "display_name": "Map & Minimap"
+      },
+      {
+        "id": 12,
+        "display_name": "Mail"
+      },
+      {
+        "id": 13,
+        "display_name": "Quests & Leveling"
+      },
+      {
+        "id": 14,
+        "display_name": "Boss Encounters"
+      },
+      {
+        "id": 15,
+        "display_name": "Professions"
+      },
+      {
+        "id": 16,
+        "display_name": "Unit Frames"
+      },
+      {
+        "id": 17,
+        "display_name": "Miscellaneous"
+      },
+      {
+        "id": 18,
+        "display_name": "Action Bars"
+      },
+      {
+        "id": 19,
+        "display_name": "Combat"
+      },
+      {
+        "id": 20,
+        "display_name": "Class"
+      },
+      {
+        "id": 21,
+        "display_name": "Development Tools"
+      },
+      {
+        "id": 22,
+        "display_name": "Minigames"
+      },
+      {
+        "id": 23,
+        "display_name": "Tooltip"
+      },
+      {
+        "id": 24,
+        "display_name": "Roleplay"
+      },
+      {
+        "id": 25,
+        "display_name": "Plugins"
+      },
+      {
+        "id": 26,
+        "display_name": "Achievements"
+      },
+      {
+        "id": 27,
+        "display_name": "Companions"
+      },
+      {
+        "id": 28,
+        "display_name": "Garrison"
+      },
+      {
+        "id": 5,
+        "display_name": "Buffs & Debuffs"
+      },
+      {
+        "id": 29,
+        "display_name": "Transmog"
+      }
+    ],
+    "addons": {
+      "current_page": 1,
+      "data": [
+        "<a href=\"https://addons.wago.io/addons/details-damage-meter-standalone\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/vaG3R9SlPb9XIVqDg6k2IfWGpKyBUPjnFKGf9A9V.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Details! Damage Meter</h3>\n                <p class=\"text-md truncate\">Famous Combat Analizys addon, compute all sorts of information related to combat, now in a standalone version (without plugins).</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Aug 18, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 7581560</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Terciob</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/raiderio-mythic-plus-raid-progress-and-recruitment\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/LIpLuZc6OuskmJOfEVdFwBnMoGyaNm8MxbxRIwyd.jpg\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Raider.IO Mythic Plus, Raid Progress, and Recruitment</h3>\n                <p class=\"text-md truncate\">This is a companion addon to go along with the Raid and Mythic+ Rankings site, Raider.IO: https://raider.io. With this addon installed, you&#039;ll gain access to an easy way to view the Mythic Keystone scores and Raid Progress for players-- all without lea...</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 6, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 7453885</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> TheFakeJah</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/deadly-boss-mods-dbm\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/mYHQ8mNxd0yMM2uQZdvKa9FcCpUVaqODs95QyrrN.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Deadly Boss Mods (DBM)</h3>\n                <p class=\"text-md truncate\">The ultimate encounter helper to give you fight info that&#039;s easy to process at a glance. DBM aims to focus on what&#039;s happening to you, and what YOU need to do about it.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 2, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 7128510</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> MysticalOS</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/bigwigs\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/3YRsTHWecE4LFJqppOStgdrpsQkEZbSQLWXpyVh8.jpg\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">BigWigs (Boss Timers &amp; Tools)</h3>\n                <p class=\"text-md truncate\">Modular and lightweight approach to providing you with the tools you need to beat any boss encounter.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 5, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 5500796</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Funkeh</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/littlewigs\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/976AbsaVarPrwzA38nG7PIlTFvhFTNlLdJY9C30g.jpg\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">LittleWigs</h3>\n                <p class=\"text-md truncate\">Boss warnings for 5-man dungeons &amp; scenarios.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Aug 30, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 5070714</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Funkeh</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/plater-nameplates\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/sMDSzIv9S3YZRkA0X6H4xCJcOlYDNx24MEyvAOAj.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Plater-Nameplates</h3>\n                <p class=\"text-md truncate\">Plater is a nameplate addon with a extraordinary amount of settings, out of the box debuff tracking, threat coloring, support for scripting similar to WeakAuras and wago.io + the WeakAuras-Companion for Mod/Script/Profile updates.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 5, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 3968099</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Terciob</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/rarescanner\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=/images/thumbnail-placeholder.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">RareScanner</h3>\n                <p class=\"text-md truncate\">RareScanner is an addon for World of Warcraft that includes a group of tools to help you track rare NPCs, treasures and events while you play.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 3, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 3072781</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> maqjav</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/mythic-dungeon-tools\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/PUrRjoHPI3vy1wBTeKhtV5V4kSYxjHRo3eIJLn00.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Mythic Dungeon Tools - MDT</h3>\n                <p class=\"text-md truncate\">AddOn for planning and optimizing Mythic+ dungeon runs</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 5, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 2329346</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Nnoggie</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/deadly-boss-mods-dbm-old-dungeon-mods\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/oBzjKcW3edwdb9YY2p4kMrTtKYcOm13bTUmM7wvd.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Deadly Boss Mods (DBM) - Dungeons, Delves, Visions, &amp; Events</h3>\n                <p class=\"text-md truncate\">This mod will add support for 1-5 player dungeon, event, and delve content</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 4, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 2266267</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> MysticalOS</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/pawn\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/vWPddBxVTyeKObk2rG50XmvPKfuysYlqCsQh1KRH.jpg\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Pawn</h3>\n                <p class=\"text-md truncate\">Find upgrades, do more damage, win.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Aug 17, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 2264213</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Vger</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/weakauras\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/9EaMsmOfJ5zk1f1wB3oNmCWyqzqJE4mRrPpcRUYn.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">WeakAuras</h3>\n                <p class=\"text-md truncate\">World of Warcraft addon that provides a powerful framework to display customizable graphics on your screen.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 5, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 2179585</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Stanzilla</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/method-raid-tools\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/7Rk7Vo2E9CmnVP1xyBmE6O7uwqQoDFy1ytquDUUF.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">Method Raid Tools</h3>\n                <p class=\"text-md truncate\">Comlex addon with QOL improvements for raiding and mythic+</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Jun 17, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 1728247</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> ykiigor</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/gtfo\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/1NqTAtFQMgySMzR1xKce2bd7ebl8tL8AOjct4Q5G.jpg\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">GTFO</h3>\n                <p class=\"text-md truncate\">GTFO warns you when you&#039;re standing in fire or other bad stuff.</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 4, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 1572962</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Zensunim</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n",
+        "<a href=\"https://addons.wago.io/addons/allthethings\" class=\"plain-link transition shadow-md block bg-background-600 rounded-md hover:bg-background-500\">\n    <div class=\"flex items-center px-4 py-4 sm:px-4\">\n        <div class=\"min-w-0 flex-1 flex items-center\">\n            <div class=\"flex-shrink-0\">\n                <img\n                    class=\"bg-background-700 h-16 w-16 shadow-sm rounded-md border-2 border-background-200\"\n                    alt=\"\"\n                    src=https://cdn.wago.io/thumbnails/GCM2L2Lxz2AObRXu404Oggp5zcjhBYp01XCXffPQ.png\n                />\n            </div>\n            <div class=\"min-w-0 flex-1 px-4 flex flex-col\">\n                <h3 class=\"-mt-px md:text-xl text-lg font-bold truncate leading-snug\">AllTheThings</h3>\n                <p class=\"text-md truncate\">ALL THE THINGS - Addon for Tracking Collections &amp; Account Completion in World of Warcraft</p>\n                <div class=\"flex items-center flex-wrap md:flex-nowrap\">\n                    <span class=\"text-sm text-muted mr-2\"><strong>Updated:</strong> Sep 6, 2026</span>\n                    <span class=\"text-sm text-muted mr-2\"><strong>Downloads:</strong> 1552448</span>\n                    <span class=\"text-sm text-muted\"><strong>Author:</strong> Crieve</span>\n                </div>\n            </div>\n        </div>\n    </div>\n</a>\n"
+      ],
+      "first_page_url": "https://addons.wago.io?game_version=retail&page=1",
+      "from": 1,
+      "last_page": 67,
+      "last_page_url": "https://addons.wago.io?game_version=retail&page=67",
+      "links": [
+        {
+          "url": null,
+          "label": "&laquo; Previous",
+          "page": null,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=1",
+          "label": "1",
+          "page": 1,
+          "active": true
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=2",
+          "label": "2",
+          "page": 2,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=3",
+          "label": "3",
+          "page": 3,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=4",
+          "label": "4",
+          "page": 4,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=5",
+          "label": "5",
+          "page": 5,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=6",
+          "label": "6",
+          "page": 6,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=7",
+          "label": "7",
+          "page": 7,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=8",
+          "label": "8",
+          "page": 8,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=9",
+          "label": "9",
+          "page": 9,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=10",
+          "label": "10",
+          "page": 10,
+          "active": false
+        },
+        {
+          "url": null,
+          "label": "...",
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=66",
+          "label": "66",
+          "page": 66,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=67",
+          "label": "67",
+          "page": 67,
+          "active": false
+        },
+        {
+          "url": "https://addons.wago.io?game_version=retail&page=2",
+          "label": "Next &raquo;",
+          "page": 2,
+          "active": false
+        }
+      ],
+      "next_page_url": "https://addons.wago.io?game_version=retail&page=2",
+      "path": "https://addons.wago.io",
+      "per_page": 15,
+      "prev_page_url": null,
+      "to": 14,
+      "total": 1000
+    }
+  },
+  "url": "/?game_version=retail",
+  "version": "a1c7e58fc4a75de82b84b6c240869fd9",
+  "encryptHistory": false,
+  "clearHistory": false
+}

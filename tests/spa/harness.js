@@ -645,6 +645,281 @@
   }
 
   // ------------------------------------------------------------------
+  // Phase 3b (WAGO-BROWSE-SPEC.md, Round 32/Expansion E29): the Wago
+  // category browse redesign - sort tabs (labels/tooltips), the category
+  // chip strip (collapse/expand, selection, empty-category state), Load
+  // more, row meta, the game-running gate, and Gaining this week's not-
+  // ready/ready states including the non-scoping note and "See Popular
+  // instead". Runs on fresh, default-theme frames like Phase 3 above, so
+  // it sits here (before Phase 4 starts mutating localStorage's theme).
+  //
+  // "new"/"rising"/"trending"/"season" are legitimate words elsewhere in
+  // this app (e.g. the "Get new addons" nav label itself), so they are
+  // NOT added to the shared, whole-document BANNED_WORDS list above -
+  // scanWagoBannedTerms below scans only #browse-wago-panel's own
+  // rendered text (+ its tooltip data-tooltip attributes), matching this
+  // round's actual acceptance bar ("no visible string anywhere in the
+  // Wago segment...").
+  // ------------------------------------------------------------------
+  const WAGO_BANNED_WORDS = ["new", "rising", "trending", "season"];
+  function scanWagoBannedTerms(win) {
+    const panel = q(win, "#browse-wago-panel");
+    if (!panel) return ["#browse-wago-panel not found"];
+    const domText = panel.textContent || "";
+    const tipText = qa(win, "#browse-wago-panel .info-tip[data-tooltip]")
+      .map(function (b) { return b.dataset.tooltip || ""; }).join(" ");
+    const combined = domText + " " + tipText;
+    const hits = [];
+    WAGO_BANNED_WORDS.forEach(function (w) {
+      const re = new RegExp("\\b" + w + "\\b", "i");
+      if (re.test(combined)) hits.push(w);
+    });
+    return hits;
+  }
+
+  async function phaseWagoBrowse() {
+    beginPhase("Wago category browse (WAGO-BROWSE-SPEC.md, Round 32/E29)");
+    const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+    await waitForReady(win, 8000);
+    await wait(700); // the initial Popular fetch (mock's own ~120-240ms delay) + render
+
+    // ---- Sort control: four segments, exact labels, Popular active by
+    // default, and the two required tooltips (through Components.Tooltip -
+    // static .info-tip triggers, wired by App.init's own initAll() call).
+    checkTry("sort control has exactly 4 segments with the spec's exact labels, Popular active by default", function () {
+      const btns = qa(win, "#wago-sort .segmented-btn[data-sort]");
+      const labels = btns.map(text);
+      const active = btns.filter(function (b) { return b.classList.contains("is-active"); });
+      return btns.length === 4 &&
+        labels[0] === "Popular" && labels[1] === "Recently updated" && labels[2] === "Name (A-Z)" && labels[3] === "Gaining this week" &&
+        active.length === 1 && active[0].dataset.sort === "popular";
+    });
+    checkTry("Recently updated tooltip text matches the spec's exact sentence", function () {
+      const item = qa(win, "#wago-sort .wago-sort-item").filter(function (it) { return /Recently updated/.test(text(it)); })[0];
+      const tip = item && item.querySelector(".info-tip");
+      return !!tip && tip.dataset.tooltip === "Sorted by each addon's own last-updated date, within the current results.";
+    });
+    checkTry("Gaining this week tooltip text matches the spec's exact sentence", function () {
+      const item = qa(win, "#wago-sort .wago-sort-item").filter(function (it) { return /Gaining this week/.test(text(it)); })[0];
+      const tip = item && item.querySelector(".info-tip");
+      return !!tip && tip.dataset.tooltip === "Furphy's own measurement, not a number Wago publishes.";
+    });
+
+    // ---- Category chips: collapsed by default (the harness's 1280px
+    // iframe is under the app's own wide-window breakpoint), a "More
+    // categories" toggle expands to the full 30 (All + 29, server order
+    // verbatim, including id 5 sorting after id 28).
+    checkTry("category strip is collapsed by default with a 'More categories +N' toggle", function () {
+      const chips = qa(win, "#wago-cat-strip .wago-chip[data-cat-id]");
+      const toggle = q(win, "#wago-cat-more");
+      return chips.length > 0 && text(chips[0]) === "All" && chips.length < 30 &&
+        !!toggle && /^More categories \+\d+$/.test(text(toggle));
+    });
+    const catMoreBtn = q(win, "#wago-cat-more");
+    if (catMoreBtn) await clickAndSettle(win, catMoreBtn, 150);
+    checkTry("expanded category strip has all 30 chips (All + the server's own 29, id 5 after id 28, never re-sorted)", function () {
+      const chips = qa(win, "#wago-cat-strip .wago-chip[data-cat-id]");
+      if (chips.length !== 30 || text(chips[0]) !== "All") return false;
+      const expectedOrder = ["Chat & Communication", "Auction & Economy", "Audio & Video", "PvP", "Artwork",
+        "Data Export", "Guild", "Bags & Inventory", "Libraries", "Map & Minimap", "Mail", "Quests & Leveling",
+        "Boss Encounters", "Professions", "Unit Frames", "Miscellaneous", "Action Bars", "Combat", "Class",
+        "Development Tools", "Minigames", "Tooltip", "Roleplay", "Plugins", "Achievements", "Companions",
+        "Garrison", "Buffs & Debuffs", "Transmog"];
+      const actual = chips.slice(1).map(text);
+      return actual.every(function (name, i) { return name === expectedOrder[i]; });
+    });
+
+    const pvpChip = qa(win, "#wago-cat-strip .wago-chip[data-cat-id]").filter(function (c) { return text(c) === "PvP"; })[0];
+    if (pvpChip) {
+      await clickAndSettle(win, pvpChip, 400);
+      checkTry("selecting a category updates the search placeholder and the result-count line", function () {
+        const input = q(win, "#browse-search");
+        return !!input && input.placeholder === "Search in PvP..." && /result(s)? in PvP$/.test(text(q(win, "#browse-summary")));
+      });
+    } else {
+      check("selecting a category updates the search placeholder and the result-count line", false, "PvP chip not found");
+    }
+
+    const achievementsChip = qa(win, "#wago-cat-strip .wago-chip[data-cat-id]").filter(function (c) { return text(c) === "Achievements"; })[0];
+    if (achievementsChip) {
+      await clickAndSettle(win, achievementsChip, 400);
+      checkTry("a category with zero matches shows the context-aware empty state", function () {
+        return visible(q(win, "#browse-empty")) && text(q(win, "#browse-empty")).indexOf("No addons in Achievements yet") !== -1;
+      });
+      const allChip = qa(win, "#wago-cat-strip .wago-chip[data-cat-id]").filter(function (c) { return text(c) === "All"; })[0];
+      if (allChip) await clickAndSettle(win, allChip, 400);
+    } else {
+      check("a category with zero matches shows the context-aware empty state", false, "Achievements chip not found");
+    }
+
+    // ---- Load more: 15 rows on the unfiltered default page (21-item mock
+    // pool), a second page appends the rest and hides the button.
+    checkTry("Load more is visible with 15 rows on the unfiltered default page", function () {
+      return qa(win, "#browse-grid .browse-row").length === 15 && visible(q(win, "#wago-loadmore"));
+    });
+    const loadMoreBtn = q(win, "#wago-loadmore-btn");
+    if (loadMoreBtn) {
+      await clickAndSettle(win, loadMoreBtn, 500);
+      checkTry("Load more appends rows and hides once the last page is reached", function () {
+        return qa(win, "#browse-grid .browse-row").length === 21 && !visible(q(win, "#wago-loadmore"));
+      });
+    } else {
+      check("Load more appends rows and hides once the last page is reached", false, "#wago-loadmore-btn not found");
+    }
+
+    checkTry("every Wago row shows author, summary, and a downloads+updated meta line", function () {
+      const rows = qa(win, "#browse-grid .browse-row");
+      if (rows.length === 0) return false;
+      return rows.every(function (r) {
+        const meta = r.querySelector(".browse-row-meta");
+        return !!r.querySelector(".browse-row-author") && !!r.querySelector(".browse-row-summary") &&
+          !!meta && /downloads/.test(text(meta)) && /updated/.test(text(meta));
+      });
+    });
+
+    // ---- Recently updated / Name (A-Z) tabs.
+    const updatedTab = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "updated"; })[0];
+    if (updatedTab) {
+      await clickAndSettle(win, updatedTab, 500);
+      checkTry("Recently updated tab becomes active and reloads results", function () {
+        return updatedTab.classList.contains("is-active") && qa(win, "#browse-grid .browse-row").length > 0;
+      });
+    } else {
+      check("Recently updated tab becomes active and reloads results", false, "updated tab button not found");
+    }
+    const nameTab = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "name"; })[0];
+    if (nameTab) {
+      await clickAndSettle(win, nameTab, 500);
+      checkTry("Name (A-Z) tab sorts rows alphabetically", function () {
+        const names = qa(win, "#browse-grid .browse-row-title").map(text);
+        const sorted = names.slice().sort(function (a, b) { return a.localeCompare(b); });
+        return names.length > 0 && names.every(function (n, i) { return n === sorted[i]; });
+      });
+    } else {
+      check("Name (A-Z) tab sorts rows alphabetically", false, "name tab button not found");
+    }
+
+    // ---- Gaining this week: not-ready state (this frame's mock has no
+    // ?wagoGainingReady=1, so it stays not-ready - a fresh install's real
+    // starting state).
+    const gainTab = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "gaining"; })[0];
+    if (gainTab) {
+      await clickAndSettle(win, gainTab, 500);
+      checkTry("Gaining this week not-ready state renders the rewritten copy (never 'Day N of 4') plus a real snapshot count", function () {
+        if (!visible(q(win, "#wago-gain-notready"))) return false;
+        const body = text(q(win, "#wago-gain-notready-body"));
+        const count = text(q(win, "#wago-gain-notready-count"));
+        return /^Furphy started measuring daily download changes on Wago on .+\. It needs two snapshots taken 5 to 9 days apart before it can show what's gaining - the earliest that could happen is .+\.$/.test(body) &&
+          /^\d+ snapshot\(s\) captured so far\.$/.test(count) && !/Day \d+ of \d+/.test(body);
+      });
+      checkTry("category chips are visually disabled and the search field is disabled with the non-scoping note visible, while Gaining is active", function () {
+        const chips = qa(win, "#wago-cat-strip .wago-chip");
+        const input = q(win, "#browse-search");
+        const note = q(win, "#wago-gain-note");
+        return chips.length > 0 && chips.every(function (c) { return c.getAttribute("aria-disabled") === "true"; }) &&
+          !!input && input.disabled && input.placeholder === "Not available on Gaining this week" &&
+          visible(note) && text(note) === "Gaining this week shows Furphy's own top movers across Wago's popular list - it isn't split by category or search yet.";
+      });
+      const seePopularBtn = q(win, "#wago-gain-see-popular");
+      if (seePopularBtn) {
+        await clickAndSettle(win, seePopularBtn, 500);
+        checkTry("'See Popular instead' switches the active tab back to Popular", function () {
+          const popularBtn = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "popular"; })[0];
+          return !!popularBtn && popularBtn.classList.contains("is-active") && qa(win, "#browse-grid .browse-row").length > 0;
+        });
+      } else {
+        check("'See Popular instead' switches the active tab back to Popular", false, "#wago-gain-see-popular not found");
+      }
+    } else {
+      check("Gaining this week not-ready state renders the rewritten copy (never 'Day N of 4') plus a real snapshot count", false, "Gaining tab button not found");
+      check("category chips are visually disabled and the search field is disabled with the non-scoping note visible, while Gaining is active", false, "Gaining tab button not found");
+      check("'See Popular instead' switches the active tab back to Popular", false, "Gaining tab button not found");
+    }
+
+    // Last use of `win` in this phase - loadFrame below reuses the SAME
+    // #spa-frame iframe (see this file's own header comment), so `win`
+    // becomes a reference to whatever loads next the instant that call
+    // fires. Scan it for banned terms now, while it is still the Popular-
+    // tab/Gaining-not-ready page it was left on above.
+    checkTry("no 'new'/'rising'/'trending'/'season' label anywhere in the Wago panel (Popular/Gaining tabs)", function () {
+      const hits = scanWagoBannedTerms(win);
+      if (hits.length) check("Wago banned-term hits, Popular/Gaining tabs (detail)", false, hits.join(", "));
+      return hits.length === 0;
+    });
+
+    // ---- Game-running blocked state (separate frame, WAGO-BROWSE-SPEC.md
+    // section 3.5's corrected gate) - reuses the same ?game=1 flag /api/state
+    // already answers to. Loaded only now that every check above is done
+    // with `win` (see the comment just above).
+    const gameWin = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago&game=1");
+    await waitForReady(gameWin, 8000);
+    await wait(700);
+    checkTry("a WoW client running shows the honest game-running message, not a blank list, never a live request", function () {
+      return visible(q(gameWin, "#browse-gameactive")) && !visible(q(gameWin, "#browse-grid")) &&
+        text(q(gameWin, "#browse-gameactive")).indexOf("Wago browsing pauses while a WoW client is running. It'll pick back up once you close the game.") !== -1;
+    });
+
+    // ---- Gaining this week: ready state (separate frame, ?wagoGainingReady=1
+    // - the LAST frame this phase loads, so it stays valid through its own
+    // banned-terms scan below).
+    const gainReadyWin = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago&wagoGainingReady=1");
+    await waitForReady(gainReadyWin, 8000);
+    await wait(700);
+    const gainReadyTab = qa(gainReadyWin, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "gaining"; })[0];
+    if (gainReadyTab) {
+      await clickAndSettle(gainReadyWin, gainReadyTab, 500);
+      checkTry("Gaining this week ready state shows a leading rank number and a delta badge on every row", function () {
+        const rows = qa(gainReadyWin, "#browse-grid .browse-row");
+        if (rows.length === 0) return false;
+        return rows.every(function (r) {
+          const rank = r.querySelector(".wago-gain-rank");
+          const delta = r.querySelector(".chip.chip-success");
+          return !!rank && /^\d+$/.test(text(rank)) && !!delta && /^\+[\d,.]+ since /.test(text(delta));
+        });
+      });
+      checkTry("Gaining this week ready state's line names both the measured-through date and the top-~150 scope", function () {
+        return /^Based on downloads Furphy measured through .+ - looking only at Wago's current top ~150 popular addons\.$/.test(text(q(gainReadyWin, "#browse-summary")));
+      });
+    } else {
+      check("Gaining this week ready state shows a leading rank number and a delta badge on every row", false, "Gaining tab button not found");
+      check("Gaining this week ready state's line names both the measured-through date and the top-~150 scope", false, "Gaining tab button not found");
+    }
+
+    checkTry("no 'new'/'rising'/'trending'/'season' label anywhere in the Wago panel (Gaining ready tab)", function () {
+      const hits = scanWagoBannedTerms(gainReadyWin);
+      if (hits.length) check("Wago banned-term hits, Gaining ready tab (detail)", false, hits.join(", "));
+      return hits.length === 0;
+    });
+
+    // ---- Gaining this week: not-ready, ZERO snapshots ever captured
+    // (WAGO-BROWSE-SPEC.md section 4.6 point 1 - since=null, snapshotCount=0;
+    // a real, reachable fresh-install/first-crawl-incomplete state, distinct
+    // from the "since known, one snapshot" fixture the earlier not-ready
+    // check above exercises). Round 2 fixer regression check for the bug
+    // where formatWagoDay(null) produced empty date placeholders and a
+    // dangling-period sentence.
+    const gainNoSnapWin = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago&wagoGainingNoSnapshots=1");
+    await waitForReady(gainNoSnapWin, 8000);
+    await wait(700);
+    const gainNoSnapTab = qa(gainNoSnapWin, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "gaining"; })[0];
+    if (gainNoSnapTab) {
+      await clickAndSettle(gainNoSnapWin, gainNoSnapTab, 500);
+      checkTry("Gaining this week not-ready state with zero snapshots ever (since=null) renders a complete sentence, never an empty date placeholder or dangling period", function () {
+        if (!visible(q(gainNoSnapWin, "#wago-gain-notready"))) return false;
+        const body = text(q(gainNoSnapWin, "#wago-gain-notready-body"));
+        const count = text(q(gainNoSnapWin, "#wago-gain-notready-count"));
+        return body.length > 0 && !/ on \.| is \.|\.\s*\.$/.test(body) &&
+          !/started measuring/.test(body) && // since is unknown - must not reference a since date at all
+          count === "0 snapshot(s) captured so far.";
+      });
+    } else {
+      check("Gaining this week not-ready state with zero snapshots ever (since=null) renders a complete sentence, never an empty date placeholder or dangling period", false, "Gaining tab button not found");
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
   // Phase 4: ?theme=matcha - applies AND persists (THEMES-SPEC.md set B).
   // Deliberately runs AFTER every phase above that depends on the DEFAULT
   // (tokyo-rain, fresh-profile) theme, since this is same-origin and
@@ -1079,6 +1354,7 @@
     await phaseDefault();
     await phaseFlavours();
     await phaseHostWebview2();
+    await phaseWagoBrowse();
     await phaseTheme();
     await phaseViewDeepLink();
     await phaseSettingsAudit();

@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Furphy Addon Manager - automatic WoW addon updates</title>
+<meta name="description" content="Furphy Addon Manager keeps your World of Warcraft addons updated automatically. No account, no API key, nothing to configure.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f3ef;
+    --bg-card: #ffffff;
+    --text: #1c1d21;
+    --text-muted: #55575e;
+    --border: #e2ddd3;
+    --accent: #f16436;
+    --accent-hover: #ff7a4d;
+    --accent-text: #ffffff;
+    --step-num-bg: #f1e9dd;
+    --step-num-text: #b5511f;
+    --code-bg: #efe9df;
+    --footer-bg: #efe9e0;
+    --shadow: 0 10px 30px rgba(30, 20, 10, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141518;
+      --bg-card: #1c1d21;
+      --text: #e7e7ea;
+      --text-muted: #9a9ca3;
+      --border: #2f3136;
+      --accent: #f16436;
+      --accent-hover: #ff7a4d;
+      --accent-text: #ffffff;
+      --step-num-bg: #2a231d;
+      --step-num-text: #ff9a6b;
+      --code-bg: #26282d;
+      --footer-bg: #1a1b1e;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+  }
+  body {
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  a { color: var(--accent); }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 48px 20px 24px;
+  }
+  header.hero {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+  .hero img {
+    width: 112px;
+    height: 112px;
+    border-radius: 24px;
+    box-shadow: var(--shadow);
+    margin-bottom: 20px;
+  }
+  h1 {
+    font-size: 2.1rem;
+    margin: 0 0 10px;
+  }
+  .subhead {
+    font-size: 1.05rem;
+    color: var(--text-muted);
+    max-width: 480px;
+    margin: 0 auto 28px;
+  }
+  .download-btn {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-size: 1.15rem;
+    font-weight: 600;
+    text-decoration: none;
+    padding: 16px 36px;
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    transition: background 0.15s ease;
+  }
+  .download-btn:hover, .download-btn:focus-visible {
+    background: var(--accent-hover);
+  }
+  .download-sub {
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .download-sub a { color: var(--text-muted); text-decoration: underline; }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 8px;
+    margin-bottom: 28px;
+  }
+  .card h2 {
+    margin-top: 0;
+    font-size: 1.3rem;
+  }
+  ol.steps {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    counter-reset: step;
+  }
+  ol.steps li {
+    counter-increment: step;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 14px 0;
+    border-top: 1px solid var(--border);
+  }
+  ol.steps li:first-child { border-top: none; padding-top: 4px; }
+  ol.steps li::before {
+    content: counter(step);
+    flex: none;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--step-num-bg);
+    color: var(--step-num-text);
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+  }
+  ol.steps li .step-body { padding-top: 3px; }
+  code, .cmd {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-size: 0.92em;
+    font-family: Consolas, "Courier New", monospace;
+  }
+
+  .safety-note {
+    font-size: 0.92rem;
+    color: var(--text-muted);
+    background: var(--code-bg);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 0 0 28px;
+  }
+
+  footer {
+    background: var(--footer-bg);
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+    padding: 28px 20px 40px;
+    text-align: center;
+  }
+  footer .wrap { padding-top: 0; padding-bottom: 0; }
+  footer p {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    max-width: 620px;
+    margin: 0 auto 12px;
+  }
+  footer a { color: var(--text-muted); }
+
+  @media (max-width: 480px) {
+    h1 { font-size: 1.7rem; }
+    .card { padding: 20px 18px 4px; }
+    .download-btn { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="hero">
+    <img src="furphy-256.png" alt="Furphy Addon Manager icon" width="112" height="112">
+    <h1>Furphy Addon Manager</h1>
+    <p class="subhead">Automatic World of Warcraft addon updates. No account, no API key, nothing to configure.</p>
+    <a class="download-btn" href="https://github.com/krenz444/furphy-addon-manager/releases/latest/download/FurphyAddonManager-latest.zip">Download Furphy Addon Manager</a>
+    <p class="download-sub">Free. For Windows 10 and 11. Works with World of Warcraft retail, Classic, and Classic Era.</p>
+  </header>
+
+  <div class="card">
+    <h2>Getting started</h2>
+    <ol class="steps">
+      <li>
+        <div class="step-body">Download the zip above, then right-click it and choose <strong>Extract All</strong>.</div>
+      </li>
+      <li>
+        <div class="step-body">Open the folder you just extracted.</div>
+      </li>
+      <li>
+        <div class="step-body">Double-click <code>Install Furphy.cmd</code>.</div>
+      </li>
+      <li>
+        <div class="step-body">If Windows shows a small "Open File - Security Warning" box, click <strong>Run</strong>. (See the note below - it's expected, and harmless.)</div>
+      </li>
+      <li>
+        <div class="step-body">Click <strong>Install</strong> in the window that opens - Furphy finds your WoW folder automatically. When it's done, click <strong>Open Furphy Addon Manager</strong> or <strong>Launch WoW</strong>.</div>
+      </li>
+    </ol>
+  </div>
+
+  <p class="safety-note">
+    Windows may show a small "Open File - Security Warning" box the first time you run Install Furphy.cmd,
+    since it isn't signed with a paid certificate yet - click Run. Furphy only writes inside your WoW folder
+    and never asks for admin access.
+  </p>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>Uninstalling: right-click the tray icon, or open Settings inside Furphy, or use Windows Settings &gt; Apps -
+      your addons always stay in WoW either way.</p>
+    <p>Want to read the code first? <a href="https://github.com/krenz444/furphy-addon-manager">View the source on GitHub</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>

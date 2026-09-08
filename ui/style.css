@@ -1650,7 +1650,58 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .browse-row-action { flex: none; margin-left: auto; }
 .browse-row-action .btn { min-width: 92px; }
 
+/* Round 32 (WAGO-BROWSE-SPEC.md section 2.6): Gaining this week's own
+   leading rank number - a plain span before the logo, no full CSS
+   component of its own needed (the delta badge next to it reuses the
+   existing .chip.chip-success straight off .browse-row-heading). */
+.wago-gain-rank { flex: none; width: 20px; text-align: right; font-size: 13px; font-weight: 700; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
 .browse-card-cat { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--bg-2); color: var(--text-faint); }
+
+/* ==========================================================================
+   Round 32 (WAGO-BROWSE-SPEC.md section 2) - Wago category browse: the
+   four-way sort control (a .segmented modifier), the category chip strip
+   (a new .wago-chip component - deliberately not .filter-chip, see the
+   spec's own 2.2 for why a solid-fill "primary navigation" chip is the
+   right call here rather than My Addons' lighter tint-fill filter chip),
+   the non-scoping note/Gaining states, and Load more. Scoped entirely to
+   #browse-wago-panel; nothing here touches the CurseForge segment.
+   ========================================================================== */
+
+.wago-sort { flex-wrap: wrap; }
+.wago-sort-item { display: inline-flex; align-items: center; }
+.wago-sort-item .info-tip { margin-left: 2px; }
+
+.wago-cat-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 2px 6px; }
+.wago-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--fast), border-color var(--fast), color var(--fast), transform var(--fast);
+}
+.wago-chip:hover { background: var(--bg-3); color: var(--text); border-color: var(--border-hover); transform: translateY(-1px); }
+.wago-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.wago-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+/* Gaining this week is active: chips stay visible (so the "what's
+   selected" state survives switching back to Popular) but go inert -
+   WAGO-BROWSE-SPEC.md 2.2/2.4, the required fix for "a control that
+   quietly does nothing truthful". */
+.wago-chip[aria-disabled="true"] { opacity: 0.5; pointer-events: none; cursor: default; transform: none; }
+.wago-chip-toggle { border-style: dashed; color: var(--text-faint); background: transparent; }
+.wago-chip-toggle .icon { width: 14px; height: 14px; transition: transform var(--fast); }
+.wago-chip-toggle.is-open .icon { transform: rotate(180deg); }
+
+.wago-gain-note { margin: 0 2px 4px; }
+
+.wago-loadmore { display: flex; justify-content: center; padding: 12px 0 2px; }
 
 .nokey-icon { width: 28px; height: 28px; stroke: var(--accent); margin-bottom: 8px; }
 .muted-text { color: var(--text-faint); font-size: 12.5px; }
@@ -2433,6 +2484,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 [data-density="compact"] .myaddons-freshness { padding: 1px 2px 3px; }
 [data-density="compact"] .filter-chips { padding-bottom: 2px; }
 [data-density="compact"] .filter-chip { padding: 3px 8px; }
+[data-density="compact"] .wago-cat-strip { padding: 5px 2px 4px; }
+[data-density="compact"] .wago-chip { padding: 3px 9px; }
 [data-density="compact"] .dep-row { padding: 6px 10px; }
 [data-density="compact"] .diag-row { padding: 6px 10px; }
 [data-density="compact"] .selection-bar { padding: 5px 10px; margin-bottom: 6px; }

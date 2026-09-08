@@ -738,6 +738,12 @@
         </div>
 
         <!-- ---------- Wago (in-app search) ---------- -->
+        <!-- Round 32 (WAGO-BROWSE-SPEC.md, Expansion E29): adds a four-way
+             sort control, a category chip strip, "Load more" paging, a
+             Furphy-measured "Gaining this week" tab (not-ready/ready states,
+             its own honesty copy), and a game-running blocked state - all
+             scoped to this panel, per that spec's section 2. The CurseForge
+             segment/switch above is unaffected. -->
         <div id="browse-wago-panel">
           <header class="topbar">
             <label class="search-field">
@@ -746,12 +752,40 @@
             </label>
           </header>
 
+          <div class="segmented wago-sort" id="wago-sort" role="tablist" aria-label="Sort Wago results">
+            <div class="wago-sort-item">
+              <button type="button" class="segmented-btn is-active" data-sort="popular" role="tab" aria-selected="true">Popular</button>
+            </div>
+            <div class="wago-sort-item">
+              <button type="button" class="segmented-btn" data-sort="updated" role="tab" aria-selected="false">Recently updated</button>
+              <button type="button" class="info-tip" tabindex="0" aria-label="More about Recently updated" aria-describedby="app-tooltip" data-tooltip="Sorted by each addon's own last-updated date, within the current results."><svg class="icon"><use href="#icon-info"></use></svg></button>
+            </div>
+            <div class="wago-sort-item">
+              <button type="button" class="segmented-btn" data-sort="name" role="tab" aria-selected="false">Name (A-Z)</button>
+            </div>
+            <div class="wago-sort-item">
+              <button type="button" class="segmented-btn" data-sort="gaining" role="tab" aria-selected="false">Gaining this week</button>
+              <button type="button" class="info-tip" tabindex="0" aria-label="More about Gaining this week" aria-describedby="app-tooltip" data-tooltip="Furphy's own measurement, not a number Wago publishes."><svg class="icon"><use href="#icon-info"></use></svg></button>
+            </div>
+          </div>
+
+          <div class="wago-cat-strip" id="wago-cat-strip" role="group" aria-label="Filter by category"></div>
+
+          <p class="chip chip-info wago-gain-note" id="wago-gain-note" hidden>Gaining this week shows Furphy's own top movers across Wago's popular list - it isn't split by category or search yet.</p>
+
           <div class="list-summary" id="browse-summary" aria-live="polite"></div>
 
           <!-- Round 17: full-width CurseForge-style rows instead of tiles
                (Eric: "they go the whole distance horizontally instead of
-               little tiles") - see .browse-row/.browse-list, ui/style.css. -->
+               little tiles") - see .browse-row/.browse-list, ui/style.css.
+               Round 32: rows now also carry author/summary/meta (every
+               tab), plus a leading rank number and a delta badge on the
+               Gaining tab only - see Views.browse's resultCard. -->
           <div class="browse-list" id="browse-grid"></div>
+
+          <div class="wago-loadmore" id="wago-loadmore" hidden>
+            <button type="button" class="btn btn-outline" id="wago-loadmore-btn">Load more</button>
+          </div>
 
           <div class="skeleton-list" id="browse-skeleton">
             <div class="skeleton-row"></div>
@@ -763,8 +797,32 @@
 
           <div class="empty-state" id="browse-empty" hidden>
             <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
-            <h3>No results</h3>
-            <p>Try a different search term.</p>
+            <h3 id="browse-empty-title">No results</h3>
+            <p id="browse-empty-body">Try a different search term.</p>
+          </div>
+
+          <!-- Round 32: the game-running gate (WAGO-BROWSE-SPEC.md section
+               3.5) - shown instead of the grid/empty/error states whenever
+               the server skipped a live Wago fetch because a WoW client is
+               running. Never used for the Gaining tab, which is a pure
+               disk read and is never blocked by game state. -->
+          <div class="empty-state" id="browse-gameactive" hidden>
+            <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
+            <h3>Paused</h3>
+            <p>Wago browsing pauses while a WoW client is running. It'll pick back up once you close the game.</p>
+          </div>
+
+          <!-- Round 32: Gaining this week's not-ready state (WAGO-BROWSE-
+               SPEC.md section 2.4) - replaces the grid entirely until Furphy
+               holds two snapshots 5-9 days apart. Body/count text is filled
+               in by Views.browse (depends on the server's since/
+               snapshotCount), never hardcoded here. -->
+          <div class="empty-state wago-gain-notready" id="wago-gain-notready" hidden>
+            <svg class="icon empty-icon"><use href="#icon-history"></use></svg>
+            <h3>Still gathering data</h3>
+            <p id="wago-gain-notready-body"></p>
+            <p class="muted-text" id="wago-gain-notready-count"></p>
+            <button type="button" class="btn btn-outline" id="wago-gain-see-popular">See Popular instead</button>
           </div>
 
           <div class="error-state" id="browse-error" hidden>

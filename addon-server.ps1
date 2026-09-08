@@ -76,6 +76,42 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+# WAGO-BROWSE-SPEC.md section 3.7 (prerequisite for Round 32/E29): test-only
+# base-URL override surface for the Wago proxy, mirroring addon-sync.ps1's
+# own $script:WagoBaseUrl/$env:FURPHY_TEST_WAGO_BASEURL seam exactly (see
+# that file's own comment for the full rationale - an integration test
+# points this at a local stub server the same way it already does for the
+# CLI). Declared here, ABOVE the dot-source guard further down, so
+# tests\unit\Server.WagoBaseUrl.Tests.ps1 can dot-source this file and read
+# $Script:WagoBaseUrl back without ever reaching the real "start the
+# listener" startup body - every real Wago call site below builds its URL
+# from this variable instead of a literal host. An empty/whitespace-only
+# override is treated the same as unset (falls back to the real host).
+# TEST-ONLY: no real user run ever sets FURPHY_TEST_WAGO_BASEURL.
+$Script:WagoBaseUrl = 'https://addons.wago.io'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL)) {
+    $Script:WagoBaseUrl = $env:FURPHY_TEST_WAGO_BASEURL.TrimEnd('/')
+}
+
+# Round-1-fixer (verifier finding 1): test-only escape hatch for
+# Initialize-WagoGrowthSnapshots' unconditional startup crawl, mirroring
+# FURPHY_TEST_WAGO_BASEURL exactly (same seam shape, same "TEST-ONLY, no
+# real user run ever sets this" contract). Before this, EVERY fresh
+# scratch server started by ANY test - not just Wago-specific ones - paid
+# a real, uncapped-in-aggregate crawl against the live addons.wago.io
+# site on startup (a genuine live-safety/politeness regression), and that
+# crawl could run long enough to block the request loop from accepting
+# connections past FurphyHost.cs RunCycle's own ping-wait deadline
+# (reproduced 100% at tests\host\Host.Tests.ps1:450). tests\lib\common.ps1's
+# Start-TestServer sets this by default for any caller that has not
+# itself opted into real Wago-crawl behavior by setting
+# FURPHY_TEST_WAGO_BASEURL; host\FurphyHost.cs's TryStartServer sets it on
+# the addon-server.ps1 child whenever the host itself was launched in a
+# test-only mode (-WowFakeProcessName/-tray-selftest - both already
+# documented as never used by a real launch). Checked once here (not
+# inside the function) so it reads the same way $Script:WagoBaseUrl does.
+$Script:SkipWagoGrowthCrawl = -not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_WAGO_GROWTH)
+
 # =====================================================================
 # Logging
 # =====================================================================
@@ -1001,6 +1037,11 @@ $Script:FlavourScopedEndpoints = @(
     @{ Method = 'GET'; Pattern = '^/api/export$' }
     @{ Method = 'POST'; Pattern = '^/api/import$' }
     @{ Method = 'GET'; Pattern = '^/api/wago/search$' }
+    # Round 32 (WAGO-BROWSE-SPEC.md, Expansion E29): /api/wago/browse is the
+    # new name Handle-WagoBrowse answers under too - both entries must stay
+    # in sync with $Script:Routes below (the startup self-check catches a
+    # mismatch here).
+    @{ Method = 'GET'; Pattern = '^/api/wago/browse$' }
 )
 
 function Test-FlavourScopedEndpoint {
@@ -4207,8 +4248,27 @@ function Get-WagoCached {
       full page URI - its own separate hashtable/cleanup logic, distinct
       from the other on-disk/in-memory caches this server keeps (e.g.
       $Script:CfCatalogueIndex), so a bug in one can't reach another's.
+
+      WAGO-BROWSE-SPEC.md section 3.5 (a CORRECTION found during that
+      round - this endpoint's caller, Handle-WagoSearch, never actually
+      gated on Test-GameRunning at all, unlike the keyless-enrichment
+      prefetch elsewhere in this file which already does): -AllowLiveFetch
+      (switch, defaults to $true) is new and fully backward-compatible -
+      every pre-existing call site (Handle-WagoCategories,
+      Handle-WagoAddonDetails, Handle-WagoAddonReleases,
+      Handle-WagoAddonGallery, Get-WagoAutoMatch, Get-CfEnrichmentNoKey)
+      omits it and is byte-for-byte unchanged. When a caller passes
+      -AllowLiveFetch:$false (Handle-WagoBrowse, for its three live-fetch
+      sort modes, while a WoW client is running) and no fresh (<5-minute)
+      cache entry already exists for this exact URI, this returns $null
+      instead of ever calling Invoke-WagoInertiaJson - the letter of the
+      "no network while WoW runs" rule is "no network," not "no data," so
+      an already-warm cache hit is still served either way.
     #>
-    param([Parameter(Mandatory = $true)][string]$PageUri)
+    param(
+        [Parameter(Mandatory = $true)][string]$PageUri,
+        [switch]$AllowLiveFetch = $true
+    )
 
     if ($Script:WagoCache.ContainsKey($PageUri)) {
         $entry = $Script:WagoCache[$PageUri]
@@ -4217,6 +4277,10 @@ function Get-WagoCached {
             return $entry.Props
         }
         $Script:WagoCache.Remove($PageUri)
+    }
+
+    if (-not $AllowLiveFetch) {
+        return $null
     }
 
     $props = Invoke-WagoInertiaJson -PageUri $PageUri
@@ -4251,6 +4315,22 @@ function ConvertFrom-WagoSearchCardHtml {
       Quotes are now optional around the URL, matched non-greedily against
       whitespace/">"/a matching quote so it still stops at the right place
       whichever style a given card uses.
+
+      Round 32 (WAGO-BROWSE-SPEC.md, Expansion E29) widening: four more
+      optional, never-throw regex extractions against the SAME card
+      fragment - summary (the card's first <p>, the truncated description),
+      author, updatedAt (kept as Wago's own raw human date string, e.g.
+      "Aug 18, 2026" - deliberately never re-parsed/reformatted here; the
+      UI's existing Date-based helpers already handle it, and
+      Sort-WagoItemsByUpdated below parses it independently for its own
+      page-local re-sort), and downloads (non-digit characters stripped
+      before [int]::Parse - defensive against a future thousands-separator,
+      though none observed live as of this round). Each of these four is
+      independent of the other three original fields and of each other - a
+      miss on any one leaves that field $null, same never-throw style as
+      slug/name/thumbnail. Confirmed present on every probed game_version/
+      category/search combination in WAGO-BROWSE-RESEARCH.md's live
+      captures - zero new upstream request needed for any of this.
     #>
     param([string]$Html)
 
@@ -4258,35 +4338,188 @@ function ConvertFrom-WagoSearchCardHtml {
     $slug = $null
     $name = $null
     $thumb = $null
+    $author = $null
+    $summary = $null
+    $updatedAt = $null
+    $downloads = $null
     if ($Html -match 'href="https://addons\.wago\.io/addons/([a-z0-9-]+)"') { $slug = $Matches[1] }
     if ($Html -match '<h3[^>]*>([^<]*)</h3>') { $name = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
     if ($Html -match 'src=["'']?(https://cdn\.wago\.io/thumbnails/[^"''\s>]+)') { $thumb = $Matches[1] }
+    if ($Html -match '<p[^>]*>([^<]*)</p>') { $summary = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
+    if ($Html -match '<strong>Author:</strong>\s*([^<]*)</span>') { $author = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
+    if ($Html -match '<strong>Updated:</strong>\s*([^<]*)</span>') { $updatedAt = [System.Net.WebUtility]::HtmlDecode($Matches[1]).Trim() }
+    if ($Html -match '<strong>Downloads:</strong>\s*([^<]*)</span>') {
+        $digitsOnly = ($Matches[1] -replace '[^0-9]', '')
+        if ($digitsOnly) {
+            try { $downloads = [int]::Parse($digitsOnly) } catch { $downloads = $null }
+        }
+    }
     if (-not $slug) { return $null }
-    return [PSCustomObject]@{ slug = $slug; name = $name; thumbnail = $thumb }
+    return [PSCustomObject]@{
+        slug      = $slug
+        name      = $name
+        thumbnail = $thumb
+        author    = $author
+        summary   = $summary
+        downloads = $downloads
+        updatedAt = $updatedAt
+    }
 }
 
-function Handle-WagoSearch {
+function Sort-WagoItemsByUpdated {
     <#
-      GET /api/wago/search?q=&categoryId=&sort=&page= -> {items, page, lastPage, total}.
+      WAGO-BROWSE-SPEC.md section 3.4: the "Recently updated" sort tab is a
+      PAGE-LOCAL re-sort of whichever page Wago's own implicit popularity
+      order already returned - NOT a true global recency sort across every
+      matching addon (Wago's own sort=updated returns no usable data at
+      all, see ConvertFrom-WagoSearchCardHtml's neighbourhood /
+      WAGO-BROWSE-RESEARCH.md section 2 - so this fetches the byte-identical
+      "popular" URL and only re-orders the up-to-15 items that single page
+      already contains). The UI's tooltip copy is written to be true under
+      this limitation, not to oversell it - see the spec's section 1/2.3.
 
-      Verified live defect (fixed here): Wago's own site only recognises
-      sort=name. Sending ANY other sort value (popular/downloads/recent/
-      newest/likes/trending/latest/top, etc.) makes it silently IGNORE the
-      search parameter entirely and return the plain popularity listing;
-      sort=updated returns an empty list outright. Omitting sort altogether
-      is what actually gives relevance/popularity-ordered search results.
-      So: sort=name is passed through verbatim (the only value Wago
-      accepts), and every other value - including the UI's own
-      popular/relevance/empty defaults and any unrecognised value - is
-      simply never sent upstream at all.
+      Each item's own updatedAt (Wago's raw "MMM d, yyyy" string, e.g. "Aug
+      18, 2026") is parsed via [DateTime]::ParseExact in a try/catch - a
+      missing/malformed date is never dropped or thrown on, it just sorts
+      LAST ([DateTime]::MinValue). Explicit three-key sort - parsed date
+      descending, then downloads descending, then slug ascending - so the
+      result never depends on incidental input-array-order stability.
+
+      Returns a plain array (NOT via Write-Output -NoEnumerate) - every
+      call site below wraps the call in @(...) instead, which correctly
+      preserves array-ness across a 0/1/N-element result AND still
+      serializes cleanly through ConvertTo-Json afterward. A -NoEnumerate
+      return works for a caller that only ever foreach's the result (this
+      file's own Search-CfCatalogue does exactly that), but this function's
+      result flows on into Send-Json/ConvertTo-Json - and a -NoEnumerate
+      array handed to ConvertTo-Json -InputObject serializes as
+      {"value":[...],"Count":N} instead of a plain JSON array, verified
+      while building this round.
+    #>
+    param($Items)
+
+    $decorated = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($it in @($Items)) {
+        $parsedDate = [DateTime]::MinValue
+        if ($it.updatedAt) {
+            try {
+                $parsedDate = [DateTime]::ParseExact([string]$it.updatedAt, 'MMM d, yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+                $parsedDate = [DateTime]::MinValue
+            }
+        }
+        $dl = 0
+        if ($null -ne $it.downloads) {
+            try { $dl = [int64]$it.downloads } catch { $dl = 0 }
+        }
+        $decorated.Add([PSCustomObject]@{ Item = $it; ParsedDate = $parsedDate; Downloads = $dl; Slug = [string]$it.slug })
+    }
+
+    $sorted = $decorated | Sort-Object -Property `
+        @{ Expression = 'ParsedDate'; Descending = $true }, `
+        @{ Expression = 'Downloads'; Descending = $true }, `
+        @{ Expression = 'Slug'; Descending = $false }
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($d in @($sorted)) { $out.Add($d.Item) }
+    return $out.ToArray()
+}
+
+function Get-WagoCategoriesFromProps {
+    <#
+      Maps a fetched page's raw props.allCategories ({id, display_name})
+      into the response shape ({id, displayName}) WAGO-BROWSE-SPEC.md
+      section 3.2 defines - shared by every branch of Handle-WagoBrowse
+      that has a $props object to read from.
+
+      Returns a plain array - see Sort-WagoItemsByUpdated's own doc
+      comment just above for why this is NOT returned via Write-Output
+      -NoEnumerate; every call site wraps the call in @(...) instead.
+    #>
+    param($Props)
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    if ($Props -and $Props.allCategories) {
+        foreach ($c in @($Props.allCategories)) {
+            $out.Add([PSCustomObject]@{ id = [int]$c.id; displayName = [string]$c.display_name })
+        }
+    }
+    return $out.ToArray()
+}
+
+function Handle-WagoBrowse {
+    <#
+      GET /api/wago/search (legacy alias, unchanged shape - additive fields
+      only) and GET /api/wago/browse (new) both dispatch here.
+      WAGO-BROWSE-SPEC.md (Round 32, Expansion E29): renamed from
+      Handle-WagoSearch and widened from a single implicit "popularity"
+      listing into a real four-way category browse:
+
+        - popular  (default; no sort= sent - Wago's own implicit order IS
+                    download-count-descending, verified live)
+        - name     (forwards sort=name, the one other value Wago's site
+                    actually accepts)
+        - updated  (a PAGE-LOCAL re-sort of the IDENTICAL popular page via
+                    Sort-WagoItemsByUpdated - see that function's own doc
+                    comment for why; shares the same Get-WagoCached entry
+                    as "popular" for the same q/categoryId/page, so
+                    switching between the two costs zero extra live
+                    requests)
+        - gaining  (Furphy's OWN measurement - a pure on-disk read of the
+                    daily download-growth snapshots this server captures,
+                    see Initialize-WagoGrowthSnapshots/Get-WagoGrowthRanking
+                    below; NEVER forwarded to Wago, and deliberately
+                    ignores q/categoryId - see the CONSTRAINT comment on
+                    that branch)
+
+      sort is never trusted verbatim: omitted/empty/any unrecognised value
+      (including a stale client's old "rising"/"trending" values) resolves
+      to "popular" - absorbs an older build exactly the way this endpoint's
+      predecessor (Handle-WagoSearch) always has.
+
+      categoryId is forwarded as Wago's own category= ONLY when it matches
+      ^[0-9]+$ (hardening over the old verbatim-forward); anything else is
+      treated as absent. page is [int]::TryParse'd; non-numeric or <=0
+      clamps to 1 (hardening over the old blank-only substitution).
+
+      Game-mode rule (WAGO-BROWSE-SPEC.md 3.5 - a CORRECTION over this
+      endpoint's own predecessor: Handle-WagoSearch never gated on
+      Test-GameRunning at all, an ungated hole in this app's "no network
+      while WoW runs" invariant, unlike the keyless-enrichment prefetch
+      elsewhere in this file which already enforces it). For the three
+      live-fetch sorts (popular/name/updated), Get-WagoCached is called
+      with -AllowLiveFetch:(-not (Test-GameRunning)) - an already-warm
+      cache hit still answers (the letter of the rule is "no network," not
+      "no data"), but a cold miss while the game is running returns 200
+      with an empty result set and gameActive:true rather than ever
+      reaching Invoke-WagoHttpRequest. sort=gaining is a pure disk read and
+      is UNAFFECTED by any of this - always answerable regardless of game
+      state.
     #>
     param($Context, $RouteMatch)
 
     $q = $Context.Request.QueryString
     $search = $q['q']
-    $categoryId = $q['categoryId']
-    $sort = $q['sort']
-    $page = Get-QueryOrDefault -QueryString $q -Name 'page' -Default '1'
+    $categoryIdRaw = $q['categoryId']
+    $sortRaw = $q['sort']
+
+    $sortApplied = 'popular'
+    if ($sortRaw -eq 'name') { $sortApplied = 'name' }
+    elseif ($sortRaw -eq 'updated') { $sortApplied = 'updated' }
+    elseif ($sortRaw -eq 'gaining') { $sortApplied = 'gaining' }
+
+    $pageNum = 1
+    $pageRaw = $q['page']
+    if ($pageRaw) {
+        $parsedPage = 0
+        if ([int]::TryParse($pageRaw, [ref]$parsedPage) -and $parsedPage -gt 0) { $pageNum = $parsedPage }
+    }
+
+    # 3.1: categoryId forwarded ONLY if it matches ^[0-9]+$ - anything else
+    # (non-numeric, blank) is treated as absent. Never forwarded at all for
+    # sort=gaining (see the CONSTRAINT comment on that branch, 4.8).
+    $categoryIdForWago = $null
+    if ($categoryIdRaw -and $categoryIdRaw -match '^[0-9]+$') { $categoryIdForWago = $categoryIdRaw }
 
     # FLAVORS-SPEC.md CS-F2 S4.6/S6.4: game_version is resolved from this
     # request's own flavour (Set-CurrentFlavourContext, via Invoke-Route)
@@ -4298,15 +4531,51 @@ function Handle-WagoSearch {
     $wagoGameVersion = $wagoMapping.WagoField
     if (-not $wagoGameVersion) { $wagoGameVersion = 'retail' }
 
-    $uri = 'https://addons.wago.io/?game_version=' + [System.Uri]::EscapeDataString($wagoGameVersion) + '&page=' + [System.Uri]::EscapeDataString($page)
-    if ($search) { $uri += '&search=' + [System.Uri]::EscapeDataString($search) }
-    if ($categoryId) { $uri += '&category=' + [System.Uri]::EscapeDataString($categoryId) }
-    if ($sort -eq 'name') { $uri += '&sort=name' }
+    if ($sortApplied -eq 'gaining') {
+        # CONSTRAINT (permanent, not a TODO): sort=gaining ignores q and
+        # categoryId entirely and always will under this design - a
+        # category- or search-scoped "gaining" would require per-category
+        # daily snapshots (~29x today's request budget) and the growth
+        # snapshot format never records which category an addon belongs to.
+        # Do not silently fake a category label onto this global list. If
+        # this is ever wanted for real, it is a new snapshot format and a
+        # new crawl budget, not a filter added to this function.
+        Send-WagoGainingResponse -Context $Context -GameVersion $wagoGameVersion -Page $pageNum
+        return
+    }
 
+    $uri = $Script:WagoBaseUrl + '/?game_version=' + [System.Uri]::EscapeDataString($wagoGameVersion) + '&page=' + [System.Uri]::EscapeDataString([string]$pageNum)
+    if ($search) { $uri += '&search=' + [System.Uri]::EscapeDataString($search) }
+    if ($categoryIdForWago) { $uri += '&category=' + [System.Uri]::EscapeDataString($categoryIdForWago) }
+    if ($sortApplied -eq 'name') { $uri += '&sort=name' }
+    # sortApplied 'updated' deliberately sends NO sort= at all - section 3.4:
+    # Wago's own sort=updated returns no usable listing, so this fetches the
+    # IDENTICAL "popular" URL (same cache entry - zero extra live requests
+    # switching between the two tabs) and re-sorts the returned page locally
+    # via Sort-WagoItemsByUpdated below.
+
+    $gameIsRunning = Test-GameRunning
     try {
-        $props = Get-WagoCached -PageUri $uri
+        $props = Get-WagoCached -PageUri $uri -AllowLiveFetch:(-not $gameIsRunning)
     } catch {
         Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
+        return
+    }
+
+    if ($null -eq $props) {
+        # 3.5: game is running and no warm (<5-minute) cache entry already
+        # existed for this exact URI - never an error; "no data because the
+        # game is running" is an expected, common state, not a failure.
+        $body = [PSCustomObject]@{
+            items       = @()
+            page        = 1
+            lastPage    = 1
+            total       = 0
+            sortApplied = $sortApplied
+            categories  = @()
+            gameActive  = $true
+        }
+        Send-Json -Context $Context -StatusCode 200 -Body $body
         return
     }
 
@@ -4318,12 +4587,24 @@ function Handle-WagoSearch {
             if ($card) { $items.Add($card) }
         }
     }
+    $itemsArray = $items.ToArray()
+    if ($sortApplied -eq 'updated') {
+        # @(...) wrap: Sort-WagoItemsByUpdated returns a plain array (see
+        # its own doc comment) - wrapping the CALL in @(...) is what
+        # correctly preserves array-ness across the 0/1/N-element cases
+        # (a bare, unwrapped function-return of an array flattens a
+        # 1-element result to a scalar and a 0-element result to $null -
+        # a PowerShell function-return quirk, not specific to this file).
+        $itemsArray = @(Sort-WagoItemsByUpdated -Items $itemsArray)
+    }
 
     $body = [PSCustomObject]@{
-        items    = $items.ToArray()
-        page     = $(if ($paginator -and $paginator.current_page) { [int]$paginator.current_page } else { 1 })
-        lastPage = $(if ($paginator -and $paginator.last_page) { [int]$paginator.last_page } else { 1 })
-        total    = $(if ($paginator -and $paginator.total) { [int]$paginator.total } else { $items.Count })
+        items       = $itemsArray
+        page        = $(if ($paginator -and $paginator.current_page) { [int]$paginator.current_page } else { $pageNum })
+        lastPage    = $(if ($paginator -and $paginator.last_page) { [int]$paginator.last_page } else { 1 })
+        total       = $(if ($paginator -and $paginator.total) { [int]$paginator.total } else { $itemsArray.Count })
+        sortApplied = $sortApplied
+        categories  = @(Get-WagoCategoriesFromProps -Props $props)
     }
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
@@ -4333,7 +4614,7 @@ function Handle-WagoCategories {
     param($Context, $RouteMatch)
 
     try {
-        $props = Get-WagoCached -PageUri 'https://addons.wago.io/?game_version=retail'
+        $props = Get-WagoCached -PageUri ($Script:WagoBaseUrl + '/?game_version=retail')
     } catch {
         Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
         return
@@ -4349,7 +4630,7 @@ function Handle-WagoAddonDetails {
 
     $slug = $RouteMatch['slug']
     try {
-        $props = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug))
+        $props = Get-WagoCached -PageUri ($Script:WagoBaseUrl + '/addons/' + [System.Uri]::EscapeDataString($slug))
     } catch {
         Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
         return
@@ -4368,7 +4649,7 @@ function Handle-WagoAddonReleases {
     $slug = $RouteMatch['slug']
     $q = $Context.Request.QueryString
     $page = Get-QueryOrDefault -QueryString $q -Name 'page' -Default '1'
-    $uri = 'https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug) + '/versions?page=' + [System.Uri]::EscapeDataString($page)
+    $uri = $Script:WagoBaseUrl + '/addons/' + [System.Uri]::EscapeDataString($slug) + '/versions?page=' + [System.Uri]::EscapeDataString($page)
 
     try {
         $props = Get-WagoCached -PageUri $uri
@@ -4396,7 +4677,7 @@ function Handle-WagoAddonGallery {
     param($Context, $RouteMatch)
 
     $slug = $RouteMatch['slug']
-    $uri = 'https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($slug) + '/gallery'
+    $uri = $Script:WagoBaseUrl + '/addons/' + [System.Uri]::EscapeDataString($slug) + '/gallery'
     try {
         $props = Get-WagoCached -PageUri $uri
     } catch {
@@ -4433,6 +4714,528 @@ function Handle-WagoResolve {
         return
     }
     Send-Json -Context $Context -StatusCode 200 -Body @{ slug = $slug }
+}
+
+# =====================================================================
+# Wago growth snapshots and "Gaining this week" (Round 32, Expansion E29,
+# WAGO-BROWSE-SPEC.md sections 3.2/4). A Furphy-OWN measurement, never a
+# Wago-published figure - every place it reaches the UI says so explicitly
+# (see the spec's section 1 exact sentences). Captured at most once per
+# ~20h per Wago game_version, entirely from data already fetched the SAME
+# paced/cached way every other Wago call in this file is; sort=gaining
+# itself is a pure on-disk read with zero network/cache interaction.
+# =====================================================================
+
+function Get-WagoGrowthSnapshotPath {
+    <# <CacheDir>\wago-growth-<gameVersion>.json - one file per Wago game_version actually encountered. #>
+    param([Parameter(Mandatory = $true)][string]$GameVersion)
+    return (Join-Path -Path $Script:CacheDir -ChildPath ("wago-growth-{0}.json" -f $GameVersion))
+}
+
+function Read-WagoGrowthSnapshotFile {
+    <#
+      Loads/parses one wago-growth-<gameVersion>.json. Returns the parsed
+      object, or $null for missing/empty/corrupt/unreadable (never throws) -
+      Get-WagoGrowthRanking treats a $null SnapshotData exactly the same as
+      "zero snapshot entries." All disk I/O for the growth-ranking feature
+      lives in this one function and Save-WagoGrowthSnapshot below, so
+      Get-WagoGrowthRanking itself stays a pure, directly unit-testable
+      function (construct a snapshot object in memory, no disk needed).
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        return ($raw | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+}
+
+function Save-WagoGrowthSnapshot {
+    <#
+      Appends one freshly-crawled page-capture as a new snapshot entry to
+      <CacheDir>\wago-growth-<gameVersion>.json (atomic write - temp file +
+      Move-Item -Force, matching Save-CfCatalogueIndex's own pattern),
+      pruning to the most recent 21 entries (roughly three weeks of daily
+      captures allowing for gaps). firstCapturedAt is set once, on the
+      file's very first write, and never overwritten afterward even as
+      older snapshot entries themselves get pruned away.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$GameVersion,
+        [Parameter(Mandatory = $true)]$Items,
+        [Parameter(Mandatory = $true)][DateTime]$CapturedAtUtc
+    )
+
+    $path = Get-WagoGrowthSnapshotPath -GameVersion $GameVersion
+    $existing = Read-WagoGrowthSnapshotFile -Path $path
+
+    $capturedAtText = $CapturedAtUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $firstCapturedAt = $capturedAtText
+    if ($existing -and $existing.firstCapturedAt) { $firstCapturedAt = [string]$existing.firstCapturedAt }
+
+    $snapshots = New-Object 'System.Collections.Generic.List[object]'
+    if ($existing -and $existing.snapshots) {
+        foreach ($s in @($existing.snapshots)) { $snapshots.Add($s) }
+    }
+    $snapshots.Add([PSCustomObject]@{ capturedAt = $capturedAtText; items = $Items })
+
+    # Re-sort defensively by capturedAt before pruning - never trust
+    # on-disk array order - then keep only the most recent 21.
+    $sorted = @($snapshots | Sort-Object -Property capturedAt)
+    if ($sorted.Count -gt 21) {
+        $sorted = $sorted[($sorted.Count - 21)..($sorted.Count - 1)]
+    }
+
+    $fileBody = [PSCustomObject]@{
+        gameVersion     = $GameVersion
+        firstCapturedAt = $firstCapturedAt
+        snapshots       = $sorted
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $Script:CacheDir)) {
+            New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null
+        }
+        $json = ConvertTo-Json -InputObject $fileBody -Depth 8
+        $tmpPath = "$path.tmp"
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+        Move-Item -LiteralPath $tmpPath -Destination $path -Force
+    } catch {
+        Write-ServerLog "Failed to write Wago growth snapshot for '$GameVersion': $($_.Exception.Message)"
+    }
+}
+
+function Get-WagoGrowthRanking {
+    <#
+      WAGO-BROWSE-SPEC.md section 4.6 - the ENTIRE "gaining this week"
+      ranking algorithm. Pure function: touches no disk, no network, no
+      script-scope state, given an already-parsed snapshot-file object (or
+      $null, treated identically to "zero snapshot entries") - directly
+      unit-testable by constructing a snapshot object in memory. -NowUtc is
+      accepted for a stable, explicit interface (every other timestamp this
+      function reasons about is DATA-driven, off the snapshots' own
+      capturedAt values, not wall-clock time) but is not itself consulted
+      by the steps below.
+
+      1. Missing/corrupt/empty data, or zero snapshot entries -> not ready,
+         snapshotCount 0.
+      2. latest = the entry with the max capturedAt (re-sorted defensively -
+         never trust on-disk array order). An entry whose own capturedAt
+         fails to parse is dropped before this step (still counted toward
+         snapshotCount below, which reflects the RAW file entry count).
+      3. targetAge = latest.capturedAt - 7 days. Search every OTHER
+         snapshot in the inclusive window [latest-9d, latest-5d]; pick
+         whichever is numerically closest to targetAge, ties broken toward
+         the OLDER candidate (deterministic). None found (including "only
+         latest exists") -> not ready, but since/snapshotCount ARE
+         populated (there IS real data, just not old enough yet).
+      4. baseline = the chosen snapshot; build a slug -> downloads
+         dictionary from it (first occurrence wins on an intra-snapshot
+         duplicate slug - defensive; the crawl itself already de-dupes).
+      5. For every latest.items entry also present in baseline (first
+         occurrence wins on a duplicate slug in latest too) with
+         delta = latest.downloads - baseline.downloads STRICTLY positive:
+         keep. Flat, declining, or baseline-absent (a new top-150 entrant
+         this week, no honest baseline to compare against) entries are
+         EXCLUDED, never shown as "gaining."
+      6. Sort qualifying entries: delta descending, then latest-downloads
+         descending, then slug ascending - explicit three-key, never
+         relying on incidental stability.
+      7. Return ready=$true with since/asOf/baselineAsOf/snapshotCount/items.
+    #>
+    param($SnapshotData, [DateTime]$NowUtc)
+
+    $notReady = [PSCustomObject]@{
+        ready         = $false
+        since         = $null
+        asOf          = $null
+        baselineAsOf  = $null
+        snapshotCount = 0
+        items         = @()
+    }
+
+    if (-not $SnapshotData -or -not $SnapshotData.snapshots) { return $notReady }
+    $rawSnapshots = @($SnapshotData.snapshots)
+    if ($rawSnapshots.Count -eq 0) { return $notReady }
+
+    $totalCount = $rawSnapshots.Count
+    $firstCapturedAt = [string]$SnapshotData.firstCapturedAt
+
+    # Parse capturedAt on every entry defensively; an entry whose own
+    # capturedAt fails to parse is dropped from ranking consideration but
+    # still counted in snapshotCount (the RAW file entry count, per 4.6).
+    $parsed = New-Object 'System.Collections.Generic.List[object]'
+    $dateStyles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    foreach ($s in $rawSnapshots) {
+        try {
+            $dt = [DateTime]::Parse([string]$s.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture, $dateStyles)
+            $parsed.Add([PSCustomObject]@{ CapturedAt = $dt; Raw = $s })
+        } catch {
+            # Unparseable capturedAt on this one entry - drop it from
+            # ranking consideration, never abort the whole computation.
+        }
+    }
+    if ($parsed.Count -eq 0) {
+        $r = $notReady.PSObject.Copy()
+        $r.since = $firstCapturedAt
+        $r.snapshotCount = $totalCount
+        return $r
+    }
+
+    # Step 2: latest = max-capturedAt entry, re-sorted defensively.
+    $byTime = @($parsed | Sort-Object -Property CapturedAt)
+    $latestEntry = $byTime[$byTime.Count - 1]
+    $latest = $latestEntry.Raw
+    $latestCapturedAt = $latestEntry.CapturedAt
+
+    # Step 3: baseline = closest-to-7-days-back candidate in [-9d, -5d],
+    # ties broken toward the OLDER candidate.
+    $windowStart = $latestCapturedAt.AddDays(-9)
+    $windowEnd = $latestCapturedAt.AddDays(-5)
+    $targetAge = $latestCapturedAt.AddDays(-7)
+
+    $bestCandidate = $null
+    $bestDistanceSeconds = 0.0
+    foreach ($cand in $parsed) {
+        if ([object]::ReferenceEquals($cand, $latestEntry)) { continue }
+        if ($cand.CapturedAt -lt $windowStart -or $cand.CapturedAt -gt $windowEnd) { continue }
+        $distance = [Math]::Abs(($cand.CapturedAt - $targetAge).TotalSeconds)
+        if ($null -eq $bestCandidate -or $distance -lt $bestDistanceSeconds -or `
+            ($distance -eq $bestDistanceSeconds -and $cand.CapturedAt -lt $bestCandidate.CapturedAt)) {
+            $bestCandidate = $cand
+            $bestDistanceSeconds = $distance
+        }
+    }
+
+    if (-not $bestCandidate) {
+        return [PSCustomObject]@{
+            ready         = $false
+            since         = $firstCapturedAt
+            asOf          = $null
+            baselineAsOf  = $null
+            snapshotCount = $totalCount
+            items         = @()
+        }
+    }
+
+    $baseline = $bestCandidate.Raw
+    $baselineCapturedAt = $bestCandidate.CapturedAt
+
+    # Step 4: baseline slug -> downloads dictionary (first occurrence wins
+    # on an intra-snapshot duplicate slug - defensive).
+    $baselineDownloads = @{}
+    foreach ($it in @($baseline.items)) {
+        if (-not $it.slug) { continue }
+        $s = [string]$it.slug
+        if ($baselineDownloads.ContainsKey($s)) { continue }
+        $baselineDownloads[$s] = [int64]$it.downloads
+    }
+
+    # Step 5: qualifying entries (strictly positive delta only), first
+    # occurrence wins on a duplicate slug in latest.items too.
+    $qualifying = New-Object 'System.Collections.Generic.List[object]'
+    $seenLatestSlugs = @{}
+    foreach ($it in @($latest.items)) {
+        if (-not $it.slug) { continue }
+        $slug = [string]$it.slug
+        if ($seenLatestSlugs.ContainsKey($slug)) { continue }
+        $seenLatestSlugs[$slug] = $true
+        if (-not $baselineDownloads.ContainsKey($slug)) { continue }
+        $latestDownloads = [int64]$it.downloads
+        $delta = $latestDownloads - $baselineDownloads[$slug]
+        if ($delta -le 0) { continue }
+        $qualifying.Add([PSCustomObject]@{
+            slug           = $slug
+            name           = [string]$it.name
+            thumbnail      = [string]$it.thumbnail
+            downloads      = $latestDownloads
+            deltaDownloads = $delta
+            rank           = $(if ($null -ne $it.rank) { [int]$it.rank } else { $null })
+        })
+    }
+
+    # Step 6: delta descending, then latest-downloads descending, then slug
+    # ascending - explicit three-key, never incidental stability.
+    $sortedItems = @($qualifying | Sort-Object -Property `
+        @{ Expression = 'deltaDownloads'; Descending = $true }, `
+        @{ Expression = 'downloads'; Descending = $true }, `
+        @{ Expression = 'slug'; Descending = $false })
+
+    return [PSCustomObject]@{
+        ready         = $true
+        since         = $firstCapturedAt
+        asOf          = [string]$latest.capturedAt
+        baselineAsOf  = [string]$baseline.capturedAt
+        snapshotCount = $totalCount
+        items         = $sortedItems
+    }
+}
+
+function Send-WagoGainingResponse {
+    <#
+      sort=gaining's own response path, split out of Handle-WagoBrowse for
+      readability - a pure on-disk read (Read-WagoGrowthSnapshotFile +
+      Get-WagoGrowthRanking), zero network/cache interaction, always
+      answerable regardless of game state (WAGO-BROWSE-SPEC.md 3.5/4).
+    #>
+    param($Context, [string]$GameVersion, [int]$Page)
+
+    $snapshotPath = Get-WagoGrowthSnapshotPath -GameVersion $GameVersion
+    $snapshotData = Read-WagoGrowthSnapshotFile -Path $snapshotPath
+    $ranking = Get-WagoGrowthRanking -SnapshotData $snapshotData -NowUtc (Get-Date).ToUniversalTime()
+
+    $allItems = @($ranking.items)
+    $pageSize = 15
+    $totalCount = $allItems.Count
+    $lastPageNum = 1
+    if ($totalCount -gt 0) { $lastPageNum = [int][Math]::Ceiling($totalCount / [double]$pageSize) }
+    $startIdx = ($Page - 1) * $pageSize
+    $pageItems = @()
+    if ($startIdx -lt $totalCount) {
+        $endIdxExclusive = [Math]::Min($startIdx + $pageSize, $totalCount)
+        $pageItems = @($allItems[$startIdx..($endIdxExclusive - 1)])
+    }
+
+    # Categories: cache-ONLY lookup (never a live Wago request from this
+    # branch - "gaining" is a pure disk read and stays that way). An
+    # already-warm cache entry (e.g. from a recent Popular/Name/Updated
+    # browse) is used opportunistically; a cold miss just means [] - the
+    # category strip is shown disabled/greyed while this tab is active
+    # anyway (WAGO-BROWSE-SPEC.md section 2.2/2.4), so an empty list here
+    # is a harmless, honest degrade, never a broken control.
+    $catsForGaining = @()
+    try {
+        $catsProps = Get-WagoCached -PageUri ($Script:WagoBaseUrl + '/?game_version=retail') -AllowLiveFetch:$false
+        if ($catsProps) { $catsForGaining = @(Get-WagoCategoriesFromProps -Props $catsProps) }
+    } catch {
+        # Cache-only lookup failing is harmless here - fall through with [].
+    }
+
+    $body = [PSCustomObject]@{
+        items         = $pageItems
+        page          = $Page
+        lastPage      = $lastPageNum
+        total         = $totalCount
+        sortApplied   = 'gaining'
+        categories    = $catsForGaining
+        ready         = $ranking.ready
+        since         = $ranking.since
+        asOf          = $ranking.asOf
+        baselineAsOf  = $ranking.baselineAsOf
+        snapshotCount = $ranking.snapshotCount
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body $body
+}
+
+function Initialize-WagoGrowthSnapshots {
+    <#
+      WAGO-BROWSE-SPEC.md sections 4.1-4.4/4.7: called once at server
+      startup, immediately after Initialize-CfCatalogueIndex and strictly
+      before the request loop starts accepting connections (enforced by
+      the $Script:AcceptingRequests guard immediately below - see that
+      variable's own declaration near the other startup state for the full
+      rationale). The only periodic-refresh precedent in this file besides
+      that catalogue index; "daily" here means "checked once whenever this
+      long-lived process happens to (re)start," not a real timer.
+
+      For every INSTALLED flavour's own Wago game_version (deduped in
+      first-seen order - PTR/XPTR/Beta collapse into the already-present
+      'retail' entry for free, since their WagoField defaults there),
+      crawls up to 10 pages of Wago's own popularity listing (the SAME
+      Get-WagoCached/Invoke-WagoHttpRequest path, same pacing, every other
+      Wago call in this file uses) and writes/prunes
+      <CacheDir>\wago-growth-<gameVersion>.json, gated on:
+        1. Test-GameRunning, checked once before this function does
+           anything at all (mirrors Initialize-CfCatalogueIndex's own
+           startup gate verbatim) AND re-checked immediately before EVERY
+           SINGLE page fetch inside the crawl (the TOCTOU fix - a worst
+           case of up to 6 flavours x 10 pages must never keep firing live
+           requests for 20-30 seconds after WoW actually launched
+           mid-crawl). The instant it flips true from either check: stop
+           the ENTIRE run immediately (not just the current flavour),
+           keeping whatever pages the CURRENT flavour already captured
+           (the PARTIAL rule, below), and skip every remaining
+           not-yet-crawled flavour entirely for this startup - they get
+           another chance at the next 20h-gated opportunity.
+        2. A per-file 20-hour freshness check (that file's own last
+           entry's capturedAt) - per-game_version, not global, so one
+           flavour's recent capture never blocks a newly-installed
+           sibling's first one.
+
+      PARTIAL rule: if zero pages succeeded for a game_version, nothing is
+      written (never persist an empty-items snapshot - it would corrupt
+      the "closest snapshot" window search and the readiness rule); if 1+
+      pages succeeded before a later page failed or the game-running abort
+      fired, the snapshot IS still written with whatever was captured.
+
+      Exception-safe by construction (4.3): each game_version's crawl runs
+      inside its own try/catch (log-and-continue, matching this file's
+      never-throw style elsewhere), and $Script:CurrentFlavour is ALWAYS
+      restored to the real default in a `finally` around the whole loop -
+      the actual safety net, not the inner catch - so a bug even inside a
+      catch handler itself can never leave a non-default flavour stuck in
+      $Script:CurrentFlavour for the rest of this process's life.
+    #>
+
+    # 4.4 (REQUIRED FIX): turns "must run before the request loop starts
+    # accepting connections" from a doc-comment-only invariant into
+    # something that fails loudly - a startup crash, impossible to miss in
+    # server.log - instead of silently corrupting every flavour-scoped
+    # request (not just Wago's) for the rest of this process's life, should
+    # a future refactor move this call past that point without updating it.
+    if ($Script:AcceptingRequests) {
+        throw 'Initialize-WagoGrowthSnapshots must run before the request loop starts accepting connections - a refactor moved this call past that point without updating it.'
+    }
+
+    # Round-1-fixer (verifier finding 1): test-mode escape hatch - see
+    # $Script:SkipWagoGrowthCrawl's own declaration/comment near the top of
+    # this file for the full rationale. Checked first, before Test-GameRunning
+    # or anything else, so a test run never pays for even one live Wago
+    # request it did not ask for.
+    if ($Script:SkipWagoGrowthCrawl) {
+        Write-ServerLog 'Wago growth snapshot crawl skipped at startup: FURPHY_TEST_SKIP_WAGO_GROWTH is set (test mode)'
+        return
+    }
+
+    $crawlStart = Get-Date
+
+    if (Test-GameRunning) {
+        Write-ServerLog 'Wago growth snapshot crawl skipped at startup: WoW is running'
+        return
+    }
+
+    $installedFlavours = Get-CurrentInstalledFlavours
+
+    # 4.7: dedup distinct WagoField values in first-seen order (hard
+    # ceiling of 6, collapses to exactly 1 on the overwhelmingly common
+    # Retail-only machine).
+    $gameVersionsSeen = New-Object 'System.Collections.Generic.List[string]'
+    $flavourIdByGameVersion = @{}
+    foreach ($f in $installedFlavours) {
+        Set-CurrentFlavourContext -Flavor $f.id
+        $mapping = Get-CfFlavourMapping -Flavor $Script:CurrentFlavour -InstalledInterface $Script:ClientBuildInfo.clientInterface
+        $gv = $mapping.WagoField
+        if (-not $gv) { continue }
+        if (-not $flavourIdByGameVersion.ContainsKey($gv)) {
+            $flavourIdByGameVersion[$gv] = $f.id
+            $gameVersionsSeen.Add($gv)
+        }
+    }
+
+    $abortAll = $false
+    try {
+        foreach ($gv in $gameVersionsSeen) {
+            if ($abortAll) { break }
+            try {
+                Set-CurrentFlavourContext -Flavor $flavourIdByGameVersion[$gv]
+
+                if (Test-GameRunning) {
+                    Write-ServerLog 'Wago growth snapshot crawl aborted mid-run: WoW started'
+                    $abortAll = $true
+                    break
+                }
+
+                # Gate 2: per-file 20h freshness check.
+                $snapshotPath = Get-WagoGrowthSnapshotPath -GameVersion $gv
+                $existing = Read-WagoGrowthSnapshotFile -Path $snapshotPath
+                if ($existing -and $existing.snapshots -and @($existing.snapshots).Count -gt 0) {
+                    $lastRaw = @($existing.snapshots | Sort-Object -Property capturedAt | Select-Object -Last 1)[0]
+                    $lastCapturedAt = $null
+                    try {
+                        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+                        $lastCapturedAt = [DateTime]::Parse([string]$lastRaw.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+                    } catch {
+                        $lastCapturedAt = $null
+                    }
+                    if ($lastCapturedAt) {
+                        $ageHours = ((Get-Date).ToUniversalTime() - $lastCapturedAt).TotalHours
+                        if ($ageHours -lt 20) {
+                            Write-ServerLog "Wago growth snapshot for '$gv' is $([Math]::Round($ageHours, 1))h old - skipping (20h freshness gate)"
+                            continue
+                        }
+                    }
+                }
+
+                # Crawl up to 10 pages, re-checking game state before EVERY
+                # page fetch (the TOCTOU fix, section 4.2).
+                $capturedItems = New-Object 'System.Collections.Generic.List[object]'
+                $seenSlugs = @{}
+                $pagesFetched = 0
+                for ($p = 1; $p -le 10; $p++) {
+                    if (Test-GameRunning) {
+                        Write-ServerLog 'Wago growth snapshot crawl aborted mid-run: WoW started'
+                        $abortAll = $true
+                        break
+                    }
+                    $pageUri = $Script:WagoBaseUrl + '/?game_version=' + [System.Uri]::EscapeDataString($gv) + '&page=' + $p
+                    try {
+                        $pageProps = Get-WagoCached -PageUri $pageUri -AllowLiveFetch:$true
+                    } catch {
+                        Write-ServerLog "Wago growth snapshot page fetch failed for '$gv' page $p (keeping what was already captured this run): $($_.Exception.Message)"
+                        break
+                    }
+                    $pagesFetched++
+                    $paginator = $pageProps.addons
+                    if (-not $paginator -or -not $paginator.data) { break }
+                    $rankBase = ($p - 1) * 15
+                    $rankOffset = 0
+                    foreach ($cardHtml in @($paginator.data)) {
+                        $rankOffset++
+                        $card = ConvertFrom-WagoSearchCardHtml -Html ([string]$cardHtml)
+                        if (-not $card -or -not $card.slug) { continue }
+                        # Defensive de-dup by slug (keep first/lowest-rank
+                        # occurrence) - observed live single-digit
+                        # download-count drift between near-simultaneous
+                        # requests can occasionally shuffle an addon across
+                        # a page boundary mid-crawl.
+                        if ($seenSlugs.ContainsKey($card.slug)) { continue }
+                        $seenSlugs[$card.slug] = $true
+                        $capturedItems.Add([PSCustomObject]@{
+                            slug      = $card.slug
+                            name      = $card.name
+                            thumbnail = $card.thumbnail
+                            downloads = $(if ($null -ne $card.downloads) { [int64]$card.downloads } else { 0 })
+                            rank      = ($rankBase + $rankOffset)
+                        })
+                    }
+                    $currentPage = 1
+                    $lastPageOfListing = 1
+                    if ($paginator.current_page) { $currentPage = [int]$paginator.current_page }
+                    if ($paginator.last_page) { $lastPageOfListing = [int]$paginator.last_page }
+                    if ($currentPage -ge $lastPageOfListing) { break }
+                }
+
+                if ($capturedItems.Count -eq 0) {
+                    # PARTIAL rule (4.3): zero pages succeeded - never
+                    # persist an empty-items snapshot.
+                    Write-ServerLog "Wago growth snapshot crawl for '$gv' captured nothing this run - not writing a snapshot"
+                } else {
+                    Save-WagoGrowthSnapshot -GameVersion $gv -Items $capturedItems.ToArray() -CapturedAtUtc (Get-Date).ToUniversalTime()
+                    Write-ServerLog "Wago growth snapshot captured for '$gv': $($capturedItems.Count) items across $pagesFetched page(s)"
+                }
+
+                if ($abortAll) { break }
+            } catch {
+                Write-ServerLog "Wago growth snapshot crawl failed for game_version '$gv': $($_.Exception.Message)"
+            }
+        }
+    } finally {
+        # The ACTUAL safety net (4.3) - always restore, even if something
+        # above threw past its own catch (a bug in the catch handler
+        # itself, say).
+        Set-CurrentFlavourContext -Flavor (Get-DefaultFlavourId -InstalledFlavours $Script:InstalledFlavoursAtStartup)
+    }
+
+    # 4.5's mitigation: log elapsed time on every run that actually
+    # started (not when gated out entirely at the top) so the added
+    # startup cost is measured and visible in server.log, not theorized.
+    $elapsedSeconds = ((Get-Date) - $crawlStart).TotalSeconds
+    Write-ServerLog "Wago growth snapshot crawl finished in $([Math]::Round($elapsedSeconds, 1))s"
 }
 
 # =====================================================================
@@ -5076,7 +5879,7 @@ function Get-WagoAutoMatch {
 
     $match = $null
     try {
-        $uri = 'https://addons.wago.io/?game_version=retail&search=' + [System.Uri]::EscapeDataString($Name)
+        $uri = $Script:WagoBaseUrl + '/?game_version=retail&search=' + [System.Uri]::EscapeDataString($Name)
         $props = Get-WagoCached -PageUri $uri
         $normName = Get-WagoAutoMatchNormalizedName -Value $Name
         if ($props -and $props.addons -and $props.addons.data) {
@@ -5085,7 +5888,7 @@ function Get-WagoAutoMatch {
                 if (-not $card -or -not $card.name) { continue }
                 if ((Get-WagoAutoMatchNormalizedName -Value $card.name) -ne $normName) { continue }
                 try {
-                    $detailProps = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($card.slug))
+                    $detailProps = Get-WagoCached -PageUri ($Script:WagoBaseUrl + '/addons/' + [System.Uri]::EscapeDataString($card.slug))
                     $authorOk = [string]::IsNullOrWhiteSpace($Author)
                     if (-not $authorOk -and $detailProps -and $detailProps.metadata -and $detailProps.metadata.developers) {
                         $authorLower = $Author.ToLowerInvariant()
@@ -5152,7 +5955,7 @@ function Get-CfEnrichmentNoKey {
     }
     if ($wagoRef) {
         try {
-            $props = Get-WagoCached -PageUri ('https://addons.wago.io/addons/' + [System.Uri]::EscapeDataString($wagoRef))
+            $props = Get-WagoCached -PageUri ($Script:WagoBaseUrl + '/addons/' + [System.Uri]::EscapeDataString($wagoRef))
             if ($props -and $props.addon) {
                 $downloadCount = $null
                 $lastUpdated = $null
@@ -7269,7 +8072,13 @@ $Script:Routes = @(
     # caller - the catalogue still refreshes itself automatically.
     @{ Method = 'GET'; Pattern = '^/api/cf/browse$'; Handler = 'Handle-CfBrowse' }
     @{ Method = 'GET'; Pattern = '^/api/cf/enrich/(?<id>[^/]+)$'; Handler = 'Handle-CfEnrich' }
-    @{ Method = 'GET'; Pattern = '^/api/wago/search$'; Handler = 'Handle-WagoSearch' }
+    # Round 32 (WAGO-BROWSE-SPEC.md, Expansion E29): Handle-WagoSearch was
+    # renamed Handle-WagoBrowse and widened into a real category/sort
+    # browse - both route patterns dispatch to the SAME renamed handler so
+    # /api/wago/search keeps answering exactly as before (additive fields
+    # only) for any existing caller/mock fixture.
+    @{ Method = 'GET'; Pattern = '^/api/wago/search$'; Handler = 'Handle-WagoBrowse' }
+    @{ Method = 'GET'; Pattern = '^/api/wago/browse$'; Handler = 'Handle-WagoBrowse' }
     @{ Method = 'GET'; Pattern = '^/api/wago/categories$'; Handler = 'Handle-WagoCategories' }
     @{ Method = 'GET'; Pattern = '^/api/wago/resolve$'; Handler = 'Handle-WagoResolve' }
     @{ Method = 'GET'; Pattern = '^/api/wago/addons/(?<slug>[^/]+)/releases$'; Handler = 'Handle-WagoAddonReleases' }
@@ -7490,7 +8299,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.15.0'
+$Script:Version = '1.16.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -7529,6 +8338,15 @@ $Script:UpdatesCheckedAtByFlavour = @{}
 # for the same S5.3 reason as the three dictionaries just above.
 $Script:LastCheckFailedByFlavour = @{}
 $Script:LastCheckErrorByFlavour = @{}
+# WAGO-BROWSE-SPEC.md section 4.4 (REQUIRED FIX, judge's data-review finding
+# 2): makes "everything that mutates $Script:CurrentFlavour/
+# $Script:ClientBuildInfo during startup, before the request loop's first
+# BeginGetContext, is safe" a SELF-ENFORCING invariant instead of a
+# doc-comment-only one. Flips to $true as the very first statement inside
+# the request loop's own try block, right after BeginGetContext is first
+# called (see that call site's own comment) - Initialize-WagoGrowthSnapshots
+# throws immediately if it is ever called while this is already $true.
+$Script:AcceptingRequests = $false
 $Script:LastRequestTime = Get-Date
 # E19: see Invoke-Route's static-file branch / Handle-Ping - flips to
 # 'webview2' the first time the native host's Furphy tab loads.
@@ -7731,6 +8549,14 @@ Write-ServerLog "Listening on $(($listener.Prefixes | ForEach-Object { $_ }) -jo
 # blocks startup on failure - unchanged from before the move.
 Initialize-CfCatalogueIndex
 
+# WAGO-BROWSE-SPEC.md section 4.1: runs once, immediately after the
+# catalogue index above, still strictly before the request loop's first
+# BeginGetContext - $Script:AcceptingRequests (declared near the other
+# startup state above, still $false here) makes that ordering
+# self-enforcing rather than doc-comment-only, see that variable's own
+# comment and Initialize-WagoGrowthSnapshots' own doc comment.
+Initialize-WagoGrowthSnapshots
+
 if ($OpenBrowser) {
     $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
     $appUrl = "http://localhost:$Script:Port/"
@@ -7749,6 +8575,11 @@ $Script:LastRequestTime = Get-Date
 
 try {
     $pending = $listener.BeginGetContext($null, $null)
+    # WAGO-BROWSE-SPEC.md section 4.4: the request loop is now officially
+    # "accepting connections" - Initialize-WagoGrowthSnapshots (and any
+    # future startup routine that mutates $Script:CurrentFlavour the same
+    # transient way) must never run after this point.
+    $Script:AcceptingRequests = $true
     while ($true) {
         if ($Script:ShuttingDown) { break }
 

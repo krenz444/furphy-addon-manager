@@ -313,16 +313,97 @@ const Mock = (function () {
     { name: "Simple Damage Meter", projectId: null, fileId: "r7k2m9q1", version: "3.4.0", fileName: "simple-damage-meter-r7k2m9q1.zip", installedAt: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), folders: ["SimpleDamageMeter"], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: "SDM001", slug: "simple-damage-meter", curseId: "654321", updateAvailable: { fileId: "r8n4p2s3", version: "3.5.0" } }
   ];
 
+  // Round 32 (WAGO-BROWSE-SPEC.md): the original 4-entry fixture is kept
+  // verbatim (mockCfEnrich id 654321 and the wagoAddonMatch drawer handler
+  // below both key off "simple-damage-meter" - removing it would break
+  // those) and extended with author/summary/downloads/updatedAt/
+  // categoryIds so the new sort/category/meta-line UI has real fields to
+  // render, plus enough additional real-named entries (from
+  // WAGO-BROWSE-RESEARCH.md's own live capture, section 2) to exercise
+  // Load more (>15 results unfiltered) and a real per-category split.
   const wagoBrowsePool = [
-    { slug: "simple-damage-meter", name: "Simple Damage Meter", thumbnail: "" },
-    { slug: "tidy-bags", name: "Tidy Bags", thumbnail: "" },
-    { slug: "quick-camera", name: "Quick Camera", thumbnail: "" },
-    { slug: "raid-cooldowns", name: "Raid Cooldowns", thumbnail: "" }
+    { slug: "simple-damage-meter", name: "Simple Damage Meter", thumbnail: "", author: "MockDev", summary: "A lightweight combat meter for quick raid analysis.", downloads: 42000, updatedAt: "Aug 12, 2026", categoryIds: [19] },
+    { slug: "tidy-bags", name: "Tidy Bags", thumbnail: "", author: "BagAuthor", summary: "Keeps your bags sorted automatically.", downloads: 15200, updatedAt: "Jul 30, 2026", categoryIds: [9] },
+    { slug: "quick-camera", name: "Quick Camera", thumbnail: "", author: "CamDev", summary: "Quick camera distance and angle presets.", downloads: 8300, updatedAt: "Jun 18, 2026", categoryIds: [17] },
+    { slug: "raid-cooldowns", name: "Raid Cooldowns", thumbnail: "", author: "CDTracker", summary: "Tracks raid cooldowns for your group.", downloads: 21100, updatedAt: "Sep 1, 2026", categoryIds: [14] },
+    { slug: "details-damage-meter-standalone", name: "Details! Damage Meter", thumbnail: "", author: "Terciob", summary: "Famous combat analysis addon, compute all sorts of information related to combat, now in a standalone version.", downloads: 7581560, updatedAt: "Aug 18, 2026", categoryIds: [19] },
+    { slug: "raiderio-mythic-plus-raid-progress-and-recruitment", name: "Raider.IO Mythic Plus, Raid Progress, and Recruitment", thumbnail: "", author: "TheFakeJah", summary: "A companion addon for the Mythic+ Rankings site, Raider.IO - view scores and raid progress for players without leaving the game.", downloads: 7453885, updatedAt: "Sep 6, 2026", categoryIds: [8, 17] },
+    { slug: "deadly-boss-mods-dbm", name: "Deadly Boss Mods (DBM)", thumbnail: "", author: "MysticalOS", summary: "The ultimate encounter helper - fight info that's easy to process at a glance.", downloads: 7128510, updatedAt: "Sep 2, 2026", categoryIds: [14] },
+    { slug: "bigwigs", name: "BigWigs (Boss Timers & Tools)", thumbnail: "", author: "Funkeh", summary: "Modular and lightweight approach to providing you with the tools you need to beat any boss encounter.", downloads: 5500796, updatedAt: "Sep 5, 2026", categoryIds: [14] },
+    { slug: "littlewigs", name: "LittleWigs", thumbnail: "", author: "Funkeh", summary: "Boss warnings for 5-man dungeons and scenarios.", downloads: 5070714, updatedAt: "Aug 30, 2026", categoryIds: [14] },
+    { slug: "plater-nameplates", name: "Plater-Nameplates", thumbnail: "", author: "Terciob", summary: "A nameplate addon with an extraordinary amount of settings, out of the box debuff tracking, and threat coloring.", downloads: 3968099, updatedAt: "Sep 5, 2026", categoryIds: [16] },
+    { slug: "rarescanner", name: "RareScanner", thumbnail: "", author: "maqjav", summary: "Tools to help you track rare NPCs, treasures, and events while you play.", downloads: 3072781, updatedAt: "Sep 3, 2026", categoryIds: [17, 22] },
+    { slug: "mythic-dungeon-tools", name: "Mythic Dungeon Tools - MDT", thumbnail: "", author: "Nnoggie", summary: "Addon for planning and optimizing Mythic+ dungeon runs.", downloads: 2329346, updatedAt: "Sep 5, 2026", categoryIds: [14] },
+    { slug: "tomtom", name: "TomTom", thumbnail: "", author: "Cladhaire", summary: "Waypoints and coordinates on your map and minimap.", downloads: 1472296, updatedAt: "Aug 29, 2026", categoryIds: [11] },
+    { slug: "world-quest-tracker", name: "World Quest Tracker", thumbnail: "", author: "Terciob", summary: "Adds a list of quests to the world map and zone maps.", downloads: 1299134, updatedAt: "Aug 18, 2026", categoryIds: [13, 11] },
+    { slug: "tradeskillmaster", name: "TradeSkillMaster", thumbnail: "", author: "Sapu", summary: "Helps both casual gold makers and expert auctioneers manage crafting and the auction house.", downloads: 1048952, updatedAt: "Aug 17, 2026", categoryIds: [2, 15] },
+    { slug: "plumber", name: "Plumber", thumbnail: "", author: "Peterodox", summary: "Quality-of-life features, including tracking stackable items on your bag UI.", downloads: 897894, updatedAt: "Sep 3, 2026", categoryIds: [9, 17] },
+    { slug: "premade-groups-filter", name: "Premade Groups Filter", thumbnail: "", author: "Bernhard", summary: "Powerful filtering for premade group listings.", downloads: 864380, updatedAt: "Aug 28, 2026", categoryIds: [4, 8] },
+    { slug: "omnicc", name: "OmniCC", thumbnail: "", author: "Tuller", summary: "Cooldown count for everything.", downloads: 836928, updatedAt: "Aug 6, 2026", categoryIds: [18] },
+    { slug: "simulationcraft", name: "SimulationCraft", thumbnail: "", author: "seriallos", summary: "Simplifies generating a SimulationCraft profile from your current character.", downloads: 830003, updatedAt: "Aug 21, 2026", categoryIds: [19, 15] },
+    { slug: "angry-keystones", name: "Angry Keystones", thumbnail: "", author: "Ermad", summary: "Displays additional information for Mythic Keystones.", downloads: 819914, updatedAt: "Aug 27, 2026", categoryIds: [14] },
+    { slug: "tomcats-tours", name: "TomCat's Tours", thumbnail: "", author: "TomCat", summary: "Rares, treasures, and more.", downloads: 807330, updatedAt: "Jun 22, 2026", categoryIds: [24, 27] }
   ];
+  // Round 32: the real, fixed 29-category list (WAGO-BROWSE-RESEARCH.md
+  // section 2's live capture of props.allCategories) - verbatim server
+  // order, INCLUDING the one out-of-numeric-sequence entry (id 5, "Buffs &
+  // Debuffs", genuinely sorts after id 28 upstream, not a typo).
   const wagoCategoriesMock = [
-    { id: 1, display_name: "Combat" },
-    { id: 2, display_name: "Interface" },
-    { id: 3, display_name: "Utility" }
+    { id: 1, display_name: "Chat & Communication" },
+    { id: 2, display_name: "Auction & Economy" },
+    { id: 3, display_name: "Audio & Video" },
+    { id: 4, display_name: "PvP" },
+    { id: 6, display_name: "Artwork" },
+    { id: 7, display_name: "Data Export" },
+    { id: 8, display_name: "Guild" },
+    { id: 9, display_name: "Bags & Inventory" },
+    { id: 10, display_name: "Libraries" },
+    { id: 11, display_name: "Map & Minimap" },
+    { id: 12, display_name: "Mail" },
+    { id: 13, display_name: "Quests & Leveling" },
+    { id: 14, display_name: "Boss Encounters" },
+    { id: 15, display_name: "Professions" },
+    { id: 16, display_name: "Unit Frames" },
+    { id: 17, display_name: "Miscellaneous" },
+    { id: 18, display_name: "Action Bars" },
+    { id: 19, display_name: "Combat" },
+    { id: 20, display_name: "Class" },
+    { id: 21, display_name: "Development Tools" },
+    { id: 22, display_name: "Minigames" },
+    { id: 23, display_name: "Tooltip" },
+    { id: 24, display_name: "Roleplay" },
+    { id: 25, display_name: "Plugins" },
+    { id: 26, display_name: "Achievements" },
+    { id: 27, display_name: "Companions" },
+    { id: 28, display_name: "Garrison" },
+    { id: 5, display_name: "Buffs & Debuffs" },
+    { id: 29, display_name: "Transmog" }
+  ];
+  function wagoCategoriesForResponse() {
+    return wagoCategoriesMock.map(function (c) { return { id: c.id, displayName: c.display_name }; });
+  }
+
+  // Round 32: "Gaining this week" is Furphy's own measurement, never a
+  // Wago field - a small separate fixture (rank/deltaDownloads, already
+  // sorted delta-descending) plus fixed since/asOf/baselineAsOf anchors so
+  // the not-ready and ready copy both have something real to say.
+  // ?mock=1&wagoGainingReady=1 switches from the not-ready state (the
+  // default - matches a freshly-installed app that hasn't held two
+  // snapshots yet) to the ready state, mirroring the ?uninstallBusy=1 /
+  // ?game=1 test-only query convention already used elsewhere in this file.
+  const wagoGainSinceIso = new Date(Date.now() - 9 * 24 * 3600e3).toISOString();
+  const wagoGainAsOfIso = new Date(Date.now() - 3 * 3600e3).toISOString();
+  const wagoGainBaselineAsOfIso = new Date(Date.now() - 8 * 24 * 3600e3).toISOString();
+  const wagoGainingPool = [
+    { slug: "mythic-dungeon-tools", name: "Mythic Dungeon Tools - MDT", thumbnail: "", downloads: 2410000, deltaDownloads: 80654 },
+    { slug: "plater-nameplates", name: "Plater-Nameplates", thumbnail: "", downloads: 4015000, deltaDownloads: 46901 },
+    { slug: "rarescanner", name: "RareScanner", thumbnail: "", downloads: 3110000, deltaDownloads: 37219 },
+    { slug: "angry-keystones", name: "Angry Keystones", thumbnail: "", downloads: 852000, deltaDownloads: 32086 },
+    { slug: "tomtom", name: "TomTom", thumbnail: "", downloads: 1489000, deltaDownloads: 16704 },
+    { slug: "premade-groups-filter", name: "Premade Groups Filter", thumbnail: "", downloads: 881000, deltaDownloads: 16620 },
+    { slug: "omnicc", name: "OmniCC", thumbnail: "", downloads: 849000, deltaDownloads: 12072 },
+    { slug: "world-quest-tracker", name: "World Quest Tracker", thumbnail: "", downloads: 1310000, deltaDownloads: 10866 },
+    { slug: "simulationcraft", name: "SimulationCraft", thumbnail: "", downloads: 838000, deltaDownloads: 7997 }
   ];
   function fakeWagoReleases(slug) {
     const out = [];
@@ -1111,6 +1192,88 @@ const Mock = (function () {
         const list = wagoBrowsePool.filter(function (x) { return !wq || x.name.toLowerCase().indexOf(wq) !== -1; });
         return { items: list, page: 1, lastPage: 1, total: list.length };
       }
+      // Round 32 (WAGO-BROWSE-SPEC.md section 3): the category/sort/
+      // paging/Gaining-this-week browse endpoint. sort absorbs anything it
+      // doesn't recognize (a stale client value included) down to
+      // "popular", exactly like the real server's contract - never
+      // forwards categoryId while sort==='gaining'. ?game=1 (the same
+      // flag /api/state already answers to) exercises the game-running
+      // gate for the three live-fetch sorts; Gaining is never blocked by
+      // it, matching section 3.5. ?wagoGainingReady=1 switches Gaining
+      // from its not-ready fixture to its ready one.
+      if (p === "/api/wago/browse") {
+        const PAGE_SIZE = 15;
+        const rawSort = (q.get("sort") || "").toLowerCase();
+        const sort = ["popular", "name", "updated", "gaining"].indexOf(rawSort) !== -1 ? rawSort : "popular";
+        let page = parseInt(q.get("page"), 10);
+        if (!page || page < 1) page = 1;
+
+        if (sort === "gaining") {
+          const gainReady = new URLSearchParams(location.search).get("wagoGainingReady") === "1";
+          // WAGO-BROWSE-SPEC.md section 4.6 point 1: zero snapshots ever
+          // captured for this game_version (missing/corrupt/empty file) -
+          // since=null, snapshotCount=0. Distinct from the default not-ready
+          // fixture below (point 3: since known, one snapshot exists but none
+          // falls in the 5-9 day window yet). ?wagoGainingNoSnapshots=1
+          // exercises this true fresh-install state for the client copy.
+          const gainNoSnapshots = new URLSearchParams(location.search).get("wagoGainingNoSnapshots") === "1";
+          if (gainNoSnapshots) {
+            return {
+              items: [], page: 1, lastPage: 1, total: 0, sortApplied: "gaining",
+              categories: wagoCategoriesForResponse(),
+              ready: false, since: null, asOf: null, baselineAsOf: null, snapshotCount: 0
+            };
+          }
+          if (!gainReady) {
+            return {
+              items: [], page: 1, lastPage: 1, total: 0, sortApplied: "gaining",
+              categories: wagoCategoriesForResponse(),
+              ready: false, since: wagoGainSinceIso, asOf: null, baselineAsOf: null, snapshotCount: 1
+            };
+          }
+          const gainItems = wagoGainingPool.map(function (x, idx) {
+            return { slug: x.slug, name: x.name, thumbnail: x.thumbnail, downloads: x.downloads, deltaDownloads: x.deltaDownloads, rank: idx + 1 };
+          });
+          const gainSlice = gainItems.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+          return {
+            items: gainSlice, page: page, lastPage: Math.max(1, Math.ceil(gainItems.length / PAGE_SIZE)), total: gainItems.length,
+            sortApplied: "gaining", categories: wagoCategoriesForResponse(),
+            ready: true, since: wagoGainSinceIso, asOf: wagoGainAsOfIso, baselineAsOf: wagoGainBaselineAsOfIso, snapshotCount: 9
+          };
+        }
+
+        // Round 32/3.5: no live Wago request (real or mocked) while a WoW
+        // client is running - the three live-fetch sorts answer 200 with
+        // nothing rather than a blank hang, same as the real corrected gate.
+        if (new URLSearchParams(location.search).get("game") === "1") {
+          return { items: [], page: 1, lastPage: 1, total: 0, sortApplied: sort, categories: [], gameActive: true };
+        }
+
+        const wq = (q.get("q") || "").trim().toLowerCase();
+        const catParam = q.get("categoryId");
+        const categoryId = /^[0-9]+$/.test(catParam || "") ? parseInt(catParam, 10) : null;
+
+        let list = wagoBrowsePool.slice();
+        if (wq) list = list.filter(function (x) { return x.name.toLowerCase().indexOf(wq) !== -1; });
+        if (categoryId !== null) list = list.filter(function (x) { return x.categoryIds.indexOf(categoryId) !== -1; });
+
+        if (sort === "name") {
+          list.sort(function (a, b) { return a.name.localeCompare(b.name); });
+        } else if (sort === "updated") {
+          list.sort(function (a, b) { return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(); });
+        } else {
+          list.sort(function (a, b) { return b.downloads - a.downloads; }); // "popular" - Wago's own default order
+        }
+
+        const total = list.length;
+        const items = list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(function (x) {
+          return { slug: x.slug, name: x.name, thumbnail: x.thumbnail, author: x.author, summary: x.summary, downloads: x.downloads, updatedAt: x.updatedAt };
+        });
+        return {
+          items: items, page: page, lastPage: Math.max(1, Math.ceil(total / PAGE_SIZE)), total: total,
+          sortApplied: sort, categories: wagoCategoriesForResponse()
+        };
+      }
       if (p === "/api/wago/categories") return { data: wagoCategoriesMock };
       const wagoAddonMatch = p.match(/^\/api\/wago\/addons\/([^/]+)$/);
       if (wagoAddonMatch) {
@@ -1553,7 +1716,11 @@ const Api = (function () {
     { method: "POST", re: /^\/api\/scan\/delete$/ },
     { method: "GET", re: /^\/api\/export$/ },
     { method: "POST", re: /^\/api\/import$/ },
-    { method: "GET", re: /^\/api\/wago\/search$/ }
+    { method: "GET", re: /^\/api\/wago\/search$/ },
+    // Round 32 (WAGO-BROWSE-SPEC.md section 3): the new browse endpoint is
+    // flavour-scoped exactly like its /api/wago/search predecessor - same
+    // per-flavour game_version resolution, just a wider query surface.
+    { method: "GET", re: /^\/api\/wago\/browse$/ }
   ];
   function needsFlavourParam(method, pathname) {
     return FLAVOUR_SCOPED_PATTERNS.some(function (p) { return p.method === method && p.re.test(pathname); });
@@ -1710,6 +1877,11 @@ const Api = (function () {
     // E12 (Wago second source): keyless, no NoKey/409 handling needed -
     // Wago never requires an API key.
     wagoSearch: function (params) { return request("GET", "/api/wago/search" + qs(params)); },
+    // Round 32 (WAGO-BROWSE-SPEC.md section 3): the category/sort/paging/
+    // Gaining-this-week browse endpoint - wagoSearch above is kept as the
+    // legacy alias the server still answers, but Views.browse now calls
+    // this one. params: {q, sort, categoryId, page}.
+    wagoBrowse: function (params) { return request("GET", "/api/wago/browse" + qs(params)); },
     wagoCategories: function () { return request("GET", "/api/wago/categories"); },
     wagoAddon: function (slug) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug)); },
     wagoReleases: function (slug, params) { return request("GET", "/api/wago/addons/" + encodeURIComponent(slug) + "/releases" + qs(params)); },
@@ -1810,7 +1982,24 @@ const Store = (function () {
     browse: {
       tab: loadBrowseTabPref(),   // 'wago' | 'curseforge'
       query: "",
-      wago: { loading: false, loaded: false, error: null, results: [] }
+      // Round 32 (WAGO-BROWSE-SPEC.md): sort/categoryId/page are NOT
+      // persisted (same as query - resets to the default every time this
+      // view is freshly loaded, matching the app's existing "Browse state
+      // is a session, not a saved preference" behavior). categories/
+      // sortApplied/gameActive/gain* mirror the LAST successful
+      // /api/wago/browse response so a re-render between fetches (a theme
+      // change, say) has real data to paint instead of a blank frame.
+      wago: {
+        loading: false, loaded: false, error: null, results: [],
+        sort: "popular",        // 'popular' | 'updated' | 'name' | 'gaining'
+        categoryId: null,       // number|null - selected category, never sent upstream while sort==='gaining'
+        categories: [],         // [{id, displayName}] - arrives inline on every /api/wago/browse response
+        page: 1, lastPage: 1, total: 0,
+        sortApplied: "popular",
+        gameActive: false,
+        // Gaining this week only (meaningful when sortApplied==='gaining'):
+        gainReady: false, gainSince: null, gainAsOf: null, gainBaselineAsOf: null, gainSnapshotCount: 0
+      }
     },
 
     drawer: {
@@ -5434,113 +5623,354 @@ Views.browse = (function () {
   let rectObserver = null;
   let rafPending = false;
   let installNoteShown = false;
+  // Round 32 (WAGO-BROWSE-SPEC.md): pure UI chrome, not app state - never
+  // persisted, resets to collapsed on every fresh load like the rest of
+  // Browse's own transient state.
+  let categoriesExpanded = false;
+  // Stale-response guard for fetchWago below: every call bumps this and
+  // captures its own value; a response that lands after a NEWER call has
+  // already started (a fast sort/category click, say) is discarded rather
+  // than clobbering state a later request already owns - same idea as the
+  // old query-equality check this replaces, generalized to cover
+  // sort/categoryId/page too instead of query alone.
+  let wagoFetchSeq = 0;
+
+  // Below this width, all 29 categories don't comfortably fit one row -
+  // collapse to a curated subset + "More categories +N" (WAGO-BROWSE-
+  // SPEC.md 2.2's "default window" case). At/above it (Eric's own wide
+  // window, section 2.7's mockup-2), everything fits without collapsing.
+  const WAGO_CAT_WIDE_BREAKPOINT = 1400;
+  const WAGO_CAT_COLLAPSED_COUNT = 8;
 
   function currentTab() { return Store.state.browse.tab; }
 
-  /* ---- Wago (in-app search) ---- */
+  /* ---- Wago (in-app browse: search + sort + categories + paging) ---- */
 
-  async function searchWago(reset) {
+  // Human day (no time-of-day - Wago's own date strings, and this round's
+  // since/asOf/baselineAsOf fields, all read more naturally as a day than a
+  // timestamp). Distinct from Utils.fullDate (which includes a time and is
+  // used for the row meta line's hover tooltip, per the existing E12/Round
+  // 17 convention that stays unchanged).
+  function formatWagoDay(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  function categoryDisplayName(id) {
+    const found = Store.state.browse.wago.categories.filter(function (c) { return c.id === id; })[0];
+    return found ? found.displayName : null;
+  }
+
+  // GRAFT 1 (WAGO-BROWSE-SPEC.md 2.1): context-aware placeholder - the
+  // Gaining tab's own "Not available..." text is applied by the caller
+  // (renderWagoResults), not here, since this only ever answers for the
+  // three category-aware tabs.
+  function wagoSearchPlaceholder() {
+    const catId = Store.state.browse.wago.categoryId;
+    if (catId == null) return "Search Wago addons...";
+    const name = categoryDisplayName(catId);
+    return name ? ("Search in " + name + "...") : "Search Wago addons...";
+  }
+
+  // The one fetch function behind every Wago interaction - search typing,
+  // a sort tab, a category chip, and Load more all funnel through this
+  // with reset=true (fresh page 1, replacing results) or reset=false
+  // (append page+1, Load more only).
+  async function fetchWago(reset) {
     const b = Store.state.browse;
+    const w = b.wago;
     const query = b.query;
-    if (reset) { b.wago.results = []; }
-    b.wago.loading = true;
-    b.wago.error = null;
+    const sort = w.sort;
+    const categoryId = w.categoryId;
+    const page = reset ? 1 : (w.page + 1);
+    const seq = ++wagoFetchSeq;
+    if (reset) w.results = [];
+    w.loading = true;
+    w.error = null;
     renderWagoResults();
     try {
-      const res = await Api.wagoSearch({ q: query, page: 1 });
-      if (Store.state.browse.query !== query) return;
-      b.wago.results = res.items || [];
-      b.wago.loaded = true;
-      b.wago.loading = false;
+      const params = { q: query, sort: sort, page: page };
+      // CONSTRAINT (WAGO-BROWSE-SPEC.md 4.8, mirrored client-side): Gaining
+      // this week never scopes by category - never sent upstream for it.
+      if (categoryId != null && sort !== "gaining") params.categoryId = categoryId;
+      const res = await Api.wagoBrowse(params);
+      if (seq !== wagoFetchSeq) return; // superseded by a newer request
+      w.results = reset ? (res.items || []) : w.results.concat(res.items || []);
+      w.loaded = true;
+      w.loading = false;
+      w.page = res.page || page;
+      w.lastPage = res.lastPage || 1;
+      w.total = res.total || 0;
+      w.sortApplied = res.sortApplied || sort;
+      w.gameActive = !!res.gameActive;
+      if (res.categories && res.categories.length) w.categories = res.categories;
+      if (w.sortApplied === "gaining") {
+        w.gainReady = !!res.ready;
+        w.gainSince = res.since || null;
+        w.gainAsOf = res.asOf || null;
+        w.gainBaselineAsOf = res.baselineAsOf || null;
+        w.gainSnapshotCount = res.snapshotCount || 0;
+      }
     } catch (err) {
-      if (Store.state.browse.query !== query) return;
-      b.wago.loading = false;
-      b.wago.error = err;
+      if (seq !== wagoFetchSeq) return;
+      w.loading = false;
+      w.error = err;
     }
     renderWagoResults();
   }
 
   // Kept as a stable name for external callers (the input handler below,
   // Actions.searchDependency) - Wago is the only in-app source now.
-  function search(reset) { searchWago(reset); }
+  function search(reset) { fetchWago(reset); }
 
-  // Case-insensitive exact/starts-with/contains tiering, mirroring the same
-  // three-tier scheme Search-CfCatalogue already applies server-side to the
-  // (now unused-in-Browse) keyless CurseForge path. An empty query (the
-  // default pre-typing view) gets one flat tier.
-  function relevanceTier(name, needle) {
-    if (!needle) return 3;
-    const n = (name || "").toLowerCase();
-    if (n === needle) return 0;
-    if (n.indexOf(needle) === 0) return 1;
-    if (n.indexOf(needle) !== -1) return 2;
-    return 3;
+  function selectSort(sort) {
+    const w = Store.state.browse.wago;
+    if (["popular", "updated", "name", "gaining"].indexOf(sort) === -1) return;
+    if (sort === w.sort) return;
+    w.sort = sort;
+    fetchWago(true);
   }
 
-  // E12: Wago's search results are parsed HTML card snippets (slug/name/
-  // thumbnail only - see SPEC's verified Wago facts), never author/summary/
-  // downloads - that detail only exists on the addon's own /addons/{slug}
-  // page, fetched once the drawer opens.
-  function normalizeWagoEntry(item) {
-    return {
+  function selectCategory(id) {
+    const w = Store.state.browse.wago;
+    if (w.sort === "gaining") return; // inert while Gaining is active (2.4)
+    if (w.categoryId === id) return;
+    w.categoryId = id;
+    fetchWago(true);
+  }
+
+  function toggleCategoriesExpanded() {
+    categoriesExpanded = !categoriesExpanded;
+    renderCategoryChips();
+  }
+
+  function loadMoreWago() {
+    const w = Store.state.browse.wago;
+    if (w.loading || w.page >= w.lastPage) return;
+    fetchWago(false);
+  }
+
+  // sortApplied branches the shape (WAGO-BROWSE-SPEC.md 3.2: gaining items
+  // omit author/summary/downloads/updatedAt and carry rank/deltaDownloads
+  // instead - a different, smaller shape, never field-presence-sniffed).
+  // gainBaselineAsOf is response-level (the same baseline for every row),
+  // passed in here rather than re-read off Store so this stays a pure
+  // mapper over one item.
+  function normalizeWagoEntry(item, sortApplied, gainBaselineAsOf) {
+    const entry = {
       source: "wago", id: null, key: "wago:" + item.slug, name: item.name || item.slug, slug: item.slug,
       logoUrl: item.thumbnail || null, summary: null, author: null,
-      downloadCount: null, updatedAt: null
+      downloadCount: null, updatedAt: null, rank: null, deltaLabel: null
     };
+    if (sortApplied === "gaining") {
+      entry.downloadCount = item.downloads != null ? item.downloads : null;
+      entry.rank = item.rank != null ? item.rank : null;
+      if (item.deltaDownloads != null) {
+        entry.deltaLabel = "+" + Utils.formatNumber(item.deltaDownloads) + " since " + formatWagoDay(gainBaselineAsOf);
+      }
+    } else {
+      entry.summary = item.summary || null;
+      entry.author = item.author || null;
+      entry.downloadCount = item.downloads != null ? item.downloads : null;
+      entry.updatedAt = item.updatedAt || null;
+    }
+    return entry;
   }
 
-  function sortedWagoEntries(b) {
-    const needle = (b.query || "").trim().toLowerCase();
-    const list = b.wago.results.map(normalizeWagoEntry);
-    list.forEach(function (e) { e.tier = relevanceTier(e.name, needle); });
-    list.sort(function (a, c) { return a.tier - c.tier; });
-    return list;
+  function renderSortControl() {
+    const sort = Store.state.browse.wago.sort;
+    Utils.qsa("#wago-sort .segmented-btn[data-sort]").forEach(function (btn) {
+      const active = btn.dataset.sort === sort;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+
+  // Category chip strip (WAGO-BROWSE-SPEC.md 2.2). "All" first, then one
+  // chip per allCategories entry in the server's own order (verbatim,
+  // including id 5's out-of-sequence position - never re-sorted here).
+  // Collapse threshold is a window-width check rather than a real
+  // one-pass layout measurement (no precedent for that in this codebase -
+  // My Addons' own "More filters" overflow, ui/app.js's renderFilters, is
+  // membership-based too, not width-measured) - deterministic at both
+  // required window sizes, and simple enough not to need a resize-driven
+  // two-pass render.
+  function renderCategoryChips() {
+    const strip = Utils.qs("#wago-cat-strip");
+    if (!strip) return;
+    const w = Store.state.browse.wago;
+    const disabled = w.sort === "gaining";
+    strip.classList.toggle("is-disabled", disabled);
+    strip.textContent = "";
+
+    function buildChip(id, label) {
+      const active = w.categoryId === id;
+      return Utils.el("button", {
+        type: "button",
+        class: "wago-chip" + (active ? " is-active" : ""),
+        "aria-disabled": disabled ? "true" : null,
+        "aria-pressed": active ? "true" : "false",
+        dataset: { catId: id == null ? "" : String(id) }
+      }, [label]);
+    }
+
+    strip.appendChild(buildChip(null, "All"));
+
+    const wide = window.innerWidth >= WAGO_CAT_WIDE_BREAKPOINT;
+    const showAll = wide || categoriesExpanded || disabled;
+    const cats = w.categories;
+    const visibleCats = showAll ? cats : cats.slice(0, WAGO_CAT_COLLAPSED_COUNT);
+    visibleCats.forEach(function (c) { strip.appendChild(buildChip(c.id, c.displayName)); });
+
+    if (!showAll && cats.length > visibleCats.length) {
+      strip.appendChild(Utils.el("button", {
+        type: "button", class: "wago-chip wago-chip-toggle", id: "wago-cat-more", "aria-expanded": "false"
+      }, ["More categories +" + (cats.length - visibleCats.length), Utils.icon("chevron-down")]));
+    } else if (categoriesExpanded && !wide && !disabled && cats.length > WAGO_CAT_COLLAPSED_COUNT) {
+      strip.appendChild(Utils.el("button", {
+        type: "button", class: "wago-chip wago-chip-toggle is-open", id: "wago-cat-more", "aria-expanded": "true"
+      }, ["Show fewer categories", Utils.icon("chevron-down")]));
+    }
   }
 
   function renderWagoResults() {
     const b = Store.state.browse;
+    const w = b.wago;
+
+    renderSortControl();
+    renderCategoryChips();
+
+    const gaining = w.sort === "gaining";
+    const searchInput = Utils.qs("#browse-search");
+    if (searchInput) {
+      searchInput.disabled = gaining;
+      searchInput.placeholder = gaining ? "Not available on Gaining this week" : wagoSearchPlaceholder();
+    }
+    const note = Utils.qs("#wago-gain-note");
+    if (note) note.hidden = !gaining;
+
     const grid = Utils.qs("#browse-grid");
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
     const errorBox = Utils.qs("#browse-error");
+    const gameActiveBox = Utils.qs("#browse-gameactive");
+    const notReadyBox = Utils.qs("#wago-gain-notready");
+    const loadMoreWrap = Utils.qs("#wago-loadmore");
     const summary = Utils.qs("#browse-summary");
-    const list = sortedWagoEntries(b);
 
-    if (b.wago.loading && !list.length) {
-      grid.hidden = true; empty.hidden = true; errorBox.hidden = true; skeleton.hidden = false;
+    function hideAllBodies() {
+      grid.hidden = true; skeleton.hidden = true; empty.hidden = true;
+      errorBox.hidden = true; gameActiveBox.hidden = true; notReadyBox.hidden = true;
+      loadMoreWrap.hidden = true;
+    }
+
+    // Loading: only a first-page load shows the full skeleton - Load more
+    // keeps the already-rendered rows in place (see loadMoreWago/the
+    // populated branch below), matching the "avoid scroll-position
+    // restoration headaches, append don't replace" reasoning behind the
+    // button's own design (WAGO-BROWSE-SPEC.md 2.1 item 6).
+    if (w.loading && !w.results.length) {
+      hideAllBodies();
+      skeleton.hidden = false;
       summary.textContent = "";
       return;
     }
-    skeleton.hidden = true;
 
-    if (!b.wago.loading && b.wago.error && !list.length) {
-      grid.hidden = true; empty.hidden = true;
+    if (!w.loading && w.error && !w.results.length) {
+      hideAllBodies();
       errorBox.hidden = false;
       Utils.qs("#browse-error-msg").textContent = "Couldn't reach Wago right now.";
       summary.textContent = "";
       return;
     }
-    errorBox.hidden = true;
 
-    if (!b.wago.loading && !list.length) {
-      grid.hidden = true; empty.hidden = false;
+    // Round 32 (WAGO-BROWSE-SPEC.md section 3.5's corrected game-mode
+    // gate): never applies to Gaining, which is a pure disk read.
+    if (!gaining && w.sortApplied !== "gaining" && w.gameActive) {
+      hideAllBodies();
+      gameActiveBox.hidden = false;
       summary.textContent = "";
-    } else {
-      empty.hidden = true;
-      grid.hidden = false;
-      grid.textContent = "";
-      list.forEach(function (entry) { grid.appendChild(resultCard(entry)); });
-      summary.textContent = list.length + " result" + (list.length === 1 ? "" : "s");
+      return;
     }
+
+    if (w.sortApplied === "gaining" && !w.gainReady) {
+      hideAllBodies();
+      notReadyBox.hidden = false;
+      // WAGO-BROWSE-SPEC.md section 4.6 point 1: since===null/snapshotCount===0
+      // means Furphy has captured zero snapshots yet for this game_version
+      // (missing/corrupt/empty file - reachable on a fresh install whose
+      // first crawl hasn't completed, or was gated off by WoW running) -
+      // distinct from point 3 (since=firstCapturedAt, one snapshot exists but
+      // no second one falls in the 5-9 day window yet). Point 1 has no since
+      // date at all, so the "started measuring on <since>...earliest that
+      // could happen is <since+5d>" sentence (which needs a real since) does
+      // not apply - it must not be rendered with empty date placeholders.
+      if (!w.gainSince) {
+        Utils.qs("#wago-gain-notready-body").textContent =
+          "Furphy hasn't measured any Wago download data for this game version yet.";
+      } else {
+        const sinceStr = formatWagoDay(w.gainSince);
+        const earliestIso = new Date(new Date(w.gainSince).getTime() + 5 * 24 * 3600e3).toISOString();
+        Utils.qs("#wago-gain-notready-body").textContent =
+          "Furphy started measuring daily download changes on Wago on " + sinceStr +
+          ". It needs two snapshots taken 5 to 9 days apart before it can show what's gaining - the earliest that could happen is " +
+          formatWagoDay(earliestIso) + ".";
+      }
+      Utils.qs("#wago-gain-notready-count").textContent = w.gainSnapshotCount + " snapshot(s) captured so far.";
+      summary.textContent = "";
+      return;
+    }
+
+    if (!w.loading && !w.results.length) {
+      hideAllBodies();
+      empty.hidden = false;
+      const title = Utils.qs("#browse-empty-title");
+      const body = Utils.qs("#browse-empty-body");
+      if (w.categoryId != null && w.sortApplied !== "gaining") {
+        title.textContent = "No addons in " + (categoryDisplayName(w.categoryId) || "this category") + " yet";
+        body.textContent = "Try a different category, or clear the search.";
+      } else {
+        title.textContent = "No results";
+        body.textContent = "Try a different search term.";
+      }
+      summary.textContent = "";
+      return;
+    }
+
+    hideAllBodies();
+    grid.hidden = false;
+    grid.textContent = "";
+    w.results
+      .map(function (item) { return normalizeWagoEntry(item, w.sortApplied, w.gainBaselineAsOf); })
+      .forEach(function (entry) { grid.appendChild(resultCard(entry)); });
+
+    // Result count line (WAGO-BROWSE-SPEC.md 2.5) - Gaining's own currency
+    // + top-~150-scope line replaces it entirely once ready (REQUIRED FIX
+    // 5, widened per data-review finding 6).
+    if (w.sortApplied === "gaining") {
+      summary.textContent = "Based on downloads Furphy measured through " + formatWagoDay(w.gainAsOf) + " - looking only at Wago's current top ~150 popular addons.";
+    } else if (w.categoryId != null) {
+      summary.textContent = w.total + " result" + (w.total === 1 ? "" : "s") + " in " + (categoryDisplayName(w.categoryId) || "");
+    } else if (!b.query) {
+      summary.textContent = w.total + "+ results"; // the capped unfiltered default - Wago reports total:1000 as a cap, not an exact count
+    } else {
+      summary.textContent = w.total + " result" + (w.total === 1 ? "" : "s");
+    }
+
+    loadMoreWrap.hidden = w.page >= w.lastPage;
+    const loadMoreBtn = Utils.qs("#wago-loadmore-btn");
+    if (loadMoreBtn) { loadMoreBtn.disabled = w.loading; loadMoreBtn.textContent = w.loading ? "Loading..." : "Load more"; }
   }
 
   // Round 17 (Eric: "change the wago results to a curseforge style
   // listing... they go the whole distance horizontally instead of little
   // tiles"): logo left, name+badge/author/summary/meta stacked in the
   // middle, Install right-aligned and vertically centered (see
-  // .browse-row/style.css). Wago cards only ever carry name/slug/thumbnail
-  // (E12) - every other field below renders only when the source actually
-  // supplied it, never a blank slot.
+  // .browse-row/style.css). Round 32: every field renders whenever the
+  // source actually supplied it, never a blank slot; the Gaining tab adds
+  // a leading rank number (GRAFT 4) and a delta badge next to the name.
   function resultCard(entry) {
     const tracked = !!Store.addonByProjectId(entry.key);
     const busy = Store.jobActingOn(entry.key);
@@ -5562,6 +5992,7 @@ Views.browse = (function () {
       Utils.el("span", { class: "browse-row-title" }, [entry.name]),
       Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : "is-cf") }, [entry.source === "wago" ? "Wago" : "CurseForge"])
     ];
+    if (entry.deltaLabel) heading.push(Utils.el("span", { class: "chip chip-success" }, [entry.deltaLabel]));
     const main = [Utils.el("div", { class: "browse-row-heading" }, heading)];
     if (entry.author) main.push(Utils.el("div", { class: "browse-row-author" }, [entry.author]));
     if (entry.summary) main.push(Utils.el("div", { class: "browse-row-summary" }, [entry.summary]));
@@ -5577,13 +6008,9 @@ Views.browse = (function () {
       Components.Drawer.open(entry.key, opts);
     }
 
-    const node = Utils.el("div", {
-      class: "browse-row", tabindex: "0", role: "button", "aria-label": "View " + entry.name,
-      onkeydown: function (ev) {
-        if (ev.target !== node) return; // let Enter/Space on the Install button do its own thing
-        if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); }
-      }
-    }, [
+    const rowChildren = [];
+    if (entry.rank != null) rowChildren.push(Utils.el("span", { class: "wago-gain-rank" }, [String(entry.rank)]));
+    rowChildren.push(
       // Logo.build sets width/height as inline styles, which beat the
       // [data-density="compact"] .browse-row .addon-logo CSS override - so
       // the size has to be picked here, not left to that CSS rule (Round 17
@@ -5591,7 +6018,15 @@ Views.browse = (function () {
       Components.Logo.build({ projectId: entry.source === "cf" ? entry.id : null, name: entry.name, thumbnailUrl: entry.logoUrl }, Prefs.getDensity() === "compact" ? 44 : 56),
       Utils.el("div", { class: "browse-row-main" }, main),
       Utils.el("div", { class: "browse-row-action" }, [btn])
-    ]);
+    );
+
+    const node = Utils.el("div", {
+      class: "browse-row", tabindex: "0", role: "button", "aria-label": "View " + entry.name,
+      onkeydown: function (ev) {
+        if (ev.target !== node) return; // let Enter/Space on the Install button do its own thing
+        if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); }
+      }
+    }, rowChildren);
     node.addEventListener("click", open);
     return node;
   }
@@ -5772,7 +6207,7 @@ Views.browse = (function () {
     const info = applyTabVisibility();
     if (info.tab === "wago") {
       const b = Store.state.browse;
-      if (!b.wago.loaded && !b.wago.loading && !b.wago.error) searchWago(true);
+      if (!b.wago.loaded && !b.wago.loading && !b.wago.error) fetchWago(true);
       else renderWagoResults();
       teardownCfPane();
     } else if (info.showCfNative) {
@@ -5814,6 +6249,33 @@ Views.browse = (function () {
       Store.state.browse.query = ev.target.value;
       search(true);
     }, 400));
+
+    // Round 32 (WAGO-BROWSE-SPEC.md section 2): sort tabs, category chips,
+    // Load more, and Gaining's "See Popular instead" escape hatch (GRAFT 3).
+    // The two .info-tip triggers inside #wago-sort are static markup, wired
+    // by App.init's own whole-document Components.Tooltip.initAll() call -
+    // nothing extra needed for them here.
+    Utils.qs("#wago-sort").addEventListener("click", function (ev) {
+      const btn = ev.target.closest(".segmented-btn[data-sort]");
+      if (!btn) return;
+      selectSort(btn.dataset.sort);
+    });
+    Utils.qs("#wago-cat-strip").addEventListener("click", function (ev) {
+      const toggle = ev.target.closest("#wago-cat-more");
+      if (toggle) { toggleCategoriesExpanded(); return; }
+      const chip = ev.target.closest(".wago-chip[data-cat-id]");
+      if (!chip || chip.getAttribute("aria-disabled") === "true") return;
+      const raw = chip.dataset.catId;
+      selectCategory(raw === "" ? null : parseInt(raw, 10));
+    });
+    Utils.qs("#wago-loadmore-btn").addEventListener("click", function () { loadMoreWago(); });
+    Utils.qs("#wago-gain-see-popular").addEventListener("click", function () { selectSort("popular"); });
+    // Chip-strip collapse threshold is width-based (renderCategoryChips'
+    // own comment) - recompute on resize, but only while this tab is
+    // actually the one on screen.
+    window.addEventListener("resize", Utils.debounce(function () {
+      if (Store.state.view === "browse" && currentTab() === "wago") renderCategoryChips();
+    }, 150));
 
     // "Not on Wago? Try CurseForge" - switches segments in the native host;
     // everywhere else, opens the existing side window directly rather than

@@ -45,6 +45,15 @@ THE APP
                   toolbar.
   Get new addons  switch between an in-app Wago search and the real CurseForge.com (open right inside the app
                   window) - both fully keyless. Paste a CurseForge link/ID or a wago.io link to install directly.
+                  The Wago side has a category strip (all 29 of Wago's own categories, plus All) and a sort
+                  control with four options: Popular (Wago's own default order), Recently updated (each addon's
+                  own last-updated date), Name (A-Z), and Gaining this week. "Gaining this week" is Furphy's own
+                  measurement, not something Wago publishes - it's built from daily snapshots Furphy takes of
+                  Wago's popular list, comparing this week's download count to about a week ago, so it takes a
+                  little while to have anything to show after a fresh install. It only covers Wago's own top
+                  ~150 popular addons and isn't split by category or search. Wago doesn't expose an addon's
+                  creation date or any "installs this season" figure at all, so neither is shown anywhere -
+                  Recently updated and Gaining this week are the honest stand-ins for "new" and "rising."
   Settings        one page, two tiers - a few Essentials always on screen (release channel, spacing, theme) and
                   an Advanced section for everything else (CurseForge options, game folders, folders Furphy
                   doesn't manage yet with one-click take over, backups, diagnostics, open logs, force reinstall).
