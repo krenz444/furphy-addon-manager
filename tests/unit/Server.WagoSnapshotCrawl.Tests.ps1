@@ -26,14 +26,29 @@ function New-RetailOnlyWowRoot {
 }
 
 function Initialize-WagoCrawlTestState {
-    <# Common per-test setup: a fresh retail-only WoW root and app root, $Script:AcceptingRequests $false, game not running. #>
+    <#
+      Common per-test setup: a fresh retail-only WoW root and app root,
+      $Script:AcceptingRequests $false, game not running.
+
+      $Script:WowFakeProcessNameOverride is set to a deliberately
+      nonexistent process name here (NOT $null) so "game not running" is
+      true regardless of whatever is actually running on the dev/CI
+      machine this test executes on - a bare $null leaves
+      Test-GameRunning checking the REAL $Script:KnownWowProcessNames
+      list, which a genuinely running Wow.exe (a dev's own game session)
+      would match, silently skipping the crawl and starving
+      $Script:WagoCachedCallCount - exactly the false failure confirmed
+      in the Round 36 verifier report. The one It that wants "game IS
+      running" (below) overrides this again right after calling this
+      function, so it is unaffected.
+    #>
     $Script:WowRootOverride = New-RetailOnlyWowRoot
     $Script:Root = New-TempRoot -Name 'wago-crawl'
     $Script:CacheDir = Join-Path $Script:Root 'cache'
     $Script:AcceptingRequests = $false
     Set-CurrentFlavourContext -Flavor 'retail'
     $Script:InstalledFlavoursAtStartup = Get-CurrentInstalledFlavours
-    $Script:WowFakeProcessNameOverride = $null
+    $Script:WowFakeProcessNameOverride = 'WowFakeNotRunningSnapshotCrawl' + (Get-Random -Maximum 99999)
     $Script:GameRunningCache = $false
     $Script:GameRunningCacheAt = [DateTime]::MinValue
     $Script:WagoCachedCallCount = 0

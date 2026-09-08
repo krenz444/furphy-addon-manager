@@ -304,9 +304,23 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             # until this line assigns the selftest process to it.
             $needle = 'perfresume-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
             $markerPath = Join-Path $root ($needle + '.json')
+            # --wow-fake $fakeProcName (below) is required here even though
+            # $fakeWow has already been stopped above: without it,
+            # WowDetector.IsRunning(null) falls back to the REAL
+            # known-WoW-names list, and a genuinely running Wow.exe on the
+            # dev/CI machine (a real play session) makes this selftest
+            # wrongly see the game as still running (lastResult =
+            # "skipped_wow_running") even though THIS scenario's own fake
+            # WoW is gone - the exact false failure confirmed in the Round
+            # 36 verifier report. Passing the now-dead fake name is still
+            # correct: WowDetector looks it up fresh, finds no such
+            # process (it was just stopped), and correctly reports "not
+            # running" - proving the resume path for the right reason
+            # (the game is gone) instead of by accident (the real machine
+            # happened to have no WoW.exe running).
             $selfPsi = New-Object System.Diagnostics.ProcessStartInfo
             $selfPsi.FileName = $hostExe
-            $selfPsi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '"'
+            $selfPsi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '" --wow-fake ' + $fakeProcName
             $selfPsi.UseShellExecute = $false
             $selfPsi.WorkingDirectory = Split-Path -Path $hostExe -Parent
             $trayProc = [System.Diagnostics.Process]::Start($selfPsi)

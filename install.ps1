@@ -434,13 +434,26 @@ function Get-InstalledFlavourDefs {
        find WoW", same fatal path as today. #>
     param([string]$WowRootPath)
     $result = New-Object 'System.Collections.Generic.List[object]'
-    if (-not $WowRootPath) { return $result }
-    foreach ($def in $Script:FlavourDefs) {
-        if (Test-FlavourInstalled -WowRootPath $WowRootPath -Folder $def.Folder) {
-            $result.Add($def)
+    if ($WowRootPath) {
+        foreach ($def in $Script:FlavourDefs) {
+            if (Test-FlavourInstalled -WowRootPath $WowRootPath -Folder $def.Folder) {
+                $result.Add($def)
+            }
         }
     }
-    return $result
+    # Round 36: PowerShell unrolls whatever a function writes to the pipeline,
+    # so a WoW root with exactly ONE installed client (a retail-only machine -
+    # the most common case) used to come back as a bare PSCustomObject whose
+    # .Count is empty; Find-WowRoot's `.Count -gt 0` check then failed and a
+    # fresh install ended with "Could not find a World of Warcraft
+    # installation". The fix lives at the CALL SITES: every caller wraps this
+    # in @(...) (0 items -> empty array, 1 -> one-element array, N -> array),
+    # the same defensive pattern this file already uses for
+    # $script:firstClassInstalled. (Write-Output -NoEnumerate was tried and
+    # rejected: an empty array emitted that way arrives as ONE object, so
+    # @(...) would count 1 for a root with no clients.) Regression test:
+    # tests\integration\Install.SingleFlavour.Tests.ps1.
+    return $result.ToArray()
 }
 
 # =====================================================================
@@ -491,7 +504,7 @@ function Find-WowRoot {
     }
 
     foreach ($c in $candidates) {
-        if ($c -and (Get-InstalledFlavourDefs -WowRootPath $c).Count -gt 0) {
+        if ($c -and @(Get-InstalledFlavourDefs -WowRootPath $c).Count -gt 0) {
             return $c
         }
     }
@@ -509,7 +522,7 @@ if ($script:FurphyDotSourced) { return }
 
 $wowRoot = Find-WowRoot -Override $WowPath
 $installedFlavours = New-Object 'System.Collections.Generic.List[object]'
-if ($wowRoot) { $installedFlavours = Get-InstalledFlavourDefs -WowRootPath $wowRoot }
+if ($wowRoot) { $installedFlavours = @(Get-InstalledFlavourDefs -WowRootPath $wowRoot) }
 # DISTRIBUTION-SPEC.md section 6.2: a plain install run (not -Uninstall,
 # not -Console) no longer exits 2 immediately on "not found" - it falls
 # through to Show-InstallWizard further down, whose own folder-picker
@@ -1714,7 +1727,7 @@ function Show-InstallWizard {
         $fbd.Description = 'Select your World of Warcraft folder (the one containing _retail_, _classic_, etc)'
         if ($fbd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $script:wowRoot = $fbd.SelectedPath
-            $script:installedFlavours = Get-InstalledFlavourDefs -WowRootPath $script:wowRoot
+            $script:installedFlavours = @(Get-InstalledFlavourDefs -WowRootPath $script:wowRoot)
             if ($script:installedFlavours.Count -gt 0) {
                 Set-InstallPathsFromWowRoot
                 $txtPath.Text = $script:wowRoot

@@ -623,6 +623,27 @@ function Start-TestServer {
         $env:FURPHY_TEST_SKIP_WAGO_GROWTH = '1'
         $skipGrowthEnvChanged = $true
     }
+
+    # Round-36-fixer follow-up (verifier finding, non-blocking): the exact
+    # same live-safety/politeness gap as FURPHY_TEST_SKIP_WAGO_GROWTH above,
+    # just for the CurseForge catalogue instead of the Wago growth crawl -
+    # Initialize-CfCatalogueIndex already honors FURPHY_TEST_SKIP_CF_CATALOGUE
+    # (addon-server.ps1's own $Script:SkipCfCatalogueFetch), but nothing here
+    # ever set it, so every one of this helper's ~many callers across the
+    # integration layer paid for a real, live CurseForge catalogue fetch
+    # (raw.githubusercontent.com via instawow-data/strongbox) on every fresh
+    # server startup. Same opt-out contract as the Wago case: skip by default
+    # UNLESS the caller has already pointed FURPHY_TEST_CF_BASEURL at a local
+    # stub (a real CF-catalogue Describe wants the genuine fetch path against
+    # its own stub) or set the skip var itself for some other reason. Same
+    # inherit-then-restore-exact-prior-value handling as the Wago var, so it
+    # can never leak into a later Start-Process call in this same session.
+    $originalSkipCfCatalogueEnv = $env:FURPHY_TEST_SKIP_CF_CATALOGUE
+    $skipCfCatalogueEnvChanged = $false
+    if ([string]::IsNullOrWhiteSpace($env:FURPHY_TEST_CF_BASEURL) -and [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_CF_CATALOGUE)) {
+        $env:FURPHY_TEST_SKIP_CF_CATALOGUE = '1'
+        $skipCfCatalogueEnvChanged = $true
+    }
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
     } finally {
@@ -631,6 +652,13 @@ function Start-TestServer {
                 Remove-Item Env:\FURPHY_TEST_SKIP_WAGO_GROWTH -ErrorAction SilentlyContinue
             } else {
                 $env:FURPHY_TEST_SKIP_WAGO_GROWTH = $originalSkipGrowthEnv
+            }
+        }
+        if ($skipCfCatalogueEnvChanged) {
+            if ($null -eq $originalSkipCfCatalogueEnv) {
+                Remove-Item Env:\FURPHY_TEST_SKIP_CF_CATALOGUE -ErrorAction SilentlyContinue
+            } else {
+                $env:FURPHY_TEST_SKIP_CF_CATALOGUE = $originalSkipCfCatalogueEnv
             }
         }
     }

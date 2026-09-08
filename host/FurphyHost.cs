@@ -966,6 +966,22 @@ namespace Furphy
         private string _selftestOpenCurseforgeUrl;
         private string _selftestCapturePath;
 
+        // host:host-cf-navigationstarting-blocks-ui-thread regression
+        // coverage: a --selftest-only UI-thread heartbeat (never started
+        // outside SelftestActive, so this is zero-overhead/zero-behaviour-
+        // change for a real player - see MainForm_Load). Ticks on a plain
+        // WinForms Timer, which can only fire while the UI thread is free
+        // to pump messages - so the largest observed gap between two
+        // ticks is a direct, deterministic measurement of how long the UI
+        // thread was ever blocked, no real-world network timing required
+        // on the test's side beyond a stub server it fully controls. See
+        // SelftestHeartbeatTimer_Tick and WriteSelftestMarker's
+        // uiHeartbeatMaxGapMs/uiHeartbeatTicks fields.
+        private System.Windows.Forms.Timer _selftestHeartbeatTimer;
+        private DateTime _selftestHeartbeatLastTick;
+        private double _selftestHeartbeatMaxGapMs;
+        private int _selftestHeartbeatTicks;
+
         // P2 perf pass (SPEC.md "Expansion E29" - host/tray/SPA game mode):
         // whether this window currently counts as "foreground" for the
         // suspend/priority contract below - tracked via Activated/Deactivate
@@ -2455,6 +2471,18 @@ namespace Furphy
                 _selftestCaptureTimer.Interval = 7000;
                 _selftestCaptureTimer.Tick += new EventHandler(SelftestCaptureTimer_Tick);
                 _selftestCaptureTimer.Start();
+
+                // host:host-cf-navigationstarting-blocks-ui-thread
+                // regression coverage - see the heartbeat fields' own
+                // comment above. 50ms interval: fine enough to catch a
+                // multi-second UI-thread stall with a large margin, coarse
+                // enough not to add meaningful load over the ~8s selftest
+                // window.
+                _selftestHeartbeatLastTick = DateTime.UtcNow;
+                _selftestHeartbeatTimer = new System.Windows.Forms.Timer();
+                _selftestHeartbeatTimer.Interval = 50;
+                _selftestHeartbeatTimer.Tick += new EventHandler(SelftestHeartbeatTimer_Tick);
+                _selftestHeartbeatTimer.Start();
             }
         }
 
@@ -2634,6 +2662,31 @@ namespace Furphy
 
         // ---------------------------------------------- CF interception
 
+        // Marshals a WebView2/form touch back onto the UI thread from the
+        // ThreadPool work items CfWebView_NavigationStarting queues below
+        // (HandleCurseforgeProtocol/HandleSlugInstall now run on a
+        // background thread so their synchronous HTTP calls cannot freeze
+        // the window - see that queuing site's own comment). Controls may
+        // only be touched from the thread that created them, so
+        // PostJobIdIfAny/SendCfJob (PostToFurphy -> _furphyWebView) and the
+        // NavigateCf fallback both need this. Guards on !IsDisposed the
+        // same way HandleRuntimeMissing already does above (2629) so a
+        // BeginInvoke is never posted once the form has started tearing
+        // down; the try/catch covers the narrow race where disposal lands
+        // between that check and the call itself.
+        private void RunOnUiThread(MethodInvoker action)
+        {
+            try
+            {
+                if (!IsDisposed && IsHandleCreated)
+                {
+                    BeginInvoke(action);
+                }
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
+
         private void CfWebView_NavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
         {
             string uri = e.Uri;
@@ -2665,7 +2718,18 @@ namespace Furphy
             if (uri.StartsWith("curseforge://", StringComparison.OrdinalIgnoreCase))
             {
                 e.Cancel = true;
-                HandleCurseforgeProtocol(uri);
+                // host:host-cf-navigationstarting-blocks-ui-thread fix:
+                // HandleCurseforgeProtocol performs synchronous HTTP calls
+                // (IsProjectTracked's GetString, then PostJson) with
+                // multi-second timeouts. NavigationStarting fires on this
+                // form's UI thread, so running that inline here would freeze
+                // the whole window (both webviews, drag/resize/close) for
+                // the round trip - exactly what TrayForm.StartBackgroundWork
+                // avoids for its own worker (ThreadPool.QueueUserWorkItem,
+                // FurphyHost.cs:4650). e.Cancel stays synchronous and
+                // unchanged; only the job-posting side effect moves off
+                // this thread.
+                ThreadPool.QueueUserWorkItem(delegate(object state) { HandleCurseforgeProtocol(uri); });
                 return;
             }
 
@@ -2673,7 +2737,9 @@ namespace Furphy
             if (TryParseInstallLink(uri, out slug, out fileId))
             {
                 e.Cancel = true;
-                HandleSlugInstall(uri, slug, fileId);
+                // Same fix as the curseforge:// branch above - HandleSlugInstall
+                // also performs a synchronous PostJson call.
+                ThreadPool.QueueUserWorkItem(delegate(object state) { HandleSlugInstall(uri, slug, fileId); });
                 return;
             }
 
@@ -2734,10 +2800,18 @@ namespace Furphy
             return null;
         }
 
+        // Runs on a ThreadPool thread (queued by CfWebView_NavigationStarting
+        // above) rather than the UI thread - IsProjectTracked and PostJson
+        // below are synchronous, multi-second-timeout HTTP calls. Only
+        // _selftestIntercepted/_selftestJobPostStatus (read back by
+        // WriteSelftestMarker off the UI thread) and the RunOnUiThread-
+        // wrapped PostJobIdIfAny call below need any thread-safety
+        // consideration; everything else here (LogHost, Http, MiniJson) is
+        // already stateless/self-locking.
         private void HandleCurseforgeProtocol(string uri)
         {
             LogHost("intercepted: " + uri);
-            _selftestIntercepted.Add(uri);
+            lock (_selftestIntercepted) { _selftestIntercepted.Add(uri); }
 
             string projectId = ExtractParam(uri, "addonId|projectId");
             string fileId = ExtractParam(uri, "fileId");
@@ -2765,7 +2839,7 @@ namespace Furphy
 
             string json = MiniJson.Write(body);
             HttpResult result = Http.PostJson(BaseUrl() + "/api/jobs", json, 4000);
-            _selftestJobPostStatus = result.StatusCode;
+            lock (_selftestIntercepted) { _selftestJobPostStatus = result.StatusCode; }
             LogHost("POST /api/jobs " + json + " -> " + result.StatusCode.ToString(CultureInfo.InvariantCulture));
 
             // Contract F: push the new job id to the SPA immediately
@@ -2775,16 +2849,22 @@ namespace Furphy
             // Guarded on a real 2xx success (matching HandleSlugInstall
             // below) rather than relying on the incidental fact that
             // addon-server.ps1's error bodies happen to omit jobId.
+            // RunOnUiThread: this method now runs on a ThreadPool thread
+            // (see its own leading comment) but PostJobIdIfAny ends in
+            // SendCfJob -> PostToFurphy, which touches the SPA webview and
+            // so must run on the UI thread.
             if (!result.NetworkError && result.StatusCode >= 200 && result.StatusCode < 300)
             {
-                PostJobIdIfAny(result);
+                RunOnUiThread(delegate { PostJobIdIfAny(result); });
             }
         }
 
+        // Runs on a ThreadPool thread - see HandleCurseforgeProtocol's own
+        // leading comment, which applies here identically.
         private void HandleSlugInstall(string uri, string slug, string fileId)
         {
             LogHost("intercepted install link: " + uri);
-            _selftestIntercepted.Add(uri);
+            lock (_selftestIntercepted) { _selftestIntercepted.Add(uri); }
 
             Dictionary<string, object> body = new Dictionary<string, object>();
             body["kind"] = "add-by-slug";
@@ -2793,23 +2873,28 @@ namespace Furphy
 
             string json = MiniJson.Write(body);
             HttpResult result = Http.PostJson(BaseUrl() + "/api/jobs", json, 4000);
-            _selftestJobPostStatus = result.StatusCode;
+            lock (_selftestIntercepted) { _selftestJobPostStatus = result.StatusCode; }
             LogHost("POST /api/jobs " + json + " -> " + result.StatusCode.ToString(CultureInfo.InvariantCulture));
 
             if (!result.NetworkError && result.StatusCode >= 200 && result.StatusCode < 300)
             {
                 // Contract F: push the new job id to the SPA immediately -
-                // see HandleCurseforgeProtocol's own comment.
-                PostJobIdIfAny(result);
+                // see HandleCurseforgeProtocol's own comment. RunOnUiThread:
+                // PostJobIdIfAny touches the SPA webview, see that method's
+                // own comment above.
+                RunOnUiThread(delegate { PostJobIdIfAny(result); });
             }
             else
             {
                 // The server does not (yet) understand add-by-slug, or the
                 // request failed outright - fall back to the plain addon
                 // page instead of leaving the user on a cancelled
-                // navigation with nothing happening.
+                // navigation with nothing happening. RunOnUiThread:
+                // NavigateCf touches the CF webview and must run on the UI
+                // thread.
                 LogHost("add-by-slug not accepted, falling back to addon page for " + slug);
-                NavigateCf("https://www.curseforge.com/wow/addons/" + slug);
+                string fallbackUrl = "https://www.curseforge.com/wow/addons/" + slug;
+                RunOnUiThread(delegate { NavigateCf(fallbackUrl); });
             }
         }
 
@@ -3574,8 +3659,24 @@ boot();
         private void SelftestTimer_Tick(object sender, EventArgs e)
         {
             _selftestTimer.Stop();
+            if (_selftestHeartbeatTimer != null) { _selftestHeartbeatTimer.Stop(); }
             WriteSelftestMarker(true);
             Close();
+        }
+
+        // host:host-cf-navigationstarting-blocks-ui-thread regression
+        // coverage - see the heartbeat fields' own comment. This Tick can
+        // only run while the UI thread is actually pumping messages, so a
+        // gap far larger than the 50ms interval means something on this
+        // thread (e.g. a synchronous HTTP call that should have been
+        // moved to a background thread) blocked it for that long.
+        private void SelftestHeartbeatTimer_Tick(object sender, EventArgs e)
+        {
+            DateTime now = DateTime.UtcNow;
+            double gapMs = (now - _selftestHeartbeatLastTick).TotalMilliseconds;
+            if (gapMs > _selftestHeartbeatMaxGapMs) { _selftestHeartbeatMaxGapMs = gapMs; }
+            _selftestHeartbeatLastTick = now;
+            _selftestHeartbeatTicks++;
         }
 
         // Fires ~1s before the marker is written (see MainForm_Load) -
@@ -3694,12 +3795,36 @@ boot();
 
             List<string> blockedCopy;
             List<string> allowedCopy;
+            List<string> interceptedCopy;
+            int? jobPostStatusCopy;
             lock (_selftestBlocked) { blockedCopy = new List<string>(_selftestBlocked); }
             lock (_selftestAllowed) { allowedCopy = new List<string>(_selftestAllowed); }
+            // HandleCurseforgeProtocol/HandleSlugInstall now write these two
+            // fields from a ThreadPool thread (host:host-cf-navigationstarting-
+            // blocks-ui-thread fix) while this marker write still happens on
+            // the UI thread (SelftestTimer_Tick) - lock on the same object
+            // those writers use, matching the _selftestBlocked/_selftestAllowed
+            // pattern immediately above.
+            lock (_selftestIntercepted)
+            {
+                interceptedCopy = new List<string>(_selftestIntercepted);
+                jobPostStatusCopy = _selftestJobPostStatus;
+            }
             marker["blockedRequests"] = blockedCopy;
             marker["allowedRequests"] = allowedCopy;
-            marker["intercepted"] = new List<string>(_selftestIntercepted);
-            marker["jobPostStatus"] = _selftestJobPostStatus.HasValue ? (object)(long)_selftestJobPostStatus.Value : null;
+            marker["intercepted"] = interceptedCopy;
+            marker["jobPostStatus"] = jobPostStatusCopy.HasValue ? (object)(long)jobPostStatusCopy.Value : null;
+
+            // host:host-cf-navigationstarting-blocks-ui-thread regression
+            // coverage - see the heartbeat fields' own comment. Both are
+            // only ever touched from the UI thread (SelftestHeartbeatTimer_
+            // Tick and this method itself), so no lock is needed the way
+            // intercepted/jobPostStatus above now require. Null-safe: the
+            // heartbeat timer is only created once MainForm_Load reaches
+            // its SelftestActive block (HandleRuntimeMissing's early
+            // WriteSelftestMarker(false) can fire before that).
+            marker["uiHeartbeatMaxGapMs"] = (long)Math.Round(_selftestHeartbeatMaxGapMs);
+            marker["uiHeartbeatTicks"] = (long)_selftestHeartbeatTicks;
 
             try
             {

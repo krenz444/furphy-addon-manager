@@ -6207,7 +6207,23 @@ Views.browse = (function () {
     const info = applyTabVisibility();
     if (info.tab === "wago") {
       const b = Store.state.browse;
-      if (!b.wago.loaded && !b.wago.loading && !b.wago.error) fetchWago(true);
+      // Round-36-fixer follow-up (verifier finding, spa-ux:browse-view-
+      // deep-link-flavour-race): this render() can run before the app's
+      // very first /api/state load resolves (App.init wires Host.onHostReady
+      // to call this whenever Store.state.view is already "browse" - true
+      // as soon as a ?view=browse deep link is applied, well before `await
+      // reloadState(false)` finishes) - at that point Store.state.
+      // installedFlavours/activeFlavour are still their unloaded defaults
+      // ([]/null), so Store.hasMultipleFlavours() reads false even on a
+      // real multi-flavour machine and the fetch below goes out with no
+      // ?flavour=, which the server correctly 400s. Store.state.loadingState
+      // is true for exactly this same window (flips false in the identical
+      // reloadState() call that also resolves the real flavour info), so
+      // gating on it here defers the very first fetch until that data can
+      // be trusted - reloadState's own "changed" check already re-renders
+      // this view once loadingState flips, so nothing is lost, just
+      // reordered relative to the premature host-ready callback.
+      if (!Store.state.loadingState && !b.wago.loaded && !b.wago.loading && !b.wago.error) fetchWago(true);
       else renderWagoResults();
       teardownCfPane();
     } else if (info.showCfNative) {

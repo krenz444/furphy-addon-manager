@@ -112,6 +112,17 @@ if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL)) {
 # inside the function) so it reads the same way $Script:WagoBaseUrl does.
 $Script:SkipWagoGrowthCrawl = -not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_WAGO_GROWTH)
 
+# first-run-docs:fresh-install-startup-blocks-first-check (Round 36 fixer):
+# same seam shape as $Script:SkipWagoGrowthCrawl immediately above, for
+# Initialize-CfCatalogueIndex's own unconditional startup fetch. On a
+# genuinely fresh install (no cache\cf-catalogue.json yet) that function
+# makes up to two sequential live HTTPS GETs (raw.githubusercontent.com),
+# each with its own 30s timeout plus a 1s pace-out between them - up to
+# ~61s worst case - strictly before the request loop starts accepting
+# connections, with no test-mode override until this. TEST-ONLY: no real
+# user run ever sets FURPHY_TEST_SKIP_CF_CATALOGUE.
+$Script:SkipCfCatalogueFetch = -not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_CF_CATALOGUE)
+
 # =====================================================================
 # Logging
 # =====================================================================
@@ -5392,7 +5403,29 @@ function Initialize-CfCatalogueIndex {
       their next fallback (addon-radar / catalogue-only) until a refresh
       succeeds (automatically past the 24h mark, or via Settings >
       Maintenance > "Refresh CurseForge catalogue now").
+
+      Must run before the request loop starts accepting connections - see
+      the $Script:AcceptingRequests guard immediately below, a verbatim
+      mirror of Initialize-WagoGrowthSnapshots' own guard (WAGO-BROWSE-
+      SPEC.md section 4.4), added for the same reason: this was previously
+      a doc-comment-only invariant with nothing to catch a future refactor
+      that moved this call past that point.
     #>
+    # perf-game:lead3 / first-run-docs:cf-catalogue-init-missing-symmetry-
+    # guard (Round 36 fixer): symmetry fix - Initialize-WagoGrowthSnapshots
+    # already throws loudly if ever called after $Script:AcceptingRequests
+    # flips true; this sibling startup routine had no equivalent guard even
+    # though it has the identical "must run before the request loop starts
+    # accepting connections" requirement. Not a live bug today (the real
+    # call site below still runs strictly before that flip), but without
+    # this a future refactor that broke that ordering would fail silently -
+    # every request would be served against a catalogue mid-(re)build with
+    # no loud failure, instead of a startup crash impossible to miss in
+    # server.log.
+    if ($Script:AcceptingRequests) {
+        throw 'Initialize-CfCatalogueIndex must run before the request loop starts accepting connections - a refactor moved this call past that point without updating it.'
+    }
+
     $loaded = Load-CfCatalogueIndexFromDisk
     $stale = $true
     if ($loaded -and $Script:CfCatalogueFetchedAt) {
@@ -5412,6 +5445,17 @@ function Initialize-CfCatalogueIndex {
         # while the game is up - use whatever is already on disk (possibly
         # empty) and let the NEXT restart (or a manual refresh) catch up.
         Write-ServerLog 'CurseForge catalogue refresh skipped at startup: WoW is running'
+    } elseif ($stale -and $Script:SkipCfCatalogueFetch) {
+        # first-run-docs:fresh-install-startup-blocks-first-check (Round 36
+        # fixer): test-mode escape hatch - see $Script:SkipCfCatalogueFetch's
+        # own declaration/comment near the top of this file. Checked after
+        # the disk-cache load above (harmless, no network) but before the
+        # live fetch, so a test run still benefits from a real fixture cache
+        # if one is present, but never pays for even one live
+        # raw.githubusercontent.com request it did not ask for, and the
+        # request loop never blocks past a test's own ping-wait deadline
+        # waiting on a slow/throttled catalogue fetch.
+        Write-ServerLog 'CurseForge catalogue refresh skipped at startup: FURPHY_TEST_SKIP_CF_CATALOGUE is set (test mode)'
     } elseif ($stale) {
         $result = Save-CfCatalogueIndex
         if (-not $result.ok) {
@@ -8299,7 +8343,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.16.0'
+$Script:Version = '1.17.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -8535,7 +8579,26 @@ try {
 try {
     $listener.Start()
 } catch {
-    Write-ServerLog "FATAL: could not start listener on $prefix : $($_.Exception.Message)"
+    # server:seed5-dual-launcher-startup-race / lead5 / F2 / fresh-install-
+    # shared-port-conflict (Round 36 fixer): 'Addon Manager.vbs' and the
+    # tray's own TryStartServer each independently ping /api/ping and, only
+    # if it doesn't answer, spawn a brand-new hidden addon-server.ps1 with
+    # no lock between the two launch paths. When both fire in the same
+    # narrow window the loser's Start() throws this exact, well-known
+    # HttpListenerException (port already bound by the winner) - completely
+    # harmless, the winner keeps serving unaffected - but logging it under a
+    # "FATAL:" prefix reads like a real crash to anyone triaging server.log.
+    # Special-case just this one known-benign message; every other bind
+    # failure (permission denied, port reserved by an unrelated app, etc.)
+    # keeps the original FATAL wording unchanged so a genuine problem is
+    # never downgraded or hidden. `throw` is unchanged in both branches -
+    # this instance must still exit immediately either way; only the log
+    # line's wording/severity changes.
+    if ($_.Exception.Message -match 'conflicts with an existing registration') {
+        Write-ServerLog "Another Furphy Addon Manager server is already running on port $Script:Port - this instance is exiting (harmless: can happen if the Addon Manager and its background tray both tried to start the server at the same moment)."
+    } else {
+        Write-ServerLog "FATAL: could not start listener on $prefix : $($_.Exception.Message)"
+    }
     throw
 }
 

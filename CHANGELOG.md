@@ -1,5 +1,172 @@
 # Furphy Addon Manager - changelog
 
+## Round 36 (1.17.0: adversarial pass)
+
+A finder/skeptic/fixer/verifier pass across every live component (server,
+CLI/installer, host, SPA/UX, perf/game-mode, docs) against five seeded
+leads and Eric's standing brief - clean, plain words, no fluff, one
+headline, real progress bars, nothing that lies about what it does, zero
+impact on gameplay, and every action safe for a below-average-tech
+player. Each confirmed finding below, one line per id:
+
+- `server:seed5-dual-launcher-startup-race` - confirmed: Addon Manager.vbs
+  and the tray's TryStartServer can race to spawn a second
+  addon-server.ps1, and the loser used to log a FATAL-prefixed line to
+  server.log before exiting even though it is functionally harmless (the
+  winner keeps serving); fixed this round: addon-server.ps1 now logs a
+  calm "another instance is already running" line instead of FATAL for
+  this known-benign bind race (every other bind failure keeps the FATAL
+  wording), proven by the new
+  tests\integration\Server.StartupRace.Tests.ps1.
+- `cli-installer:F2-dual-server-start-race-fatal-log` - the same race,
+  confirmed by static trace of both launchers' unsynchronized
+  ping-then-spawn logic, neither of which takes any lock around the
+  spawn+bind step; fixed this round by the same calm-log-line change
+  above (one root cause, one fix).
+- `spa-ux:wago-name-sort-surfaces-crude-catalogue-entries-confirmed` -
+  confirmed the Wago "Name (A-Z)" sort surfaces crude/profane entries
+  verbatim from Wago's own third-party catalogue; per Eric's own
+  direction this is a product decision, not a bug, so no filter was
+  built.
+- `host:host-cf-navigationstarting-blocks-ui-thread` - confirmed every
+  CurseForge Install click used to run blocking HTTP calls directly on
+  WebView2's UI thread, which could freeze the whole native window for
+  as long as the single-threaded server took to answer; fixed this
+  round: CfWebView_NavigationStarting now dispatches
+  HandleCurseforgeProtocol/HandleSlugInstall via
+  ThreadPool.QueueUserWorkItem, marshaling UI-touching side effects back
+  to the UI thread via a new RunOnUiThread helper, proven by the new
+  heartbeat-timer regression test in tests\host\Host.Tests.ps1 (~130ms
+  max UI-thread gap vs. the ~4000ms the bug caused).
+- `perf-game:lead3-cfcatalogue-missing-symmetry-guard` - confirmed
+  Initialize-CfCatalogueIndex had no $Script:AcceptingRequests guard,
+  unlike its sibling Initialize-WagoGrowthSnapshots; latent only, not
+  triggered by today's call order. Fixed this round: addon-server.ps1
+  now throws immediately if called while $Script:AcceptingRequests is
+  already true, mirroring Initialize-WagoGrowthSnapshots' own guard.
+- `perf-game:lead4-quick-gate-composition` - confirmed the -Quick gate's
+  328.2s runtime is about 83% integration-layer server start/stop
+  cycles, led by Round 35's new Wago Browse tests; no test changes made,
+  since nothing about the gate itself is wrong.
+- `perf-game:lead5-dual-server-start-race` - the same dual-launcher race
+  as above, reproduced live during this round's own testing; fixed this
+  round by the same calm-log-line change described above.
+- `perf-game:lead2-wago-name-sort-unfiltered-confirmed` - a second,
+  independent confirmation of the Wago name-sort finding above; same
+  product-decision outcome, no filter built.
+- `first-run-docs:site-landing-page-nonexistent-button` - fixed: the
+  public landing page and README.md's install walkthrough no longer
+  tell a brand-new user to click a "Launch WoW" button that Round 34
+  removed; both now say only "Open Furphy Addon Manager." While fixing
+  this, README.md's own tagline, install-steps list, and "What it does"
+  section were also found to still describe the "WoW (auto-update
+  addons)" desktop shortcut, its launcher file, and an "Update on
+  launch" feature - all removed in Round 34 - and were corrected to
+  describe the app's one remaining shortcut and its actual
+  background-timer update mechanism.
+- `first-run-docs:readme-md-stale-theme-list` - fixed: README.md's theme
+  bullet now correctly says 16 themes with Tokyo Rain as the current
+  default, adding the previously-missing Snow Day theme.
+- `first-run-docs:settings-spec-unresolved-tbd` - fixed: SETTINGS-SPEC.md's
+  cfFocus row no longer says its default is TBD/unconfirmed; it now
+  states On, matching addon-server.ps1's Get-DefaultSettings.
+- `first-run-docs:fresh-install-startup-blocks-first-check` - seeded lead
+  1 investigated; the literal failure text could not be reproduced on a
+  zero-addon fixture, but a real mechanism was confirmed where the CF
+  catalogue's uncapped ~61s worst-case fetch runs before the server's
+  own extended ping-wait budget (sized only for the Wago crawl), which
+  could combine to exceed it on a slow connection; not fixed this round.
+- `first-run-docs:cf-catalogue-init-missing-symmetry-guard` - seeded lead
+  3; a second, independent confirmation of the Initialize-CfCatalogueIndex
+  guard gap above.
+- `first-run-docs:fresh-install-shared-port-conflict-live-evidence` -
+  seeded lead 5; the dual-server FATAL-bind race above was directly
+  witnessed live during this round's own scratch testing, confirming
+  it is harmless but noisy exactly as scoped.
+- `first-run-docs:process-disclosure-shared-port-interaction` - process
+  disclosure: a scratch port-47899 investigation this round briefly
+  shared the port with an unrelated concurrent agent's own test server.
+- `docs:changelog-round36-false-not-fixed-claims` - fixed: three of the
+  Round 36 entries above (both dual-launcher-startup-race entries and
+  host-cf-navigationstarting-blocks-ui-thread) originally said "not
+  fixed this round" - true when first drafted, but the fixes below
+  landed later the same round and the claims were never updated.
+  Corrected in place to describe what actually shipped, matching the
+  full test suite that proves each fix.
+- `spa-ux:browse-view-deep-link-flavour-race` - found and fixed during
+  this round's own verification pass (not one of the five seeded
+  leads): App.init() could let Views.browse.render() run (via
+  Host.onHostReady, fired by the native host or the mock's own
+  simulated delay) before `await reloadState(false)` populated
+  Store.state.installedFlavours/activeFlavour, so a
+  `?view=browse&tab=wago` deep link on a multi-flavour machine fetched
+  /api/wago/browse without the required ?flavour= param on its very
+  first load, and the server's correct 400 rendered as a misleading
+  "Couldn't reach Wago right now" instead of the real cause. Fixed by
+  gating Views.browse's initial Wago fetch on Store.state.loadingState
+  (already the exact "has the first /api/state load completed" flag)
+  being false, so the auto-fetch waits for the same reloadState() call
+  that resolves the real flavour info.
+- `perf-game:cf-catalogue-live-fetch-in-tests` - completed a follow-up
+  the server fixer flagged this round: tests\lib\common.ps1's
+  Start-TestServer defaulted FURPHY_TEST_SKIP_WAGO_GROWTH but not
+  FURPHY_TEST_SKIP_CF_CATALOGUE (addon-server.ps1 has supported the
+  latter since this round's seed-1 fix), so most of the integration
+  layer's many server starts were still paying for a real, live
+  CurseForge catalogue fetch on every startup. Now defaulted the same
+  way - off unless a caller already opted into real CF-fetch behavior
+  via FURPHY_TEST_CF_BASEURL or the skip var itself - matching Eric's
+  "live traffic polite and minimal" principle.
+- `docs:run-all-theme-audit-stale-count` - cosmetic: tests\run-all.ps1's
+  spa-layer DisplayName still said "Run-ThemeAudit (15 themes,
+  full-only)" though the script itself (and its own header comment)
+  has covered all 16 themes, Snow Day included, since Round 35; bumped
+  the label to 16. No effect on pass/fail.
+- `tests:real-wow-false-failures` - fixed: this round's own verifier run
+  reported 12 failures (tests\unit\Server.WagoSnapshotCrawl.Tests.ps1
+  lines 69/142; tests\integration\Server.WagoBrowse.Tests.ps1 lines
+  237/300/343/354/397/482/527/582/833; tests\perf\Perf.Tests.ps1:324),
+  every one traced to the same non-code cause: a real Wow.exe was
+  genuinely running on the dev machine for the whole test window, and
+  these specific Describes/Its never passed a fake-WoW override, so the
+  app's own correct, by-design "never do live network work while WoW is
+  running" behavior (Test-GameRunning / WowDetector.IsRunning) starved
+  them of the live/stub traffic they expect - exactly the verifier's own
+  root-cause finding and its suggested fix. Fixed by giving every
+  affected Describe a deterministic fake-WoW override instead of relying
+  on the dev machine's real WoW state: Server.WagoSnapshotCrawl.Tests.ps1's
+  shared Initialize-WagoCrawlTestState now sets
+  $Script:WowFakeProcessNameOverride to a fresh nonexistent name (was
+  $null, which fell through to the real known-names list);
+  Server.WagoBrowse.Tests.ps1 gained a Get-NotRunningFakeWowName helper
+  and now passes it via -WowFakeProcessName to every Start-TestServer
+  call that expects the game to read as not-running (the sibling
+  Describes that deliberately simulate WoW running were already
+  correct and untouched); and Perf.Tests.ps1's "game stops: normal
+  behaviour resumes within 60s" It now passes --wow-fake (the same
+  now-stopped fake process name) to its own --tray-selftest
+  sub-invocation, which previously omitted it and so had
+  WowDetector.IsRunning(null) check the real system-wide process list
+  instead. All three files re-verified passing standalone
+  (Invoke-Pester) with the real Wow.exe still genuinely running on the
+  machine throughout. No production code changed - test-robustness only,
+  matching the verifier's own "not a regression" conclusion.
+
+**Fresh install on a one-client machine (critical, found by a second
+session's review).** `install.ps1`'s `Get-InstalledFlavourDefs` returned
+its list with `return $result`; PowerShell unrolls that, so a WoW folder
+with exactly ONE installed client - a retail-only machine, the most common
+case - came back as a bare record whose `.Count` is empty. `Find-WowRoot`'s
+`.Count -gt 0` check then failed and every fresh console or wizard install
+ended with "Could not find a World of Warcraft installation". Two or more
+clients never hit it, and `deploy.ps1` bypasses detection, which is why
+the live machine never showed it. No published release carried it. Fix:
+every call site wraps the call in `@(...)` (the pattern the file already
+used for `$script:firstClassInstalled`) and the function returns a plain
+array; `tests\integration\Install.SingleFlavour.Tests.ps1` runs a real
+console install and uninstall against a one-client scratch root and
+statically guards that every call site stays wrapped.
+
 ## Round 35 (1.16.0: browse Wago by category, popular, recently updated, and what is gaining)
 
 Eric's ask, verbatim: "for wago, i need a really good category based

@@ -230,6 +230,142 @@ function Get-OlderCurseForgeFileId {
     return [int64]$files[$idx].id
 }
 
+# host:host-cf-navigationstarting-blocks-ui-thread regression coverage.
+#
+# A minimal, standalone HttpListener stub (own child powershell.exe
+# process, same idiom as tests\fixtures\wago-stub\WagoStubServer.ps1) -
+# deliberately NOT addon-server.ps1, which this test has no business
+# starting or editing: this test targets the HOST's own thread
+# behaviour (does a slow /api/state or /api/jobs round trip freeze the
+# native window?), not server correctness. It answers GET /selftest.html
+# immediately (serving the real host\selftest.html content verbatim so
+# the existing --selftest choreography - hello/theme/cf-show/cf-nav -
+# still runs unchanged) but deliberately sleeps -DelayMs before answering
+# GET /api/state and POST /api/jobs - the two synchronous, timeout-bound
+# HTTP calls IsProjectTracked/HandleCurseforgeProtocol make from
+# CfWebView_NavigationStarting's own call chain (host\FurphyHost.cs).
+$Script:CfDelayStubServerSource = @'
+param(
+    [Parameter(Mandatory = $true)][int]$Port,
+    [Parameter(Mandatory = $true)][int]$DelayMs,
+    [Parameter(Mandatory = $true)][string]$SelftestHtmlPath
+)
+
+Set-StrictMode -Off
+$ErrorActionPreference = 'Stop'
+
+$htmlBytes = [System.Text.Encoding]::UTF8.GetBytes((Get-Content -LiteralPath $SelftestHtmlPath -Raw -Encoding UTF8))
+
+function Send-StubBytes {
+    param($Response, [int]$StatusCode, [string]$ContentType, [byte[]]$Bytes)
+    $Response.StatusCode = $StatusCode
+    $Response.ContentType = $ContentType
+    $Response.ContentLength64 = $Bytes.Length
+    $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://localhost:$Port/")
+$listener.Start()
+
+$shuttingDown = $false
+try {
+    while (-not $shuttingDown) {
+        $context = $listener.GetContext()
+        $request = $context.Request
+        $response = $context.Response
+        try {
+            $path = $request.Url.AbsolutePath
+            if ($path -eq '/__control/shutdown') {
+                Send-StubBytes -Response $response -StatusCode 200 -ContentType 'application/json' -Bytes ([System.Text.Encoding]::UTF8.GetBytes('{"ok":true}'))
+                $shuttingDown = $true
+                continue
+            }
+            if ($path -eq '/selftest.html' -and $request.HttpMethod -eq 'GET') {
+                Send-StubBytes -Response $response -StatusCode 200 -ContentType 'text/html; charset=utf-8' -Bytes $htmlBytes
+                continue
+            }
+            if ($path -eq '/api/state' -and $request.HttpMethod -eq 'GET') {
+                Start-Sleep -Milliseconds $DelayMs
+                Send-StubBytes -Response $response -StatusCode 200 -ContentType 'application/json' -Bytes ([System.Text.Encoding]::UTF8.GetBytes('{"addons":[]}'))
+                continue
+            }
+            if ($path -eq '/api/jobs' -and $request.HttpMethod -eq 'POST') {
+                Start-Sleep -Milliseconds $DelayMs
+                Send-StubBytes -Response $response -StatusCode 202 -ContentType 'application/json' -Bytes ([System.Text.Encoding]::UTF8.GetBytes('{"jobId":"stub-job-1"}'))
+                continue
+            }
+            Send-StubBytes -Response $response -StatusCode 404 -ContentType 'text/plain' -Bytes ([System.Text.Encoding]::UTF8.GetBytes('not found'))
+        } catch {
+            try {
+                Send-StubBytes -Response $response -StatusCode 500 -ContentType 'text/plain' -Bytes ([System.Text.Encoding]::UTF8.GetBytes('stub error'))
+            } catch { }
+        }
+    }
+} finally {
+    try { $listener.Stop() } catch { }
+    try { $listener.Close() } catch { }
+}
+'@
+
+function Start-CfDelayStubServer {
+    <#
+      Writes $Script:CfDelayStubServerSource into $Root and launches it as
+      its own child powershell.exe process, listening on $Port with each
+      of /api/state and /api/jobs delayed by $DelayMs. Waits for
+      /selftest.html to answer before returning. Returns a hashtable
+      Stop-CfDelayStubServer accepts.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][int]$DelayMs
+    )
+
+    $scriptPath = Join-Path -Path $Root -ChildPath 'cf-delay-stub.ps1'
+    Set-Content -LiteralPath $scriptPath -Value $Script:CfDelayStubServerSource -Encoding ASCII
+    $selftestHtmlPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'host\selftest.html'
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '" -Port ' + $Port + ' -DelayMs ' + $DelayMs + ' -SelftestHtmlPath "' + $selftestHtmlPath + '"'
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+
+    $ready = $false
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $resp = Invoke-WebRequest -Uri ("http://localhost:{0}/selftest.html" -f $Port) -UseBasicParsing -TimeoutSec 2
+            if ($resp.StatusCode -eq 200) { $ready = $true; break }
+        } catch { }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $ready) {
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+        throw "Start-CfDelayStubServer: stub on port $Port did not answer /selftest.html in time"
+    }
+
+    return @{ Process = $proc; Port = $Port }
+}
+
+function Stop-CfDelayStubServer {
+    <# Graceful shutdown request first (belt-and-suspenders Kill after). #>
+    param($Server)
+    if (-not $Server) { return }
+    try {
+        Invoke-WebRequest -Uri ("http://localhost:{0}/__control/shutdown" -f $Server.Port) -Method Post -UseBasicParsing -TimeoutSec 3 | Out-Null
+    } catch { }
+    Start-Sleep -Milliseconds 200
+    try {
+        if ($Server.Process -and -not $Server.Process.HasExited) {
+            $Server.Process.Kill()
+        }
+    } catch { }
+}
+
 Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
     # T4: tagged 'Network' in addition to 'Host' (T3 left it untagged and
     # flagged this exact choice as open) so tests\run-all.ps1 -NoNetwork /
@@ -340,6 +476,96 @@ Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
             }
             Stop-Straggler-FurphyHost -Needle $needle
             Stop-TestServer -Server $server
+        }
+    }
+
+    It 'keeps the UI thread responsive while the CF pane job-post round trip is slow (host-cf-navigationstarting-blocks-ui-thread)' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $root = New-TempRoot -Name 'host-window-selftest-uithread'
+        $stub = $null
+        $hostProc = $null
+        $needle = 'uithread-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path -Path $root -ChildPath ($needle + '.json')
+        $port = 47905
+
+        try {
+            # Own stub, not addon-server.ps1 - see Start-CfDelayStubServer's
+            # own header comment above. 2000ms on EACH of /api/state and
+            # /api/jobs: comfortably under IsProjectTracked's own 3000ms
+            # GetString timeout and HandleCurseforgeProtocol's 4000ms
+            # PostJson timeout (both calls succeed normally - this proves
+            # the fix moved them off the UI thread, not that a timeout
+            # fallback papered over a still-blocking call), while the
+            # ~4000ms combined sequential delay is far larger than the
+            # heartbeat bound asserted below.
+            $stub = Start-CfDelayStubServer -Root $root -Port $port -DelayMs 2000
+
+            Copy-Item -LiteralPath $Script:HostBinDir -Destination (Join-Path $root 'host\bin') -Recurse -Force
+            $exeCopyPath = Join-Path $root 'host\bin\FurphyHost.exe'
+            $webview2Dir = $exeCopyPath + '.WebView2'
+            if (Test-Path -LiteralPath $webview2Dir) {
+                Remove-Item -LiteralPath $webview2Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $selftestUrl = "http://localhost:$port/selftest.html"
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exeCopyPath
+            $psi.Arguments = '--port ' + $port + ' --selftest "' + $markerPath + '" "' + $selftestUrl + '"'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exeCopyPath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 40
+            $marker | Should Not Be $null
+
+            # Sanity: the deep-link path actually ran against the stub (same
+            # EnsureSelftestDeepLinkInjection/CfWebView_NavigationStarting
+            # mechanism as the It above, real curseforge.com CF-pane
+            # navigation with a fake deep link injected into it) - without
+            # this, a heartbeat that never saw the slow calls at all would
+            # trivially pass the assertion below for the wrong reason.
+            # Deliberately NOT also requiring jobPostStatus to equal 202
+            # here (the It above already covers that end-to-end shape) -
+            # this file's own pre-existing KNOWN FINDING comment documents
+            # that EnsureSelftestDeepLinkInjection's fire time against a
+            # real curseforge.com navigation is not always the same run to
+            # run, so HandleCurseforgeProtocol's two calls (each now
+            # deliberately slowed by this test's stub) do not always have
+            # time to both finish before the fixed 8s marker write; that
+            # timing variance is pre-existing and unrelated to this fix.
+            # When a status IS captured it must still be a genuine success,
+            # never silently masking a real regression.
+            $intercepted = @($marker.intercepted)
+            (@($intercepted | Where-Object { $_ -match 'curseforge://install' -and $_ -match 'addonId=999999001' }).Count) | Should BeGreaterThan 0
+            if ($null -ne $marker.jobPostStatus) {
+                $marker.jobPostStatus | Should Be 202
+            }
+
+            # The heartbeat Timer (50ms interval; host:
+            # host-cf-navigationstarting-blocks-ui-thread fix's own
+            # regression instrumentation, host\FurphyHost.cs
+            # SelftestHeartbeatTimer_Tick) can only tick while the UI
+            # thread is free to pump messages. 2000ms is generous headroom
+            # over normal WinForms/GC jitter (observed well under 500ms in
+            # practice) while staying far below the ~4000ms the stub would
+            # have blocked this thread for pre-fix (IsProjectTracked's
+            # GetString then HandleCurseforgeProtocol's PostJson, run back
+            # to back, inline, on this exact thread, both against this
+            # test's own deliberately slow stub).
+            [int]$marker.uiHeartbeatTicks | Should BeGreaterThan 80
+            [double]$marker.uiHeartbeatMaxGapMs | Should BeLessThan 2000
+
+            Wait-ProcessExit -Process $hostProc | Should Be $true
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) {
+                try { $hostProc.Kill() } catch { }
+            }
+            Stop-Straggler-FurphyHost -Needle $needle
+            Stop-CfDelayStubServer -Server $stub
         }
     }
 }

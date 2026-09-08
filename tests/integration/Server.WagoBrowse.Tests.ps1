@@ -127,6 +127,27 @@ function Stop-FakeWowProcess {
     try { if (-not $FakeWow.Process.HasExited) { Stop-Process -Id $FakeWow.Process.Id -Force -ErrorAction SilentlyContinue } } catch { }
 }
 
+function Get-NotRunningFakeWowName {
+    <#
+      Every Describe below that wants "the game is NOT running" (i.e.
+      every one that expects Handle-WagoBrowse to actually reach the
+      stub, not the gameActive:true empty-items gate) must still pass
+      -WowFakeProcessName to its Start-TestServer child process - without
+      it, Test-GameRunning falls back to the REAL
+      $Script:KnownWowProcessNames list, and a genuinely running Wow.exe
+      on the dev/CI machine (a real play session) makes the child server
+      correctly, but here WRONGLY for the test's intent, believe the game
+      is running, starving every assertion below the game-mode gate of
+      the stub traffic it expects - the exact false failure confirmed in
+      the Round 36 verifier report. Returning a fresh, deliberately
+      nonexistent name each call (mirroring New-FakeWowProcess's own
+      naming scheme, just never actually started as a process) makes
+      Test-GameRunning's Get-Process lookup always miss, so "not running"
+      holds regardless of the real machine's state.
+    #>
+    return 'WowFakeNotRunning' + (Get-Random -Maximum 99999)
+}
+
 function Add-WagoBrowsePath {
     <#
       Every /api/wago/browse call in this file needs an explicit
@@ -226,7 +247,7 @@ Describe 'Wago browse: default listing (Popular)' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'GET /api/wago/browse with no params sends no sort=, returns sortApplied=popular with author/downloads/updatedAt/summary populated on every row, and 29 categories folded in' {
@@ -288,7 +309,7 @@ Describe 'Wago browse: categories' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It '/api/wago/browse categories and /api/wago/categories agree exactly, id-for-id, in the server''s own order' {
@@ -334,7 +355,7 @@ Describe 'Wago browse: categoryId filtering' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'categoryId=4 forwards category=4 to Wago and returns the real filtered total/lastPage' {
@@ -387,7 +408,7 @@ Describe 'Wago browse: sort handling' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'sort=name forwards sort=name to Wago, sortApplied=name, alphabetical first item' {
@@ -473,7 +494,7 @@ Describe 'Wago browse: pagination' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'page=2 forwards page=2 to Wago and returns page 2''s own paginator/first item' {
@@ -517,7 +538,7 @@ Describe 'Wago browse: cache' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'an identical second call within 5 minutes makes zero additional stub requests' {
@@ -565,7 +586,7 @@ Describe 'Wago browse: pacing' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It '3 sequential DISTINCT calls (cache misses) take at least (N-1)*300ms combined' {
@@ -824,7 +845,7 @@ Describe 'Wago browse: snapshot crawl at startup (<=10 pages, spec-shaped file, 
             # running) and a fresh -Root (no pre-existing snapshot file,
             # so the 20h-staleness gate has nothing to skip against) - the
             # crawl should run for real during this server's own startup.
-            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName))
         } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'crawls at most 10 pages for the one installed flavour and writes a spec-shaped, de-duped snapshot file' {
@@ -940,7 +961,7 @@ Describe 'Wago browse: CSRF (GET is exempt)' {
         ) -DefaultFile 'empty-retail.json'
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
-        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot }
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
         finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'GET /api/wago/browse succeeds with no Origin/Referer header at all (CSRF guard is POST/PUT/DELETE only)' {

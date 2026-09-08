@@ -227,10 +227,10 @@ Row 8
   prior location: Advanced > Browsing (now Advanced > CurseForge)
 
 Row 9
-  key: cfFocus (exact default UNCONFIRMED in the audit material - verify in
-       addon-server.ps1 before implementing; do not assume on or off)
+  key: cfFocus
   control: toggle
-  default: TBD - verify in addon-server.ps1
+  default: On (matches addon-server.ps1 Get-DefaultSettings and SPEC.md
+       Expansion E22)
   label: "Show only search results on CurseForge" (unchanged)
   helper line: none (unchanged - this row is deliberately explainer-
        sentence-free, per UX-SPEC.md 6.2)
