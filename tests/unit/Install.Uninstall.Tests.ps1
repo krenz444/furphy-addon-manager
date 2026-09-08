@@ -13,6 +13,15 @@
 $Script:InstallScript = Join-Path $Script:FurphyBuildRoot 'install.ps1'
 . $Script:InstallScript
 
+# fresh-zip:novice-uninstall-orphans-addon-server fix: the raw source text,
+# used below to isolate Get-InstallLiveAppDestProcesses/
+# Invoke-InstallServerShutdown - both sit BELOW the round-32 dot-source
+# guard (same situation Install.Wizard.Tests.ps1 documents for
+# Show-InstallWizard), so dot-sourcing install.ps1 above never defines
+# them; this proves the REAL shipped matching/shutdown logic rather than a
+# hand-written reimplementation of it.
+$Script:InstallSource = Get-Content -Raw -LiteralPath $Script:InstallScript
+
 Describe 'install.ps1 dot-source guard still holds with the round-33 additions' {
     It 'defines every round-33 pure helper (all of which sit ABOVE the dot-source guard) without running the installer' {
         (Get-Command Get-InstallAppsKeyName -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
@@ -264,5 +273,200 @@ Describe 'Test-IsTempUninstallScriptCopy (novice:NOVICE-3: gates the -Uninstall 
     It 'false for null/empty' {
         Test-IsTempUninstallScriptCopy -Path $null | Should Be $false
         Test-IsTempUninstallScriptCopy -Path '' | Should Be $false
+    }
+}
+
+# =========================================================================
+# fresh-zip:novice-uninstall-orphans-addon-server fix (QA-FINDINGS-LENSES-3
+# .md, MEDIUM): install.ps1 -Uninstall run directly (the "advanced"/
+# Installed-Apps path, not via a live server's own POST /api/uninstall)
+# used to leave the background addon-server.ps1 process (a bare
+# powershell.exe spawned by Addon Manager.vbs on first open, deliberately
+# left running per README so "minimizing and coming back reconnects on its
+# own") running indefinitely after deleting its own script files out from
+# under it. Fixed by (1) extending Get-InstallLiveAppDestProcesses to also
+# match a powershell.exe/pwsh.exe process whose command line references
+# THIS install's own "$AppDest\addon-server.ps1", so Wait-
+# InstallHostAndWebView2Exit's existing wait/force-kill loop now covers it
+# too, and (2) a new Invoke-InstallServerShutdown that gives that server
+# one graceful, best-effort POST /api/shutdown BEFORE that loop even
+# starts polling - the exact same route a live server's own POST
+# /api/uninstall already uses to self-shutdown.
+# =========================================================================
+
+Describe 'install.ps1 source shape (fresh-zip:novice-uninstall-orphans-addon-server fix)' {
+    # Both functions under test sit BELOW the round-32 dot-source guard
+    # (defined only while the installer is actually running, not merely
+    # dot-sourced) - static source-text assertions here are cheap,
+    # deterministic checks on the REAL shipped shape, complementing the
+    # real-process functional Describe further below and the end-to-end
+    # "server stopped" integration assertion in
+    # tests\integration\Server.Uninstall.Tests.ps1 (port 47903).
+
+    $Script:LiveProcsFuncStart = $Script:InstallSource.IndexOf('function Get-InstallLiveAppDestProcesses {')
+    $Script:LiveProcsFuncEnd = $Script:InstallSource.IndexOf("`nfunction Invoke-InstallServerShutdown {", $Script:LiveProcsFuncStart)
+    $Script:ShutdownFuncEnd = $Script:InstallSource.IndexOf("`nfunction Wait-InstallHostAndWebView2Exit {", $Script:LiveProcsFuncStart)
+
+    It 'the source markers used by every test below were found (update them if this function''s shape changes)' {
+        $Script:LiveProcsFuncStart | Should BeGreaterThan -1
+        $Script:LiveProcsFuncEnd | Should BeGreaterThan $Script:LiveProcsFuncStart
+        $Script:ShutdownFuncEnd | Should BeGreaterThan $Script:LiveProcsFuncEnd
+    }
+
+    $Script:LiveProcsFuncBody = $Script:InstallSource.Substring($Script:LiveProcsFuncStart, $Script:LiveProcsFuncEnd - $Script:LiveProcsFuncStart)
+    $Script:ShutdownFuncBody = $Script:InstallSource.Substring($Script:LiveProcsFuncEnd, $Script:ShutdownFuncEnd - $Script:LiveProcsFuncEnd)
+
+    It 'Get-InstallLiveAppDestProcesses'' CIM filter now includes powershell.exe and pwsh.exe alongside the existing FurphyHost.exe/msedgewebview2.exe names' {
+        $Script:LiveProcsFuncBody | Should Match ([regex]::Escape("Name='FurphyHost.exe' OR Name='msedgewebview2.exe' OR Name='powershell.exe' OR Name='pwsh.exe'"))
+    }
+
+    It 'the powershell.exe/pwsh.exe branch requires BOTH ''addon-server.ps1'' AND the install''s own $AppDestNorm in the same command line (never a bare "any powershell.exe" match)' {
+        $branchIdx = $Script:LiveProcsFuncBody.IndexOf("`$p.Name -eq 'powershell.exe' -or `$p.Name -eq 'pwsh.exe'")
+        $branchIdx | Should BeGreaterThan -1
+        $branchBody = $Script:LiveProcsFuncBody.Substring($branchIdx, [Math]::Min(400, $Script:LiveProcsFuncBody.Length - $branchIdx))
+        $branchBody | Should Match ([regex]::Escape("Contains('addon-server.ps1')"))
+        $branchBody | Should Match ([regex]::Escape('Contains($AppDestNorm)'))
+    }
+
+    It 'Invoke-InstallServerShutdown POSTs /api/shutdown with an Origin header built from Get-InstallPort''s own port, and never throws' {
+        $Script:ShutdownFuncBody | Should Match ([regex]::Escape('Get-InstallPort -AppDest $AppDest'))
+        $Script:ShutdownFuncBody | Should Match ([regex]::Escape('/api/shutdown'))
+        $Script:ShutdownFuncBody | Should Match 'Method Post'
+        $Script:ShutdownFuncBody | Should Match ([regex]::Escape('Headers @{ Origin = $originUrl }'))
+        # try/catch around the whole call - a missing server or a 409 (job
+        # still running) must never bubble up and abort the uninstall.
+        $Script:ShutdownFuncBody | Should Match '(?s)try\s*\{.*Invoke-RestMethod.*\}\s*catch\s*\{'
+    }
+
+    It 'Wait-InstallHostAndWebView2Exit calls Invoke-InstallServerShutdown BEFORE its own poll loop starts (graceful attempt first, force-kill fallback second)' {
+        $waitFuncStart = $Script:InstallSource.IndexOf('function Wait-InstallHostAndWebView2Exit {')
+        $waitFuncStart | Should BeGreaterThan -1
+        $firstPollIdx = $Script:InstallSource.IndexOf('while ($remaining.Count -gt 0', $waitFuncStart)
+        $shutdownCallIdx = $Script:InstallSource.IndexOf('Invoke-InstallServerShutdown -AppDest $AppDest', $waitFuncStart)
+        $firstPollIdx | Should BeGreaterThan $waitFuncStart
+        $shutdownCallIdx | Should BeGreaterThan $waitFuncStart
+        $shutdownCallIdx | Should BeLessThan $firstPollIdx
+    }
+
+    It 'the -Uninstall flow''s "stopped" confirmation only prints after a fresh Get-InstallLiveAppDestProcesses recheck reports zero live processes' {
+        $recheckIdx = $Script:InstallSource.IndexOf('$stillLiveAfterWait = Get-InstallLiveAppDestProcesses')
+        $recheckIdx | Should BeGreaterThan -1
+        $nearby = $Script:InstallSource.Substring($recheckIdx, 400)
+        $nearby | Should Match ([regex]::Escape('$stillLiveAfterWait.Count -eq 0'))
+        $nearby | Should Match ([regex]::Escape("Write-Info 'Background tray/server stopped.'"))
+        # The early tray-only wait loop (above this point in the file) must
+        # NOT itself claim the combined "stopped" wording - it only ever
+        # confirms the tray's own FurphyHost.exe process, never the
+        # separate addon-server.ps1 process.
+        $Script:InstallSource | Should Not Match ([regex]::Escape("Write-Info 'Background tray stopped.'"))
+    }
+}
+
+Describe 'Get-InstallLiveAppDestProcesses (real process matching - fresh-zip:novice-uninstall-orphans-addon-server fix)' {
+    <#
+      Dot-sources the REAL function body (isolated above) as a standalone
+      scriptblock, then exercises it against REAL scratch powershell.exe
+      processes this test spawns and force-stops itself - never a
+      FurphyHost.exe/msedgewebview2.exe, never a port, never anything
+      outside tests\.tmp\, so none of the HARD RULES process-safety
+      restrictions apply here. Proves the new powershell.exe/pwsh.exe
+      branch matches an addon-server.ps1-shaped command line under the
+      given AppDest and, just as importantly, does NOT match: (a) the
+      same script name under a DIFFERENT AppDest (a decoy install), or
+      (b) a DIFFERENT script name under the SAME AppDest.
+    #>
+    $sb = [scriptblock]::Create($Script:LiveProcsFuncBody)
+    . $sb
+
+    It 'the extracted function actually defined Get-InstallLiveAppDestProcesses in this scope' {
+        (Get-Command Get-InstallLiveAppDestProcesses -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
+    }
+
+    $Script:LiveProcsRoot = New-TempRoot -Name 'liveprocs'
+    $Script:AppDestA = Join-Path $Script:LiveProcsRoot 'InstallA\_retail_\AddonSync'
+    $Script:AppDestB = Join-Path $Script:LiveProcsRoot 'InstallB\_retail_\AddonSync'
+    New-Item -ItemType Directory -Path $Script:AppDestA -Force | Out-Null
+    New-Item -ItemType Directory -Path $Script:AppDestB -Force | Out-Null
+
+    # A harmless stand-in for addon-server.ps1 - never binds a port, never
+    # touches the network, just sleeps long enough for the test to observe
+    # it via Get-CimInstance and then kill it itself.
+    $dummyServerBody = 'param([int]$Port=1,[string]$Root=".",[int]$IdleMinutes=5) Start-Sleep -Seconds 120'
+    $dummyOtherBody = 'param([int]$Port=1,[string]$Root=".",[int]$IdleMinutes=5) Start-Sleep -Seconds 120'
+    Set-Content -LiteralPath (Join-Path $Script:AppDestA 'addon-server.ps1') -Value $dummyServerBody -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $Script:AppDestB 'addon-server.ps1') -Value $dummyServerBody -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $Script:AppDestA 'other-script.ps1') -Value $dummyOtherBody -Encoding Ascii
+
+    function Start-DummyScratchProcess {
+        param([string]$ScriptPath)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'powershell.exe'
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Port 1 -Root `"$(Split-Path -Path $ScriptPath -Parent)`" -IdleMinutes 5"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        return [System.Diagnostics.Process]::Start($psi)
+    }
+
+    # procTarget: the real repro shape - addon-server.ps1 under AppDestA.
+    # procDecoyAppDest: the SAME script name, but a DIFFERENT AppDest
+    # (must never be matched when querying for AppDestA).
+    # procDecoyScript: a DIFFERENT script name under the SAME AppDestA
+    # (must never be matched - $AppDestNorm alone is not enough).
+    $Script:ProcTarget = Start-DummyScratchProcess -ScriptPath (Join-Path $Script:AppDestA 'addon-server.ps1')
+    $Script:ProcDecoyAppDest = Start-DummyScratchProcess -ScriptPath (Join-Path $Script:AppDestB 'addon-server.ps1')
+    $Script:ProcDecoyScript = Start-DummyScratchProcess -ScriptPath (Join-Path $Script:AppDestA 'other-script.ps1')
+
+    # Get-CimInstance can lag a short moment behind Start-Process - poll
+    # rather than sleeping a fixed guess.
+    function Wait-CimVisible {
+        param([int]$ProcessId, [int]$TimeoutSec = 15)
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        while ((Get-Date) -lt $deadline) {
+            if (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue) { return $true }
+            Start-Sleep -Milliseconds 300
+        }
+        return $false
+    }
+    $Script:AllVisible = (Wait-CimVisible -ProcessId $Script:ProcTarget.Id) -and
+                          (Wait-CimVisible -ProcessId $Script:ProcDecoyAppDest.Id) -and
+                          (Wait-CimVisible -ProcessId $Script:ProcDecoyScript.Id)
+
+    AfterAll {
+        foreach ($p in @($Script:ProcTarget, $Script:ProcDecoyAppDest, $Script:ProcDecoyScript)) {
+            if ($p) { try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } catch { } }
+        }
+        if ($Script:LiveProcsRoot -and (Test-Path -LiteralPath $Script:LiveProcsRoot)) {
+            Remove-Item -LiteralPath $Script:LiveProcsRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'all three scratch processes actually started and became visible to Get-CimInstance (precondition for every assertion below)' {
+        $Script:AllVisible | Should Be $true
+    }
+
+    It 'matches the real addon-server.ps1 process under its own AppDest' {
+        $found = Get-InstallLiveAppDestProcesses -AppDestNorm ($Script:AppDestA.TrimEnd('\').ToLowerInvariant())
+        $foundIds = @($found | ForEach-Object { [int]$_.ProcessId })
+        ($foundIds -contains $Script:ProcTarget.Id) | Should Be $true
+    }
+
+    It 'does NOT match the same-named addon-server.ps1 process running under a DIFFERENT AppDest (a decoy/other install)' {
+        $found = Get-InstallLiveAppDestProcesses -AppDestNorm ($Script:AppDestA.TrimEnd('\').ToLowerInvariant())
+        $foundIds = @($found | ForEach-Object { [int]$_.ProcessId })
+        ($foundIds -contains $Script:ProcDecoyAppDest.Id) | Should Be $false
+    }
+
+    It 'does NOT match a differently-named script under the SAME AppDest ($AppDestNorm alone is not a match)' {
+        $found = Get-InstallLiveAppDestProcesses -AppDestNorm ($Script:AppDestA.TrimEnd('\').ToLowerInvariant())
+        $foundIds = @($found | ForEach-Object { [int]$_.ProcessId })
+        ($foundIds -contains $Script:ProcDecoyScript.Id) | Should Be $false
+    }
+
+    It 'querying AppDestB''s own norm matches only ITS OWN addon-server.ps1 process' {
+        $found = Get-InstallLiveAppDestProcesses -AppDestNorm ($Script:AppDestB.TrimEnd('\').ToLowerInvariant())
+        $foundIds = @($found | ForEach-Object { [int]$_.ProcessId })
+        ($foundIds -contains $Script:ProcDecoyAppDest.Id) | Should Be $true
+        ($foundIds -contains $Script:ProcTarget.Id) | Should Be $false
+        ($foundIds -contains $Script:ProcDecoyScript.Id) | Should Be $false
     }
 }

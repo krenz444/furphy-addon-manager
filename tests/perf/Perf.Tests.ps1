@@ -71,6 +71,22 @@ $Script:MaxServerRequestsInWindow = 2    # task brief: "at most 2 SPA polls" (PO
 $Script:MaxServerLogGrowthBytes = 2048   # task brief: "< 2 KB"
 $Script:ResumeTimeoutSec = 60            # task brief
 
+# Round 40 (QA-FINDINGS-LENSES-3.md, tests:perf-suite-no-webview-cpu-assertion,
+# HIGH): the checks above only ever summed CPU for Role 'server'/'host-tray' -
+# host-window and every webview2-child row (renderer/gpu-process/etc.) were
+# never asserted on anywhere in this file, and the window was never measured
+# in any state other than minimized. That gap is exactly how the companion
+# finding webview2-gpu-cpu-open-foreground (an unthrottled decorative theme
+# animation costing ~5.766 CPU-s/60s in the open+foreground state, ~11x the
+# round-25 baseline of 0.516 CPU-s/60s) shipped undetected. Two guards below:
+# $TotalCpuMaxSec closes the gap for the EXISTING minimized/tray It (added to
+# its assertion block, not a new It); $ForegroundTotalCpuMaxSec backs a new,
+# separate It that actually reproduces the state the regression landed in
+# (window open, focused, WoW running, no minimize).
+$Script:TotalCpuMaxSec = 1.0             # minimized steady-state It: total across EVERY Furphy-scoped process (server+tray+host-window+webview2 children), not just server/tray
+$Script:ForegroundTotalCpuMaxSec = 1.5   # foreground It, 60s window: fixNote's own verified after-fix number is 0.312 CPU-s and the historical pre-regression P0-P2 baseline is 0.516 CPU-s/60s - 1.5 leaves ~3-5x headroom over both for a slower/busier CI machine while still failing hard (by ~4x) against the confirmed 5.766 CPU-s regression
+$Script:ForegroundSettleWaitSec = 8      # matches tests\perf\Run-StateD.ps1's own settle - no tray/first-cycle wait needed here (no --tray process is started for this It)
+
 $Script:HostBinDir = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'host\bin'
 $Script:HostCsPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'host\FurphyHost.cs'
 $Script:HostExePath = Join-Path -Path $Script:HostBinDir -ChildPath 'FurphyHost.exe'
@@ -92,10 +108,32 @@ function Ensure-PerfHostBuilt {
 
 Add-Type -Namespace FurphyPerfTest -Name User32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
 '@ -ErrorAction SilentlyContinue
 
 $Script:SW_MINIMIZE = 6
 $Script:SW_RESTORE = 9
+
+function Test-RealWowClientRunning {
+    <#
+      HARD RULE for this build round: never launch a native FurphyHost.exe
+      window while a real WoW client may be running on this machine - only
+      --wow-fake/-WowFakeProcessName's fake client should ever be involved.
+      Own local copy (kept dependency-free, matches
+      tests\host\Host.Tests.ps1's Test-RealWowClientRunning and
+      addon-server.ps1's Test-GameRunning / host\FurphyHost.cs's
+      WowDetector.IsRunning name list byte-for-byte) - each *.Tests.ps1 is
+      dot-sourced into its own scope, nothing here is shared automatically.
+    #>
+    $names = @('Wow', 'Wow-64', 'WowClassic', 'WowClassicT', 'WowClassicB', 'WowT', 'WowB')
+    foreach ($n in $names) {
+        try {
+            $procs = Get-Process -Name $n -ErrorAction SilentlyContinue
+            if ($procs -and @($procs).Count -gt 0) { return $true }
+        } catch { }
+    }
+    return $false
+}
 
 function New-PerfAppRoot {
     <#
@@ -217,9 +255,21 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             if (-not $serverCpu) { $serverCpu = 0 }
             $trayCpu = ($result.Processes | Where-Object { $_.Role -eq 'host-tray' } | Measure-Object -Property CpuSeconds -Sum).Sum
             if (-not $trayCpu) { $trayCpu = 0 }
+            # Round 40: $result.TotalCpuSeconds already sums EVERY Furphy-
+            # scoped process in the window (server+tray+host-window+every
+            # webview2-child role) - the two per-role checks above never
+            # covered host-window/webview2-child at all, which is exactly
+            # where QA round 3's webview2-gpu-cpu-open-foreground regression
+            # lived. This window is minimized (background mode engaged), so
+            # webview2/CF panes are expected to be suspended - see the
+            # separate 'foreground state' It below for the un-minimized case
+            # that actually caught the regression.
+            $totalCpu = $result.TotalCpuSeconds
+            if (-not $totalCpu) { $totalCpu = 0 }
 
             ($serverCpu -lt $Script:ServerCpuMaxSec) | Should Be $true
             ($trayCpu -lt $Script:TrayCpuMaxSec) | Should Be $true
+            ($totalCpu -lt $Script:TotalCpuMaxSec) | Should Be $true
             ($result.TotalNewTcpConnections -le $Script:MaxNewTcpConnections) | Should Be $true
             if ($null -ne $result.RequestCountInWindow) {
                 ($result.RequestCountInWindow -le $Script:MaxServerRequestsInWindow) | Should Be $true
@@ -230,6 +280,98 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
         } finally {
             Stop-PerfProcessQuiet -Process $hostProc
             Stop-PerfProcessQuiet -Process $trayProc
+            Stop-PerfProcessQuiet -Process $fakeWow
+            Start-Sleep -Milliseconds 500
+            Get-Process -Name 'msedgewebview2' -ErrorAction SilentlyContinue | Where-Object {
+                (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine -like "*$root*"
+            } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Stop-TestServer -Server $server
+        }
+    }
+
+    It 'foreground state (WoW running, host window open + focused on My Addons, no minimize): total CPU stays within tolerance' {
+        <#
+          Round 40 regression guard for QA-FINDINGS-LENSES-3.md's
+          webview2-gpu-cpu-open-foreground (HIGH): the steady-state It above
+          only ever measures the window MINIMIZED, where the existing P2
+          background-mode gate already suspends the webview2/CF panes - the
+          real regression (an unthrottled decorative theme animation forcing
+          the compositor to keep doing full-frame-rate composite passes)
+          only shows up with the window open and NOT minimized, which no
+          test in this file exercised before. Deliberately mirrors this QA
+          round's own repro as closely as possible: no --tray process (the
+          finding's own repro didn't use one either), a short settle instead
+          of the 90s+ first-cycle wait (nothing here depends on tray
+          timing), --view my-addons (same view tests\perf\Run-StateD.ps1 used
+          to capture the original round-25 P0-P2 baseline this compares
+          against).
+        #>
+        if (-not (Ensure-PerfHostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+        if (Test-RealWowClientRunning) {
+            Write-Host '  (skipped: a real WoW client process is running on this machine - not launching a native FurphyHost.exe window)'
+            return
+        }
+
+        $root = New-TempRoot -Name 'perf-foreground'
+        New-PerfAppRoot -Root $root -Port 47899
+        $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'perf-foreground-wowroot')
+
+        $fakeProcName = 'WowFakePerf' + (Get-Random -Maximum 99999)
+        $fakeExePath = Join-Path $root ($fakeProcName + '.exe')
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
+
+        $serverLogPath = Join-Path $root 'server.log'
+        $hostExe = Join-Path $root 'host\bin\FurphyHost.exe'
+
+        $fakeWow = $null
+        $server = $null
+        $hostProc = $null
+
+        try {
+            $fakeWow = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '900', '/nobreak') -WindowStyle Hidden -PassThru
+            Start-Sleep -Milliseconds 500
+
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -IdleMinutes 60 -ExtraArgs @('-WowFakeProcessName', $fakeProcName)
+
+            $hostProc = Start-Process -FilePath $hostExe -ArgumentList @('--port', '47899', '--view', 'my-addons', '--wow-fake', $fakeProcName) -PassThru
+
+            # Wait for a real window handle rather than assuming one appears
+            # - "no window can be shown" (no interactive desktop session, a
+            # locked workstation, etc.) is a real possibility on some runner
+            # machines and should skip cleanly, not fail/hang.
+            $hwnd = [IntPtr]::Zero
+            $tries = 0
+            while ($hwnd -eq [IntPtr]::Zero -and $tries -lt 20) {
+                Start-Sleep -Milliseconds 500
+                $hostProc.Refresh()
+                $hwnd = $hostProc.MainWindowHandle
+                $tries++
+            }
+            if ($hwnd -eq [IntPtr]::Zero) {
+                Write-Host '  (skipped: no window could be shown on this machine - MainWindowHandle stayed zero)'
+                return
+            }
+
+            # Deliberately NOT minimized, and explicitly brought to the
+            # foreground/focused - this is the exact state the finding's
+            # own repro measured (state D: "Window open, My Addons, fake
+            # WoW running") and the one no existing It covered.
+            [FurphyPerfTest.User32]::SetForegroundWindow($hwnd) | Out-Null
+            Start-Sleep -Seconds $Script:ForegroundSettleWaitSec
+
+            $result = & (Join-Path $PSScriptRoot 'Measure-Furphy.ps1') -Label 'p3-foreground' -DurationSec 60 `
+                -ServerLogPath $serverLogPath -Quiet `
+                -Notes 'P3 perf test: fake Wow.exe running, host window OPEN and FOCUSED on My Addons (no minimize, no tray). Regression guard for QA round 3 webview2-gpu-cpu-open-foreground.'
+
+            $totalCpu = $result.TotalCpuSeconds
+            if (-not $totalCpu) { $totalCpu = 0 }
+
+            ($totalCpu -lt $Script:ForegroundTotalCpuMaxSec) | Should Be $true
+        } finally {
+            Stop-PerfProcessQuiet -Process $hostProc
             Stop-PerfProcessQuiet -Process $fakeWow
             Start-Sleep -Milliseconds 500
             Get-Process -Name 'msedgewebview2' -ErrorAction SilentlyContinue | Where-Object {

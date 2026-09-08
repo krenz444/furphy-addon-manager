@@ -1,5 +1,92 @@
 # Furphy Addon Manager - changelog
 
+## Round 40 (1.20.1: cheaper theme animations, uninstall stops its helper, foreground-CPU test, soak script)
+
+A skeptic QA pass across four lenses (perf-remeasure, soak, classic-only/
+classic-era-only, fresh-zip) against the v1.20.0 build. 4 findings
+confirmed (2 high, 2 medium) and fixed this round: a real, measured
+gameplay-CPU regression (the app's own "zero impact on gameplay" promise
+being broken while its window was open), a real but time-bounded
+uninstall correctness bug, and two test-infrastructure gaps - the
+coverage hole that let the CPU regression ship undetected in the first
+place, and a soak run that only completed 5 of its planned 120 minutes.
+3 findings were investigated and rejected with reasoning (a cold-start
+"regression" that did not reproduce under a controlled 14-sample
+re-test, a teardown-safety claim contradicted by the actual code and
+port pool, and a wizard DPI-awareness "fix" already rejected for the
+same reason in Round 39) - see the QA report's own appendix; none
+reopened here. No defects found in Classic/Classic Era flavour handling
+or the already-known minimized background-mode CPU envelope, both
+re-checked this round. Each fixer worked only their own files and
+verified with parse checks, `node --check`, standalone Pester runs, and
+real scratch-port measurements; the full `tests\run-all.ps1` suite is
+the verifier's job, not reflected in the per-fixer notes below.
+
+**SPA:**
+- `perf-remeasure:webview2-gpu-cpu-open-foreground` - every decorative
+  theme animation (the tokyo-rain default's sidebar pulse, and the
+  lofi/aurora-sky/snow-day/matcha/desert-night/terminal-green/
+  strawberry-cream/arcane-library equivalents) kept the WebView2
+  compositor doing full-frame-rate work even with WoW running and the
+  app's window merely open (focused or not) - about 11x the app's own
+  zero-impact baseline (5.766 CPU-s vs a historical 0.516 CPU-s over 60
+  seconds, measured with tests\perf\Measure-Furphy.ps1). ui\app.js now
+  stamps a `data-game-active` attribute on `<html>` from the same
+  game-state signal the SPA already reacts to elsewhere, alongside the
+  existing `data-window-inactive` (unfocused-but-visible) attribute;
+  ui\style.css forces every decorative animation off while either is
+  set, so the moment WoW starts (or the window loses focus) the
+  compositor has nothing left to animate, and everything resumes the
+  instant the game stops (or the window is focused again). Art and
+  readability at rest are unchanged - only measured CPU/GPU work
+  changed.
+
+**Installer:**
+- `fresh-zip:novice-uninstall-orphans-addon-server` - running
+  `install.ps1 -Uninstall` directly (the documented "advanced" path, not
+  the tray/Settings/Apps & Features paths) deleted the app's files and
+  reported success while the background addon-server.ps1 process it had
+  spawned kept answering requests for up to ~20 minutes afterward (its
+  own idle-exit timer, not a hang). Get-InstallLiveAppDestProcesses now
+  also matches a powershell.exe/pwsh.exe process whose command line
+  names both addon-server.ps1 and this install's own path, and a new
+  Invoke-InstallServerShutdown POSTs the same graceful /api/shutdown
+  route the other three uninstall paths already use, before falling
+  back to the existing wait/force-kill loop for anything left. "Background
+  tray/server stopped." now only prints once both the host process(es)
+  and the server are confirmed gone.
+
+**Tests:**
+- `perf-remeasure:perf-suite-no-webview-cpu-assertion` - the automated
+  perf suite (tests\perf\Perf.Tests.ps1) never asserted on host-window or
+  WebView2-child CPU at all (only server/tray), and only ever measured
+  the window minimized - exactly the coverage gap that let the
+  regression above ship undetected. The existing minimized/tray
+  steady-state It now also asserts total Furphy-process CPU (every role,
+  not just server/tray) stays under 1.0 CPU-s across its 90s window; a
+  new It measures the window OPEN and FOCUSED on My Addons with a fake
+  WoW running (no minimize - the actual scenario the regression landed
+  in) and asserts total CPU stays under 1.5 CPU-s/60s, comfortable
+  margin over both the historical 0.516 CPU-s baseline and the fix's own
+  verified 0.312 CPU-s result while still failing hard against the
+  confirmed 5.766 CPU-s regression. Both skip cleanly, with a clear
+  message, if a real WoW client is running on the machine or no window
+  can be shown.
+- `soak:SOAK-SCOPE-1` - the requested 2-hour soak only ran ~5 minutes
+  before the harness cut it short, so no leak/growth, repeated-
+  maintenance-cycle, or multi-cycle background-sync signal was ever
+  gathered. tests\perf\Soak-Furphy.ps1 is a new, repeatable, standalone
+  script (`-Minutes`, `-Port`, its own scratch root, its own local
+  CurseForge-catalogue and Wago stubs so a multi-hour run makes no real
+  internet calls) that samples CPU/working set/handle count/thread count
+  for every Furphy-scoped process, plus server/host/sync log size,
+  jobs\/cache\ growth, and tray-state.json, every 5 minutes - writing a
+  CSV pair and a plain-language summary at the end. It is a
+  data-gathering tool, not a pass/fail check: deliberately named so that
+  tests\run-all.ps1's Pester discovery (which only ever picks up
+  `*.Tests.ps1`) never finds it, keeping it excluded from the gate by
+  construction.
+
 ## Round 39 (1.20.0: keyboard, dialogs, zoom, reduced motion, installer polish, docs truth)
 
 A skeptic-confirmed QA pass across four lenses (a11y/keyboard, installer

@@ -701,17 +701,34 @@ function Get-InstallLiveAppDestProcesses {
     <#
       Every FurphyHost.exe (tray OR a main window - any FurphyHost.exe
       whose own exe path resolves under $AppDest, not just one specific
-      known path) and every msedgewebview2.exe child spawned FOR this
+      known path), every msedgewebview2.exe child spawned FOR this
       install (matched by --user-data-dir on its own command line
-      containing $AppDest) that is alive right now. Read-only - never
-      touches a process whose own path/command-line does not resolve
-      under $AppDest, so a real production tray/window running from an
-      entirely different install is never matched here.
+      containing $AppDest), AND (fresh-zip:novice-uninstall-orphans-
+      addon-server fix) every plain powershell.exe/pwsh.exe process
+      whose own command line references THIS install's own
+      "$AppDest\addon-server.ps1" - the background HTTP server Addon
+      Manager.vbs spawns on first open and (per README) deliberately
+      leaves running after the app window closes, so "minimizing the app
+      and coming back to it later reconnects on its own". That server is
+      a different process image entirely from FurphyHost.exe, so before
+      this fix a caller that only ever asked for FurphyHost.exe/
+      msedgewebview2.exe here (i.e. every install.ps1 -Uninstall run
+      invoked directly, rather than through a live server's own POST
+      /api/uninstall self-shutdown) never saw it, never waited for it,
+      and left it running indefinitely after deleting its own script
+      file out from under it. Read-only - never touches a process whose
+      own path/command-line does not resolve under $AppDest, so a real
+      production tray/window/server running from an entirely different
+      install (or an unrelated powershell.exe elsewhere on the machine,
+      this very install.ps1 process included) is never matched here: the
+      powershell.exe/pwsh.exe branch requires BOTH "addon-server.ps1"
+      AND this exact $AppDestNorm to appear in that process's own
+      command line, never a bare "any powershell.exe" match.
     #>
     param([Parameter(Mandatory = $true)][string]$AppDestNorm)
     $found = New-Object 'System.Collections.Generic.List[object]'
     try {
-        $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='FurphyHost.exe' OR Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue
+        $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='FurphyHost.exe' OR Name='msedgewebview2.exe' OR Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue
     } catch {
         $procs = $null
     }
@@ -726,6 +743,11 @@ function Get-InstallLiveAppDestProcesses {
                 if ($cmd -and $cmd.ToLowerInvariant().Contains('--user-data-dir') -and $cmd.ToLowerInvariant().Contains($AppDestNorm)) {
                     $found.Add($p)
                 }
+            } elseif ($p.Name -eq 'powershell.exe' -or $p.Name -eq 'pwsh.exe') {
+                $cmd = [string]$p.CommandLine
+                if ($cmd -and $cmd.ToLowerInvariant().Contains('addon-server.ps1') -and $cmd.ToLowerInvariant().Contains($AppDestNorm)) {
+                    $found.Add($p)
+                }
             }
         } catch {
             # A process that exited between the CIM query and here, or an
@@ -735,14 +757,61 @@ function Get-InstallLiveAppDestProcesses {
     return $found
 }
 
+function Invoke-InstallServerShutdown {
+    <#
+      fresh-zip:novice-uninstall-orphans-addon-server fix - best-effort
+      GRACEFUL stop for the background addon-server.ps1 process this
+      install owns, tried BEFORE Wait-InstallHostAndWebView2Exit's own
+      wait/force-kill loop below ever runs. POSTs the exact same
+      /api/shutdown route the tray/Settings/Installed-Apps uninstall
+      paths already reach through a live server (Handle-Shutdown,
+      addon-server.ps1) - the server answers 200 then sets
+      $Script:ShuttingDown and exits its own main loop cleanly on its
+      own, same as a graceful in-app close. Same Origin-header pattern
+      Get-InstallUninstallString already builds for the Windows Apps &
+      Features UninstallString case, reused here rather than
+      reinvented.
+
+      Fire-and-forget: a short 2-second timeout, and every failure (no
+      server listening on this port, a job genuinely still running
+      [409], or any other network hiccup) is swallowed silently -
+      Wait-InstallHostAndWebView2Exit's own poll-then-force-kill loop
+      immediately after this call is what actually guarantees the
+      process is gone either way, so this is only here to give it the
+      chance to exit cleanly first, without a hard kill, whenever it
+      can. Never throws.
+    #>
+    param([Parameter(Mandatory = $true)][string]$AppDest)
+    try {
+        $port = Get-InstallPort -AppDest $AppDest
+        $originUrl = "http://localhost:$port"
+        $apiUrl = "http://localhost:$port/api/shutdown"
+        Invoke-RestMethod -Method Post -Uri $apiUrl -TimeoutSec 2 -Headers @{ Origin = $originUrl } -ErrorAction Stop | Out-Null
+    } catch {
+        # No server listening on this port, a job genuinely still running
+        # (409), or any other network hiccup - the wait/force-kill loop
+        # this function's caller runs immediately after is what actually
+        # guarantees the process is gone.
+    }
+}
+
 function Wait-InstallHostAndWebView2Exit {
     <#
       Waits (polling every $PollMs, up to $TimeoutMs total - defaults 300ms/
-      20s per the task brief) for every live FurphyHost.exe and
-      msedgewebview2.exe process under $AppDest (Get-
-      InstallLiveAppDestProcesses) to exit on their own, called AFTER
-      Close-InstallMainWindow and the pre-existing $trayExePath wait loop
-      above, and BEFORE the file-removal loop below ever touches host\.
+      20s per the task brief) for every live FurphyHost.exe,
+      msedgewebview2.exe, AND (fresh-zip:novice-uninstall-orphans-addon-
+      server fix) this install's own addon-server.ps1 process under
+      $AppDest (Get-InstallLiveAppDestProcesses) to exit on their own,
+      called AFTER Close-InstallMainWindow and the pre-existing
+      $trayExePath wait loop above, and BEFORE the file-removal loop
+      below ever touches host\ or the app's own script files.
+
+      Starts by giving the background server one graceful, best-effort
+      chance to self-shutdown (Invoke-InstallServerShutdown, POST
+      /api/shutdown) before falling into the poll loop below - the same
+      graceful route a live server's own POST /api/uninstall already
+      gets, now also reached by a direct install.ps1 -Uninstall run
+      (which has no other way to talk to that already-running process).
 
       If anything is still alive once the timeout elapses, force-
       terminates ONLY those specific pids (Stop-Process -Force - safe
@@ -761,6 +830,8 @@ function Wait-InstallHostAndWebView2Exit {
         [int]$SettleTimeoutMs = 3000
     )
     $appDestNorm = $AppDest.TrimEnd('\').ToLowerInvariant()
+
+    Invoke-InstallServerShutdown -AppDest $AppDest
 
     $waitedMs = 0
     $remaining = Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm
@@ -790,7 +861,7 @@ function Wait-InstallHostAndWebView2Exit {
             if ((Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm).Count -eq 0) { break }
         }
     } else {
-        Write-Info 'Host window and any WebView2 child processes have exited.'
+        Write-Info 'Host window, background server, and any WebView2 child processes have exited.'
     }
 
     return [PSCustomObject]@{ ForceKilled = $forceKilled }
@@ -1153,7 +1224,15 @@ if ($Uninstall) {
         if ($stillRunning) {
             Write-Warn2 'The background tray (FurphyHost.exe --tray) did not exit within 10 seconds - it may still be holding files open.'
         } else {
-            Write-Info 'Background tray stopped.'
+            # fresh-zip:novice-uninstall-orphans-addon-server fix: this
+            # loop only ever watches the tray's OWN FurphyHost.exe process
+            # - it says nothing about the separate background
+            # addon-server.ps1 (powershell.exe) process, so deliberately
+            # does NOT claim "stopped" here. The one user-facing
+            # "stopped" confirmation for both together is printed below,
+            # after Wait-InstallHostAndWebView2Exit has actually covered
+            # (and confirmed gone) the server too.
+            Write-Info 'Background tray process exited.'
         }
     }
 
@@ -1171,6 +1250,20 @@ if ($Uninstall) {
     $processWait = Wait-InstallHostAndWebView2Exit -AppDest $appDest
     if ($processWait.ForceKilled.Count -gt 0) {
         Write-Warn2 "Had to force-close $($processWait.ForceKilled.Count) leftover Furphy process(es) before removing files: $($processWait.ForceKilled -join ', ')"
+    }
+
+    # fresh-zip:novice-uninstall-orphans-addon-server fix: this is the ONE
+    # user-facing "stopped" confirmation for the tray/window AND the
+    # background addon-server.ps1 process together, and it only prints
+    # once a fresh check (not just "we didn't throw") actually confirms
+    # every one of them is gone - a re-check rather than trusting
+    # $processWait alone, since a force-kill whose settle-wait above timed
+    # out could in principle still leave something alive.
+    $stillLiveAfterWait = Get-InstallLiveAppDestProcesses -AppDestNorm $appDest.TrimEnd('\').ToLowerInvariant()
+    if ($stillLiveAfterWait.Count -eq 0) {
+        Write-Info 'Background tray/server stopped.'
+    } else {
+        Write-Warn2 "$($stillLiveAfterWait.Count) Furphy process(es) under $appDest may still be running - files may still be locked."
     }
 
     if (-not $NoProtocol) {

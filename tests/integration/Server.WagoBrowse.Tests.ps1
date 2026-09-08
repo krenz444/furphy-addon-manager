@@ -887,8 +887,15 @@ Describe 'Wago browse: snapshot crawl at startup (<=10 pages, spec-shaped file, 
             # actually reach its <=10-page cap before asserting on it,
             # instead of asserting immediately against whatever partial
             # (possibly zero) request count had landed by this point.
+            # Round 40: assign FIRST, then filter - never pipe Get-WagoStubRequests
+            # straight into Where-Object. Its `return ,@($resp)` (there so a plain
+            # assignment keeps a 1-item array) delivers the WHOLE array as one $_
+            # when piped directly, and PowerShell vectorizes `-eq` over it, so the
+            # filter could pass the unsplit array through as a single merged item.
+            # Same pattern as every other caller in this file (lines ~311, 485, 895).
             $getCrawlReqCount = {
-                @(Get-WagoStubRequests -Stub $stub | Where-Object { $_.query.game_version -eq 'retail' -and [string]::IsNullOrEmpty($_.query.search) -and [string]::IsNullOrEmpty($_.query.category) -and [string]::IsNullOrEmpty($_.query.sort) }).Count
+                $allReqs = Get-WagoStubRequests -Stub $stub
+                @($allReqs | Where-Object { $_.query.game_version -eq 'retail' -and [string]::IsNullOrEmpty($_.query.search) -and [string]::IsNullOrEmpty($_.query.category) -and [string]::IsNullOrEmpty($_.query.sort) }).Count
             }
             Wait-ForWagoCrawlPages -Condition $getCrawlReqCount -ExpectedCount 10 -TimeoutSec 30 | Out-Null
 

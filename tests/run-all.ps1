@@ -441,7 +441,21 @@ if ($layersToRun -contains 'fixture-acceptance') {
 # reason as fixture-acceptance/the theme audit above: a real fake-Wow.exe +
 # server + tray + host-window steady-state window costs real wall-clock
 # seconds, well over the Quick budget - see tests\perf\Perf.Tests.ps1's own
-# header comment for the exact timeline)
+# header comment for the exact timeline). Round 40 added a total-CPU
+# assertion to the existing minimized/tray It plus a new It that measures
+# the window OPEN and FOCUSED (no minimize) - both are just more Its in
+# Perf.Tests.ps1, so Invoke-PesterLayer below picks them up automatically;
+# nothing extra to register here.
+#
+# EXCLUDED FROM THE GATE, ON PURPOSE: tests\perf\Soak-Furphy.ps1 (round 40,
+# soak:SOAK-SCOPE-1) is a standalone, non-assertion script meant to run
+# unattended for up to 2 hours and produce a CSV + summary for a human to
+# read - never a pass/fail check. Invoke-PesterLayer below only ever
+# discovers *.Tests.ps1 files (Pester 3.4.0's own -Script directory
+# convention - see Invoke-PesterLayer's own comment), and Soak-Furphy.ps1
+# is deliberately named to NOT match that pattern, so it is excluded
+# automatically, by construction, not by an explicit skip list here. Never
+# add a call to it from this file.
 # =====================================================================
 if ($layersToRun -contains 'perf') {
     $layer = New-LayerReport -Name 'perf'

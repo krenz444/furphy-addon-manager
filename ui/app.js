@@ -120,6 +120,59 @@ const Prefs = (function () {
 })();
 
 /* ==========================================================================
+   WindowActivity - QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-
+   foreground), the second (courtesy, not gameplay-safety) half of that
+   finding's fix. Store's applyGameActiveAttr above stamps data-game-active
+   for as long as a WoW client is running - the documented "zero impact on
+   gameplay" case this finding actually measured. This module stamps a
+   second, independent attribute, data-window-inactive, for as long as
+   nobody is actually looking at this window at all - document.hidden (the
+   host minimized it - though FurphyHost.cs's own EnterBackgroundMode
+   already hides/stops rendering the SPA webview outright when minimized,
+   so this is redundant-but-harmless belt-and-braces there) or the window
+   merely lost OS focus while still visible (e.g. WoW running windowed in
+   front of it - the exact scenario EnterBackgroundMode's own comment
+   names, host\FurphyHost.cs "just unfocused, still visible... keep
+   scripts/network alive... but ask WebView2 to trim memory" - that comment
+   deliberately does NOT touch CSS animations, since nothing in FurphyHost.cs
+   can reach into the page's own compositor work). No host/FurphyHost.cs
+   change was needed for this: document.visibilityState and
+   document.hasFocus() already answer both questions correctly inside a
+   WebView2, exactly as in any other Chromium tab - see this fix's own
+   FIX NOTE ("expose a page message OR use document.visibilityState/window
+   blur"), the second option.
+   ui/style.css's decorative-animation-gating section guards on
+   :is([data-game-active], [data-window-inactive]) together, so either
+   condition alone is enough to pause every theme's decorative animation;
+   neither attribute touches anything else (the idle poll, the CF pane, any
+   functional loading indicator - those already have their own, separate
+   gating and must keep running regardless of window focus).
+   ========================================================================== */
+const WindowActivity = (function () {
+  function isActive() {
+    try { return document.visibilityState === "visible" && document.hasFocus(); }
+    catch (e) { return true; } // can't tell in this environment - default to "active" so decorative art behaves as it always has rather than freezing for a reason nothing here can verify
+  }
+  function apply() {
+    try {
+      if (isActive()) document.documentElement.removeAttribute("data-window-inactive");
+      else document.documentElement.setAttribute("data-window-inactive", "");
+    } catch (e) { /* no-op outside a real DOM */ }
+  }
+  // Applied once immediately (module-load time, same as Prefs.applyTheme
+  // just above - no need to wait for DOMContentLoaded, document/window
+  // already exist by the time this script runs) and again on every
+  // visibility/focus change for the rest of the page's life.
+  apply();
+  try {
+    window.addEventListener("focus", apply);
+    window.addEventListener("blur", apply);
+    document.addEventListener("visibilitychange", apply);
+  } catch (e) { /* non-browser/test environment - the one apply() call above already ran */ }
+  return { isActive: isActive };
+})();
+
+/* ==========================================================================
    Mock (DEV ONLY) - active only when the page is opened with ?mock=1.
    Fakes every /api/* endpoint used by Api so the UI can be exercised in a
    plain browser tab without addon-server.ps1 running. Nothing here runs,
@@ -2020,7 +2073,13 @@ const Store = (function () {
     // /api/state's gameRunning field (also pushed early by the native host's
     // own {type:"game"} message - see Host.onGame) - read by the idle poll/
     // auto-check schedulers to back off, and by Components.Freshness to show
-    // the one muted "background checks paused" line.
+    // the one muted "background checks paused" line. QA-round-3 fix
+    // (perf-remeasure:webview2-gpu-cpu-open-foreground): every write to this
+    // field (both below, via set(), and Host.onGame's callback near App.init)
+    // now also stamps/clears a data-game-active attribute on <html> - see
+    // applyGameActiveAttr below - so ui/style.css can gate every theme's
+    // decorative animation off for as long as this is true, the same way
+    // Prefs.applyTheme stamps data-theme.
     gameRunning: false,
     // E13 (compatibility audit): the WoW client's own build string/Interface
     // number, from /api/state (server reads .build.info once at startup).
@@ -2118,7 +2177,33 @@ const Store = (function () {
     pendingFlavourChoice: null
   };
 
-  function set(patch) { Object.assign(state, patch); }
+  // QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-foreground): the
+  // single place that stamps/clears data-game-active on <html>, mirroring
+  // how Prefs.applyTheme stamps data-theme. Presence-only (no value read by
+  // any selector) so ui/style.css's ":root[data-game-active] ..." overrides
+  // - one per theme's decorative animation, see that file's own "decorative
+  // animation gating" section - can force "animation: none !important" for
+  // as long as a WoW client is running, and let it resume the instant
+  // gameRunning goes false again. Wrapped in try/catch only for parity with
+  // every other DOM write in this file (Prefs.applyTheme, Prefs.applyDensity)
+  // - document.documentElement always exists by the time this module runs.
+  function applyGameActiveAttr(running) {
+    try {
+      if (running) document.documentElement.setAttribute("data-game-active", "");
+      else document.documentElement.removeAttribute("data-game-active");
+    } catch (e) { /* no-op outside a real DOM */ }
+  }
+
+  // set() is the only place gameRunning is ever written now (reloadState's
+  // own Store.set call below, and Host.onGame's callback near App.init,
+  // which used to mutate state.gameRunning directly - see that callback's
+  // own comment) - checking hasOwnProperty rather than `patch.gameRunning
+  // !== undefined` so an explicit `{gameRunning: false}` patch (the normal,
+  // common case) still applies the attribute change, not just a truthy one.
+  function set(patch) {
+    Object.assign(state, patch);
+    if (Object.prototype.hasOwnProperty.call(patch, "gameRunning")) applyGameActiveAttr(state.gameRunning);
+  }
 
   // FLAVORS-SPEC.md CS-F4/S5.1: mirrors the exact gate addon-server.ps1
   // itself uses ((installed).Count -gt 1) for "does an addon-scoped request
@@ -8384,7 +8469,15 @@ const App = (function () {
     // may re-post.
     Host.onGame(function (running) {
       if (Store.state.gameRunning === running) return;
-      Store.state.gameRunning = running;
+      // QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-foreground):
+      // was a direct `Store.state.gameRunning = running` mutation, which
+      // bypassed Store.set() and therefore never stamped data-game-active -
+      // this is the FASTER of the two gameRunning signals (see the module
+      // comment on hostGameRunning above), so leaving it un-routed meant the
+      // decorative-animation gate could lag up to 60s behind the host's own
+      // real-time {type:"game"} push. Store.set() below applies the DOM
+      // attribute the same way reloadState's own call does.
+      Store.set({ gameRunning: running });
       renderCurrentView();
     });
     await reloadState(false);

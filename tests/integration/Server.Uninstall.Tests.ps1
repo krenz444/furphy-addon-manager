@@ -636,3 +636,149 @@ Describe 'POST /api/uninstall - CSRF: a request with no same-origin Origin/Refer
         }
     }
 }
+
+Describe 'install.ps1 -Uninstall run DIRECTLY (not via a live server''s own POST /api/uninstall) also stops the background addon-server.ps1 server (fresh-zip:novice-uninstall-orphans-addon-server fix, port 47903)' {
+    <#
+      QA-FINDINGS-LENSES-3.md MEDIUM finding: uninstalling via README's own
+      documented "run install.ps1 -Uninstall directly from an unzipped
+      copy of the app" path (the "advanced"/Installed-Apps route) used to
+      delete the app's files and report success while the background
+      addon-server.ps1 process (spawned by Addon Manager.vbs on first
+      open, deliberately left running per README so "minimizing the app
+      and coming back to it later reconnects on its own") stayed alive
+      indefinitely - a different process image from FurphyHost.exe, which
+      Get-InstallLiveAppDestProcesses never used to look for at all. This
+      Describe reproduces that exact scenario end-to-end: start the
+      server the way Addon Manager.vbs would, THEN run install.ps1
+      -Uninstall directly - never through a live server's own POST
+      /api/uninstall, which the Describes above already prove worked
+      before this fix (Handle-Uninstall sets $Script:ShuttingDown itself)
+      - and proves the server PROCESS itself, not just its files, is
+      actually gone afterward.
+
+      Uses port 47903 (this fixer's own assigned scratch port, kept
+      distinct from the rest of this file's 47899) so this Describe's own
+      Start-TestServer/orphan-detection can never collide with anything
+      else in this file.
+    #>
+
+    function New-OrphanServerScratchInstall {
+        $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'orphanserver-wowroot')
+        $appDest = Join-Path -Path $wowRoot -ChildPath '_retail_\AddonSync'
+        New-Item -ItemType Directory -Path $appDest -Force | Out-Null
+        '{ "releaseType": 1, "port": 47903 }' | Set-Content -LiteralPath (Join-Path $appDest 'settings.json') -Encoding Ascii
+
+        $installScript = Join-Path -Path $Script:FurphyBuildRoot 'install.ps1'
+        $r = Invoke-CliProcess -ScriptPath $installScript -ArgumentList @('-WowPath', $wowRoot, '-NoShortcuts', '-NoProtocol', '-Console') -TimeoutSec 120
+
+        return [PSCustomObject]@{ WowRoot = $wowRoot; AppDest = $appDest; ExitCode = $r.ExitCode }
+    }
+
+    function Get-OrphanAddonServerProcesses {
+        <# Any REAL powershell.exe/pwsh.exe process whose command line
+           references THIS scratch install's own addon-server.ps1 -
+           independent proof the fix's own claim holds, mirroring how
+           Get-FurphyWebView2ChildrenUnder above independently re-checks
+           the webview2 case rather than trusting the fix's own internals
+           alone. #>
+        param([string]$AppDestNorm)
+        try {
+            $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue
+        } catch {
+            return @()
+        }
+        return @($procs | Where-Object {
+                $_.CommandLine -and
+                $_.CommandLine.ToLowerInvariant().Contains('addon-server.ps1') -and
+                $_.CommandLine.ToLowerInvariant().Contains($AppDestNorm)
+            })
+    }
+
+    It 'stops the orphaned background server (process actually exits, port actually closes) after a direct install.ps1 -Uninstall run' {
+
+        # ---- live-safety snapshot BEFORE ----
+        $runBefore = Get-ProductionRunValue
+        $appsBefore = Get-ProductionInstalledAppsSnapshot
+        $trayPidsBefore = Get-LiveFurphyTrayPids
+        Write-Host "  [live-safety BEFORE] Run value present: $([bool]$runBefore) | Installed-Apps key present: $([bool]$appsBefore) | live tray pids: $($trayPidsBefore -join ',')"
+
+        $installed = New-OrphanServerScratchInstall
+        $installed.ExitCode | Should Be 0
+        (Test-Path -LiteralPath (Join-Path $installed.AppDest 'addon-server.ps1')) | Should Be $true
+
+        $appDestNorm = $installed.AppDest.TrimEnd('\').ToLowerInvariant()
+        $appsKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager.Test'
+        (Test-Path -LiteralPath $appsKeyPath) | Should Be $true
+
+        $server = $null
+        try {
+            # Mirrors exactly what Addon Manager.vbs does on first app
+            # open: a bare powershell.exe -File <AppDest>\addon-server.ps1
+            # process, deliberately left running once the window closes -
+            # the finding's own precondition.
+            $server = Start-TestServer -Root $installed.AppDest -Port 47903 -ScriptPath (Join-Path $installed.AppDest 'addon-server.ps1')
+            (Test-PortOpen -Port 47903 -TimeoutMs 1000) | Should Be $true
+            $server.Process.HasExited | Should Be $false
+
+            $orphanBefore = Get-OrphanAddonServerProcesses -AppDestNorm $appDestNorm
+            $orphanBefore.Count | Should BeGreaterThan 0
+
+            # THE REPRO: install.ps1 -Uninstall run DIRECTLY against the
+            # same -WowPath, exactly as README describes for the
+            # "advanced"/Installed-Apps path - never a POST to the
+            # already-running server's own /api/uninstall (that path was
+            # never broken; this one was).
+            $installScript = Join-Path -Path $Script:FurphyBuildRoot 'install.ps1'
+            $uninstall = Invoke-CliProcess -ScriptPath $installScript -ArgumentList @('-WowPath', $installed.WowRoot, '-NoShortcuts', '-NoProtocol', '-Uninstall', '-Console', '-Quiet') -TimeoutSec 60
+            $uninstall.ExitCode | Should Be 0
+
+            # The port the orphaned server was answering on must actually
+            # close...
+            $portClosed = Wait-ForCondition -TimeoutSec 30 -Condition { -not (Test-PortOpen -Port 47903 -TimeoutMs 300) }
+            $portClosed | Should Be $true
+
+            # ...its own process handle must actually exit (not just "we
+            # stopped seeing it answer HTTP")...
+            $procGone = Wait-ForCondition -TimeoutSec 15 -Condition { $server.Process.Refresh(); $server.Process.HasExited }
+            $procGone | Should Be $true
+
+            # ...and an independent, from-scratch process scan (not
+            # relying on $server.Process at all) must find nothing left
+            # referencing this install's own addon-server.ps1 - the exact
+            # thing install.ps1's own Get-InstallLiveAppDestProcesses now
+            # also checks internally.
+            $orphanAfter = Get-OrphanAddonServerProcesses -AppDestNorm $appDestNorm
+            $orphanAfter.Count | Should Be 0
+
+            # And the app itself is actually gone (the pre-existing half
+            # of this fix - never regressed by the server-stop addition).
+            (Test-Path -LiteralPath (Join-Path $installed.AppDest 'install.ps1')) | Should Be $false
+            (Test-Path -LiteralPath $appsKeyPath) | Should Be $false
+        } finally {
+            # Belt-and-suspenders: Stop-TestServer's own graceful POST is
+            # a harmless no-op if the server already shut itself down (the
+            # normal, expected outcome here); its process-kill fallback
+            # only fires if something is somehow still alive.
+            Stop-TestServer -Server $server
+            foreach ($p in @(Get-OrphanAddonServerProcesses -AppDestNorm $appDestNorm)) {
+                try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            if ($installed.WowRoot -and (Test-Path -LiteralPath $installed.WowRoot)) {
+                Remove-Item -LiteralPath $installed.WowRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $appsKeyPath) {
+                Remove-Item -LiteralPath $appsKeyPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # ---- live-safety snapshot AFTER - must be byte-identical to BEFORE ----
+        $runAfter = Get-ProductionRunValue
+        $appsAfter = Get-ProductionInstalledAppsSnapshot
+        $trayPidsAfter = Get-LiveFurphyTrayPids
+        Write-Host "  [live-safety AFTER]  Run value present: $([bool]$runAfter) | Installed-Apps key present: $([bool]$appsAfter) | live tray pids: $($trayPidsAfter -join ',')"
+
+        $runAfter | Should Be $runBefore
+        (ConvertTo-Json -InputObject $appsAfter -Compress) | Should Be (ConvertTo-Json -InputObject $appsBefore -Compress)
+        (@($trayPidsAfter) -join ',') | Should Be (@($trayPidsBefore) -join ',')
+    }
+}

@@ -1671,6 +1671,117 @@
   }
 
   // ------------------------------------------------------------------
+  // Phase (perf-remeasure:webview2-gpu-cpu-open-foreground): every
+  // decorative theme animation (ui\style.css's own "Decorative animation
+  // gating" section, appended just above Arcane Library's own closing
+  // rule) must be covered by a
+  // ":is([data-game-active], [data-window-inactive]) ... { animation: none
+  // !important }" rule. Same static-CSSOM technique as the reduced-motion
+  // phase just below (and for the identical reason given there: this
+  // harness has no way to make the browser itself report a real
+  // game-running or unfocused-window state, so this reads the actual
+  // parsed stylesheet instead of relying on ambient runtime state that a
+  // headless run can't control).
+  // ------------------------------------------------------------------
+  function gameActiveAnimationNoneSelectors(win) {
+    const found = [];
+    function walk(rules) {
+      for (let i = 0; i < rules.length; i++) {
+        const r = rules[i];
+        if (r.selectorText && r.style) {
+          const animNone = r.style.animationName === "none" || /(^|;)\s*animation:\s*none\s*!important\b/i.test(r.style.cssText || "");
+          if (animNone && r.selectorText.indexOf("[data-game-active]") !== -1 && r.selectorText.indexOf("[data-window-inactive]") !== -1) {
+            found.push(r.selectorText);
+          }
+        } else if (r.cssRules) {
+          walk(r.cssRules); // nested @media / @supports etc. (none expected here, but matches the reduced-motion phase's own walk)
+        }
+      }
+    }
+    for (let s = 0; s < win.document.styleSheets.length; s++) {
+      try { walk(win.document.styleSheets[s].cssRules); } catch (e) { /* cross-origin/not-yet-parsed - skip */ }
+    }
+    return found;
+  }
+
+  async function phaseDecorativeAnimationGating() {
+    beginPhase("perf: decorative theme-animation gating CSS coverage (data-game-active/data-window-inactive, static CSSOM check)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    const foundRules = gameActiveAnimationNoneSelectors(win);
+    const covered = foundRules.join(" | ");
+    check("at least one :is([data-game-active],[data-window-inactive]) rule with animation:none!important was found", covered.length > 0, covered || "(none found)");
+    // Every real decorative class/pseudo-element this finding's fix note
+    // names, by the CSS class/pseudo name alone (matches the reduced-motion
+    // phase's own convention - a substring hit anywhere in the joined,
+    // comma-separated selector lists is enough, since these rules are never
+    // written any other way in ui\style.css).
+    [
+      ".lofi-star-1", ".lofi-star-2", ".lofi-star-3", ".lofi-star-4", ".lofi-cat-tail",
+      ".brand-name", ".nav-item.is-active", ".btn-accent",
+      ".sidebar::after", ".sidebar::before",
+      ".brand-icon",
+      ".snow-layer-far", ".snow-layer-mid", ".snow-layer-near",
+      ".arcane-flame", ".arcane-mote-1", ".arcane-mote-2", ".arcane-mote-3",
+      ".arcane-hero-tail", ".arcane-hero-eye-l", ".arcane-hero-eye-r", ".arcane-hero-glow"
+    ].forEach(function (sel) {
+      checkTry("a :is([data-game-active],[data-window-inactive]) rule sets animation:none!important covering " + sel, function () {
+        return covered.indexOf(sel) !== -1;
+      });
+    });
+    // The confirmed regression driver specifically (WHERE: ui/style.css,
+    // tokyo-pulse) - both substrings must land in the SAME rule's own
+    // selectorText, not just somewhere in the flattened join, so a
+    // different theme's own .sidebar::after rule can never accidentally
+    // satisfy this one.
+    checkTry("tokyo-rain's .sidebar::after (tokyo-pulse, this finding's own confirmed regression driver) is specifically covered", function () {
+      return foundRules.some(function (sel) { return sel.indexOf('data-theme="tokyo-rain"') !== -1 && sel.indexOf(".sidebar::after") !== -1; });
+    });
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (perf-remeasure:webview2-gpu-cpu-open-foreground): the live
+  // behavioral half - data-game-active on <html> tracks Store.state.
+  // gameRunning (?mock=1&game=1 previews the gameRunning contract, same
+  // flag Phase 3b's own Wago game-running gate check already uses). This
+  // is the attribute the CSS phase above proves is wired to
+  // "animation: none !important" - this phase proves ui\app.js actually
+  // sets/clears it at the right times.
+  // ------------------------------------------------------------------
+  async function phaseGameActiveAttribute() {
+    beginPhase("perf: data-game-active attribute tracks Store.state.gameRunning (?game=1)");
+    const offWin = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(offWin, 8000);
+    checkTry("data-game-active is absent on <html> when gameRunning is false (default mock)", function () {
+      return !offWin.document.documentElement.hasAttribute("data-game-active");
+    });
+
+    const onWin = await loadFrame("?mock=1&test=1&view=my-addons&game=1");
+    await waitForReady(onWin, 8000);
+    checkTry("data-game-active IS present on <html> when gameRunning is true (?game=1)", function () {
+      return onWin.document.documentElement.hasAttribute("data-game-active");
+    });
+    checkTry("Store.state.gameRunning itself reflects the mock flag (sanity check for the assertion above)", function () {
+      return onWin.__furphyTest.Store.state.gameRunning === true;
+    });
+
+    // Flips off again on the SAME loaded page (not just at initial load) -
+    // this is what actually lets a player resume seeing the art the moment
+    // they close WoW, per the fix note's own "resuming automatically when
+    // gameRunning goes false" requirement. Drives it the same way the real
+    // Host.onGame callback and reloadState both do now: through Store.set,
+    // never a direct state mutation (see that callback's own comment in
+    // ui\app.js for why the distinction matters).
+    onWin.__furphyTest.Store.set({ gameRunning: false });
+    checkTry("data-game-active is removed again once gameRunning flips back to false on the same page", function () {
+      return !onWin.document.documentElement.hasAttribute("data-game-active");
+    });
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
   // Phase (a11y-keyboard:a11y-missing-live-regions): the freshness
   // headline (both mounts) and the job panel's title/phase-label carry
   // aria-live="polite" (ui\index.html) - and #job-progress-current
@@ -2043,6 +2154,8 @@
     await phaseA11yMyAddonsKeyboard();
     await phaseA11yDialogFocus();
     await phaseA11yReducedMotion();
+    await phaseDecorativeAnimationGating();
+    await phaseGameActiveAttribute();
     await phaseA11yLiveRegions();
     await phaseA11yLightbox();
     await phaseFormatNextCheckDST();

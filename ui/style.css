@@ -3607,3 +3607,130 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   width: 27px; height: 22px; left: 22px; bottom: -2px;
   pointer-events: none;
 }
+
+/* ==========================================================================
+   Decorative animation gating - QA round 3 fix
+   (perf-remeasure:webview2-gpu-cpu-open-foreground). Every "animation: ...
+   infinite" rule above this section (one per theme's signature touch -
+   lofi-twinkle, terminal-flicker, matcha-steam, desert-twinkle, tokyo-pulse,
+   aurora-drift, sc-sparkle, the three snow-day-fall layers, and Arcane
+   Library's five) already stops under prefers-reduced-motion:reduce, but
+   nothing stopped it while a WoW client is actually running with this
+   window open - measured at 11x round-25's own baseline CPU (5.766 CPU-s vs
+   0.516 CPU-s/60s, almost entirely WebView2 renderer+gpu-process time),
+   because an infinite CSS animation keeps forcing full-frame-rate compositor
+   passes for as long as it plays, and nothing in the existing perf-gating
+   stack (game-state detection, SPA poll backoff, EnterBackgroundMode) ever
+   pauses a CSS animation specifically - see host\FurphyHost.cs's own
+   EnterBackgroundMode comment, which deliberately keeps the SPA webview's
+   scripts/network alive whenever the window is merely unfocused-but-visible
+   (the idle poll needs to keep running) but never touches the page's own
+   compositor work, and ui/app.js's own "gameRunning is NOT a proxy for
+   backgrounded" comment near App - this section is scoped to decorative-only
+   CSS, not that logic.
+   Two independent attributes on <html>, either one enough to pause
+   everything below (combined via :is() so each decorative touch is listed
+   once, not twice) - see their own module comments in ui/app.js:
+     data-game-active     - Store.applyGameActiveAttr - true for as long as
+                             a WoW client is running (the gameplay-safety
+                             half this finding actually measured).
+     data-window-inactive  - WindowActivity - true whenever the document is
+                             hidden or the window has lost OS focus (a
+                             plain "don't animate what's not on screen"
+                             courtesy that also covers the merely-
+                             unfocused-but-visible case named above).
+   Both gates are purely additive on top of the existing
+   prefers-reduced-motion:no-preference guards already wrapping most of
+   these rules (untouched) - a player with reduced-motion off and neither
+   gate active still sees every theme's art exactly as before; !important is
+   used (as verified in this finding's own repro: this exact override,
+   applied to just the tokyo-pulse rule below, dropped state D's 60s total
+   Furphy-process CPU from 5.766 to 0.312 CPU-s) so this section wins
+   regardless of the source-order/specificity of whatever a future theme
+   adds above it, not only because it happens to be the last thing in this
+   file today. None of these selectors touch a functional/loading animation
+   (pulse, shimmer, spin, job-progress-sweep, toast-in/out - see this file's
+   own top-of-file animations and tests\spa\harness.js's own reduced-motion
+   coverage check) - those must keep animating regardless of window/game
+   state, so they are deliberately absent from every list below.
+   Every animated property used above is already compositor-only (opacity/
+   transform) except sc-sparkle (an animated filter:drop-shadow(), used only
+   because generated content isn't reliably rendered on an <img> - see that
+   theme's own file-header note) - filter has no compositor-only equivalent
+   without adding a real extra layer to the art, which is out of this fix's
+   scope ("the art itself unchanged"), so it is covered here by the same
+   pause-when-not-looking gate as everything else instead.
+   ========================================================================== */
+
+/* Lofi Night - lofi-twinkle (4 stars) + lofi-tail-sway. Bare, unscoped
+   selectors above (theme-gating happens via display:none on the parent SVG
+   container, not on the animation rule itself), so no [data-theme=] prefix
+   is needed here either. */
+:root:is([data-game-active], [data-window-inactive]) .lofi-star-1,
+:root:is([data-game-active], [data-window-inactive]) .lofi-star-2,
+:root:is([data-game-active], [data-window-inactive]) .lofi-star-3,
+:root:is([data-game-active], [data-window-inactive]) .lofi-star-4,
+:root:is([data-game-active], [data-window-inactive]) .lofi-cat-tail {
+  animation: none !important;
+}
+
+/* Terminal Green - terminal-flicker on the brand wordmark, active nav item,
+   and accent buttons (shared functional classnames, but only this theme
+   ever puts an animation on them - see the rule above). */
+:root[data-theme="terminal-green"]:is([data-game-active], [data-window-inactive]) .brand-name,
+:root[data-theme="terminal-green"]:is([data-game-active], [data-window-inactive]) .nav-item.is-active,
+:root[data-theme="terminal-green"]:is([data-game-active], [data-window-inactive]) .btn-accent {
+  animation: none !important;
+}
+
+/* Matcha - matcha-steam. */
+:root[data-theme="matcha"]:is([data-game-active], [data-window-inactive]) .sidebar::after {
+  animation: none !important;
+}
+
+/* Desert Night - desert-twinkle (the star field, ::before; the dune ridge,
+   ::after, was never animated). */
+:root[data-theme="desert-night"]:is([data-game-active], [data-window-inactive]) .sidebar::before {
+  animation: none !important;
+}
+
+/* Tokyo Rain - tokyo-pulse. The current default theme (DEFAULT_THEME in
+   ui/app.js) and this finding's own confirmed regression driver. */
+:root[data-theme="tokyo-rain"]:is([data-game-active], [data-window-inactive]) .sidebar::after {
+  animation: none !important;
+}
+
+/* Aurora Sky - aurora-drift. */
+:root[data-theme="aurora-sky"]:is([data-game-active], [data-window-inactive]) .sidebar::after {
+  animation: none !important;
+}
+
+/* Strawberry Cream - sc-sparkle (see this section's own header note on why
+   this one animates filter instead of opacity/transform). */
+:root[data-theme="strawberry-cream"]:is([data-game-active], [data-window-inactive]) .brand-icon {
+  animation: none !important;
+}
+
+/* Snow Day - the three parallax snow-day-fall layers. */
+:root[data-theme="snow-day"]:is([data-game-active], [data-window-inactive]) .snow-layer-far,
+:root[data-theme="snow-day"]:is([data-game-active], [data-window-inactive]) .snow-layer-mid,
+:root[data-theme="snow-day"]:is([data-game-active], [data-window-inactive]) .snow-layer-near {
+  animation: none !important;
+}
+
+/* Arcane Library - arcane-flame-flicker, arcane-mote-drift (x3),
+   arcane-hero-tail-sway, arcane-hero-blink (x2 eyes), arcane-hero-glow-pulse.
+   Bare, unscoped selectors above (same reasoning as Lofi Night's stars -
+   theme-gating happens via display:none on .arcane-alcove/.arcane-hero, not
+   on these animation rules), so no [data-theme=] prefix is needed here
+   either. */
+:root:is([data-game-active], [data-window-inactive]) .arcane-flame,
+:root:is([data-game-active], [data-window-inactive]) .arcane-mote-1,
+:root:is([data-game-active], [data-window-inactive]) .arcane-mote-2,
+:root:is([data-game-active], [data-window-inactive]) .arcane-mote-3,
+:root:is([data-game-active], [data-window-inactive]) .arcane-hero-tail,
+:root:is([data-game-active], [data-window-inactive]) .arcane-hero-eye-l,
+:root:is([data-game-active], [data-window-inactive]) .arcane-hero-eye-r,
+:root:is([data-game-active], [data-window-inactive]) .arcane-hero-glow {
+  animation: none !important;
+}
