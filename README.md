@@ -14,7 +14,7 @@ Furphy also manages Classic and Classic Era addons, not just Retail - it detects
 
 - Windows 10 or 11
 - Windows PowerShell 5.1 (built into Windows - nothing to install)
-- Microsoft Edge (used for the app window; the installer falls back to your default browser if Edge is missing)
+- Microsoft Edge (used for the app window and required for it to open - WoW-adjacent machines almost always have it, but there is currently no fallback to another browser if it's missing)
 - World of Warcraft retail, installed anywhere the installer can find or you can point it at
 
 ## Install
@@ -111,7 +111,7 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 
 ## Tests
 
-`tests\run-all.ps1` is the one entry point for the whole automated test suite (static checks, PS 5.1 unit tests, real server/CLI integration tests, the native host's `--selftest`/`--tray-selftest` markers, a headless-browser SPA harness plus a 15-theme contrast/screenshot audit, a FLAVORS-SPEC section 8 acceptance pass, and a "zero impact on gameplay" perf pass against a simulated running game) - run `tests\run-all.ps1 -Quick` for a sub-4-minute pass covering everything except real network installs and the full theme/fixture/perf sweep, or plain `tests\run-all.ps1` for the complete run; both print a summary table and write `tests\last-report.json`/`tests\last-report.md`. `deploy.ps1` runs the Quick gate itself before touching a live install and refuses to proceed on a failure (`-SkipTests` overrides, loudly). See `tests\TESTING.md` for the full layer breakdown, the small set of testability hooks added to production files to make this possible, and how to add a new test.
+`tests\run-all.ps1` is the one entry point for the whole automated test suite (static checks, PS 5.1 unit tests, real server/CLI integration tests, the native host's `--selftest`/`--tray-selftest` markers, a headless-browser SPA harness plus a 16-theme contrast/screenshot audit, a FLAVORS-SPEC section 8 acceptance pass, and a "zero impact on gameplay" perf pass against a simulated running game) - run `tests\run-all.ps1 -Quick` for a sub-4-minute pass covering everything except real network installs and the full theme/fixture/perf sweep, or plain `tests\run-all.ps1` for the complete run; both print a summary table and write `tests\last-report.json`/`tests\last-report.md`. `deploy.ps1` runs the Quick gate itself before touching a live install and refuses to proceed on a failure (`-SkipTests` overrides, loudly). See `tests\TESTING.md` for the full layer breakdown, the small set of testability hooks added to production files to make this possible, and how to add a new test.
 
 ## Status
 

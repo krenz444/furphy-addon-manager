@@ -589,7 +589,7 @@
            sentence. Components.Freshness.render() paints the first; the dot
            stays silent (data-state="ok", empty #status-text) whenever the
            server is reachable and nothing else is wrong. -->
-      <div class="freshness-line" id="sidebar-freshness"></div>
+      <div class="freshness-line" id="sidebar-freshness" aria-live="polite" aria-atomic="true"></div>
       <div class="status-line" id="status-line">
         <span class="status-dot" id="status-dot" data-state="connecting"></span>
         <span id="status-text">Connecting&hellip;</span>
@@ -633,7 +633,7 @@
              "Last run" line (both deleted, per the spec's "one fact, one
              place" rule). #myaddons-summary now only ever carries the short
              "N of M shown" text while a search/filter narrows the list. -->
-        <div class="myaddons-freshness" id="myaddons-freshness"></div>
+        <div class="myaddons-freshness" id="myaddons-freshness" aria-live="polite" aria-atomic="true"></div>
         <div class="list-summary" id="myaddons-summary" aria-live="polite"></div>
 
         <div class="filter-chips" id="myaddons-filters" role="group" aria-label="Filter addons by status"></div>
@@ -952,9 +952,13 @@
             <h3>Appearance</h3>
             <div class="settings-row settings-row-col">
               <div class="settings-row-label">Spacing<button type="button" class="info-tip" tabindex="0" aria-label="More about Spacing" aria-describedby="app-tooltip" data-tooltip="Comfortable gives buttons, rows and lists more breathing room. Compact tightens everything up so more fits on screen at once. Purely visual - it doesn't change what anything does."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
-              <div class="segmented" id="density-toggle" role="group" aria-label="Spacing">
-                <button type="button" class="segmented-btn" data-density-value="comfortable">Comfortable</button>
-                <button type="button" class="segmented-btn" data-density-value="compact">Compact</button>
+              <!-- a11y-keyboard:a11y-tabs-no-arrow-keys - radiogroup, matching
+                   the theme grid's own already-correct pattern just below;
+                   role/aria-checked/tabindex kept in sync by
+                   Views.settings.renderAppearance (ui/app.js). -->
+              <div class="segmented" id="density-toggle" role="radiogroup" aria-label="Spacing">
+                <button type="button" class="segmented-btn" role="radio" data-density-value="comfortable">Comfortable</button>
+                <button type="button" class="segmented-btn" role="radio" data-density-value="compact">Compact</button>
               </div>
             </div>
             <div class="settings-row settings-row-col">
@@ -1230,7 +1234,7 @@
 <div class="job-panel" id="job-panel" hidden>
   <div class="job-panel-bar" id="job-panel-bar">
     <svg class="icon job-spinner" id="job-spinner"><use href="#icon-spinner"></use></svg>
-    <span class="job-title" id="job-title">Working&hellip;</span>
+    <span class="job-title" id="job-title" aria-live="polite" aria-atomic="true">Working&hellip;</span>
     <!-- FLAVORS-SPEC.md CS-F4 (section 5.4/6.2): a flavour label next to the
          job title, shown only when more than one WoW flavour is installed
          and this job actually names one (Components.JobPanel.update). -->
@@ -1250,7 +1254,11 @@
          job kind has no progress object, so this stays hidden and the panel
          falls back to just its title bar. -->
     <div class="job-progress-wrap" id="job-progress-wrap" hidden>
-      <div class="job-progress-label" id="job-progress-label"></div>
+      <!-- aria-live on the label only: it changes once per phase/addon.
+           #job-progress-current deliberately has NO aria-live - it gets a
+           byte-percentage tick roughly every 500ms during downloads, which
+           would spam a screen reader. -->
+      <div class="job-progress-label" id="job-progress-label" aria-live="polite" aria-atomic="true"></div>
       <progress class="job-progress-bar" id="job-progress-bar" max="1" value="0"></progress>
       <div class="job-progress-current" id="job-progress-current"></div>
     </div>
@@ -1316,7 +1324,7 @@
 </div>
 
 <!-- ===================== Lightbox ===================== -->
-<div class="lightbox" id="lightbox" hidden>
+<div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot">
   <button type="button" class="icon-btn lightbox-close" id="lightbox-close" aria-label="Close" title="Close">
     <svg class="icon"><use href="#icon-close"></use></svg>
   </button>

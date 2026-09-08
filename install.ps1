@@ -1865,14 +1865,39 @@ function Show-InstallWizard {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
+    # installer-dpi:installer-no-visual-styles fix: must run before the
+    # first Form/Control is constructed (same ordering constraint as
+    # host\FurphyHost.cs:37-38's Application.EnableVisualStyles() /
+    # SetCompatibleTextRenderingDefault(false) as its first two
+    # statements) so the wizard - the very first thing a novice sees -
+    # renders with the current Windows visual style instead of flat
+    # classic-Windows buttons and the legacy default font.
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
+
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'Furphy Addon Manager - Install'
-    $form.ClientSize = New-Object System.Drawing.Size(480, 230)
+    $form.ClientSize = New-Object System.Drawing.Size(480, 250)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.AutoScaleMode = 'Font'
+
+    # installer-dpi:installer-wizard-no-acceptbutton-initial-focus fix
+    # (Escape/Cancel behaviour): a small invisible button gives Escape a
+    # real, safe action - close the wizard - on every screen this one
+    # Form ever shows (initial picker, success, error), without adding a
+    # visible Cancel control the initial screen doesn't otherwise need
+    # (see the fix note: no explicit Cancel action exists today, only
+    # Browse/Install).
+    $btnCancelHidden = New-Object System.Windows.Forms.Button
+    $btnCancelHidden.Size = New-Object System.Drawing.Size(0, 0)
+    $btnCancelHidden.TabStop = $false
+    $btnCancelHidden.Visible = $false
+    $btnCancelHidden.Add_Click({ $form.Close() })
+    $form.Controls.Add($btnCancelHidden)
+    $form.CancelButton = $btnCancelHidden
 
     $lblStatus = New-Object System.Windows.Forms.Label
     $lblStatus.AutoSize = $false
@@ -1898,19 +1923,51 @@ function Show-InstallWizard {
     $btnBrowse.Size = New-Object System.Drawing.Size(90, 26)
     $form.Controls.Add($btnBrowse)
 
+    # installer-dpi:installer-no-progress-bar-control fix: a real,
+    # always-visible ProgressBar (Marquee - the install steps aren't
+    # counted/weighted anywhere today, so a determinate bar has nothing
+    # accurate to report) so every step, including the multi-second
+    # csc.exe compile DISTRIBUTION-SPEC.md's fix-6 text already accepts
+    # as "a brief, few-second UI freeze", shows visible motion instead of
+    # a static label that can read as "did this hang?" to a
+    # below-average-tech user (DISTRIBUTION-SPEC.md line 597 step 7 /
+    # SPEC.md E19). No extra wiring needed: Update-WizardProgress's
+    # existing Application.DoEvents() pump (called from every
+    # Write-Step/Write-Info/Write-Warn2 during Invoke-FurphyInstallSteps)
+    # already animates it between steps.
+    $progressBar = New-Object System.Windows.Forms.ProgressBar
+    $progressBar.Size = New-Object System.Drawing.Size(340, 16)
+    $progressBar.Location = New-Object System.Drawing.Point(20, 100)
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    $progressBar.MarqueeAnimationSpeed = 30
+    $form.Controls.Add($progressBar)
+
     $progressLabel = New-Object System.Windows.Forms.Label
     $progressLabel.AutoSize = $false
     $progressLabel.Size = New-Object System.Drawing.Size(340, 60)
-    $progressLabel.Location = New-Object System.Drawing.Point(20, 100)
+    $progressLabel.Location = New-Object System.Drawing.Point(20, 122)
     $progressLabel.Text = ''
     $form.Controls.Add($progressLabel)
 
     $btnInstall = New-Object System.Windows.Forms.Button
     $btnInstall.Text = 'Install'
-    $btnInstall.Location = New-Object System.Drawing.Point(370, 170)
+    $btnInstall.Location = New-Object System.Drawing.Point(370, 192)
     $btnInstall.Size = New-Object System.Drawing.Size(90, 32)
     $btnInstall.Enabled = [bool]$InitialWowRoot
     $form.Controls.Add($btnInstall)
+
+    # installer-dpi:installer-wizard-no-acceptbutton-initial-focus fix
+    # (item 1): Enter now does the obvious thing on the very first
+    # screen, and initial focus lands on whichever control is actually
+    # usable next (Install when a WoW root was auto-detected, Browse
+    # when it wasn't - AcceptButton alone doesn't move focus, so both
+    # are needed). Wired via Add_Shown rather than a bare .Focus() call
+    # here, since the form's handle isn't created/visible yet at
+    # construction time - a bare call before ShowDialog() is unreliable.
+    $form.AcceptButton = $btnInstall
+    $form.Add_Shown({
+        if ($InitialWowRoot) { $btnInstall.Focus() } else { $btnBrowse.Focus() }
+    })
 
     $btnBrowse.Add_Click({
         $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1953,13 +2010,13 @@ function Show-InstallWizard {
             $btnInstall.Visible = $false
             $btnClose = New-Object System.Windows.Forms.Button
             $btnClose.Text = 'Close'
-            $btnClose.Location = New-Object System.Drawing.Point(370, 170)
+            $btnClose.Location = New-Object System.Drawing.Point(370, 192)
             $btnClose.Size = New-Object System.Drawing.Size(90, 32)
             $btnClose.Add_Click({ $form.Close() })
             $form.Controls.Add($btnClose)
             $btnOpen = New-Object System.Windows.Forms.Button
             $btnOpen.Text = 'Open Furphy Addon Manager'
-            $btnOpen.Location = New-Object System.Drawing.Point(20, 170)
+            $btnOpen.Location = New-Object System.Drawing.Point(20, 192)
             $btnOpen.Size = New-Object System.Drawing.Size(220, 32)
             $btnOpen.Add_Click({
                 try {
@@ -1971,6 +2028,13 @@ function Show-InstallWizard {
                 $form.Close()
             })
             $form.Controls.Add($btnOpen)
+            # installer-dpi:installer-wizard-no-acceptbutton-initial-focus
+            # fix (item 2): Enter on the success screen now triggers the
+            # same primary action DISTRIBUTION-SPEC.md 6.2 describes
+            # ("Open Furphy Addon Manager"). The error branch below reuses
+            # $btnInstall (already AcceptButton from construction, per
+            # item 3 of the fix note - no reassignment needed there).
+            $form.AcceptButton = $btnOpen
         } catch {
             $Script:WizardActive = $false
             $lblStatus.Text = 'Something went wrong during install:'

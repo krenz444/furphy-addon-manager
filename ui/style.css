@@ -975,7 +975,13 @@ html, body {
   font-family: "Segoe UI", "Segoe UI Variable", system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.45;
-  overflow-x: hidden;
+  /* No overflow-x:hidden here on purpose: at the app's own documented
+     minimum window size (host/FurphyHost.cs MinimumSizeBaselineAt96Dpi,
+     1040x660) there is zero headroom above the 1000px floor above, so
+     ordinary browser zoom (125%+) needs more than 1000 effective CSS px.
+     Hiding overflow would silently clip Settings toggles etc. off-canvas
+     with no way back; letting the native horizontal scrollbar appear (same
+     pattern as .table-scroll below) keeps them reachable instead. */
 }
 
 h1, h2, h3, h4 { margin: 0 0 8px; font-weight: 600; color: var(--text); }
@@ -1453,6 +1459,11 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
   transition: background var(--fast);
 }
 .addon-row:hover { background: var(--bg-2); }
+/* a11y-keyboard:a11y-myaddons-row-mouse-only - the row is now tabbable
+   (app.js) and needs its own visible focus ring; -2px offset (like
+   .drawer-tab:focus-visible) keeps it inside the row instead of overlapping
+   the row above/below it. */
+.addon-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .addon-row td { padding: 10px 12px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
 .addon-row td:first-child { border-left: 1px solid var(--border-soft); border-top-left-radius: var(--radius); border-bottom-left-radius: var(--radius); }
 .addon-row td:last-child { border-right: 1px solid var(--border-soft); border-top-right-radius: var(--radius); border-bottom-right-radius: var(--radius); }
@@ -2257,6 +2268,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .screenshots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .screenshot-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: var(--radius-sm); cursor: zoom-in; border: 1px solid var(--border-soft); transition: opacity var(--fast); }
 .screenshot-thumb:hover { opacity: 0.85; }
+/* a11y-keyboard:a11y-lightbox-not-a-real-dialog - now tabindex=0/role=button (app.js). */
+.screenshot-thumb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* ==========================================================================
    Job progress panel
@@ -2397,6 +2410,32 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 
 @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes toast-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(16px); } }
+
+/* The per-theme decorative animations below (lofi twinkle, terminal
+   flicker, matcha steam, aurora drift, snow-day fall, arcane motes, etc.)
+   already each carry their own prefers-reduced-motion:reduce guard further
+   down this file. These are the app's own FUNCTIONAL loading/status
+   indicators (freshness/connectivity pulses, busy-row dot, skeleton
+   shimmer, job spinner/progress sweep, toast transition) - they need the
+   same guard so a reduced-motion user isn't left with a spinning/pulsing/
+   shimmering UI regardless of theme. State is kept legible without motion:
+   the colored dots stay visible at their state color, the progress bar
+   keeps a static (non-swept) fill, and toasts still appear/disappear, just
+   via an instant opacity change instead of a slide. */
+@media (prefers-reduced-motion: reduce) {
+  .freshness-dot.is-checking,
+  .status-dot[data-state="connecting"],
+  .chip-busy .chip-dot,
+  .job-spinner {
+    animation: none;
+  }
+  .skeleton-row { animation: none; background-position: 0 0; }
+  .job-progress-bar.is-indeterminate::-webkit-progress-bar {
+    animation: none;
+    background-position: 50% 0;
+  }
+  .toast, .toast.is-leaving { animation: none; transition: opacity var(--fast); }
+}
 
 /* ==========================================================================
    Dialogs

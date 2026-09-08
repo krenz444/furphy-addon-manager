@@ -962,6 +962,190 @@ function Invoke-Api {
     return [PSCustomObject]@{ Ok = $ok; StatusCode = $status; Body = $parsedBody; Error = $errorMessage }
 }
 
+function Invoke-ApiConcurrentPair {
+    <#
+      Fires two GET calls against the local test server TRULY
+      concurrently - both requests actually in flight on the wire at
+      once, via HttpWebRequest's async GetResponseAsync, never two
+      sequential Invoke-Api calls one after the other (that would never
+      put both on the wire at the same time: the second call's own TCP
+      connect wouldn't even begin until the first call's response had
+      been fully read). Returns @{ A; B }, each in Invoke-Api's own {Ok;
+      StatusCode; Body; Error} shape plus CompletedAtUtc, so a caller can
+      see which of the two the server actually finished first.
+
+      Used by regression tests proving two DIFFERENT concurrent requests
+      never cross-contaminate each other's response body regardless of
+      which one the server happens to finish first (see
+      tests\integration\Server.WagoBrowse.Tests.ps1's "distinct search
+      queries never cross-contaminate" Describe, the regression guard for
+      regression-guards:wago-search-stale-response-no-guard-test /
+      ui\app.js's fetchWago wagoFetchSeq guard). Note addon-server.ps1's
+      own request loop is fully sequential (one EndGetContext ->
+      Invoke-Route -> BeginGetContext at a time - see that loop's own
+      comment near the bottom of addon-server.ps1), so this helper cannot
+      force a genuine "later response overtakes an earlier one" the way a
+      slow real upstream occasionally can in production; what firing both
+      requests concurrently here DOES prove, deterministically, is that
+      neither response is corrupted by the other being in flight at the
+      same time - the necessary condition for any client-side "ignore the
+      stale one" sequence guard to be safe (if a shared/mutable bit of
+      server state ever bled between two concurrently-handled requests,
+      this is what would catch it).
+
+      Only ever used for GET (no body, no CSRF Origin requirement to
+      satisfy beyond the harmless same-origin header every Invoke-Api
+      call already sends) - not a general Invoke-Api replacement.
+    #>
+    param(
+        [int]$Port = 47899,
+        [Parameter(Mandatory = $true)][string]$PathA,
+        [Parameter(Mandatory = $true)][string]$PathB,
+        [int]$TimeoutSec = 30
+    )
+
+    function New-FurphyAsyncGetRequest {
+        param([int]$P, [string]$Path)
+        $uri = "http://127.0.0.1:$P$Path"
+        $req = [System.Net.HttpWebRequest]::Create($uri)
+        $req.Method = 'GET'
+        $req.KeepAlive = $false
+        $req.Timeout = $TimeoutSec * 1000
+        $req.Headers.Set('Origin', "http://localhost:$P")
+        return $req
+    }
+
+    function Receive-FurphyAsyncGetResult {
+        param($Request, $Task)
+        $status = 0
+        $errorMessage = $null
+        $webResp = $null
+        try {
+            if (-not $Task.Wait($TimeoutSec * 1000)) {
+                throw "request to $($Request.RequestUri) did not complete within ${TimeoutSec}s"
+            }
+            $webResp = $Task.Result
+            $status = [int]$webResp.StatusCode
+        } catch {
+            $inner = $_.Exception
+            if ($inner -is [System.AggregateException] -and $inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner -is [System.Net.WebException] -and $inner.Response) {
+                $webResp = $inner.Response
+                try { $status = [int]$webResp.StatusCode } catch { $status = 0 }
+            } else {
+                $errorMessage = $inner.Message
+            }
+        }
+        $completedAt = (Get-Date).ToUniversalTime()
+        $text = ''
+        if ($webResp) {
+            try {
+                $stream = $webResp.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($stream)
+                $text = $reader.ReadToEnd()
+                $reader.Close()
+            } catch {
+            } finally {
+                try { $webResp.Close() } catch { }
+            }
+        }
+        $parsedBody = $null
+        if ($text) {
+            try { $parsedBody = $text | ConvertFrom-Json } catch { $parsedBody = $text }
+        }
+        $ok = ($status -ge 200 -and $status -lt 300)
+        return [PSCustomObject]@{ Ok = $ok; StatusCode = $status; Body = $parsedBody; Error = $errorMessage; CompletedAtUtc = $completedAt }
+    }
+
+    $reqA = New-FurphyAsyncGetRequest -P $Port -Path $PathA
+    $reqB = New-FurphyAsyncGetRequest -P $Port -Path $PathB
+    # Both async calls started back-to-back with nothing awaited in
+    # between - THIS is what actually puts both requests on the wire at
+    # once. Whichever order this function later reads the two Task
+    # results back in has no bearing on which one the server itself
+    # serviced first.
+    $taskA = $reqA.GetResponseAsync()
+    $taskB = $reqB.GetResponseAsync()
+
+    $resultA = Receive-FurphyAsyncGetResult -Request $reqA -Task $taskA
+    $resultB = Receive-FurphyAsyncGetResult -Request $reqB -Task $taskB
+
+    return [PSCustomObject]@{ A = $resultA; B = $resultB }
+}
+
+# ---------------------------------------------------------------------
+# Bitmap inspection (verify-capture.ps1's PrintWindow-corruption guard -
+# installer-dpi:verify-capture-printwindow-pw2-corrupts-installer-window).
+# Pure, unit-testable pixel math with no window/process/HDC involvement,
+# kept here (rather than only inline in shots\verify-capture.ps1) so a
+# static/unit test can exercise it directly against a synthetic Bitmap.
+# ---------------------------------------------------------------------
+
+function Get-CaptureCorruptionFraction {
+    <#
+      Scans -Bitmap and returns the fraction (0.0-1.0) of sampled pixels
+      that look like a PrintWindow(hwnd, hdc, 2)/PW_RENDERFULLCONTENT
+      capture failed to actually paint into - either signature observed
+      live, on two different machines, of the SAME underlying defect
+      (installer-dpi:verify-capture-printwindow-pw2-corrupts-installer-
+      window):
+        1. Fully OPAQUE, near-black (alpha=255, R/G/B all <
+           -BlackThreshold, default 10) - the finding's own originally
+           reported repro: large solid-black bottom/left bands on that
+           machine, where the real on-screen window has none.
+        2. NOT fully opaque at all (alpha < 255 - in practice this GDI+
+           path only ever produces exactly alpha=0, never a partial
+           value, so this is effectively "still showing the freshly-
+           allocated Bitmap's own default pixels, never touched by
+           PrintWindow") - confirmed independently live on a SECOND
+           machine while building this fix: an otherwise-normal WinForms
+           form's nFlags=2 capture came back ~36% fully transparent
+           (large bottom/right regions, the New-Object
+           System.Drawing.Bitmap default), with only ~4% actually opaque-
+           black - a real capture this size/shape would have read as
+           "fine" under signature 1 alone despite being ~40% garbage.
+           Both are the same root cause (PrintWindow silently declining
+           to paint part of the surface under nFlags=2) with a
+           machine/GPU/driver-dependent visual result, so both must
+           count.
+
+      Sampled on a -Stride grid (every Nth pixel on both axes, default 4)
+      rather than every pixel - fast enough even against a large window
+      capture (FurphyHost.exe's main window, say), and the corruption
+      this guards against paints in large contiguous bands, never
+      isolated stray pixels, so a sparse grid finds it exactly as
+      reliably as an exhaustive per-pixel scan while running in a small
+      fraction of the time Bitmap.GetPixel's well-known per-call overhead
+      would otherwise cost on every pixel of a real window-sized capture.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][System.Drawing.Bitmap]$Bitmap,
+        [int]$BlackThreshold = 10,
+        [int]$Stride = 4
+    )
+
+    $w = $Bitmap.Width
+    $h = $Bitmap.Height
+    if ($w -le 0 -or $h -le 0) { return 0.0 }
+    if ($Stride -lt 1) { $Stride = 1 }
+
+    $sampled = 0
+    $bad = 0
+    for ($y = 0; $y -lt $h; $y += $Stride) {
+        for ($x = 0; $x -lt $w; $x += $Stride) {
+            $px = $Bitmap.GetPixel($x, $y)
+            $sampled++
+            if ($px.A -lt 255) {
+                $bad++
+            } elseif ($px.R -lt $BlackThreshold -and $px.G -lt $BlackThreshold -and $px.B -lt $BlackThreshold) {
+                $bad++
+            }
+        }
+    }
+    if ($sampled -eq 0) { return 0.0 }
+    return ([double]$bad / [double]$sampled)
+}
+
 # ---------------------------------------------------------------------
 # Win32 command-line round-trip (for ConvertTo-SafeProcessArg tests) -
 # parses a quoted argv string the exact way CreateProcess's C runtime

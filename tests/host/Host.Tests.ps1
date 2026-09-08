@@ -84,6 +84,32 @@ function Wait-ProcessExit {
     return $false
 }
 
+function Test-RealWowClientRunning {
+    <#
+      regression-guards:host-minimumsize-floor-no-guard-test's live-window
+      assertion (see the "Host MinimumSize DPI floor" Describe below) needs
+      to know whether it is safe to actually show a real FurphyHost.exe
+      window on THIS machine, independent of any --wow-fake override a test
+      process passes to the exe itself (--wow-fake only changes what the
+      exe under test believes, never what is really running). Mirrors
+      addon-server.ps1's own Test-GameRunning / host\FurphyHost.cs's
+      WowDetector.IsRunning name list exactly (KnownWowProcessNames /
+      KnownWowNames) - kept as its own tiny, dependency-free check here
+      rather than dot-sourcing addon-server.ps1 into this file, since that
+      would pull in and evaluate its entire top-level body (guarded against
+      starting a real listener, but with no reason to take on that surface
+      just for one process-name check).
+    #>
+    $names = @('Wow', 'Wow-64', 'WowClassic', 'WowClassicT', 'WowClassicB', 'WowT', 'WowB')
+    foreach ($n in $names) {
+        try {
+            $procs = Get-Process -Name $n -ErrorAction SilentlyContinue
+            if ($procs -and @($procs).Count -gt 0) { return $true }
+        } catch { }
+    }
+    return $false
+}
+
 function New-TrayTestLayout {
     <#
       Builds (idempotently - safe to call more than once against the same
@@ -699,6 +725,27 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
             $expectedRunValue = '"' + $exePath + '" --tray'
             $marker.runValueWritten | Should Be $expectedRunValue
             $marker.runValueRemoved | Should Be $true
+
+            # tray-truth:tray-selftest-startup-click-handler-unexercised -
+            # the Start with Windows toggle above used to hit
+            # StartupRegistry.Enable/Disable directly, bypassing
+            # MenuStartup_Click (host\FurphyHost.cs) entirely, so the
+            # settings.json `runAtStartup` write that handler makes
+            # (HostFiles.UpdateJsonObject, ~5480-5483) had zero coverage
+            # through this marker - a regression reverting that handler to
+            # a registry-only write would still show runValueWritten/
+            # runValueRemoved above as fine. RunSelftestSequence now routes
+            # both toggles through the real click handler and records
+            # settings.json's own runAtStartup value right after each one.
+            $marker.settingsRunAtStartupAfterEnable | Should Be $true
+            $marker.settingsRunAtStartupAfterDisable | Should Be $false
+
+            # Real settings.json check, independent of the marker's own
+            # claim - same "don't just trust the marker" spirit as the real
+            # registry check further down.
+            $settingsPath = Join-Path $addonSyncDir 'settings.json'
+            $settingsAfter = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+            [bool]$settingsAfter.runAtStartup | Should Be $false
 
             # Round 28 (SPEC.md section F/J): --tray-selftest's own
             # ActivateOrLaunch(true) call never actually starts a process
@@ -1365,6 +1412,163 @@ Describe 'Host FormatNextCheck DST handling (long-run:tray-next-check-dst-two-da
         $nowUtc2 = [System.TimeZoneInfo]::ConvertTimeToUtc($nowLocal2, $tz)
         $result2 = $method.Invoke($null, @([Nullable[datetime]]($nowUtc2.AddMinutes(120)), $nowLocal2, $tz))
         $result2 | Should Be 'tomorrow 01:00'
+    }
+}
+
+Describe 'Host MinimumSize DPI floor (regression-guards:host-minimumsize-floor-no-guard-test)' -Tags 'Host' {
+    <#
+      regression-guards:host-minimumsize-floor-no-guard-test - Round 32
+      raised MainForm's MinimumSize floor from 900x600 (which pushed every
+      Settings toggle switch off the visible right edge with no scroll
+      escape) to 1040x660, expressed as a 96-DPI baseline
+      (MinimumSizeBaselineAt96Dpi) converted to physical pixels for the
+      real DPI in effect by MinimumSizeForDpi(int dpi) - both private
+      static members of host\FurphyHost.cs's Furphy.MainForm. Before this
+      Describe, the only DPI-related assertion anywhere in this file was
+      the --selftest marker's `dpiAware` boolean (a flag saying "the app
+      IS DPI-aware", never the actual pixel floor) - a regression that
+      shrank the baseline back toward 900x600 would have passed the whole
+      suite untouched.
+    #>
+
+    It 'pins the 1040x660 96-DPI baseline and MinimumSizeForDpi''s identity/scaling math, via reflection - no window' {
+        <#
+          Mirrors the FormatNextCheck DST Describe immediately above: pure
+          Assembly.LoadFrom + reflection against private static members, no
+          window created, no WoW client involved - safe to run
+          unconditionally.
+        #>
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $mainFormType = $asm.GetType('Furphy.MainForm')
+        $mainFormType | Should Not Be $null
+
+        $staticFlags = [System.Reflection.BindingFlags]'NonPublic, Static'
+
+        # Today's exact values - Round 32's fix. A future intentional
+        # change to the floor should update this test deliberately (and
+        # CHANGELOG.md) rather than the baseline silently drifting back
+        # down and this guard staying green.
+        $field = $mainFormType.GetField('MinimumSizeBaselineAt96Dpi', $staticFlags)
+        $field | Should Not Be $null
+        $baseline = $field.GetValue($null)
+        [int]$baseline.Width | Should Be 1040
+        [int]$baseline.Height | Should Be 660
+
+        $method = $mainFormType.GetMethod('MinimumSizeForDpi', $staticFlags, $null, @([int]), $null)
+        $method | Should Not Be $null
+
+        # 96 DPI = 100% scaling - identity conversion, same value back.
+        $result96 = $method.Invoke($null, @(96))
+        [int]$result96.Width | Should Be ([int]$baseline.Width)
+        [int]$result96.Height | Should Be ([int]$baseline.Height)
+
+        # 144 DPI = 150% scaling - proves the scaling math itself, not
+        # just the baseline constant (Round 32's actual bug: the baseline
+        # was fine, but nothing rescaled it for a >100% display).
+        $result144 = $method.Invoke($null, @(144))
+        [int]$result144.Width | Should Be ([int][Math]::Ceiling($baseline.Width * 1.5))
+        [int]$result144.Height | Should Be ([int][Math]::Ceiling($baseline.Height * 1.5))
+
+        # 120 DPI = 125% scaling - the exact dev-machine scale factor
+        # Round 32's own repro/comments call out by name.
+        $result120 = $method.Invoke($null, @(120))
+        [int]$result120.Width | Should Be ([int][Math]::Ceiling($baseline.Width * 1.25))
+        [int]$result120.Height | Should Be ([int][Math]::Ceiling($baseline.Height * 1.25))
+    }
+
+    It 'a real, live MainForm window actually carries the floor MinimumSizeForDpi computes for its own detected DPI' {
+        <#
+          The reflection test above proves the pure function's math; this
+          proves the constructor really assigns it (MinimumSize =
+          MinimumSizeForDpi(_effectiveDpi), host\FurphyHost.cs, just above
+          MainForm_Load) to a genuine on-screen window, closing the gap a
+          pure-function test alone cannot. Per this build round's HARD
+          RULES, a native FurphyHost.exe window is only ever launched here
+          when Test-RealWowClientRunning reports the real game is not
+          running on this machine - unlike --wow-fake (which only changes
+          what the launched exe itself believes), this check is about not
+          popping a real window while someone may be actually playing.
+          Uses this fixer's own assigned scratch port (47905), never
+          47899/47831.
+        #>
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+        if (Test-RealWowClientRunning) {
+            Write-Host '  (skipped: a real WoW client process is running on this machine - not launching a native FurphyHost.exe window)'
+            return
+        }
+
+        $root = New-TempRoot -Name 'host-minsize-selftest'
+        $server = $null
+        $hostProc = $null
+        $needle = 'minsize-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path -Path $root -ChildPath ($needle + '.json')
+        $testPort = 47905
+
+        try {
+            $server = Start-TestServer -Root $root -Port $testPort
+            Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'host\selftest.html') -Destination (Join-Path $root 'ui\selftest.html') -Force
+
+            # Same "run from a copy of host\bin, never the real build-root
+            # copy" isolation as the existing --selftest Describe above.
+            Copy-Item -LiteralPath $Script:HostBinDir -Destination (Join-Path $root 'host\bin') -Recurse -Force
+            Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'VERSION') -Destination (Join-Path $root 'VERSION') -Force -ErrorAction SilentlyContinue
+            $exeCopyPath = Join-Path $root 'host\bin\FurphyHost.exe'
+
+            $webview2Dir = $exeCopyPath + '.WebView2'
+            if (Test-Path -LiteralPath $webview2Dir) {
+                Remove-Item -LiteralPath $webview2Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $selftestUrl = 'http://localhost:' + $testPort + '/selftest.html'
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exeCopyPath
+            $psi.Arguments = '--port ' + $testPort + ' --selftest "' + $markerPath + '" "' + $selftestUrl + '"'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exeCopyPath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 40
+            $marker | Should Not Be $null
+
+            ($marker.dpiAware -is [bool]) | Should Be $true
+            [int]$marker.minimumSizeWidth | Should BeGreaterThan 0
+            [int]$marker.minimumSizeHeight | Should BeGreaterThan 0
+
+            # Cross-check the live window's actual MinimumSize against the
+            # SAME MinimumSizeForDpi function (via reflection, no second
+            # window) evaluated at the DPI this live window itself
+            # detected (marker.dpi) - proves the constructor assignment
+            # matches the formula exactly, not just "some positive size".
+            $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+            $mainFormType = $asm.GetType('Furphy.MainForm')
+            $staticFlags = [System.Reflection.BindingFlags]'NonPublic, Static'
+            $method = $mainFormType.GetMethod('MinimumSizeForDpi', $staticFlags, $null, @([int]), $null)
+            $expected = $method.Invoke($null, @([int]$marker.dpi))
+            [int]$marker.minimumSizeWidth | Should Be ([int]$expected.Width)
+            [int]$marker.minimumSizeHeight | Should Be ([int]$expected.Height)
+
+            # Never below the 96-DPI baseline itself, regardless of DPI -
+            # the actual "Settings toggles pushed off-edge" regression
+            # Round 32 fixed would show up here as a floor below 1040x660.
+            [int]$marker.minimumSizeWidth | Should BeGreaterThan 1039
+            [int]$marker.minimumSizeHeight | Should BeGreaterThan 659
+
+            Wait-ProcessExit -Process $hostProc | Should Be $true
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) {
+                try { $hostProc.Kill() } catch { }
+            }
+            Stop-Straggler-FurphyHost -Needle $needle
+            Stop-TestServer -Server $server
+        }
     }
 }
 

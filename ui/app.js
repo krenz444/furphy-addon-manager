@@ -1562,9 +1562,44 @@ const Utils = (function () {
     return map[phase] || (phase || "");
   }
 
+  // a11y-keyboard:a11y-tabs-no-arrow-keys - WAI-ARIA APG "Tabs"/"Radio
+  // Group" pattern: Left/Right (also Up/Down, since either orientation is
+  // valid per both patterns) moves focus between a group's own child
+  // items (default selector [role="tab"]; pass itemSelector for
+  // [role="radio"] etc.) and activates the newly focused one (automatic
+  // activation - the same immediate effect a mouse click already has on
+  // every one of these controls, so this never introduces a NEW
+  // activation model, just a keyboard path to the existing one); Home/End
+  // jump to the first/last item. Wraps at both ends. Roving tabindex
+  // (only the active item is a Tab stop) is each call site's own job,
+  // right where it already toggles aria-selected/aria-checked - grep this
+  // same finding id in app.js for every tabIndex assignment that keeps it
+  // in sync - this function only has to move focus once the user is
+  // already on one of the group's own items.
+  function wireTabsArrowNav(container, itemSelector) {
+    if (!container) return;
+    const selector = itemSelector || '[role="tab"]';
+    container.addEventListener("keydown", function (ev) {
+      const key = ev.key;
+      if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "ArrowUp" && key !== "ArrowDown" && key !== "Home" && key !== "End") return;
+      const tabs = qsa(selector, container).filter(function (t) { return !t.disabled && t.getAttribute("aria-disabled") !== "true"; });
+      if (tabs.length < 2) return;
+      const from = tabs.indexOf(document.activeElement);
+      if (from === -1) return; // focus isn't on one of this tablist's own tabs - let Tab/other keys behave normally
+      ev.preventDefault();
+      let to;
+      if (key === "Home") to = 0;
+      else if (key === "End") to = tabs.length - 1;
+      else if (key === "ArrowLeft" || key === "ArrowUp") to = (from - 1 + tabs.length) % tabs.length;
+      else to = (from + 1) % tabs.length;
+      tabs[to].focus();
+      tabs[to].click();
+    });
+  }
+
   return {
     qs: qs, qsa: qsa, el: el, icon: icon, escapeHtml: escapeHtml, debounce: debounce, relativeTime: relativeTime, fullDate: fullDate, formatBytes: formatBytes, formatNumber: formatNumber, releaseLabel: releaseLabel, releaseChipClass: releaseChipClass, colorForName: colorForName, firstLetter: firstLetter, normalizeId: normalizeId,
-    interfaceToVersion: interfaceToVersion, compatDisplay: compatDisplay, phaseWord: phaseWord
+    interfaceToVersion: interfaceToVersion, compatDisplay: compatDisplay, phaseWord: phaseWord, wireTabsArrowNav: wireTabsArrowNav
   };
 })();
 
@@ -2337,14 +2372,32 @@ Components.Toast = (function () {
 Components.Dialogs = (function () {
   let openName = null;      // 'add' | 'confirm' | 'welcome' | null
   let confirmResolve = null;
+  // a11y-keyboard:a11y-dialog-no-trap-no-return - the element that had focus
+  // right before the dialog opened, so hide() can put focus back where the
+  // user was instead of leaving it stranded on (or inside) hidden markup.
+  let lastFocused = null;
 
   function show(name) {
+    // These three dialogs share one openName slot (never stack), so "was
+    // nothing open a moment ago" is exactly "openName was null" - that's
+    // the only moment focus should be captured and the background trapped.
+    const wasClosed = (openName === null);
     openName = name;
     OverlayTracker.open();
     const backdrop = Utils.qs("#dialog-backdrop");
     const dlg = Utils.qs("#dialog-" + name);
     backdrop.hidden = false;
     dlg.hidden = false;
+    if (wasClosed) {
+      lastFocused = document.activeElement;
+      // Focus trap: the WAI-ARIA modal dialog pattern requires Tab to never
+      // leave the dialog while it's open. `inert` on the app's main content
+      // root (sidebar + views - NOT the dialog or backdrop themselves, both
+      // of which are siblings of #app, not descendants) natively blocks
+      // both keyboard focus and click-through on everything behind it.
+      const appRoot = Utils.qs("#app");
+      if (appRoot) appRoot.setAttribute("inert", "");
+    }
     requestAnimationFrame(function () {
       backdrop.classList.add("is-visible");
       dlg.classList.add("is-visible");
@@ -2357,7 +2410,16 @@ Components.Dialogs = (function () {
     backdrop.classList.remove("is-visible");
     dlg.classList.remove("is-visible");
     setTimeout(function () { backdrop.hidden = true; dlg.hidden = true; }, 150);
-    if (openName === name) { openName = null; OverlayTracker.close(); }
+    if (openName === name) {
+      openName = null;
+      OverlayTracker.close();
+      const appRoot = Utils.qs("#app");
+      if (appRoot) appRoot.removeAttribute("inert");
+      if (lastFocused && typeof lastFocused.focus === "function" && document.contains(lastFocused)) {
+        lastFocused.focus();
+      }
+      lastFocused = null;
+    }
   }
 
   function openAdd() {
@@ -2371,7 +2433,13 @@ Components.Dialogs = (function () {
 
   // E18: first-run welcome (Components.Welcome builds its content; this just
   // owns the shared show/hide/backdrop/Esc plumbing, same as add/confirm).
-  function openWelcome() { show("welcome"); }
+  function openWelcome() {
+    show("welcome");
+    // a11y-keyboard:a11y-dialog-no-trap-no-return - move focus into the
+    // dialog on open (WAI-ARIA APG modal pattern); Skip is the least
+    // destructive control, same "safe default" choice as confirm() below.
+    setTimeout(function () { Utils.qs("#welcome-skip").focus(); }, 160);
+  }
   function closeWelcome() { hide("welcome"); }
 
   function confirm(opts) {
@@ -2385,6 +2453,10 @@ Components.Dialogs = (function () {
     // colored any more (UX-SPEC.md section 1/2.3).
     okBtn.className = "btn " + (opts.danger === false ? "btn-outline" : "btn-danger");
     show("confirm");
+    // a11y-keyboard:a11y-dialog-no-trap-no-return - Cancel, not the (often
+    // destructive) Confirm button, is the safe default a stray Enter/Space
+    // should land on right as the dialog appears.
+    setTimeout(function () { Utils.qs("#confirm-cancel").focus(); }, 160);
     return new Promise(function (resolve) { confirmResolve = resolve; });
   }
   function resolveConfirm(result) {
@@ -2405,10 +2477,38 @@ Components.Dialogs = (function () {
   }
   function isOpen() { return openName !== null; }
 
+  // a11y-keyboard:a11y-dialog-no-trap-no-return - `inert` on #app (above)
+  // keeps the background unreachable, but Tab reaching the last focusable
+  // control in the dialog still needs to wrap back to the first one (and
+  // Shift+Tab from the first back to the last) rather than walking off the
+  // end of the document into browser chrome. Called from the app's one
+  // global keydown listener whenever ev.key === "Tab"; a no-op (returns
+  // false, does nothing) whenever no dialog is open.
+  const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function trapTab(ev) {
+    if (openName === null) return false;
+    const dlg = Utils.qs("#dialog-" + openName);
+    if (!dlg) return false;
+    const focusables = Utils.qsa(FOCUSABLE_SELECTOR, dlg).filter(function (el) {
+      return el.offsetParent !== null || el === document.activeElement;
+    });
+    if (focusables.length === 0) return false;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (ev.shiftKey) {
+      if (active === first || !dlg.contains(active)) { ev.preventDefault(); last.focus(); }
+    } else {
+      if (active === last || !dlg.contains(active)) { ev.preventDefault(); first.focus(); }
+    }
+    return true;
+  }
+
   return {
     openAdd: openAdd, closeAdd: closeAdd, confirm: confirm, resolveConfirm: resolveConfirm,
     openWelcome: openWelcome, closeWelcome: closeWelcome,
-    backdropClicked: backdropClicked, escPressed: escPressed, isOpen: isOpen
+    backdropClicked: backdropClicked, escPressed: escPressed, isOpen: isOpen,
+    trapTab: trapTab
   };
 })();
 
@@ -2946,16 +3046,35 @@ Components.Logo = (function () {
 
 /* ---------- Screenshot lightbox ---------- */
 Components.Lightbox = (function () {
-  function open(url) {
+  // a11y-keyboard:a11y-lightbox-not-a-real-dialog - the element that
+  // triggered open(), so close() can return focus there (same pattern as
+  // Components.Dialogs' lastFocused).
+  let lastTrigger = null;
+
+  function open(url, caption) {
     OverlayTracker.open();
+    lastTrigger = document.activeElement;
     Utils.qs("#lightbox-img").src = url;
-    Utils.qs("#lightbox").hidden = false;
+    // Falls back to "" (not e.g. "screenshot") when no caption is known, so
+    // a screen reader doesn't announce a meaningless generic word - same
+    // fallback the thumbnail's own alt already uses right next to each call
+    // site.
+    Utils.qs("#lightbox-img").alt = caption || "";
+    const lb = Utils.qs("#lightbox");
+    lb.setAttribute("aria-label", caption ? "Screenshot: " + caption : "Screenshot");
+    lb.hidden = false;
+    Utils.qs("#lightbox-close").focus();
   }
   function close() {
     if (Utils.qs("#lightbox").hidden) return;
     Utils.qs("#lightbox").hidden = true;
     Utils.qs("#lightbox-img").src = "";
+    Utils.qs("#lightbox-img").alt = "";
     OverlayTracker.close();
+    if (lastTrigger && typeof lastTrigger.focus === "function" && document.contains(lastTrigger)) {
+      lastTrigger.focus();
+    }
+    lastTrigger = null;
   }
   function isOpen() { return !Utils.qs("#lightbox").hidden; }
   return { open: open, close: close, isOpen: isOpen };
@@ -3038,6 +3157,8 @@ Components.Drawer = (function () {
       const active = btn.dataset.tab === tab;
       btn.classList.toggle("is-active", active);
       btn.setAttribute("aria-selected", String(active));
+      // a11y-keyboard:a11y-tabs-no-arrow-keys - roving tabindex, see Utils.wireTabsArrowNav.
+      btn.tabIndex = active ? 0 : -1;
     });
     ["overview", "versions", "changelog", "screenshots"].forEach(function (t) { Utils.qs("#drawer-panel-" + t).hidden = t !== tab; });
     if (tab === "overview") renderOverview();
@@ -3820,7 +3941,17 @@ Components.Drawer = (function () {
     const images = wagoGalleryImages(d.wagoGallery);
     if (!images.length) { panel.appendChild(Utils.el("p", { class: "rich-content" }, ["No screenshots provided."])); return; }
     panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, images.map(function (s) {
-      return Utils.el("img", { class: "screenshot-thumb", src: s.thumb, alt: "", loading: "lazy", onclick: function () { Components.Lightbox.open(s.full); } });
+      function open() { Components.Lightbox.open(s.full, s.title || ""); }
+      // a11y-keyboard:a11y-lightbox-not-a-real-dialog - a plain <img> has no
+      // keyboard path of its own; tabindex/role/onkeydown make it reachable
+      // and operable the same way every other click-to-open control in this
+      // app is (mirrors .browse-row/tr.addon-row's own Enter/Space pattern).
+      return Utils.el("img", {
+        class: "screenshot-thumb", src: s.thumb, alt: "", loading: "lazy",
+        tabindex: "0", role: "button", "aria-label": "View screenshot" + (s.title ? ": " + s.title : "") + " (opens larger)",
+        onclick: open,
+        onkeydown: function (ev) { if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); } }
+      });
     })));
   }
 
@@ -3848,7 +3979,15 @@ Components.Drawer = (function () {
     panel.appendChild(Utils.el("div", { class: "screenshots-grid" }, shots.map(function (s) {
       const full = s.url || s.thumbnail;
       const thumb = s.thumbnail || s.url;
-      return Utils.el("img", { class: "screenshot-thumb", src: thumb, alt: s.title || "", loading: "lazy", onclick: function () { Components.Lightbox.open(full); } });
+      function open() { Components.Lightbox.open(full, s.title || ""); }
+      // a11y-keyboard:a11y-lightbox-not-a-real-dialog - see the identical
+      // comment in renderWagoScreenshots just above.
+      return Utils.el("img", {
+        class: "screenshot-thumb", src: thumb, alt: s.title || "", loading: "lazy",
+        tabindex: "0", role: "button", "aria-label": "View screenshot" + (s.title ? ": " + s.title : "") + " (opens larger)",
+        onclick: open,
+        onkeydown: function (ev) { if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); } }
+      });
     })));
   }
 
@@ -5532,7 +5671,12 @@ Views.myAddons = (function () {
   function row(a) {
     const key = Store.addonKey(a);
     const logo = Components.Logo.build({ projectId: a.projectId, name: a.name }, 40);
-    const tr = Utils.el("tr", { class: "addon-row" }, [
+    // a11y-keyboard:a11y-myaddons-row-mouse-only - same treatment as
+    // Views.browse's .browse-row: tabindex/role/aria-label make the row
+    // itself a stop in the Tab order with one accessible name, so a
+    // keyboard-only user can reach and open it the same way a mouse user
+    // clicks it, not just via the kebab menu's indirect "Versions..." item.
+    const tr = Utils.el("tr", { class: "addon-row", tabindex: "0", role: "button", "aria-label": "View " + a.name }, [
       Utils.el("td", { class: "checkbox-cell" }, [
         Utils.el("input", {
           type: "checkbox", class: "chk", checked: Store.isSelected(key), "aria-label": "Select " + a.name,
@@ -5550,9 +5694,18 @@ Views.myAddons = (function () {
       Utils.el("td", {}, [Components.Chip.forStatus(a)]),
       Utils.el("td", {}, [kebab(a)])
     ]);
+    function open() { Components.Drawer.open(key, { tab: "overview", source: a.source }); }
     tr.addEventListener("click", function (ev) {
       if (ev.target.closest(".menu-wrap") || ev.target.closest(".checkbox-cell") || ev.target.closest(".chip-action")) return;
-      Components.Drawer.open(key, { tab: "overview", source: a.source });
+      open();
+    });
+    // Mirrors .browse-row's own guard: only handle Enter/Space when focus is
+    // on the row itself, so the checkbox, kebab button, and any .chip-action
+    // inside the row keep doing their own native Enter/Space thing instead
+    // of also opening the drawer (no double-handling).
+    tr.addEventListener("keydown", function (ev) {
+      if (ev.target !== tr) return;
+      if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); open(); }
     });
     return tr;
   }
@@ -5860,6 +6013,8 @@ Views.browse = (function () {
       const active = btn.dataset.sort === sort;
       btn.classList.toggle("is-active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
+      // a11y-keyboard:a11y-tabs-no-arrow-keys - roving tabindex, see Utils.wireTabsArrowNav.
+      btn.tabIndex = active ? 0 : -1;
     });
   }
 
@@ -6282,6 +6437,11 @@ Views.browse = (function () {
     wagoTab.setAttribute("aria-selected", tab === "wago" ? "true" : "false");
     cfTab.classList.toggle("is-active", tab === "curseforge");
     cfTab.setAttribute("aria-selected", tab === "curseforge" ? "true" : "false");
+    // a11y-keyboard:a11y-tabs-no-arrow-keys - roving tabindex: only the
+    // active tab is a Tab stop (Utils.wireTabsArrowNav moves focus/
+    // activates the rest via arrow keys, matching WAI-ARIA's tabs pattern).
+    wagoTab.tabIndex = tab === "wago" ? 0 : -1;
+    cfTab.tabIndex = tab === "curseforge" ? 0 : -1;
     const showCfNative = tab === "curseforge" && Host.hasCfPane();
     const showCfFallback = tab === "curseforge" && !Host.hasCfPane();
     Utils.qs("#browse-wago-panel").hidden = tab !== "wago";
@@ -6347,6 +6507,9 @@ Views.browse = (function () {
   function bindOnce() {
     Utils.qs("#tab-wago").addEventListener("click", function () { setTab("wago"); });
     Utils.qs("#tab-curseforge").addEventListener("click", function () { setTab("curseforge"); });
+    // a11y-keyboard:a11y-tabs-no-arrow-keys
+    Utils.wireTabsArrowNav(Utils.qs("#get-new-tabs"));
+    Utils.wireTabsArrowNav(Utils.qs("#wago-sort"));
 
     Utils.qs("#browse-search").addEventListener("input", Utils.debounce(function (ev) {
       Store.state.browse.query = ev.target.value;
@@ -6660,18 +6823,31 @@ Views.settings = (function () {
     return s;
   }
 
-  // Round 28: JS mirror of FurphyHost.cs's FormatNextCheck - "HH:mm" local
-  // time if nextRunAt's local calendar date matches today, else
-  // "tomorrow HH:mm" (the background interval is clamped 30..1440 minutes
-  // server-side, so the next run is always within 24h - never a third case).
+  // Round 28 (fixed tray-truth:spa-formatnextcheck-missing-two-day-branch):
+  // JS mirror of FurphyHost.cs's FormatNextCheck(DateTime?, DateTime,
+  // TimeZoneInfo) overload - "HH:mm" local time if nextRunAt's local
+  // calendar date is today or earlier, "tomorrow HH:mm" if it's exactly one
+  // day out, else a plain "MMM d HH:mm" date. A DST spring-forward can push
+  // nextRunAt's local calendar date TWO days out even though the
+  // background-check interval itself is clamped 30..1440 minutes (<=24h) -
+  // see CHANGELOG.md's long-run:tray-next-check-dst-two-day-mislabel and
+  // tests\host\Host.Tests.ps1's matching Describe for the exact scenario.
+  // This must stay byte-identical to the C# formatter for every branch.
   function formatNextCheck(nextRunAtIso) {
     if (!nextRunAtIso) return "soon";
     const d = new Date(nextRunAtIso);
     if (isNaN(d.getTime())) return "soon";
     const hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
     const now = new Date();
-    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return hhmm;
-    return "tomorrow " + hhmm;
+    // Local midnight for both sides, then a real day-count difference -
+    // field equality (the old code) can't tell "one day out" from "two
+    // days out", which is exactly what the DST case needs.
+    const dMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dayDiff = Math.round((dMidnight - nowMidnight) / 86400000);
+    if (dayDiff <= 0) return hhmm;
+    if (dayDiff === 1) return "tomorrow " + hhmm;
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + hhmm;
   }
 
   // Round 28 (SPEC.md section A): the SAME "core" sentence per status that
@@ -6764,7 +6940,13 @@ Views.settings = (function () {
   function renderAppearance() {
     const density = Prefs.getDensity();
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
-      btn.classList.toggle("is-active", btn.dataset.densityValue === density);
+      const active = btn.dataset.densityValue === density;
+      btn.classList.toggle("is-active", active);
+      // a11y-keyboard:a11y-tabs-no-arrow-keys - role="radio" needs a real
+      // checked state (the class alone was visual-only before), plus
+      // roving tabindex for Utils.wireTabsArrowNav (wired in bindOnce).
+      btn.setAttribute("aria-checked", active ? "true" : "false");
+      btn.tabIndex = active ? 0 : -1;
     });
     paintThemeGrid();
   }
@@ -7140,6 +7322,8 @@ Views.settings = (function () {
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setDensity(btn.dataset.densityValue); renderAppearance(); });
     });
+    // a11y-keyboard:a11y-tabs-no-arrow-keys
+    Utils.wireTabsArrowNav(Utils.qs("#density-toggle"), '[role="radio"]');
     // Round 18 (Set B): the theme picker is a dynamically-built grid, not
     // static markup - built once here (its own click/keydown wiring lives
     // inside buildThemeGrid itself), never rebuilt by render().
@@ -8053,6 +8237,8 @@ const App = (function () {
     Utils.qs("#drawer-backdrop").addEventListener("click", function () { Components.Drawer.close(); });
     Utils.qs("#drawer-close").addEventListener("click", function () { Components.Drawer.close(); });
     Utils.qsa(".drawer-tab").forEach(function (btn) { btn.addEventListener("click", function () { Components.Drawer.selectTab(btn.dataset.tab); }); });
+    // a11y-keyboard:a11y-tabs-no-arrow-keys
+    Utils.wireTabsArrowNav(Utils.qs("#drawer-tabs"));
 
     Utils.qs("#job-panel-collapse").addEventListener("click", function () { Components.JobPanel.toggleCollapse(); });
     Utils.qs("#job-panel-close").addEventListener("click", function () { Components.JobPanel.hide(); });
@@ -8086,6 +8272,10 @@ const App = (function () {
     Utils.qs("#lightbox").addEventListener("click", function (ev) { if (ev.target.id === "lightbox") Components.Lightbox.close(); });
 
     document.addEventListener("keydown", function (ev) {
+      // a11y-keyboard:a11y-dialog-no-trap-no-return - wraps Tab/Shift+Tab
+      // at the ends of whichever dialog (add/confirm/welcome) is open;
+      // no-ops immediately when none is.
+      if (ev.key === "Tab" && Components.Dialogs.trapTab(ev)) return;
       if (ev.key === "Escape") {
         // Ordered by actual stacking (highest z-index first) so Escape always
         // dismisses whatever is visually on top. Round 32 (SETTINGS-SPEC.md
@@ -8265,6 +8455,14 @@ document.addEventListener("DOMContentLoaded", function () {
     // this module's real object (never undefined) when ?test=1 is present,
     // since the harness only ever drives this page under ?mock=1&test=1.
     window.__furphyTest.Mock = Mock;
+    // a11y-keyboard:a11y-dialog-no-trap-no-return - lets the harness open/
+    // close Components.Dialogs' three modal dialogs (and the Lightbox)
+    // directly to prove the focus trap/return works, without having to
+    // reverse-engineer a real trigger flow for every one of them (the
+    // Welcome dialog in particular only opens from a specific empty-
+    // roster + untracked-folders scan combination there is no other
+    // reason to reproduce here).
+    window.__furphyTest.Components = Components;
     initPromise.then(function () { window.__furphyTest.ready = true; });
   }
 });

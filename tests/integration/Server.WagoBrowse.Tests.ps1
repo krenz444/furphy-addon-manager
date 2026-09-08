@@ -1106,3 +1106,116 @@ Describe 'Wago browse: unrecognized Classic client version refuses instead of si
         Stop-WagoStubServer -Stub $stub
     }
 }
+
+# =====================================================================
+# 13) Regression guard (Round-2-QA regression-guards:wago-search-stale-
+#     response-no-guard-test, component: tests): distinct search queries
+#     must never cross-contaminate each other's response.
+#
+#     ui\app.js's fetchWago carries a `wagoFetchSeq` sequence counter
+#     (ui/app.js:5763/5774/5792) that makes the SPA ignore a browse/search
+#     response that comes back after the user has already moved on to a
+#     different query - the Round 20 live fix this guards. That guard
+#     lives entirely client-side (ui/app.js and tests/spa/harness.js are
+#     the SPA fixer's files, not this suite's), so this Describe covers
+#     the piece actually reachable from here: the SERVER-side half of the
+#     guarantee that guard depends on being safe at all. If Handle-
+#     WagoBrowse/Get-WagoCached/Invoke-WagoInertiaJson ever grew a bit of
+#     shared mutable state one request could read/overwrite while another
+#     was still in flight (a caching-key collision, a stray script-scope
+#     "last search" variable, etc.), the "stale" response the client-side
+#     guard discards would no longer just be LATE - it would be WRONG,
+#     which the sequence-number guard alone cannot detect or fix. This
+#     test proves that never happens: a response for query Q is always
+#     actually query Q's own data, whether the immediately-adjacent
+#     request was for a different query moments before/after, or was
+#     genuinely concurrent with it on the wire.
+#
+#     addon-server.ps1's own request loop is fully sequential (one
+#     EndGetContext -> Invoke-Route -> BeginGetContext at a time - see
+#     that loop's own comment near the bottom of addon-server.ps1), so
+#     this suite cannot force a real network-level "later response
+#     overtakes an earlier one" the way a slow real Wago upstream
+#     occasionally can in production. Firing both requests truly
+#     concurrently (Invoke-ApiConcurrentPair, tests\lib\common.ps1) is
+#     still a meaningful, deterministic regression guard: whichever of
+#     the two the server happens to finish first, each response must
+#     carry only its own query's data - proving no shared state leaks
+#     between concurrently-in-flight requests, today or after some future
+#     change to this request path.
+# =====================================================================
+
+Describe 'Wago browse: distinct search queries never cross-contaminate (Round 20 regression guard)' {
+    if (-not $Script:CapCore) {
+        It 'two different q= searches, run back-to-back and genuinely concurrently, never swap or blend results' {
+            Write-PendingSkip 'needs SERVER-1 (WagoBaseUrl seam) and SERVER-2 (Handle-WagoBrowse / /api/wago/browse route)'
+        }
+        return
+    }
+
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'wago-browse-race'
+    Block-WagoGrowthCrawl -Root $root
+    $stub = $null
+    $server = $null
+    try {
+        # Two existing, already-distinct fixtures (search-bigwigs-page1 /
+        # sort-name-page1 - neither used together by any earlier Describe
+        # in this file) mapped to two arbitrary, deliberately unrelated
+        # -q= values, so a response containing the WRONG fixture's data is
+        # unambiguous - there is no realistic way a correct implementation
+        # could confuse the two.
+        $stub = Start-WagoStubServer -Routes @(
+            @{ gameVersion = 'retail'; page = '1'; search = 'race-query-a'; file = 'search-bigwigs-page1.json' },
+            @{ gameVersion = 'retail'; page = '1'; search = 'race-query-b'; file = 'sort-name-page1.json' }
+        ) -DefaultFile 'empty-retail.json'
+
+        $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
+        finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+
+        It 'sequential: query A, then query B, then query A again - A''s result is identical both times and never picks up B''s data' {
+            $rA1 = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?q=race-query-a')
+            $rA1.Ok | Should Be $true
+            $rA1.Body.items[0].slug | Should Be 'bigwigs'
+            $rA1.Body.total | Should Be 27
+
+            $rB = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?q=race-query-b')
+            $rB.Ok | Should Be $true
+            $rB.Body.items[0].slug | Should Be 'bang'
+            $rB.Body.total | Should Be 1000
+
+            # Re-issued right after a DIFFERENT query answered in between -
+            # a shared/stale-state bug would most plausibly show up here,
+            # either as A silently returning B's data or as a cache-key
+            # collision serving A's own now-wrong cached entry for B.
+            $rA2 = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?q=race-query-a')
+            $rA2.Ok | Should Be $true
+            $rA2.Body.items[0].slug | Should Be 'bigwigs'
+            $rA2.Body.total | Should Be 27
+        }
+
+        It 'concurrent: query A and query B fired truly simultaneously on the wire never swap results, whichever the server finishes first' {
+            $pair = Invoke-ApiConcurrentPair -Port 47899 `
+                -PathA (Add-WagoBrowsePath '/api/wago/browse?q=race-query-a') `
+                -PathB (Add-WagoBrowsePath '/api/wago/browse?q=race-query-b')
+
+            $pair.A.Ok | Should Be $true
+            $pair.B.Ok | Should Be $true
+
+            # Each response must carry ONLY its own query's data, never
+            # the other's - regardless of which one the server's own
+            # strictly-sequential loop happened to service first (visible
+            # via .CompletedAtUtc on each result if this ever needs
+            # debugging; the correctness assertion below does not depend
+            # on which order won).
+            $pair.A.Body.items[0].slug | Should Be 'bigwigs'
+            $pair.A.Body.total | Should Be 27
+            $pair.B.Body.items[0].slug | Should Be 'bang'
+            $pair.B.Body.total | Should Be 1000
+        }
+    } finally {
+        Stop-TestServer -Server $server
+        Stop-WagoStubServer -Stub $stub
+    }
+}

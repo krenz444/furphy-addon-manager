@@ -1,5 +1,114 @@
 # Furphy Addon Manager - changelog
 
+## Round 39 (1.20.0: keyboard, dialogs, zoom, reduced motion, installer polish, docs truth)
+
+A skeptic-confirmed QA pass across four lenses (a11y/keyboard, installer
+DPI/visual, tray-truth, docs-truth) plus a regression-guards sweep. 17
+findings confirmed (3 high, 9 medium, 5 low) and fixed this round. 2
+findings were investigated and rejected with reasoning - a DPI-awareness
+"fix" that would have shrunk the install wizard ~20% on 125%+ displays
+for no benefit, and a startup-registry-key "gap" that turned out to be a
+deliberate, three-place-documented, test-pinned design decision - see
+the QA report's own appendix; neither is reopened here. Each fixer
+worked only their own files and verified with parse checks, `node
+--check`, standalone Pester runs, and static mock serves; the full
+`tests\run-all.ps1` suite is the verifier's job, not reflected in the
+per-fixer notes below.
+
+**SPA:**
+- `a11y-keyboard:a11y-settings-zoom-clip` - the Settings toggles could
+  disappear off-canvas with no scrollbar at ordinary browser zoom on the
+  app's own minimum window size; the hard `overflow-x: hidden` on
+  `html`/`body` is gone so a real, visible horizontal scrollbar appears
+  instead of silently clipping.
+- `a11y-keyboard:a11y-myaddons-row-mouse-only` - My Addons table rows
+  opened the addon detail drawer on click only, with no way to reach or
+  activate them from the keyboard; rows are now tabbable and
+  keyboard-activatable, opening the same Overview tab a click does, the
+  same pattern Browse rows already used.
+- `a11y-keyboard:a11y-dialog-no-trap-no-return` - the Add addon,
+  Confirm, and Welcome dialogs never trapped Tab focus inside
+  themselves and never returned focus to the control that opened them
+  on close; both are fixed for all three dialogs.
+- `a11y-keyboard:a11y-loading-indicators-ignore-reduced-motion` - the
+  freshness/connectivity/busy-row pulses, the skeleton shimmer, the job
+  spinner, the progress-bar sweep, and the toast transition kept
+  animating under `prefers-reduced-motion: reduce`; they now stop.
+- `a11y-keyboard:a11y-missing-live-regions` - a screen reader got no
+  automatic announcement when the freshness headline or the job panel's
+  title changed; both now carry `aria-live="polite"` (the per-tick byte
+  progress line deliberately does not, to avoid spamming
+  announcements).
+- `tray-truth:spa-formatnextcheck-missing-two-day-branch` - the SPA's
+  "next check" label could still say "tomorrow" in a case where the
+  tray's own tooltip correctly showed a real two-days-out date across a
+  DST spring-forward; the SPA's formatter now mirrors the tray's
+  formatter exactly.
+- `regression-guards:wago-search-stale-response-no-guard-test` - the
+  existing fix that ignores a stale, superseded Wago search response had
+  no automated regression test guarding it; a new race-condition test
+  does now.
+- `a11y-keyboard:a11y-lightbox-not-a-real-dialog` - the screenshot
+  lightbox announced nothing to a screen reader, moved focus nowhere on
+  open, and never restored it on close; it now behaves like the app's
+  other dialogs.
+
+**Installer:**
+- `installer-dpi:installer-no-visual-styles` - the entire install
+  wizard rendered in the unthemed classic-Windows style (flat gray
+  buttons, the old default font) instead of the current Windows visual
+  style; it now calls `EnableVisualStyles`/
+  `SetCompatibleTextRenderingDefault`, the same pair the native host
+  already uses.
+- `installer-dpi:installer-no-progress-bar-control` - the wizard
+  promised a progress bar in the docs but shipped none, just a text
+  label frozen during the one genuinely slow step (compiling the native
+  host); a marquee progress bar now gives visible motion through every
+  step.
+- `installer-dpi:installer-wizard-no-acceptbutton-initial-focus` -
+  pressing Enter on the wizard's first screen or its success screen did
+  nothing; both screens now set an AcceptButton and focus the primary
+  action on load.
+
+**Docs:**
+- `docs-truth:readme-md-fake-default-browser-fallback` - README.md
+  claimed the installer falls back to your default browser if Edge is
+  missing, which nothing in the shipped launch path actually does; the
+  line now says plainly that Edge is required, with no fallback to
+  another browser today.
+- `docs-truth:ux-spec-stale-default-theme-checklist` - UX-SPEC.md's
+  acceptance checklist still named Arcane Library as the default theme,
+  two rounds out of date; it now names Tokyo Rain (Round 31), with the
+  same superseded-history marker THEMES-SPEC.md already uses for the
+  earlier defaults.
+- `docs-truth:stale-15-theme-audit-count` - README.md still described
+  the audit as covering "15 themes" after a 16th theme (Snow Day)
+  shipped in Round 31; corrected to 16.
+
+**Host:**
+- `regression-guards:host-minimumsize-floor-no-guard-test` - the Round
+  32 fix that raised the window's minimum size to 1040x660 (so Settings
+  toggles stay on-screen) had no automated test asserting the actual
+  size floor or its DPI scaling; a new reflection-based test now pins
+  both.
+
+**Tests:**
+- `installer-dpi:verify-capture-printwindow-pw2-corrupts-installer-window`
+  - the shared screenshot-capture script's `PrintWindow` mode painted
+  solid-black bands over the installer wizard on this machine, a
+  capture-tool artifact that could be mistaken for a real rendering
+  defect; the capture strategy for plain WinForms windows now avoids
+  it.
+- `tray-truth:tray-selftest-startup-click-handler-unexercised` - the
+  `--tray-selftest` harness verified Start-with-Windows by poking the
+  registry directly instead of going through the real click handler, so
+  it never actually exercised the settings.json half of that handler;
+  it now runs through the same code path a real click does.
+
+`a11y-keyboard:a11y-tabs-no-arrow-keys` came back rate-limited with no
+verdict from the prior round's pass; it was re-checked this round per
+the QA report's appendix rather than left open indefinitely.
+
 ## Round 38 (1.19.0: QA journeys - 21 fixes)
 
 A skeptic-confirmed QA pass across six lenses (failure-modes, long-run,

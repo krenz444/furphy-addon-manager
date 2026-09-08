@@ -4174,6 +4174,17 @@ boot();
             marker["dpi"] = (long)_effectiveDpi;
             marker["dpiAware"] = _dpiAware;
 
+            // regression-guards:host-minimumsize-floor-no-guard-test: the
+            // reflection-based Describe in tests\host\Host.Tests.ps1 proves
+            // MinimumSizeForDpi's math in isolation, but never that a real
+            // MainForm actually ends up with it assigned - these two fields
+            // let that same test also assert against this live window's
+            // actual MinimumSize (constructor-assigned well before this
+            // marker is ever written, see the MinimumSize = MinimumSizeForDpi
+            // (_effectiveDpi) call above MainForm_Load).
+            marker["minimumSizeWidth"] = (long)MinimumSize.Width;
+            marker["minimumSizeHeight"] = (long)MinimumSize.Height;
+
             // Launch-latency fix (Builder H): how long StartServerWait's
             // /api/ping poll took before navigating (or timing out) -
             // "ok"/"timeout", null if the marker is somehow written before
@@ -4968,6 +4979,8 @@ boot();
             marker["clickAction"] = null;
             marker["runValueWritten"] = null;
             marker["runValueRemoved"] = false;
+            marker["settingsRunAtStartupAfterEnable"] = null;
+            marker["settingsRunAtStartupAfterDisable"] = null;
             marker["stateFileWritten"] = false;
             marker["mutexHeld"] = false;
             marker["exitCode"] = (long)0;
@@ -6918,6 +6931,8 @@ boot();
             marker["clickAction"] = null;
             marker["runValueWritten"] = null;
             marker["runValueRemoved"] = false;
+            marker["settingsRunAtStartupAfterEnable"] = null;
+            marker["settingsRunAtStartupAfterDisable"] = null;
             marker["stateFileWritten"] = _stateFileWritten;
             marker["mutexHeld"] = true;
             marker["exitCode"] = (long)1;
@@ -6949,39 +6964,46 @@ boot();
 
             string clickAction = ActivateOrLaunch(true);
 
-            // Toggle Start with Windows on, record the exact value text,
-            // then always disable it again - the harness must not leave
-            // the Run value behind after a test run. Round 28 (section K):
-            // always the test-scoped _startupValueName, never the real
-            // "FurphyAddonManager" value a live tray/install may own.
+            // Toggle Start with Windows on, record the exact value text and
+            // the settings.json runAtStartup mirror, then always disable it
+            // again - the harness must not leave the Run value behind after
+            // a test run. Round 28 (section K): always the test-scoped
+            // _startupValueName, never the real "FurphyAddonManager" value a
+            // live tray/install may own.
+            //
+            // Round 39 (tray-truth:tray-selftest-startup-click-handler-
+            // unexercised): this used to call StartupRegistry.Enable/
+            // Disable directly, bypassing MenuStartup_Click entirely - so
+            // the settings.json `runAtStartup` write that handler makes
+            // (HostFiles.UpdateJsonObject, see MenuStartup_Click below) had
+            // zero coverage through this marker. Now both toggles go
+            // through the real click handler, marshaled onto the UI thread
+            // the same Invoke/IsHandleCreated way CollectMenuItemLabels
+            // does (MenuStartup_Click's own last line touches
+            // _startupMenuItem.Checked, which - like ToolStripMenuItem
+            // elsewhere in this file - is UI state best not touched off the
+            // UI thread even though it won't throw the cross-thread
+            // exception a Control would), so a regression that reverts
+            // MenuStartup_Click back to a registry-only write now fails
+            // here instead of shipping with a fully green marker.
             string runValueWritten = null;
             bool runValueRemoved = false;
+            bool? settingsRunAtStartupAfterEnable = null;
+            bool? settingsRunAtStartupAfterDisable = null;
             try
             {
-                StartupRegistry.Enable(_startupValueName, _exePath);
+                MethodInvoker enableClick = delegate() { MenuStartup_Click(null, EventArgs.Empty); };
+                if (IsHandleCreated) { Invoke(enableClick); } else { enableClick(); }
                 runValueWritten = StartupRegistry.ReadValue(_startupValueName);
+                settingsRunAtStartupAfterEnable = TraySettingsReader.Read(_settingsPath).RunAtStartup;
             }
             finally
             {
-                bool disabled = StartupRegistry.Disable(_startupValueName);
-                runValueRemoved = disabled && !StartupRegistry.Exists(_startupValueName);
+                MethodInvoker disableClick = delegate() { MenuStartup_Click(null, EventArgs.Empty); };
+                if (IsHandleCreated) { Invoke(disableClick); } else { disableClick(); }
+                runValueRemoved = !StartupRegistry.Exists(_startupValueName);
+                settingsRunAtStartupAfterDisable = TraySettingsReader.Read(_settingsPath).RunAtStartup;
             }
-            // Marshal onto the UI thread like SetTooltip/ShowBalloon do -
-            // this runs on a ThreadPool thread and ToolStripMenuItem is
-            // still UI state even though it won't throw the cross-thread
-            // exception a Control would.
-            try
-            {
-                if (IsHandleCreated)
-                {
-                    bool startupExists = StartupRegistry.Exists(_startupValueName);
-                    BeginInvoke(new MethodInvoker(delegate()
-                    {
-                        try { _startupMenuItem.Checked = startupExists; } catch { }
-                    }));
-                }
-            }
-            catch { }
 
             // DISTRIBUTION-SPEC.md section 2.2/5.3 - dryRun:true so this
             // never actually spawns install.ps1 -Uninstall or tears down
@@ -7047,6 +7069,14 @@ boot();
             marker["clickAction"] = clickAction;
             marker["runValueWritten"] = runValueWritten;
             marker["runValueRemoved"] = runValueRemoved;
+            // tray-truth:tray-selftest-startup-click-handler-unexercised -
+            // the settings.json-side half of MenuStartup_Click's write,
+            // read back right after each toggle so a regression that drops
+            // the HostFiles.UpdateJsonObject call (registry-only again)
+            // shows up here even though runValueWritten/runValueRemoved
+            // above would still look fine.
+            marker["settingsRunAtStartupAfterEnable"] = settingsRunAtStartupAfterEnable.HasValue ? (object)settingsRunAtStartupAfterEnable.Value : null;
+            marker["settingsRunAtStartupAfterDisable"] = settingsRunAtStartupAfterDisable.HasValue ? (object)settingsRunAtStartupAfterDisable.Value : null;
             marker["stateFileWritten"] = _stateFileWritten;
             marker["mutexHeld"] = true;
             marker["exitCode"] = (long)0;

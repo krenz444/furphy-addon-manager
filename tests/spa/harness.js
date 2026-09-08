@@ -982,6 +982,103 @@
   }
 
   // ------------------------------------------------------------------
+  // Phase 3c (regression-guards:wago-search-stale-response-no-guard-test):
+  // guards fetchWago's wagoFetchSeq stale-response guard (ui\app.js,
+  // ~line 5861/5872/5890) - a slow response for an EARLIER query must
+  // never overwrite state a later, faster query's response already
+  // rendered (the exact live bug Round 20 fixed, carried forward unchanged
+  // through Round 35's browse-screen rewrite but never covered by an
+  // automated test). Wraps window.__furphyTest.Mock.handle (ui\app.js's
+  // own testability hook - see its header comment) to add an extra delay
+  // ONLY for one sentinel query's own request, restoring the original
+  // afterward - no production code touched, no mutation of the guard
+  // itself; this exercises the REAL code path so a future edit that
+  // weakens/removes the guard fails this phase instead of shipping silent.
+  // ------------------------------------------------------------------
+  const WAGO_RACE_SLOW_QUERY = "zzz-race-first"; // matches nothing in the mock pool -> 0 results
+  const WAGO_RACE_FAST_QUERY = "camera";         // matches exactly one entry: "Quick Camera"
+
+  async function phaseWagoSearchRace() {
+    beginPhase("Wago search stale-response race guard (wagoFetchSeq)");
+    const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+    await waitForReady(win, 8000);
+    await wait(700); // let the initial Popular fetch settle, same margin phaseWagoBrowse uses
+
+    const mock = win.__furphyTest && win.__furphyTest.Mock;
+    const input = q(win, "#browse-search");
+    if (!mock || !input) {
+      check("a stale response for the earlier (slow) query never overwrites the later query's already-rendered results", false, "Mock hook or #browse-search not found");
+      checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+      return;
+    }
+
+    const origHandle = mock.handle;
+    // Only the slow query's own request gets the extra delay - every other
+    // request (the initial Popular fetch already settled above, and the
+    // fast second query below) goes through unmodified.
+    mock.handle = function (method, path, body) {
+      if (typeof path === "string" && path.indexOf("q=" + WAGO_RACE_SLOW_QUERY) !== -1) {
+        return new Promise(function (resolve, reject) {
+          setTimeout(function () {
+            origHandle.call(mock, method, path, body).then(resolve, reject);
+          }, 700);
+        });
+      }
+      return origHandle.call(mock, method, path, body);
+    };
+
+    try {
+      // Fire the slow query first...
+      input.value = WAGO_RACE_SLOW_QUERY;
+      input.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await wait(450); // past the 400ms debounce - fetchWago(true) for the slow query is now in flight
+
+      // ...then, WHILE it's still pending, fire a different, fast query -
+      // exactly Round 20's "user changed the search box before the old
+      // response came back" scenario.
+      input.value = WAGO_RACE_FAST_QUERY;
+      input.dispatchEvent(new win.Event("input", { bubbles: true }));
+
+      // Poll for the fast query's own results rather than a fixed delay -
+      // matches this file's existing convention (see the import-dialog
+      // poll above) for headless/virtual-time timing variance. A generous
+      // deadline (observed live: this environment can throttle timers far
+      // beyond the mock's own ~120-240ms nominal delay under load).
+      const fastDeadline = Date.now() + 15000;
+      let fastLanded = false;
+      while (Date.now() < fastDeadline) {
+        const rows = qa(win, "#browse-grid .browse-row-title").map(text);
+        if (rows.length === 1 && rows[0] === "Quick Camera") { fastLanded = true; break; }
+        await wait(100);
+      }
+      checkTry("the fast (second) query's own results render", function () { return fastLanded; });
+
+      // Now give the slow (first, stale) query's response plenty of time to
+      // land too (700ms wrapper delay + the mock's own ~120-240ms base, all
+      // on top of the 450ms head start above) and confirm it did NOT
+      // clobber what the fast query already rendered - this is the actual
+      // regression Round 20 fixed and the one this phase exists to guard.
+      // Poll rather than a fixed wait, for the same throttling reason as
+      // above; the slow response landing late is the scenario under test,
+      // so this loop doesn't exit early on any particular DOM state - it
+      // just gives real wall-clock time a chance to pass before asserting.
+      const slowSettleDeadline = Date.now() + 4000;
+      while (Date.now() < slowSettleDeadline) { await wait(200); }
+      checkTry("a stale response for the earlier (slow) query never overwrites the later query's already-rendered results", function () {
+        const rows = qa(win, "#browse-grid .browse-row-title").map(text);
+        return rows.length === 1 && rows[0] === "Quick Camera";
+      });
+      checkTry("the empty state never reverts to the slow query's own (zero-result) response", function () {
+        return !visible(q(win, "#browse-empty"));
+      });
+    } finally {
+      mock.handle = origHandle;
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
   // Phase 4: ?theme=matcha - applies AND persists (THEMES-SPEC.md set B).
   // Deliberately runs AFTER every phase above that depends on the DEFAULT
   // (tokyo-rain, fresh-profile) theme, since this is same-origin and
@@ -1265,30 +1362,515 @@
       return /^Updated 3 addons at \d{2}:\d{2}: A, B, C$/.test(out);
     });
 
-    // ---- Escape closes the tooltip bubble first, without also dismissing
-    // an overlay open underneath it (Section 3's ordering requirement) -
-    // uses a real confirm dialog (Force reinstall all) as the "overlay
-    // underneath", since Settings has no dropdown menu of its own to reuse.
+    // ---- a11y-keyboard:a11y-dialog-no-trap-no-return follow-up: this
+    // check used to open a tooltip, THEN open a confirm dialog over it,
+    // then verify Escape closed the tooltip without touching the dialog
+    // underneath (Section 3's ordering requirement). The focus trap this
+    // same build round adds changes what actually happens here, in a
+    // strictly safer direction, confirmed live: #app (which this tooltip
+    // trigger lives inside) goes `inert` the instant a dialog opens
+    // (Components.Dialogs.show(), ui\app.js) - an inert element cannot
+    // hold focus, so the browser force-blurs the trigger, and
+    // Components.Tooltip's own trigger blur handler (its wire()) closes
+    // the bubble right then. A tooltip can no longer survive behind an
+    // open dialog AT ALL, so there's nothing left for Escape to have to
+    // pick between - this re-verifies that cleanup instead of the old,
+    // now-impossible stacked state. Uses a real confirm dialog (Force
+    // reinstall all) since Settings has no dropdown menu of its own to
+    // reuse. Uses a real click (Components.Tooltip.wire's own click
+    // handler opens the bubble instantly, no hover/focus-reveal delay to
+    // wait out) rather than focus(), for a faster, less timing-sensitive
+    // check.
     const forceBtn = q(win, "#btn-force-reinstall");
     if (forceBtn) {
+      const betaTip = q(win, '.info-tip[aria-label="More about Include beta versions"]');
+      if (betaTip) { await clickAndSettle(win, betaTip, 150); }
+      const tooltipOpenedFirst = !!q(win, "#app-tooltip");
       await clickAndSettle(win, forceBtn, 250);
       const dialogShown = visible(q(win, "#dialog-confirm"));
+      checkTry("opening a dialog closes any tooltip left open behind it (the focus trap's inert-driven blur cleans it up)", function () {
+        return tooltipOpenedFirst && dialogShown && !q(win, "#app-tooltip");
+      });
       if (dialogShown) {
-        const betaTip = q(win, '.info-tip[aria-label="More about Include beta versions"]');
-        if (betaTip) { betaTip.focus(); }
-        await wait(600);
-        const tooltipOpenedUnderneath = !!q(win, "#app-tooltip");
         win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
         await wait(150);
-        checkTry("Escape closes the tooltip bubble", function () { return tooltipOpenedUnderneath && !q(win, "#app-tooltip"); });
-        checkTry("that same Escape leaves the confirm dialog underneath untouched (still open)", function () { return visible(q(win, "#dialog-confirm")); });
-        // Clean up: a second Escape dismisses the dialog itself, back to baseline.
-        win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-        await wait(150);
+        checkTry("Escape then closes the dialog itself (nothing left stuck open)", function () {
+          return q(win, "#dialog-confirm").hidden === true;
+        });
       } else {
-        check("Escape closes the tooltip bubble", false, "confirm dialog never opened");
-        check("that same Escape leaves the confirm dialog underneath untouched (still open)", false, "confirm dialog never opened");
+        check("Escape then closes the dialog itself (nothing left stuck open)", false, "confirm dialog never opened");
       }
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-settings-zoom-clip): at the app's own
+  // documented minimum window (host\FurphyHost.cs's
+  // MinimumSizeBaselineAt96Dpi, 1040x660), ordinary browser zoom must
+  // never silently clip content with no way back - ui\style.css's
+  // html/body rule no longer sets overflow-x:hidden (see that file's own
+  // comment at this same finding id), so a real, reachable horizontal
+  // scrollbar appears instead. Temporarily shrinks the harness's own
+  // iframe (1280x900 by default, set in harness.html) to 1040x660 via an
+  // inline style override, restored afterward so no later phase inherits
+  // the narrower size.
+  // ------------------------------------------------------------------
+  async function phaseA11yZoomClip() {
+    beginPhase("a11y: Settings zoom-clip (1040x660 @ 125% zoom)");
+    const frame = iframeEl();
+    const savedWidth = frame.style.width, savedHeight = frame.style.height;
+    frame.style.width = "1040px";
+    frame.style.height = "660px";
+    try {
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      win.document.documentElement.style.zoom = "1.25";
+      await wait(200); // let layout settle at the new zoom level
+      checkTry("html is not overflow-x:hidden at the app's minimum window size (a real scrollbar can appear instead of silently clipping)", function () {
+        return win.getComputedStyle(win.document.documentElement).overflowX !== "hidden";
+      });
+      checkTry("the layout genuinely needs more room than the 1040px window at 125% zoom (scrollWidth > clientWidth) - proves this check exercises the real clipping scenario, not a no-op", function () {
+        return win.document.documentElement.scrollWidth > win.document.documentElement.clientWidth;
+      });
+      win.scrollTo(win.document.documentElement.scrollWidth, 0);
+      await wait(50);
+      ["#toggle-beta", "#toggle-background-updates", "#toggle-run-at-startup"].forEach(function (sel) {
+        checkTry(sel + " is reachable after scrolling all the way right (within the viewport, not clipped off past the edge)", function () {
+          const el = q(win, sel);
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return r.right <= win.innerWidth + 1 && r.right > 0;
+        });
+      });
+      win.document.documentElement.style.zoom = "";
+    } finally {
+      frame.style.width = savedWidth;
+      frame.style.height = savedHeight;
+    }
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-myaddons-row-mouse-only): a My Addons row
+  // (ui\app.js, Views.myAddons.row()) must be reachable and operable from
+  // the keyboard the same way Views.browse's own .browse-row already is -
+  // tabindex=0/role=button/aria-label, Enter/Space opens the drawer on
+  // Overview, and the checkbox/kebab button inside the row keep handling
+  // their own Enter/Space instead of ALSO opening the drawer.
+  // ------------------------------------------------------------------
+  async function phaseA11yMyAddonsKeyboard() {
+    beginPhase("a11y: My Addons row keyboard-open (tabindex/role/Enter, no double-handling)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    const row = q(win, "#myaddons-tbody tr.addon-row");
+    checkTry("a My Addons row is a Tab stop (tabIndex 0) with role=button and a real accessible name", function () {
+      return !!row && row.tabIndex === 0 && row.getAttribute("role") === "button" && !!row.getAttribute("aria-label");
+    });
+    if (!row) {
+      check("Enter on a focused row opens the drawer on the Overview tab", false, "no tr.addon-row found");
+      check("Enter/Space on the row's own checkbox does not also open the drawer (no double-handling)", false, "no tr.addon-row found");
+    } else {
+      row.focus();
+      row.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await wait(250);
+      checkTry("Enter on a focused row opens the drawer on the Overview tab", function () {
+        const drawer = q(win, "#drawer");
+        const overviewTab = q(win, '.drawer-tab[data-tab="overview"]');
+        return !!drawer && drawer.hidden === false && !!overviewTab && overviewTab.classList.contains("is-active");
+      });
+      const closeBtn = q(win, "#drawer-close");
+      if (closeBtn) await clickAndSettle(win, closeBtn, 200);
+
+      const checkbox = row.querySelector(".chk");
+      if (checkbox) {
+        checkbox.focus();
+        checkbox.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        await wait(200);
+        checkTry("Enter/Space on the row's own checkbox does not also open the drawer (no double-handling)", function () {
+          const drawer = q(win, "#drawer");
+          return !drawer || drawer.hidden === true;
+        });
+      } else {
+        check("Enter/Space on the row's own checkbox does not also open the drawer (no double-handling)", false, ".chk checkbox not found in the row");
+      }
+    }
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-dialog-no-trap-no-return): each of the three
+  // modal dialogs (Add/Confirm/Welcome, all sharing Components.Dialogs'
+  // show()/hide() - ui\app.js) must trap Tab within itself (#app goes
+  // `inert` for the background while one is open) and return focus to
+  // whatever opened it on close. Drives Components directly via
+  // window.__furphyTest.Components (exposed for exactly this - see that
+  // exposure's own comment in ui\app.js) rather than hunting a real
+  // trigger flow for Welcome, which normally only opens from a specific
+  // empty-roster + untracked-folders scan result.
+  // ------------------------------------------------------------------
+  function focusablesIn(win, dlgSel) {
+    const parts = ["a[href]", "button:not([disabled])", "input:not([disabled])", "select:not([disabled])", "textarea:not([disabled])", '[tabindex]:not([tabindex="-1"])'];
+    return qa(win, parts.map(function (p) { return dlgSel + " " + p; }).join(", "));
+  }
+
+  async function checkDialogFocus(win, name, openerEl, openFn) {
+    const dlgSel = "#dialog-" + name;
+    openerEl.focus();
+    openFn();
+    await wait(250); // every open*() moves focus into the dialog via its own ~160ms setTimeout
+    checkTry(name + ": focus lands inside the dialog on open", function () {
+      return !!win.document.activeElement && !!win.document.activeElement.closest(dlgSel);
+    });
+    checkTry(name + ": #app goes inert while the dialog is open (background trapped)", function () {
+      return q(win, "#app").hasAttribute("inert");
+    });
+    const focusables = focusablesIn(win, dlgSel);
+    if (focusables.length > 0) {
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      last.focus();
+      win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      checkTry(name + ": Tab from the last focusable control wraps to the first (trap holds)", function () {
+        return win.document.activeElement === first;
+      });
+      win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+      checkTry(name + ": Shift+Tab from the first focusable control wraps to the last", function () {
+        return win.document.activeElement === last;
+      });
+    } else {
+      check(name + ": Tab from the last focusable control wraps to the first (trap holds)", false, "no focusable controls found in " + dlgSel);
+      check(name + ": Shift+Tab from the first focusable control wraps to the last", false, "no focusable controls found in " + dlgSel);
+    }
+    win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await wait(250); // hide()'s own 150ms hidden-attribute timeout
+    checkTry(name + ": Escape closes the dialog and returns focus to the element that opened it", function () {
+      return q(win, dlgSel).hidden === true && win.document.activeElement === openerEl;
+    });
+    checkTry(name + ": #app is no longer inert once the dialog is closed", function () {
+      return !q(win, "#app").hasAttribute("inert");
+    });
+  }
+
+  async function phaseA11yDialogFocus() {
+    beginPhase("a11y: dialog focus trap + focus return (Add/Confirm/Welcome)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+
+    const addBtn = q(win, "#btn-add-addon");
+    if (addBtn) {
+      await checkDialogFocus(win, "add", addBtn, function () { addBtn.click(); });
+    } else {
+      check("add: focus lands inside the dialog on open", false, "#btn-add-addon not found");
+    }
+
+    // Welcome next, on this SAME my-addons frame/`win` - loadFrame reuses
+    // the one shared #spa-frame iframe (see this file's own header
+    // comment), so navigating to a settings frame for "confirm" first
+    // would silently strand `win`/`checkBtn` pointing at a page that no
+    // longer exists (checkBtn.focus() on an element that just got
+    // display:none'd by the navigation is a no-op, which broke this exact
+    // check - confirmed live). Welcome has no natural trigger in a frame
+    // whose mock roster already has addons (App.maybeShowWelcome only
+    // fires on an EMPTY roster) - driven directly through Components.
+    // Welcome.open (which builds real content, then calls the same
+    // Dialogs.openWelcome() the other two dialogs' own open* functions
+    // call) via the test-only hook.
+    const checkBtn = q(win, "#btn-check-updates");
+    if (checkBtn && win.__furphyTest && win.__furphyTest.Components) {
+      await checkDialogFocus(win, "welcome", checkBtn, function () {
+        win.__furphyTest.Components.Welcome.open([{ curseId: "999999", title: "Test Untracked Addon", folder: "TestUntrackedAddon" }]);
+      });
+    } else {
+      check("welcome: focus lands inside the dialog on open", false, "#btn-check-updates or window.__furphyTest.Components not found");
+    }
+
+    // Confirm last, in its own fresh settings frame (Settings > Advanced >
+    // Force reinstall all) - this navigation is safe now that nothing
+    // after it still needs the old `win`.
+    const settingsWin = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(settingsWin, 8000);
+    const summary = q(settingsWin, "#settings-advanced summary");
+    if (summary) await clickAndSettle(settingsWin, summary, 150);
+    const reinstallBtn = q(settingsWin, "#btn-force-reinstall");
+    if (reinstallBtn) {
+      await checkDialogFocus(settingsWin, "confirm", reinstallBtn, function () { reinstallBtn.click(); });
+    } else {
+      check("confirm: focus lands inside the dialog on open", false, "#btn-force-reinstall not found");
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-loading-indicators-ignore-reduced-motion):
+  // the app's own functional loading/status indicators (freshness/
+  // connectivity pulses, a busy row's chip-dot, the skeleton shimmer, the
+  // job spinner and its indeterminate progress sweep, the toast
+  // transition) must stop animating under prefers-reduced-motion:reduce -
+  // ui\style.css's per-theme decorative animations already did; these did
+  // not (see that file's own comment at this finding id).
+  //
+  // This harness has no way to make the browser itself REPORT
+  // prefers-reduced-motion:reduce (that needs a DevTools-protocol media
+  // override or an OS-level setting - Run-SpaHarness.ps1's single
+  // `msedge --headless=new --dump-dom` invocation, out of this file's own
+  // edit scope, does neither), so `getComputedStyle` under the real,
+  // ambient preference can't be used to prove this. Instead this reads
+  // the loaded stylesheet's own parsed CSSOM: it finds every rule inside
+  // an `@media (prefers-reduced-motion: reduce)` block that sets
+  // `animation: none`, and confirms each of the 7 selectors this finding
+  // named is covered by one of them - a direct, deterministic check of
+  // the actual CSS this fix adds, immune to whatever the test host's own
+  // OS motion setting happens to be.
+  // ------------------------------------------------------------------
+  function reducedMotionAnimationNoneSelectors(win) {
+    const found = [];
+    function walk(rules) {
+      for (let i = 0; i < rules.length; i++) {
+        const r = rules[i];
+        if (r.cssRules && r.media && /prefers-reduced-motion:\s*reduce/i.test(r.media.mediaText || "")) {
+          for (let j = 0; j < r.cssRules.length; j++) {
+            const sr = r.cssRules[j];
+            if (!sr.selectorText || !sr.style) continue;
+            const animNone = sr.style.animationName === "none" || /(^|;)\s*animation:\s*none\b/i.test(sr.style.cssText || "");
+            if (animNone) found.push(sr.selectorText);
+          }
+        } else if (r.cssRules) {
+          walk(r.cssRules); // nested @media / @supports etc.
+        }
+      }
+    }
+    for (let s = 0; s < win.document.styleSheets.length; s++) {
+      try { walk(win.document.styleSheets[s].cssRules); } catch (e) { /* cross-origin/not-yet-parsed - skip */ }
+    }
+    return found;
+  }
+
+  async function phaseA11yReducedMotion() {
+    beginPhase("a11y: prefers-reduced-motion CSS coverage for functional loading indicators (static CSSOM check)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    const covered = reducedMotionAnimationNoneSelectors(win).join(" | ");
+    check("at least one @media(prefers-reduced-motion:reduce) rule with animation:none was found in the loaded stylesheet", covered.length > 0, covered || "(none found)");
+    [
+      ".freshness-dot.is-checking",
+      '.status-dot[data-state="connecting"]',
+      ".chip-busy .chip-dot",
+      ".job-spinner",
+      ".skeleton-row",
+      ".job-progress-bar.is-indeterminate",
+      ".toast"
+    ].forEach(function (sel) {
+      checkTry("a rule inside @media(prefers-reduced-motion:reduce) sets animation:none covering " + sel, function () {
+        return covered.indexOf(sel) !== -1;
+      });
+    });
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-missing-live-regions): the freshness
+  // headline (both mounts) and the job panel's title/phase-label carry
+  // aria-live="polite" (ui\index.html) - and #job-progress-current
+  // deliberately does NOT, since it ticks a byte-percentage roughly every
+  // 500ms during downloads and would spam a screen reader if it did.
+  // ------------------------------------------------------------------
+  async function phaseA11yLiveRegions() {
+    beginPhase("a11y: aria-live on freshness/job-panel status (and NOT on the byte-percentage tick)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    [["#sidebar-freshness", true], ["#myaddons-freshness", true], ["#job-title", true], ["#job-progress-label", true], ["#job-progress-current", false]].forEach(function (pair) {
+      const sel = pair[0], wantLive = pair[1];
+      checkTry(sel + (wantLive ? " carries aria-live=\"polite\"" : " does NOT carry aria-live (would spam a percentage tick)"), function () {
+        const el = q(win, sel);
+        if (!el) return false;
+        const has = el.getAttribute("aria-live") === "polite";
+        return wantLive ? has : !has;
+      });
+    });
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-lightbox-not-a-real-dialog): the screenshot
+  // lightbox (ui\app.js, Components.Lightbox) needs role=dialog/aria-modal,
+  // focus on the close button on open, real alt text from the clicked
+  // thumbnail's own title, and focus returned to that thumbnail on close -
+  // which in turn requires the thumbnail itself to be a real Tab stop
+  // (verified live during development: it wasn't, on either screenshots
+  // path - a plain <img> with an onclick and nothing else, so neither a
+  // keyboard user nor `lastTrigger.focus()` on close could ever reach it;
+  // fixed alongside this finding, both renderWagoScreenshots and
+  // renderKeylessScreenshots in ui\app.js now give it tabindex=0/role=
+  // button/onkeydown, same finding id tags both).
+  //
+  // Uses projectId 25301 (Details! Damage Meter, mockCfEnrich's
+  // "addon-radar" branch - real screenshots[] fixture data) rather than
+  // the Wago-sourced addon: the mock's own /api/wago/addons/:slug/gallery
+  // handler unconditionally returns `{gallery:{images:[]}}` for every
+  // slug (verified live - no mock addon's Wago gallery path ever has a
+  // real thumbnail to click), so that path can never exercise this phase.
+  // ------------------------------------------------------------------
+  async function phaseA11yLightbox() {
+    beginPhase("a11y: screenshot lightbox is a real dialog (role/focus/alt/focus-return)");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    const drawer = win.__furphyTest && win.__furphyTest.Components && win.__furphyTest.Components.Drawer;
+    if (!drawer) {
+      check("lightbox: role=dialog/aria-modal present on open", false, "window.__furphyTest.Components.Drawer not found");
+      checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+      return;
+    }
+    drawer.open(25301, { tab: "screenshots" });
+    await wait(900); // loadEnrich's own mock fetch delay
+    const thumb = q(win, "#drawer-panel-screenshots .screenshot-thumb");
+    if (!thumb) {
+      check("lightbox: role=dialog/aria-modal present on open", false, "no .screenshot-thumb found (mockCfEnrich's addon-radar fixture may have changed)");
+      checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+      return;
+    }
+    checkTry("the thumbnail itself is a real Tab stop (tabindex 0, role=button) - a keyboard user must be able to reach it before opening it", function () {
+      return thumb.tabIndex === 0 && thumb.getAttribute("role") === "button";
+    });
+    thumb.focus();
+    checkTry("the thumbnail can actually receive focus", function () { return win.document.activeElement === thumb; });
+    thumb.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await wait(200);
+    checkTry("lightbox: role=dialog and aria-modal=true are present while open", function () {
+      const lb = q(win, "#lightbox");
+      return !!lb && !lb.hidden && lb.getAttribute("role") === "dialog" && lb.getAttribute("aria-modal") === "true";
+    });
+    checkTry("lightbox: focus lands on the close button on open", function () {
+      return win.document.activeElement === q(win, "#lightbox-close");
+    });
+    checkTry("lightbox: the enlarged image's alt text is non-empty when the source thumbnail had a title", function () {
+      return (q(win, "#lightbox-img").alt || "").length > 0;
+    });
+    win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await wait(150);
+    checkTry("lightbox: Escape closes it and returns focus to the thumbnail that opened it", function () {
+      return q(win, "#lightbox").hidden === true && win.document.activeElement === thumb;
+    });
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (tray-truth:spa-formatnextcheck-missing-two-day-branch): the JS
+  // mirror of host\FurphyHost.cs's FormatNextCheck must stay byte-identical
+  // for the DST-driven 2+ day-out case, not just "today"/"tomorrow" - see
+  // tests\host\Host.Tests.ps1's matching "Host FormatNextCheck DST
+  // handling" Describe for the C#-side half of this same scenario. Uses
+  // computeCoreText (exposed for exactly this - see its own Round 32
+  // comment in ui\app.js) rather than reaching into the private
+  // formatNextCheck closure directly.
+  // ------------------------------------------------------------------
+  async function phaseFormatNextCheckDST() {
+    beginPhase("formatNextCheck DST two-day-out branch (byte parity with the tray)");
+    const win = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(win, 8000);
+    const fn = win.__furphyTest && win.__furphyTest.Views && win.__furphyTest.Views.settings && win.__furphyTest.Views.settings.computeCoreText;
+    checkTry("computeCoreText/formatNextCheck exists", function () { return typeof fn === "function"; });
+    if (typeof fn === "function") {
+      // A local calendar date 2 days out, expressed as an absolute ISO
+      // instant so this test is stable regardless of the machine's own
+      // timezone (mirrors the DST scenario's SHAPE - "now" and nextRunAt
+      // land 2 real calendar days apart - without depending on this CI
+      // machine actually being in America/Los_Angeles or the spring-
+      // forward date itself, which the C#-side Host.Tests.ps1 Describe
+      // covers with the real timezone/date instead).
+      const now = new Date();
+      const localMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const twoDaysOut = new Date(localMidnight.getTime() + 2 * 24 * 3600e3 + 30 * 60e3); // 2 days out, 00:30
+      checkTry("formatNextCheck (via computeCoreText's 'idle' branch) shows a real date, never 'tomorrow', when the target is genuinely 2 calendar days out", function () {
+        const out = fn({ status: "idle", nextRunAt: twoDaysOut.toISOString() });
+        return out.indexOf("tomorrow") === -1 && /next check .+\d{2}:\d{2}$/.test(out);
+      });
+      checkTry("formatNextCheck still says 'tomorrow HH:mm' for a genuine one-day-out target (regression guard on the boundary)", function () {
+        const oneDayOut = new Date(localMidnight.getTime() + 1 * 24 * 3600e3 + 30 * 60e3);
+        const out = fn({ status: "idle", nextRunAt: oneDayOut.toISOString() });
+        return out.indexOf("tomorrow") !== -1;
+      });
+      checkTry("formatNextCheck still shows plain HH:mm for a same-day target (regression guard on the boundary)", function () {
+        const laterToday = new Date(Date.now() + 5 * 60e3);
+        const out = fn({ status: "idle", nextRunAt: laterToday.toISOString() });
+        return out.indexOf("tomorrow") === -1 && /next check \d{2}:\d{2}$/.test(out);
+      });
+    }
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (a11y-keyboard:a11y-tabs-no-arrow-keys, re-checked this round):
+  // every WAI-ARIA tablist (Get new addons' Wago/CurseForge switch, the
+  // Wago sort segmented control, the detail drawer's tab strip) and the
+  // Settings > Appearance Spacing radiogroup now support Left/Right
+  // (and Up/Down) arrow-key roving-tabindex navigation with automatic
+  // activation, plus Home/End - see Utils.wireTabsArrowNav (ui\app.js)
+  // and every call site tagged with this same finding id.
+  // ------------------------------------------------------------------
+  async function phaseA11yTabsArrowKeys() {
+    beginPhase("a11y: arrow-key navigation in tab strips and the Spacing radiogroup");
+    const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+    await waitForReady(win, 8000);
+    await wait(700);
+
+    const cfTab = q(win, "#tab-curseforge");
+    const wagoTab = q(win, "#tab-wago");
+    if (wagoTab && cfTab) {
+      wagoTab.focus();
+      win.document.getElementById("get-new-tabs").dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+      checkTry("Get new addons: ArrowRight moves focus AND activates the CurseForge tab", function () {
+        return win.document.activeElement === cfTab && cfTab.getAttribute("aria-selected") === "true" && cfTab.tabIndex === 0 && wagoTab.tabIndex === -1;
+      });
+      cfTab.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
+      checkTry("Get new addons: ArrowLeft wraps/moves focus back and re-activates Wago", function () {
+        return win.document.activeElement === wagoTab && wagoTab.getAttribute("aria-selected") === "true";
+      });
+    } else {
+      check("Get new addons: ArrowRight moves focus AND activates the CurseForge tab", false, "#tab-wago or #tab-curseforge not found");
+    }
+
+    const popularTab = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "popular"; })[0];
+    const updatedTab = qa(win, "#wago-sort .segmented-btn[data-sort]").filter(function (b) { return b.dataset.sort === "updated"; })[0];
+    if (popularTab && updatedTab) {
+      popularTab.focus();
+      popularTab.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+      await wait(400);
+      checkTry("Wago sort: ArrowRight moves to and activates 'Recently updated'", function () {
+        return win.document.activeElement === updatedTab && updatedTab.classList.contains("is-active");
+      });
+    } else {
+      check("Wago sort: ArrowRight moves to and activates 'Recently updated'", false, "sort segment buttons not found");
+    }
+
+    const overviewTab = q(win, '.drawer-tab[data-tab="overview"]');
+    const versionsTab = q(win, '.drawer-tab[data-tab="versions"]');
+    if (overviewTab && versionsTab && win.__furphyTest && win.__furphyTest.Components) {
+      win.__furphyTest.Components.Drawer.open(68304); // Auctionator, a plain tracked mock addon
+      await wait(200);
+      overviewTab.focus();
+      overviewTab.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+      checkTry("Drawer tabs: ArrowRight moves to and activates Versions", function () {
+        return win.document.activeElement === versionsTab && versionsTab.classList.contains("is-active");
+      });
+    } else {
+      check("Drawer tabs: ArrowRight moves to and activates Versions", false, "drawer tab buttons or window.__furphyTest.Components not found");
+    }
+
+    const settingsWin = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(settingsWin, 8000);
+    const comfyBtn = q(settingsWin, '#density-toggle [data-density-value="comfortable"]');
+    const compactBtn = q(settingsWin, '#density-toggle [data-density-value="compact"]');
+    if (comfyBtn && compactBtn) {
+      comfyBtn.focus();
+      comfyBtn.dispatchEvent(new settingsWin.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+      checkTry("Settings > Appearance Spacing: ArrowRight moves to and selects Compact (radiogroup)", function () {
+        return settingsWin.document.activeElement === compactBtn && compactBtn.getAttribute("aria-checked") === "true" && compactBtn.classList.contains("is-active");
+      });
+    } else {
+      check("Settings > Appearance Spacing: ArrowRight moves to and selects Compact (radiogroup)", false, "#density-toggle buttons not found");
     }
 
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
@@ -1453,9 +2035,18 @@
     await phaseFlavours();
     await phaseHostWebview2();
     await phaseWagoBrowse();
+    await phaseWagoSearchRace();
     await phaseTheme();
     await phaseViewDeepLink();
     await phaseSettingsAudit();
+    await phaseA11yZoomClip();
+    await phaseA11yMyAddonsKeyboard();
+    await phaseA11yDialogFocus();
+    await phaseA11yReducedMotion();
+    await phaseA11yLiveRegions();
+    await phaseA11yLightbox();
+    await phaseFormatNextCheckDST();
+    await phaseA11yTabsArrowKeys();
     await phaseEmptyStateFreshness();
     await phaseUninstall();
 

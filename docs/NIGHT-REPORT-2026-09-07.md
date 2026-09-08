@@ -99,7 +99,8 @@ finished after this draft.
 | 1.16.0 | 35 | Wago browsing shipped as designed | Sept 7 19:41 |
 | 1.17.0 | 36 | Adversarial pass: 15 confirmed fixes (dual-launcher start race, CurseForge Install click off the UI thread, catalogue startup guard, docs) plus the critical one-client installer fix found by the other session | Sept 7 23:00 |
 | 1.18.1 | 37 | Fast launch: measured on this machine after deploy - server answers its first request 1.5 s after the process starts (was 5-20 s when a refresh was due), addon state 60-66 ms per call after the first (was ~970 ms), install-links status 37 ms (was 413 ms); the window shows "Starting..." immediately and the shortcut no longer waits 15 s | Sept 8 01:39 |
-| 1.19.0 | 38 | IN PROGRESS: 21 confirmed QA-journey findings (9 high) - minimized window dying after the server's idle exit, Windows uninstall entry splitting the Program Files path, Settings port with no range check, corrupt addons.json lockout, CurseForge outage misreported as incompatible, locked-folder fake success, downgrade hiding addons, Classic Wago mapping, and more | running |
+| 1.19.0 | 38 | QA journeys: 21 confirmed findings fixed (9 high) - minimized window recovers after the helper's idle exit, Windows uninstall entry and relaunch handle "Program Files (x86)", downgrade guard, Settings port range check, honest errors for locked folders / CurseForge outages / corrupt files, Classic Wago mapping, PTR adopt gate, WebView2-missing message, log rotation and pruning; upgrade from the public 1.1.0 re-tested end to end | Sept 8 03:45 |
+| 1.20.0 | 39 | IN PROGRESS: QA lens round 2 - keyboard/accessibility, installer at other display scalings, 16-theme visual regression on every view, tray text truth, documentation truth, regression-guard audit | running |
 
 The "overnight" ran through the evening of Sept 7 and the night into Sept 8
 because the usage-limit pause covered most of Sept 7's daytime. Nothing was
