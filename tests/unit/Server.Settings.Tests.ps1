@@ -170,4 +170,93 @@ Describe 'Get-DefaultSettings' {
     }
 }
 
+function New-RawSettingsFile {
+    <# Writes -Content verbatim (not through Save-Settings) to a fresh temp root's settings.json and points $Script:SettingsPath at it. #>
+    param([string]$Content)
+    $settingsRoot = New-TempRoot -Name 'settings-raw'
+    $path = Join-Path $settingsRoot 'settings.json'
+    Set-Content -LiteralPath $path -Value $Content -Encoding UTF8 -NoNewline
+    $Script:SettingsPath = $path
+    return $path
+}
+
+Describe 'Get-Settings - port range (security:security-server-settings-port-no-range-check-bricks-launch, defense in depth)' {
+    <#
+      Handle-SettingsPut already rejects an out-of-range port with 400 (see
+      the integration Describe for that half) - this covers the SECOND,
+      independent guard: Get-Settings' own READ path, which must clamp a
+      bad value already sitting on disk (a manual hand-edit, or a file from
+      before this fix) back to the 47831 default rather than ever letting
+      it round-trip anywhere unfiltered, including into the real startup
+      port-resolution fallback that ultimately feeds $listener.Start().
+    #>
+
+    It 'a positive but out-of-range on-disk port (999999) reads back as the 47831 default, not the bad value' {
+        New-RawSettingsFile -Content '{"port":999999}' | Out-Null
+        (Get-Settings).port | Should Be 47831
+    }
+
+    It 'an on-disk port of 0 reads back as the 47831 default' {
+        New-RawSettingsFile -Content '{"port":0}' | Out-Null
+        (Get-Settings).port | Should Be 47831
+    }
+
+    It 'a negative on-disk port reads back as the 47831 default' {
+        New-RawSettingsFile -Content '{"port":-5}' | Out-Null
+        (Get-Settings).port | Should Be 47831
+    }
+
+    It 'a genuinely valid on-disk port is unaffected' {
+        New-RawSettingsFile -Content '{"port":47905}' | Out-Null
+        (Get-Settings).port | Should Be 47905
+    }
+}
+
+Describe 'Get-Settings - corrupt settings.json self-repairs (failure-modes:settingsjson-corruption-silent-reset)' {
+    <#
+      Before this round's fix, a malformed settings.json fell back to
+      in-memory defaults on every single read forever, with the corrupt
+      file itself never repaired - any real choice the user had made
+      (most importantly adFilter/cfFocus, both ON by default) silently
+      reverted with zero indication, and the same parse-failure warning
+      re-logged on every subsequent request for the life of the install.
+    #>
+
+    It 'returns Get-DefaultSettings-equivalent values on a parse failure' {
+        New-RawSettingsFile -Content '{"adFilter": false, garbage!!!' | Out-Null
+        $result = Get-Settings
+        $defaults = Get-DefaultSettings
+        $result.adFilter | Should Be $defaults.adFilter
+        $result.cfFocus | Should Be $defaults.cfFocus
+        $result.port | Should Be $defaults.port
+    }
+
+    It 'overwrites the corrupt file on disk with valid JSON that parses back to the same defaults' {
+        $path = New-RawSettingsFile -Content '{"adFilter": false, garbage!!!'
+        Get-Settings | Out-Null
+
+        $raw = Get-Content -LiteralPath $path -Raw
+        # (a scriptblock passed to "Should Not Throw" runs in its own child
+        # scope in Pester 3 - a variable assigned inside it does not
+        # propagate back out, so the parse itself happens directly here;
+        # ConvertFrom-Json throwing on still-malformed content would fail
+        # this It the normal way, via an uncaught exception)
+        $onDisk = $raw | ConvertFrom-Json -ErrorAction Stop
+        $onDisk.adFilter | Should Be (Get-DefaultSettings).adFilter
+    }
+
+    It 'a second read of the now-repaired file no longer needs to fall back (the repair actually took)' {
+        $path = New-RawSettingsFile -Content '{"adFilter": false, garbage!!!'
+        Get-Settings | Out-Null
+        # Simulate the user having since changed a real preference through
+        # the repaired file, to prove the second read is a normal parse of
+        # valid JSON - not still silently discarding everything back to
+        # defaults every time.
+        $repaired = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $repaired.adFilter = $false
+        (ConvertTo-Json -InputObject $repaired -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8
+        (Get-Settings).adFilter | Should Be $false
+    }
+}
+
 Remove-TempRoots

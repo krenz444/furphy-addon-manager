@@ -1,5 +1,284 @@
 # Furphy Addon Manager - changelog
 
+## Round 38 (1.19.0: QA journeys - 21 fixes)
+
+A skeptic-confirmed QA pass across six lenses (failure-modes, long-run,
+multi-client, novice, security, upgrade-1.1.0) walked host, installer,
+CLI and server as a below-average-tech player would actually hit them -
+minimizing the app, upgrading/downgrading, a corrupted file, a locked
+folder, an unrecognized Classic client. 21 findings confirmed (9 high, 9
+medium, 3 low) and fixed this round, plus 2 follow-ups from the Round 37
+launch-time work. 5 further items from the same pass were investigated
+and refuted with reasoning (stale-behavior claims, or documented,
+deliberate scoping decisions) - see the QA report's own appendix; none
+are reopened here. Each fixer worked only their own files and verified
+with parse checks, `node --check`, `build-host.ps1`, and standalone
+Pester runs on the files they touched; the full `tests\run-all.ps1`
+suite is the verifier's job, not reflected in the per-fixer notes below.
+
+**Host (fixed first - the two items below hit the single most routine
+action in the app, tabbing back into WoW, and a real if uncommon
+missing-runtime machine, with zero recovery either way):**
+- `failure-modes:webview2-missing-no-fallback` - confirmed: on a machine
+  where the WebView2 Runtime is missing, double-clicking the launcher
+  produced total silence - no window, no error, nothing on screen at
+  all, and Addon Manager.vbs never saw the host's exit code to fall back
+  to Edge. Fixed: `host\FurphyHost.cs`'s `HandleRuntimeMissing` now shows
+  a plain-language MessageBox pointing at the WebView2 Runtime installer
+  before closing (suppressed during `--selftest`), and `Addon
+  Manager.vbs` now waits for the host's exit code instead of firing and
+  forgetting it, falling back to the Edge `--app` window on exit code 3 -
+  restoring the fallback ROADMAP.md always documented. Covered by a 5th
+  scenario in SPEC.md's `cscript` acceptance harness (hostExe stubbed to
+  exit 3), now a permanent automated test
+  (`tests\host\Launcher.Tests.ps1`) rather than a manual-only check, and
+  the existing Round 10 `--selftest` assertion (`tests\host\Host.Tests.ps1`)
+  that `SelftestActive` really does suppress the MessageBox during
+  `--selftest`.
+- `long-run:minimize-kills-server-no-recovery` - confirmed: minimizing
+  the main window suspends the SPA's own webview, which starves
+  addon-server.ps1's idle-exit clock; after `-IdleMinutes` (20 by
+  default) the server quietly exits, and nothing un-minimizing the
+  window ever notices or restarts it - the app is left permanently
+  stuck on "Server not reachable - restart from the desktop shortcut."
+  Fixed: `MainForm_Resize`'s un-minimize branch now pings the server and,
+  on failure, relaunches it through the same helper the tray already
+  uses, before the SPA's own reconnect poll would otherwise time out
+  waiting for nothing. New integration test drives the host into
+  minimized state past a short `-IdleMinutes` window and asserts the
+  server is alive (or transparently restarted) by the time the window is
+  restored.
+- `long-run:host-log-no-rotation` - confirmed: `server.log`/`sync.log`
+  both rotate at ~2MB specifically because a background-tray install can
+  run for weeks, but `host.log` had no cap at all and grew unbounded over
+  the same timeframe. Fixed: `LogWriter.Append` now rotates `host.log` to
+  `host.log.1` at the same ~2MB threshold, matching the other two logs
+  exactly (best-effort - a rotation failure never blocks the log write
+  itself). Covered by a new `tests/host` case that pre-seeds `host.log`
+  past 2MB and asserts the rotate-then-append behavior.
+- `long-run:tray-next-check-dst-two-day-mislabel` - confirmed: the "next
+  background check" label's today/tomorrow logic assumed the interval's
+  24h clamp made a 2-day-out result impossible, but a DST spring-forward
+  near the 1440-minute max can push the real next run two calendar days
+  out while the label still says "tomorrow." Fixed: `FormatNextCheck` now
+  computes an actual day-diff and falls back to a plain date (or "in N
+  days") past the 1-day case, with a testable overload taking an explicit
+  local time/timezone. Covered by a new unit test using Pacific time
+  across a spring-forward transition.
+
+**Installer (fixed second - the two items below hit the default Windows
+install path, and make a confused user believe every tracked addon was
+lost):**
+- `upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons` - confirmed:
+  running an older installer (e.g. a stale downloaded 1.1.0 zip) over a
+  current, already-migrated install silently replaces the newer
+  flavour-aware code with old code that doesn't know where the real
+  addon data lives, so the app reports zero tracked addons even though
+  nothing was actually deleted. Fixed: `install.ps1` now compares the
+  installed `VERSION` against the running installer's own version before
+  copying, warns in plain language and skips the copy when the installed
+  copy is newer, and proceeds anyway only with a new `-Force` switch (the
+  Install button in the wizard shares the same guard). Covered by a new
+  regression test seeding a newer `VERSION` and asserting the code/
+  settings/flavours tree is untouched without `-Force` and updates with
+  it.
+- `security:security-install-uninstall-wowpath-arg-splitting` - confirmed:
+  both the Uninstall self-relaunch and the Windows Apps&Features
+  uninstall string built their relaunch command from an unquoted argument
+  list, so a WoW root containing a space - the *default* Windows install
+  location, "C:\Program Files (x86)\World of Warcraft\_retail_" - got
+  silently truncated by PowerShell 5.1's own argument joining, aborting
+  the uninstall. Fixed: `install.ps1` now quotes every relaunch argument
+  (a local port of the existing `ConvertTo-SafeProcessArg` helper) at
+  both call sites, matching the correctly-quoted pattern
+  `host\FurphyHost.cs`'s equivalent fallback already used. Covered by
+  updated/new Pester cases in `Install.Uninstall.Tests.ps1` that actually
+  execute the generated command against a stub with a spaced, parenthesized
+  path and assert the whole path arrives intact.
+- `upgrade-1.1.0:upgrade-1.1.0-package-ships-stray-dev-log` - confirmed:
+  the public 1.1.0 zip shipped a leftover developer log file
+  (`ui\server47896.log`) because `package.ps1`'s `ui\` copy has no
+  exclude/allow-list at all - clean today only by coincidence. Fixed:
+  `package.ps1` now copies `ui\` through an explicit file-extension
+  allow-list instead of an unfiltered recursive copy, so a future stray
+  dev artifact can never silently ship again. Covered by a new packaging
+  test that stages one allow-listed and one disallowed file and asserts
+  only the allow-listed one reaches the zip.
+- `novice:NOVICE-3` - confirmed: every uninstall copies `install.ps1`
+  into `%TEMP%` under a fresh GUID name so it can delete its own source
+  folder, then never cleans that copy (or its log) up - a permanent,
+  unbounded leak in `%TEMP%` for anyone who installs/uninstalls more than
+  once. Fixed: all four call sites that spawn a self-executing temp copy
+  (the Uninstall self-relaunch, the Windows uninstall-string fallback,
+  the relaunch safety net, and the tray's own uninstall fallback in
+  `host\FurphyHost.cs`) now trigger a detached `cmd /c` delete of their
+  own temp copy after a short delay, folding in the uninstall log too
+  when nothing failed. Covered by a new integration test that runs a full
+  scratch uninstall and asserts zero matching leftover files in `%TEMP%`
+  afterward.
+- `multi-client:install-adopt-loop-includes-hidden-ptr-flavour` -
+  confirmed: FLAVORS-SPEC.md already says PTR/XPTR/Beta stay excluded by
+  default until a player opts in, and every other multi-flavour surface
+  respects that, but the installer's first-run "adopt existing addon
+  folders" step looped over every detected flavour unfiltered - so a
+  machine with a live PTR client got its PTR addons silently adopted
+  before the player ever opted into seeing PTR anywhere. Fixed: the adopt
+  loop and its flavour-header check now use the same first-class-only
+  filter every other surface already uses. Covered by a new integration
+  test with a Retail+PTR fixture asserting PTR is skipped by default and
+  adopted once `showTestRealms` is on.
+
+**CLI (fixed third - both high items are silent-lie failures on the
+single most common ongoing action, routine sync):**
+- `failure-modes:silent-fake-success-on-locked-addons-folder` - confirmed
+  live, twice: when an addon folder can't actually be replaced (ACL-
+  denied, or a file inside it locked by WoW/AV/cloud-sync/Explorer),
+  `Install-AddonPackage` only logged the failure and then used
+  "destination path still exists" as false proof of success, so the sync
+  reported "Updated" and rewrote `addons.json` to the new version while
+  the real files on disk were completely untouched. Fixed: a real
+  `$swapSucceeded` flag now gates whether a folder counts as installed,
+  and a sync that swaps some but not all candidate folders no longer
+  silently reports success. Covered by a new regression test that holds
+  an exclusive file lock during a sync and asserts the result is
+  Failed/partial with `addons.json` unchanged.
+- `failure-modes:cf-outage-misdiagnosed-as-incompatible` - confirmed
+  live, three times: a CurseForge outage (503, a bot-challenge page, a
+  network failure) during the update-check phase was shown to the user
+  as "No matching version found" - the exact same message used for a
+  genuine incompatibility, actively misinforming a player that their WoW
+  version isn't supported when the real cause is transient and a retry
+  would likely fix it. Fixed: a distinct `checking-network` phase is now
+  set when the CurseForge/Wago file-list fetch itself throws (network/
+  parse failure), separate from a deliberate "no compatible file"
+  result, and `ui/app.js` maps it to "Couldn't check for updates -
+  CurseForge might be having trouble" instead of the incompatibility
+  message. Covered by a new Pester test against a stub returning 503/
+  malformed JSON, asserting the new distinct FailPhase.
+- `novice:NOVICE-2` - confirmed: a rollback genuinely swaps the addon
+  back to the backed-up file, but never updates `installedAt`, so the
+  addon detail drawer's "Installed X ago" line kept showing the time of
+  the previous install action instead of the rollback that just
+  happened. Fixed: `Invoke-RollbackForRecord` now sets `installedAt` on
+  every real rollback, matching the same field already set by every
+  other real install/update path. Covered by an extended rollback
+  integration test asserting `installedAt` advances after a rollback.
+- `failure-modes:missing-record-fields-crash-loop` - confirmed:
+  `Initialize-AddonRecordFields` backfills 15 of the 22 fields a fresh
+  record needs, but missed `fileName` and `installedAt` - a record
+  missing either one (a hand edit, a partial restore, an externally
+  migrated file) hit a hard PowerShell crash on its very next real
+  install/update, and would hit the identical crash on every future
+  retry since the crash happens before the missing field is ever set.
+  Fixed: the same backfill pattern used for the other 15 fields now
+  covers `fileName`/`installedAt` too. Covered by a new test that strips
+  just those two fields from an otherwise-valid record and asserts the
+  next sync succeeds and backfills both.
+
+**Server (fixed last - each item here needs a narrower trigger than the
+routine, everyday actions ahead of it in this list, but three are still
+high-severity):**
+- `failure-modes:corrupt-addonsjson-total-lockout` - confirmed live: a
+  malformed (not just missing) `addons.json` made `GET /api/state` -
+  the endpoint every SPA view depends on - return HTTP 500 with a raw
+  .NET parser exception fragment on every single poll, forever, with no
+  recovery path in the UI at all. Fixed: `Get-AddonRecords` now wraps its
+  read/parse in try/catch and falls back to an empty list on a malformed
+  file (mirroring `Get-Settings`' existing pattern), so `/api/state`
+  stays 200 with `addons: []` and a log entry instead of ever reaching
+  the generic 500. Covered by a new integration test that writes
+  truncated JSON directly to `addons.json` and asserts a 200 response.
+- `multi-client:wago-browse-unknown-classic-era-silently-shows-retail` -
+  confirmed live: when a Classic client's Interface falls outside every
+  known progression-table row (a future Classic expansion Furphy's table
+  doesn't cover yet), `Handle-WagoBrowse` silently substituted Retail's
+  catalog instead of refusing - the exact class of bug the tracked-addon
+  sync paths were already hard-failed against, but the Wago browse/search
+  endpoint was never given the same guard. Fixed: `Handle-WagoBrowse` (and
+  every other `Handle-Wago*` caller resolving `game_version` the same
+  way) now checks for an unresolved Classic era and returns a clear
+  client-facing error instead of ever falling through to Retail's
+  catalog. Covered by a new integration test with a Classic client
+  outside every known range, asserting the new error and zero
+  `game_version=retail` requests sent.
+- `security:security-server-settings-port-no-range-check-bricks-launch` -
+  confirmed live end-to-end: `PUT /api/settings` accepted any positive
+  integer as a port with no upper bound, and writing an out-of-range
+  value (e.g. 999999) to `settings.json` bricked the very next launch -
+  `Addon Manager.vbs` never passes `-Port` at all, so the server tried to
+  bind the bad stored port, threw FATAL, and exited with no listener on
+  any port and no on-screen error whatsoever. Fixed: `Handle-SettingsPut`
+  now rejects a port outside 1-65535 with 400, matching the same-function
+  pattern already used for `releaseType`/`backgroundIntervalMinutes`, and
+  both the settings read path and the startup port fallback now guard the
+  same range, falling back to 47831 rather than ever binding a corrupted
+  value. Covered by new tests asserting `PUT` rejects 0/999999 and that
+  startup self-heals from an out-of-range stored port.
+- `novice:NOVICE-1` - confirmed: a brand-new user's very first check
+  (zero addons ever added) produced a freshness headline of "Everything's
+  up to date - checked just now" directly above the "No addons yet" empty
+  state - two contradictory messages on the very first screen a new user
+  sees. Fixed: `Views.myAddons`'s render now blanks the freshness line in
+  the true-empty branch, matching UX-SPEC.md section 2.4's wireframe
+  exactly (no freshness headline of any kind above "No addons yet").
+  Covered by a new SPA harness case seeding an empty addon list and
+  asserting the freshness container is empty while the empty state shows.
+- `failure-modes:settingsjson-corruption-silent-reset` - confirmed live:
+  a malformed `settings.json` silently fell back to default settings on
+  every read with no error and no repair, so an explicit user choice that
+  differs from the default (most importantly ad-block/focus-view, both
+  on by default) reverted with zero indication and stayed reverted
+  forever. Fixed: `Get-Settings`' catch block now also writes the
+  defaults back to disk on first detection, so a corrupt file self-repairs
+  instead of re-triggering the same silent reset on every request.
+  Covered by a new test asserting both the returned defaults and that the
+  on-disk file is valid after the first read.
+- `multi-client:wago-automatch-hardcoded-retail-game-version` - confirmed
+  by static read: the "is this CurseForge addon also on Wago" auto-match
+  probe hardcoded `game_version=retail` instead of resolving the current
+  flavour the way `Handle-WagoBrowse` correctly does, so a Classic/Classic
+  Era addon legitimately listed on Wago under its own game version never
+  got matched - a quietly incomplete result, not a crash. Fixed:
+  `Get-WagoAutoMatch` now resolves `game_version` from the same
+  flavour-mapping call `Handle-WagoBrowse` already uses; byte-identical
+  behavior on a Retail-only machine. Covered by a new test asserting the
+  outbound `game_version` matches the active Classic/Classic Era flavour.
+- `security:security-server-uninstall-bool-coercion-lies` - confirmed
+  live: `Handle-Uninstall`'s four boolean body fields used a bare
+  `[bool]` cast instead of the codebase's own `ConvertTo-SettingsBool`
+  helper (added specifically because a bare cast treats any non-empty
+  string, including the literal string `"false"`, as truthy) - so a
+  caller sending `"dryRun":"false"` got silently routed into a no-op dry
+  run while the response still claimed `ok:true`, and the same inversion
+  on `quiet` could suppress the one visible confirmation a real uninstall
+  gives while the process runs hidden. Fixed: all four fields now go
+  through `ConvertTo-SettingsBool`, matching every other boolean settings
+  field in the file. Covered by a new integration test posting a
+  stringified `"false"` and asserting the real (non-dry-run) path
+  actually runs.
+- `long-run:failed-job-files-only-pruned-at-startup` - confirmed: failed-
+  job diagnostic file pairs are only ever cleaned up once, at server
+  startup, so a server kept alive for days/weeks (the whole point of the
+  idle-exit + tray design) never prunes them again for its entire life.
+  Fixed: the request loop's own periodic tick now re-runs the same
+  cleanup at most once an hour, so a long-lived session no longer
+  accumulates stale `.failed` pairs without bound. Covered by a new test
+  that backdates a synthetic pair and asserts it's gone without a server
+  restart.
+
+**Two follow-ups from the Round 37 launch-time work, found and fixed
+alongside this round:**
+- F1 - `Invoke-MaintenanceTick` tried to write its lock file before
+  `cache\` existed on a fresh install, logging "Maintenance child: could
+  not write lock file" on every tick. Fixed: the cache directory is now
+  created (best-effort) immediately before the lock file write.
+- F2 - the CurseForge catalogue fetch (`Save-CfCatalogueIndex`'s two
+  `raw.githubusercontent.com` URLs) had no test seam, unlike the Wago
+  base URL. Fixed: `$Script:CfCatalogueBaseUrl` is now overridable via
+  `FURPHY_TEST_CF_CATALOGUE_BASEURL` (empty = ignored, same contract as
+  `$Script:WagoBaseUrl`), and the startup/launch tests that used to
+  shadow `Invoke-WebRequest` now use the real seam instead.
+
 ## Round 37 (1.18.1: fast launch)
 
 Eric's verbatim question: "it can take a while to launch the app when i

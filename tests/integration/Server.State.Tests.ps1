@@ -121,3 +121,76 @@ Describe 'GET /api/state and flavour-scoped endpoints - multi-flavour root (fixt
         Stop-TestServer -Server $server
     }
 }
+
+Describe 'GET /api/state - corrupt addons.json (failure-modes:corrupt-addonsjson-total-lockout)' {
+    <#
+      Before this round's fix, Get-AddonRecords' Get-Content/ConvertFrom-Json
+      ran unguarded - a MALFORMED (not just missing/empty) addons.json threw
+      straight through Invoke-Route's blanket catch as a generic HTTP 500
+      with the raw .NET parser exception text (including a fragment of the
+      corrupted file's own content) in the body, on every single poll. Every
+      other view depending on GET /api/state degraded with it, and there was
+      no recovery path in the UI at all.
+    #>
+    $root = New-TempRoot -Name 'state-corrupt-addonsjson'
+    $server = $null
+    try {
+        $server = Start-TestServer -Root $root -Port 47899
+
+        # No addon was ever added through the real API, so
+        # flavours\retail\ does not exist yet - create it and drop a
+        # truncated/malformed JSON string directly, mirroring the repro in
+        # the finding's own report exactly.
+        $flavourDir = Join-Path $root 'flavours\retail'
+        New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+        $addonsJsonPath = Join-Path $flavourDir 'addons.json'
+        Set-Content -LiteralPath $addonsJsonPath -Value '[{"projectId":925037,"name":"BigWigs","folders":["Big' -Encoding UTF8 -NoNewline
+
+        It 'returns 200 with an empty addons list instead of a 500 with raw exception text' {
+            # No ?flavour= here, deliberately: this root has zero DETECTED
+            # installed flavours (no -WowRoot passed to Start-TestServer,
+            # same as the "single/no-flavour root" Describe above), so an
+            # explicit ?flavour=retail would 400 "not installed" (Resolve-
+            # RequestFlavour validates a requested value against the
+            # currently-installed list, not against Set-CurrentFlavourContext's
+            # own 'retail' default) - omitted, it resolves to that same
+            # default 'retail' context regardless, which is all this test
+            # needs (the same <Root>\flavours\retail\addons.json path
+            # either way).
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/state'
+            $r.Ok | Should Be $true
+            $r.StatusCode | Should Be 200
+            $r.Body.addons.Count | Should Be 0
+        }
+
+        It 'logs the parse failure to server.log rather than only ever surfacing it to the client' {
+            $tail = Get-LastLogLines -Path (Join-Path $root 'server.log') -Lines 50
+            ($tail -match 'Failed to read addons.json') | Should Be $true
+        }
+
+        It 'moves the unreadable file aside (addons.json.corrupt-<timestamp>) instead of deleting or leaving it in place to be silently overwritten' {
+            (Test-Path -LiteralPath $addonsJsonPath) | Should Be $false
+            $corruptCopies = Get-ChildItem -LiteralPath $flavourDir -Filter 'addons.json.corrupt-*' -File
+            $corruptCopies.Count | Should Be 1
+            (Get-Content -LiteralPath $corruptCopies[0].FullName -Raw) | Should Match 'BigWigs'
+        }
+
+        It 'a repeated poll keeps answering 200 (does not loop back into the same 500)' {
+            # No ?flavour= here, deliberately: this root has zero DETECTED
+            # installed flavours (no -WowRoot passed to Start-TestServer,
+            # same as the "single/no-flavour root" Describe above), so an
+            # explicit ?flavour=retail would 400 "not installed" (Resolve-
+            # RequestFlavour validates a requested value against the
+            # currently-installed list, not against Set-CurrentFlavourContext's
+            # own 'retail' default) - omitted, it resolves to that same
+            # default 'retail' context regardless, which is all this test
+            # needs (the same <Root>\flavours\retail\addons.json path
+            # either way).
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/state'
+            $r.Ok | Should Be $true
+            $r.Body.addons.Count | Should Be 0
+        }
+    } finally {
+        Stop-TestServer -Server $server
+    }
+}

@@ -197,6 +197,7 @@ Only **All** and **Updates** are permanent. Every other status (Pinned, Ignored,
   - failed during `downloading` → "Couldn't download the update"
   - failed during `installing` → "Couldn't install the update"
   - no compatible file found → "No matching version found"
+  - CurseForge/Wago outage while checking (`failPhase: "checking-network"`, Round 38 - a thrown network/parse error while fetching the file list, distinct from the deliberate "no compatible file" result above so a transient outage never reads as a permanent incompatibility) -> "Couldn't check for updates - CurseForge might be having trouble"
   - network/connectivity error → "Couldn't reach CurseForge — check your connection"
   - anything else → "Something went wrong" (generic fallback)
   - Raw exception text stays available behind that row's own "Details", never shown by default.
@@ -407,6 +408,11 @@ Target length ~30 words; a genuinely coupled control (Beta/Experimental, Start w
 | First-run take-over dialog, per flavour — Round 19, multi-flavour only | "Found 6 addons in your AddOns folder" | "Found 4 addons in your Classic Era AddOns folder" (flavour name inserted only when more than one flavour's dialog shows in sequence) |
 | Wago drawer table header — Round 19, renamed regardless of flavour count (data source touched anyway) | "Retail Patches" | "Patches" |
 | Job panel flavour badge — Round 19, multi-flavour only | — | flavour label only, reuses the switcher pill style (§4.3) |
+| WebView2 Runtime missing dialog - Round 38, new (host only, native `MessageBox`, not in the SPA) | (none - silent, the app just never opened) | "Furphy Addon Manager needs the Microsoft Edge WebView2 Runtime, which is missing or broken on this PC. Install it and try again." with a link to the Microsoft installer page |
+| Job row failure reason - Round 38, new (see section 4.3) | (shared the "No matching version found" text with a genuine incompatibility) | "Couldn't check for updates - CurseForge might be having trouble" (a CurseForge/Wago outage during the check itself, kept distinct from a real incompatibility) |
+| My Addons corrupt-list notice - Round 38, new | (raw .NET parser exception text in the error box) | Addon list falls back to empty with a server log entry; no raw exception text reaches the client |
+| Get new addons (Wago) unrecognized Classic client - Round 38, new, non-Retail only | (silently showed Retail's own listings with no indication anything was wrong) | "Furphy doesn't recognize this Classic version yet - update Furphy to browse new addons for it." |
+| Installer console/wizard, older installer over a newer install - Round 38, new | (silently copied the older app over the newer one; no warning of any kind) | "This copy of Furphy Addon Manager is older than what's already installed - installing it would replace the newer app with an older one, and your addon list could look empty until you reinstall the newer version instead." |
 
 ---
 

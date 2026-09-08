@@ -955,4 +955,417 @@ Describe 'Host --tray-selftest (tray) - single-flavour tooltip/icon/balloon hist
     }
 }
 
+Describe 'Host WebView2 runtime missing (failure-modes:webview2-missing-no-fallback)' -Tags 'Host' {
+    <#
+      failure-modes:webview2-missing-no-fallback - HandleRuntimeMissing
+      (host\FurphyHost.cs) now shows a MessageBox before closing, so a real
+      launch on a machine with the WebView2 Runtime missing/broken no
+      longer looks like total silence to the player (the VBS launcher runs
+      the exe fire-and-forget and can never observe its exit code, so the
+      dialog is the only place left that CAN tell the player anything).
+
+      That dialog itself cannot be asserted by this unattended suite
+      without a second, separate UI-automation click to dismiss it - out
+      of scope for this file's existing all-headless conventions, and
+      genuinely risky: a broken dismiss would hang this It, and by
+      extension any run it's part of, forever on a modal with nothing left
+      to click it. What CAN be asserted safely, and is the actual
+      regression risk worth automating: the `if (!_options.SelftestActive)`
+      guard around that MessageBox really does suppress it during
+      --selftest. If that guard were ever lost or inverted, THIS test
+      would hang instead of finishing - a clean, fast marker write plus
+      process exit here is itself the regression proof.
+
+      Forces the real failure via the same technique CHANGELOG.md's Round
+      10 entry already used for manual verification (a host\bin copy with
+      WebView2Loader.dll deliberately removed), now automated instead of
+      only ever checked by hand.
+    #>
+    It 'still writes a marker (init:false) and exits with code 3 during --selftest when WebView2Loader.dll is missing, no hang' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $port = 47902
+        $root = New-TempRoot -Name 'host-runtime-missing'
+        $server = $null
+        $hostProc = $null
+        $needle = 'rtmissing-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path -Path $root -ChildPath ($needle + '.json')
+
+        try {
+            $server = Start-TestServer -Root $root -Port $port
+
+            Copy-Item -LiteralPath $Script:HostBinDir -Destination (Join-Path $root 'host\bin') -Recurse -Force
+            $exeCopyPath = Join-Path $root 'host\bin\FurphyHost.exe'
+            Remove-Item -LiteralPath (Join-Path $root 'host\bin\WebView2Loader.dll') -Force
+
+            $webview2Dir = $exeCopyPath + '.WebView2'
+            if (Test-Path -LiteralPath $webview2Dir) {
+                Remove-Item -LiteralPath $webview2Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # The test-page URL is never actually reached - HandleRuntimeMissing
+            # returns out of MainForm_Load before StartServerWait/navigation
+            # ever run - but --selftest's own arg parser requires one.
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exeCopyPath
+            $psi.Arguments = '--port ' + $port + ' --selftest "' + $markerPath + '" "http://localhost:' + $port + '/selftest.html"'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exeCopyPath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            # Deliberately a tighter budget than the other --selftest Its'
+            # 40s: HandleRuntimeMissing fires almost immediately out of
+            # MainForm_Load's own EnsureCoreWebView2Async catch, well before
+            # the normal ~7-8s selftest timeline even starts. A marker
+            # taking anywhere near this budget would itself suggest the
+            # MessageBox suppression regressed and something is blocked on
+            # a dialog with nothing to click it.
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 20
+            $marker | Should Not Be $null
+            $marker.init | Should Be $false
+
+            Wait-ProcessExit -Process $hostProc -TimeoutSec 20 | Should Be $true
+            $hostProc.ExitCode | Should Be 3
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
+            Stop-Straggler-FurphyHost -Needle $needle
+            Stop-TestServer -Server $server
+        }
+    }
+}
+
+Describe 'Host un-minimize server recovery (long-run:minimize-kills-server-no-recovery)' -Tags 'Host' {
+    <#
+      long-run:minimize-kills-server-no-recovery - before this fix, nothing
+      in MainForm ever re-checked or relaunched addon-server.ps1 once the
+      window came back from being minimized (only TrayForm.TryStartServer
+      did, and the tray loop is off by default), so once the server was
+      gone for any reason the player was stuck on the SPA's permanent
+      "Server not reachable" banner forever - with no recovery path short
+      of digging up the desktop shortcut and starting over.
+
+      This drives the real recovery mechanism end to end: a real (NOT
+      --selftest - CheckServerAndRecoverIfDown is itself guarded off
+      during SelftestActive, precisely so a scripted selftest run's
+      deterministic timeline is never disturbed by a surprise server
+      relaunch) FurphyHost.exe main window against a real addon-server.ps1,
+      minimized and restored via a direct ShowWindow P/Invoke - same
+      Add-Type-with-DllImport idiom shots\verify-capture.ps1 already uses
+      for PrintWindow, no actual desktop interaction needed.
+
+      Rather than waiting out a full -IdleMinutes idle-exit window (which
+      depends on exactly how long the SPA webview's own idle poll takes to
+      notice - the OTHER half of this same finding, fixed separately by no
+      longer fully suspending the SPA webview on minimize), the server is
+      killed directly while minimized: CheckServerAndRecoverIfDown does
+      not care WHY the ping failed, only that it did, so this exercises
+      the exact same recovery code path deterministically and fast instead
+      of depending on real-world suspend/idle timing.
+
+      Uses this round's own assigned scratch port (47902) throughout,
+      never 47899/47831 - and this session confirmed no real WoW client
+      process was running before opening this native window.
+    #>
+    It 'relaunches addon-server.ps1 after the window is un-minimized if the server died while minimized' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        if (-not ('FurphyWindowControl' -as [type])) {
+            Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class FurphyWindowControl {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+}
+'@
+        }
+
+        $port = 47902
+        $root = New-TempRoot -Name 'host-unminimize-recovery'
+        $addonSyncDir = New-TrayTestLayout -WowRoot $root -Port $port
+        $exePath = Join-Path $addonSyncDir 'host\bin\FurphyHost.exe'
+        $hostLogPath = Join-Path $addonSyncDir 'host.log'
+        $server = $null
+        $hostProc = $null
+
+        try {
+            $server = Start-TestServer -Root $addonSyncDir -Port $port -ScriptPath (Join-Path $addonSyncDir 'addon-server.ps1')
+
+            $webview2Dir = $exePath + '.WebView2'
+            if (Test-Path -LiteralPath $webview2Dir) {
+                Remove-Item -LiteralPath $webview2Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exePath
+            $psi.Arguments = '--port ' + $port
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exePath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $hwnd = [IntPtr]::Zero
+            $tries = 0
+            while ($hwnd -eq [IntPtr]::Zero -and $tries -lt 40) {
+                Start-Sleep -Milliseconds 500
+                $hostProc.Refresh()
+                $hwnd = $hostProc.MainWindowHandle
+                $tries++
+            }
+            $hwnd | Should Not Be ([IntPtr]::Zero)
+
+            # Minimize - same effect as the player clicking the taskbar
+            # icon (fires WM_SIZE, which WinForms turns into
+            # MainForm_Resize with WindowState == Minimized). 6 = SW_MINIMIZE.
+            [void][FurphyWindowControl]::ShowWindow($hwnd, 6)
+            $iconicDeadline = (Get-Date).AddSeconds(10)
+            while (-not ([FurphyWindowControl]::IsIconic($hwnd)) -and (Get-Date) -lt $iconicDeadline) {
+                Start-Sleep -Milliseconds 200
+            }
+            [FurphyWindowControl]::IsIconic($hwnd) | Should Be $true
+
+            # Kill the server while minimized - simulates ANY reason it
+            # could be gone by the time the player comes back (idle-exit,
+            # a crash, the PC having slept through it), which is exactly
+            # what CheckServerAndRecoverIfDown must be agnostic to.
+            if ($server.Process -and -not $server.Process.HasExited) {
+                Stop-Process -Id $server.Process.Id -Force -ErrorAction SilentlyContinue
+            }
+            $downDeadline = (Get-Date).AddSeconds(10)
+            while ((Test-PortOpen -Port $port -TimeoutMs 300) -and (Get-Date) -lt $downDeadline) {
+                Start-Sleep -Milliseconds 200
+            }
+            (Test-PortOpen -Port $port -TimeoutMs 300) | Should Be $false
+
+            # Restore - fires MainForm_Resize's wasMinimized branch, which
+            # now calls CheckServerAndRecoverIfDown. 9 = SW_RESTORE.
+            [void][FurphyWindowControl]::ShowWindow($hwnd, 9)
+
+            # CheckServerAndRecoverIfDown pings with a 2s timeout on its own
+            # background thread, then (on failure) spawns a fresh
+            # addon-server.ps1 - generous budget for a real cold start
+            # under test-suite load.
+            $recoveredDeadline = (Get-Date).AddSeconds(30)
+            $recovered = $false
+            while ((Get-Date) -lt $recoveredDeadline) {
+                try {
+                    Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/ping" -Method Get -TimeoutSec 2 | Out-Null
+                    $recovered = $true
+                    break
+                } catch { Start-Sleep -Milliseconds 500 }
+            }
+            $recovered | Should Be $true
+
+            $hostLog = Get-Content -LiteralPath $hostLogPath -Raw -ErrorAction SilentlyContinue
+            $hostLog | Should Not Be $null
+            $hostLog | Should Match 'un-minimize: server not responding, attempting restart'
+            $hostLog | Should Match 'un-minimize: restart started'
+        } finally {
+            # Whichever server is listening now (the recovered one, a
+            # DIFFERENT process than $server.Process, which was killed on
+            # purpose mid-test) - shut it down by port, not by PID.
+            try { Invoke-Api -Port $port -Method Post -Path '/api/shutdown' -TimeoutSec 5 | Out-Null } catch { }
+            if ($server -and $server.Process -and -not $server.Process.HasExited) {
+                try { Stop-Process -Id $server.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
+            try {
+                Get-CimInstance -ClassName Win32_Process -Filter "Name = 'FurphyHost.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -like ('*' + $exePath + '*') } |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+            } catch { }
+            try {
+                Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -like ('*' + $addonSyncDir + '*addon-server.ps1*') } |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+            } catch { }
+        }
+    }
+}
+
+Describe 'Host log rotation (long-run:host-log-no-rotation)' -Tags 'Host' {
+    It 'rotates host.log to host.log.1 once it is at/over ~2MB instead of growing unbounded' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $port = 47902
+        $root = New-TempRoot -Name 'host-log-rotation'
+        $server = $null
+        $hostProc = $null
+        $needle = 'logrotate-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $markerPath = Join-Path -Path $root -ChildPath ($needle + '.json')
+
+        try {
+            $server = Start-TestServer -Root $root -Port $port
+            Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'host\selftest.html') -Destination (Join-Path $root 'ui\selftest.html') -Force
+            Copy-Item -LiteralPath $Script:HostBinDir -Destination (Join-Path $root 'host\bin') -Recurse -Force
+            $exeCopyPath = Join-Path $root 'host\bin\FurphyHost.exe'
+            $webview2Dir = $exeCopyPath + '.WebView2'
+            if (Test-Path -LiteralPath $webview2Dir) {
+                Remove-Item -LiteralPath $webview2Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # Pre-seed host.log past the 2MB rotation threshold
+            # (LogWriter's MaxBytes = 2097152, matching addon-server.ps1's
+            # own $Script:LogRotationMaxBytes) BEFORE the exe ever runs, so
+            # its very first LogHost call (MainForm_Load's own
+            # "starting, port=..." line) is the one that has to rotate.
+            $hostLogPath = Join-Path $root 'host.log'
+            $seedMarker = 'SEED-' + ('x' * 195)
+            $seedLine = $seedMarker + [Environment]::NewLine
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            $sw = New-Object System.IO.StreamWriter($hostLogPath, $false, $utf8NoBom)
+            try {
+                $target = 2097152 + 5000
+                $written = 0
+                while ($written -lt $target) {
+                    $sw.Write($seedLine)
+                    $written += $seedLine.Length
+                }
+            } finally { $sw.Dispose() }
+            $preSize = (Get-Item -LiteralPath $hostLogPath).Length
+            $preSize | Should BeGreaterThan 2097152
+
+            $rotatedPath = $hostLogPath + '.1'
+            if (Test-Path -LiteralPath $rotatedPath) { Remove-Item -LiteralPath $rotatedPath -Force }
+
+            $selftestUrl = "http://localhost:$port/selftest.html"
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exeCopyPath
+            $psi.Arguments = '--port ' + $port + ' --selftest "' + $markerPath + '" "' + $selftestUrl + '"'
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = Split-Path -Path $exeCopyPath -Parent
+            $hostProc = [System.Diagnostics.Process]::Start($psi)
+
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 40
+            $marker | Should Not Be $null
+            Wait-ProcessExit -Process $hostProc | Should Be $true
+
+            (Test-Path -LiteralPath $rotatedPath -PathType Leaf) | Should Be $true
+            $rotatedContent = Get-Content -LiteralPath $rotatedPath -Raw
+            $rotatedContent | Should Match ([regex]::Escape($seedMarker))
+
+            $newContent = Get-Content -LiteralPath $hostLogPath -Raw
+            $newContent | Should Not Match ([regex]::Escape($seedMarker))
+            $newContent | Should Match ('starting, port=' + $port)
+            (Get-Item -LiteralPath $hostLogPath).Length | Should BeLessThan $preSize
+        } finally {
+            if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch { } }
+            Stop-Straggler-FurphyHost -Needle $needle
+            Stop-TestServer -Server $server
+        }
+    }
+}
+
+Describe 'Host FormatNextCheck DST handling (long-run:tray-next-check-dst-two-day-mislabel)' -Tags 'Host' {
+    <#
+      long-run:tray-next-check-dst-two-day-mislabel - FormatNextCheck's old
+      two-branch "today, else tomorrow" logic assumed the interval being
+      clamped 30..1440 minutes meant the LOCAL calendar date of nextRunAtUtc
+      could never be more than one day ahead of "today". True for the UTC
+      gap itself, false for the local date it lands on: a DST spring-
+      forward between now and nextRunAtUtc adds a real wall-clock hour on
+      top of that 24h interval, which can push the local date two days out.
+
+      Invoked via reflection against the compiled FurphyHost.exe's private
+      3-arg FormatNextCheck(DateTime?, DateTime nowLocal, TimeZoneInfo tz)
+      overload (host\FurphyHost.cs) - that overload exists specifically so
+      a test can simulate the exact DST transition without touching this
+      machine's real system clock/timezone. Loads the assembly directly
+      (no process launched, no window shown) via Assembly.LoadFrom, same
+      as any other pure-function reflection test.
+    #>
+    It 'labels a next-check time two calendar days out with a real date, never "tomorrow", across a DST spring-forward' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $tz = $null
+        try {
+            $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById('Pacific Standard Time')
+        } catch {
+            Write-Host '  (skipped: this machine has no "Pacific Standard Time" zone registered)'
+            return
+        }
+
+        # FormatNextCheck lives on TrayForm (host\FurphyHost.cs) - it is
+        # the tray's own "next check" tooltip/menu formatter, not MainForm's.
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $trayFormType = $asm.GetType('Furphy.TrayForm')
+        $trayFormType | Should Not Be $null
+        $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+        $method = $trayFormType.GetMethod('FormatNextCheck', $flags, $null,
+            @([System.Nullable[datetime]], [datetime], [System.TimeZoneInfo]), $null)
+        $method | Should Not Be $null
+
+        # 2026-03-08 is the real US spring-forward date (2:00am -> 3:00am).
+        # "now" the night before at 23:30 local, interval at its 1440-
+        # minute (24h) max: nextRunAtUtc = nowUtc + 24h lands on 2026-03-09
+        # 00:30 PDT local wall-clock - two calendar days after "today"
+        # (Mar 7), not one, because spring-forward added a real wall-clock
+        # hour on top of the 24h UTC interval. Before this fix that was
+        # mislabeled "tomorrow 00:30"; after it, a real date - never
+        # "tomorrow".
+        $nowLocal = [datetime]'2026-03-07T23:30:00'
+        $nowUtc = [System.TimeZoneInfo]::ConvertTimeToUtc($nowLocal, $tz)
+        $nextRunUtc = $nowUtc.AddMinutes(1440)
+        $nextRunLocalCheck = [System.TimeZoneInfo]::ConvertTimeFromUtc($nextRunUtc, $tz)
+        # Sanity: confirms this scenario really does cross two local
+        # calendar dates before asserting anything about the label -
+        # otherwise a wrong repro date would make the rest meaningless.
+        ($nextRunLocalCheck.Date - $nowLocal.Date).Days | Should Be 2
+
+        $result = $method.Invoke($null, @([Nullable[datetime]]$nextRunUtc, $nowLocal, $tz))
+
+        $result | Should Not Match 'tomorrow'
+        $result | Should Match ([regex]::Escape($nextRunLocalCheck.ToString('HH:mm')))
+    }
+
+    It 'still labels an ordinary same-day next-check as plain HH:mm and an ordinary one-day-out check as "tomorrow"' {
+        if (-not (Ensure-HostBuilt)) {
+            Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
+            return
+        }
+
+        $tz = $null
+        try {
+            $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById('Pacific Standard Time')
+        } catch {
+            Write-Host '  (skipped: this machine has no "Pacific Standard Time" zone registered)'
+            return
+        }
+
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $trayFormType = $asm.GetType('Furphy.TrayForm')
+        $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+        $method = $trayFormType.GetMethod('FormatNextCheck', $flags, $null,
+            @([System.Nullable[datetime]], [datetime], [System.TimeZoneInfo]), $null)
+
+        # Ordinary same-day case, no DST transition anywhere nearby (June):
+        # plain "HH:mm" - regression guard against the day-diff rewrite
+        # breaking the ordinary case.
+        $nowLocal1 = [datetime]'2026-06-01T10:00:00'
+        $nowUtc1 = [System.TimeZoneInfo]::ConvertTimeToUtc($nowLocal1, $tz)
+        $result1 = $method.Invoke($null, @([Nullable[datetime]]($nowUtc1.AddMinutes(60)), $nowLocal1, $tz))
+        $result1 | Should Be '11:00'
+
+        # Ordinary one-day-out case (no DST transition in the gap): still
+        # "tomorrow HH:mm", unchanged from before this fix.
+        $nowLocal2 = [datetime]'2026-06-01T23:00:00'
+        $nowUtc2 = [System.TimeZoneInfo]::ConvertTimeToUtc($nowLocal2, $tz)
+        $result2 = $method.Invoke($null, @([Nullable[datetime]]($nowUtc2.AddMinutes(120)), $nowLocal2, $tz))
+        $result2 | Should Be 'tomorrow 01:00'
+    }
+}
+
 Remove-TempRoots

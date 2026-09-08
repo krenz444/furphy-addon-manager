@@ -100,7 +100,6 @@ Describe 'Get-InstallUninstallString (section 5.4: the converged try-server-else
         $cmd | Should Match ([regex]::Escape('http://localhost:47831/api/uninstall'))
         $cmd | Should Match ([regex]::Escape("Origin='http://localhost:47831'"))
         $cmd | Should Match ([regex]::Escape('C:\WoW\_retail_\AddonSync\install.ps1'))
-        $cmd | Should Match ([regex]::Escape("'-WowPath','C:\WoW'"))
         $cmd | Should Match ([regex]::Escape('-Uninstall'))
     }
 
@@ -115,5 +114,155 @@ Describe 'Get-InstallUninstallString (section 5.4: the converged try-server-else
     It 'doubles an embedded single quote in a path defensively (PowerShell single-quote literal escaping)' {
         $cmd = Get-InstallUninstallString -Port 47899 -AppDest "C:\Eric's WoW\_retail_\AddonSync" -WowRootPath "C:\Eric's WoW"
         $cmd | Should Match ([regex]::Escape("C:\Eric''s WoW"))
+    }
+
+    # security:security-install-uninstall-wowpath-arg-splitting regression:
+    # the fallback used to build -ArgumentList as a comma-separated array
+    # literal ('-NoProfile','-ExecutionPolicy',...,'-WowPath','$wowRootEsc',
+    # ...) - Start-Process joins array elements with a bare, unquoted space
+    # under PS 5.1, so a WoW root containing a space (the DEFAULT Windows
+    # install path, "C:\Program Files (x86)\World of Warcraft\_retail_")
+    # got split into extra argv tokens by the relaunched child, truncating
+    # -WowPath. Fixed by having the inner fallback script build ONE
+    # pre-quoted argument string instead.
+    It 'no longer embeds the vulnerable comma-array -ArgumentList shape' {
+        $cmd = Get-InstallUninstallString -Port 47831 -AppDest 'C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync' -WowRootPath 'C:\Program Files (x86)\World of Warcraft'
+        $cmd | Should Not Match "'-NoProfile','-ExecutionPolicy'"
+        $cmd | Should Not Match "'-WowPath','"
+        # The new shape: the inner script builds one $fArgs string via
+        # [char]34-based double-quoting, never a literal " character
+        # embedded directly in the outer -Command "..." body (which would
+        # prematurely terminate that outer double-quoted wrapper).
+        $cmd | Should Match ([regex]::Escape('[char]34'))
+        $cmd | Should Not Match '""'
+    }
+
+    It 'the inner fallback script is syntactically valid PowerShell (parses with zero errors)' {
+        $cmd = Get-InstallUninstallString -Port 47831 -AppDest 'C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync' -WowRootPath 'C:\Program Files (x86)\World of Warcraft'
+        if ($cmd -notmatch '-Command "(.*)"$') { throw 'could not extract the inner -Command body from the generated string' }
+        $inner = $Matches[1]
+        $parseErrors = $null
+        $tokens = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($inner, [ref]$tokens, [ref]$parseErrors)
+        $parseErrors.Count | Should Be 0
+    }
+
+    It 'end-to-end: a WowRootPath containing a space AND parens (the real default install path shape) reaches the relaunched child untruncated' {
+        # Isolated repro matching the QA finding's own methodology: a stub
+        # "install.ps1" that just logs its own bound -WowPath, then
+        # actually execute the generated command line (as Windows would
+        # execute a registry UninstallString) against a port nothing is
+        # listening on, so the try{} branch fails fast and the catch{}
+        # fallback (the vulnerable code path) actually runs.
+        $stubRoot = New-TempRoot -Name 'uninstallstring-e2e'
+        $stubAppDest = Join-Path $stubRoot 'World of Warcraft (x86)\_retail_\AddonSync'
+        New-Item -ItemType Directory -Force -Path $stubAppDest | Out-Null
+        $stubInstallPs1 = Join-Path $stubAppDest 'install.ps1'
+        @'
+param([string]$WowPath, [switch]$Uninstall, [switch]$NoShortcuts, [switch]$NoProtocol, [switch]$Console, [switch]$Quiet)
+$logPath = Join-Path $env:TEMP ('furphy-unit-uninstallstring-' + $PID + '.txt')
+"WowPathReceived=[$WowPath]`nUninstallSwitch=[$Uninstall]`nRawExtraArgs=[$($args -join '|')]" | Set-Content -LiteralPath $logPath -Encoding Ascii
+'@ | Set-Content -LiteralPath $stubInstallPs1 -Encoding Ascii
+
+        $wowRootWithSpaceAndParens = Join-Path $stubRoot 'World of Warcraft (x86)'
+        $logPath = $null
+        try {
+            $cmd = Get-InstallUninstallString -Port 47903 -AppDest $stubAppDest -WowRootPath $wowRootWithSpaceAndParens
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'powershell.exe'
+            $psi.Arguments = $cmd.Substring('powershell.exe '.Length)
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $proc.WaitForExit(20000) | Out-Null
+
+            $logFound = $false
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline) {
+                $candidates = @(Get-ChildItem -Path $env:TEMP -Filter 'furphy-unit-uninstallstring-*.txt' -ErrorAction SilentlyContinue)
+                if ($candidates.Count -gt 0) { $logPath = $candidates[0].FullName; $logFound = $true; break }
+                Start-Sleep -Milliseconds 300
+            }
+            $logFound | Should Be $true
+
+            $content = Get-Content -Raw -LiteralPath $logPath
+            $content | Should Match ([regex]::Escape("WowPathReceived=[$wowRootWithSpaceAndParens]"))
+            $content | Should Match 'UninstallSwitch=\[True\]'
+            $content | Should Match 'RawExtraArgs=\[\]'
+        } finally {
+            if ($logPath -and (Test-Path -LiteralPath $logPath)) { Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $stubRoot) { Remove-Item -LiteralPath $stubRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Describe 'install.ps1 -Uninstall self-relaunch safety net (security:security-install-uninstall-wowpath-arg-splitting)' {
+    # Mirrors the QA finding's own isolated repro shape exactly: builds
+    # $relaunchArgs the same way the -Uninstall block does (now via
+    # ConvertTo-SafeProcessArg on every element) and actually executes it
+    # via Start-Process -ArgumentList against a stub that echoes its own
+    # bound -WowPath, with a WowRootPath containing a space AND parens
+    # (the real default "C:\Program Files (x86)\World of
+    # Warcraft\_retail_" shape).
+    It 'ConvertTo-SafeProcessArg is defined above the dot-source guard (loads without running the installer)' {
+        (Get-Command ConvertTo-SafeProcessArg -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
+    }
+
+    It 'a WowRootPath with a space and parens reaches the relaunched child untruncated via the fixed ArgumentList shape' {
+        $stubRoot = New-TempRoot -Name 'relaunch-argsplit-e2e'
+        $stubInstallPs1 = Join-Path $stubRoot 'install.ps1'
+        @'
+param([string]$WowPath, [switch]$Uninstall, [switch]$NoShortcuts, [switch]$NoProtocol)
+$logPath = Join-Path $env:TEMP ('furphy-unit-relaunchargs-' + $PID + '.txt')
+"WowPathReceived=[$WowPath]`nUninstallSwitch=[$Uninstall]`nRawExtraArgs=[$($args -join '|')]" | Set-Content -LiteralPath $logPath -Encoding Ascii
+'@ | Set-Content -LiteralPath $stubInstallPs1 -Encoding Ascii
+
+        $wowRoot = Join-Path $stubRoot 'Program Files (x86)\World of Warcraft'
+        $logPath = $null
+        try {
+            $relaunchArgs = New-Object 'System.Collections.Generic.List[string]'
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-NoProfile')); $relaunchArgs.Add((ConvertTo-SafeProcessArg '-ExecutionPolicy')); $relaunchArgs.Add((ConvertTo-SafeProcessArg 'Bypass'))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-File')); $relaunchArgs.Add((ConvertTo-SafeProcessArg $stubInstallPs1))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-WowPath')); $relaunchArgs.Add((ConvertTo-SafeProcessArg $wowRoot))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-Uninstall'))
+
+            $relaunchProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $relaunchArgs.ToArray() -NoNewWindow -PassThru -Wait
+
+            $candidates = @(Get-ChildItem -Path $env:TEMP -Filter 'furphy-unit-relaunchargs-*.txt' -ErrorAction SilentlyContinue)
+            $candidates.Count | Should BeGreaterThan 0
+            $logPath = $candidates[0].FullName
+            $content = Get-Content -Raw -LiteralPath $logPath
+            $content | Should Match ([regex]::Escape("WowPathReceived=[$wowRoot]"))
+            $content | Should Match 'UninstallSwitch=\[True\]'
+            $content | Should Match 'RawExtraArgs=\[\]'
+        } finally {
+            if ($logPath -and (Test-Path -LiteralPath $logPath)) { Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $stubRoot) { Remove-Item -LiteralPath $stubRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Describe 'Test-IsTempUninstallScriptCopy (novice:NOVICE-3: gates the -Uninstall block''s trailing self-delete)' {
+    It 'true for a %TEMP%\FurphyUninstall-<hex>.ps1 shaped path' {
+        $p = Join-Path $env:TEMP ('FurphyUninstall-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Test-IsTempUninstallScriptCopy -Path $p | Should Be $true
+    }
+
+    It 'false for the build root''s own install.ps1 (never deletes the source/app-folder copy a developer is running directly)' {
+        Test-IsTempUninstallScriptCopy -Path $Script:InstallScript | Should Be $false
+    }
+
+    It 'false for a correctly-named file outside %TEMP%' {
+        $p = Join-Path (Split-Path -Path $env:TEMP -Parent) ('FurphyUninstall-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Test-IsTempUninstallScriptCopy -Path $p | Should Be $false
+    }
+
+    It 'false for a differently-named file inside %TEMP%' {
+        Test-IsTempUninstallScriptCopy -Path (Join-Path $env:TEMP 'NotAFurphyFile.ps1') | Should Be $false
+    }
+
+    It 'false for null/empty' {
+        Test-IsTempUninstallScriptCopy -Path $null | Should Be $false
+        Test-IsTempUninstallScriptCopy -Path '' | Should Be $false
     }
 }

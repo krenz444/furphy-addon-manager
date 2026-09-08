@@ -60,8 +60,33 @@ End If
 ' launcher the server is normally the older-established, already-running
 ' background piece, not the thing this script just spawned. If neither
 ' exists there is nothing left to show the app in.
+'
+' failure-modes:webview2-missing-no-fallback: the hostExe launch below
+' waits for the process to exit (waitOnReturn=True) specifically so this
+' script CAN observe host\FurphyHost.cs's own ExitCode=3 (set by
+' HandleRuntimeMissing when the WebView2 Runtime is missing/broken on this
+' PC) and fall back to the same Edge --app window used when the host build
+' itself is missing - restoring the fallback ROADMAP.md always documented.
+' Waiting here does not delay the window the player sees: the WebView2
+' host still creates and shows its window immediately on a normal launch
+' (it has its own "Starting..." wait built in, per the Round 37 comment
+' above), so it is only this invisible wscript.exe process that blocks
+' until the app closes, not anything on screen.
+Dim exitCode
 If fso.FileExists(hostExe) Then
-    sh.Run """" & hostExe & """ --port " & port, 1, False
+    exitCode = sh.Run("""" & hostExe & """ --port " & port, 1, True)
+    If exitCode = 3 Then
+        If fso.FileExists(edge) Then
+            sh.Run """" & edge & """ --app=" & url & " --window-size=1320,900", 1, False
+        End If
+        ' else: no Edge to fall back to either - the plain-language
+        ' MessageBox HandleRuntimeMissing already showed before exiting is
+        ' the player's only signal in that case, same as before this fix.
+    End If
+    ' Any other exit code (0 on a normal close, or an unexpected value) is
+    ' already-handled/no-op - the host either closed normally or however
+    ' it failed, it is not the one specific case (3) this fallback exists
+    ' for, so nothing more to do here.
 ElseIf fso.FileExists(edge) Then
     sh.Run """" & edge & """ --app=" & url & " --window-size=1320,900", 1, False
 Else

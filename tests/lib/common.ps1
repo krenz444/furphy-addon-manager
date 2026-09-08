@@ -391,6 +391,82 @@ function Stop-StaticServer {
 }
 
 # ---------------------------------------------------------------------
+# CurseForge catalogue stub (F2 follow-up, launch-round): a real, local
+# stand-in for the two raw.githubusercontent.com files addon-server.ps1's
+# Save-CfCatalogueIndex fetches, now that $Script:CfCatalogueBaseUrl/
+# FURPHY_TEST_CF_CATALOGUE_BASEURL gives that fetch a real override seam
+# (mirrors $Script:WagoBaseUrl/FURPHY_TEST_WAGO_BASEURL exactly - see that
+# variable's own doc comment in addon-server.ps1). Before this seam
+# existed, the only way to make this fetch deterministic without touching
+# the real internet was shots\launch\Start-ScratchServer.ps1's own trick of
+# defining a same-named `Invoke-WebRequest` FUNCTION to shadow the cmdlet -
+# fragile (relies on PowerShell's function-before-cmdlet scope resolution)
+# and not reusable by an actual Pester test. This is just Start-StaticServer
+# above, pointed at a temp directory laid out with the same two relative
+# paths Save-CfCatalogueIndex requests
+# (layday\instawow-data\data\base-catalogue-v8.compact.json and
+# ogri-la\strongbox-catalogue\master\curseforge-catalogue.json) - a plain
+# python http.server serves real files at real URLs, so nothing in
+# addon-server.ps1 needs to know it isn't talking to the real GitHub host.
+# ---------------------------------------------------------------------
+
+function Start-CfCatalogueStubServer {
+    <#
+      Starts a Start-StaticServer instance seeded with a minimal-but-real-
+      shaped instawow-data base-catalogue-v8.compact.json and strongbox-
+      catalogue curseforge-catalogue.json, laid out under the same
+      layday/... and ogri-la/... relative paths
+      $Script:CfCatalogueBaseUrl + '/<path>' resolves to in addon-server.ps1.
+      The seam is an environment variable, same as FURPHY_TEST_WAGO_BASEURL -
+      set $env:FURPHY_TEST_CF_CATALOGUE_BASEURL = $stub.BaseUrl before
+      spawning the server child (Start-Process inherits the current
+      process's environment), matching exactly how existing tests already
+      point $env:FURPHY_TEST_WAGO_BASEURL at tests\fixtures\wago-stub.
+
+      -InstawowEntries / -StrongboxEntries: optional arrays of hashtables
+      to seed each payload's `entries` / `addon-summary-list` with (default:
+      one real-shaped, source:"curse"/"curseforge" entry each) - lets a
+      caller build a specific merge/collision/id-only-in-one-source
+      scenario without hand-writing the JSON shape every time.
+
+      Returns the same shape Start-StaticServer does (Process/Port/
+      Directory), plus BaseUrl - stop with Stop-StaticServer (same
+      contract), then best-effort Remove-Item -Recurse the returned
+      .Directory since this creates a fresh temp folder per call.
+    #>
+    param(
+        [int]$Port,
+        [array]$InstawowEntries = @(
+            @{ id = '1'; name = 'StubCatalogueAddon'; slug = 'stubcatalogueaddon'; url = 'https://www.curseforge.com/wow/addons/stubcatalogueaddon'; source = 'curse'; download_count = 1000; last_updated = '2026-01-01T00:00:00Z' }
+        ),
+        [array]$StrongboxEntries = @()
+    )
+
+    $dir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('furphy-cf-catalogue-stub-' + [Guid]::NewGuid().ToString('N'))
+    $instawowDir = Join-Path -Path $dir -ChildPath 'layday\instawow-data\data'
+    $strongboxDir = Join-Path -Path $dir -ChildPath 'ogri-la\strongbox-catalogue\master'
+    New-Item -ItemType Directory -Path $instawowDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $strongboxDir -Force | Out-Null
+
+    # PS 5.1's `Set-Content -Encoding UTF8` always writes a BOM - harmless
+    # for most files, but Save-CfCatalogueIndex's own ConvertFrom-Json
+    # (the old JavaScriptSerializer-backed cmdlet on this PS version)
+    # rejects a BOM-prefixed body outright ("Invalid JSON primitive")
+    # rather than skipping it - confirmed live while writing this helper.
+    # addon-server.ps1 itself already works around this exact gotcha
+    # everywhere it writes JSON (its own `New-Object
+    # System.Text.UTF8Encoding($false)` pattern) - mirrored here so a
+    # Start-StaticServer response is byte-for-byte parseable the same way
+    # a real raw.githubusercontent.com response is.
+    $noBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText((Join-Path $instawowDir 'base-catalogue-v8.compact.json'), (@{ entries = $InstawowEntries } | ConvertTo-Json -Depth 6), $noBom)
+    [System.IO.File]::WriteAllText((Join-Path $strongboxDir 'curseforge-catalogue.json'), (@{ 'addon-summary-list' = $StrongboxEntries } | ConvertTo-Json -Depth 6), $noBom)
+
+    $server = Start-StaticServer -Directory $dir -Port $Port
+    $server | Add-Member -NotePropertyName BaseUrl -NotePropertyValue ('http://127.0.0.1:{0}' -f $server.Port) -PassThru
+}
+
+# ---------------------------------------------------------------------
 # Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
 # connection and never reads or responds - used to prove addon-sync.ps1's
 # FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL override actually reaches

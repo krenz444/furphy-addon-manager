@@ -1412,6 +1412,41 @@
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
+  // ------------------------------------------------------------------
+  // Phase: novice:NOVICE-1 (QA findings round, UX-SPEC.md 2.4) - a brand-new/
+  // zero-addon account must never show a freshness headline (any enum
+  // value) directly above "No addons yet" on the My Addons screen - the two
+  // contradict each other on a new user's very first screen. This isn't
+  // reachable through any of the built-in ?mock= fixtures (none seed zero
+  // addons with a real updatesCheckedAt), so this phase drives
+  // Views.myAddons.render() directly via the __furphyTest Store/Views hooks
+  // for both freshness enum values the fixNote calls out, rather than
+  // adding a bespoke mock fixture. Get-ComputedFreshness legitimately still
+  // returns "up_to_date" for zero tracked addons server-side (locked in by
+  // tests\integration\Server.FreshnessAndFlavours.Tests.ps1) - the fix lives
+  // entirely in ui\app.js's empty-state branch, which is what this phase
+  // exercises.
+  // ------------------------------------------------------------------
+  async function phaseEmptyStateFreshness() {
+    beginPhase("NOVICE-1: zero-addon empty state never shows a freshness headline");
+    const win = await loadFrame("?mock=1&test=1");
+    await waitForReady(win, 8000);
+
+    ["up_to_date", "not_checked"].forEach(function (freshness) {
+      win.__furphyTest.Store.set({
+        addons: [], freshness: freshness,
+        updatesCheckedAt: freshness === "up_to_date" ? new Date().toISOString() : null,
+        loadingState: false, stateError: null
+      });
+      win.__furphyTest.Views.myAddons.render();
+      checkTry("freshness=\"" + freshness + "\": #myaddons-freshness is empty while #myaddons-empty is shown", function () {
+        return text(q(win, "#myaddons-freshness")) === "" && visible(q(win, "#myaddons-empty"));
+      });
+    });
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
   async function main() {
     await phaseDefault();
     await phaseLaunchPerf();
@@ -1421,6 +1456,7 @@
     await phaseTheme();
     await phaseViewDeepLink();
     await phaseSettingsAudit();
+    await phaseEmptyStateFreshness();
     await phaseUninstall();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }

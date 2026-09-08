@@ -3929,6 +3929,15 @@ Components.JobPanel = (function () {
     const failPhase = failPhaseByName[r.name];
     if (failPhase === "downloading") return "Couldn't download the update";
     if (failPhase === "installing") return "Couldn't install the update";
+    // failure-modes:cf-outage-misdiagnosed-as-incompatible (QA findings
+    // round): "checking-network" is a distinct FailPhase the CLI now stamps
+    // when the CurseForge/Wago files-list fetch itself throws (a network
+    // error, a bot-challenge page, a malformed response) - as opposed to a
+    // genuine "no compatible file for this addon" result, which still stays
+    // on the plain "checking" phase below. Conflating the two used to tell
+    // the user their WoW version is unsupported (a permanent condition) when
+    // the real cause was often a transient CurseForge hiccup worth retrying.
+    if (failPhase === "checking-network") return "Couldn't check for updates — CurseForge might be having trouble";
     if (failPhase === "checking") return "No matching version found";
     if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
     return "Something went wrong";
@@ -3944,6 +3953,19 @@ Components.JobPanel = (function () {
   // via #job-log/Details (see update() below). Exported so pollJob's own
   // terminal-poll toast (ui/app.js, App module) can show the identical
   // plain sentence instead of concatenating raw job.error itself.
+  //
+  // failure-modes:cf-outage-misdiagnosed-as-incompatible (QA findings round):
+  // the build brief's touch list asks failureReason() "and its whole-job
+  // counterpart" to both map the new checking-network FailPhase. Deliberately
+  // NOT changed here: addon-sync.ps1's Sync-SingleAddon/Sync-SingleWagoAddon
+  // catch a CF/Wago network failure per-addon, inside the same-file sync loop
+  // (see addon-server.ps1's per-row Write-ProgressStep call sites) - that
+  // failure always comes back as one row with Status=Failed inside a process
+  // that still exits 0, never as $exitCode-ne-0/unparseable stdout (the only
+  // two things that make job.state="failed" and route here, per
+  // addon-server.ps1's Complete-Job). There is no reachable path where a
+  // checking-network FailPhase ever reaches job.error/wholeJobFailureReason -
+  // that per-row case is fully handled by failureReason() above.
   function wholeJobFailureReason(job) {
     if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
     const err = ((job && job.error) || "").toLowerCase();
@@ -5402,10 +5424,6 @@ Views.myAddons = (function () {
     // removed it) - keeps the selection-bar count and every bulk action
     // honest even when the row that changed wasn't part of this selection.
     Store.pruneSelection();
-    // CS2 (UX-SPEC.md sections 1.1/2.2): the one freshness headline, mounted
-    // here (and in the sidebar - see App.renderChrome) - replaces the old
-    // summary sentence AND the separate "Last run" line, both deleted below.
-    Components.Freshness.render("myaddons-freshness");
 
     const table = Utils.qs("#myaddons-table");
     const tbody = Utils.qs("#myaddons-tbody");
@@ -5436,9 +5454,27 @@ Views.myAddons = (function () {
     if (!Store.state.addons.length) {
       table.hidden = true; empty.hidden = false; emptyFiltered.hidden = true; summary.textContent = ""; filters.hidden = true;
       renderSelectionBar(null);
+      // NOVICE-1 (QA findings round): a brand-new install with zero addons
+      // ever added used to still show "Everything's up to date - checked
+      // just now" directly above "No addons yet" - two contradictory
+      // messages on the very first screen a new user sees. Get-ComputedFreshness
+      // legitimately returns "up_to_date" for zero tracked addons (that enum
+      // value is locked in server-side), so the fix lives here: per
+      // UX-SPEC.md section 2.4's wireframe, the true-empty state shows no
+      // freshness headline of any kind.
+      const freshnessEl = Utils.qs("#myaddons-freshness");
+      if (freshnessEl) freshnessEl.textContent = "";
       return;
     }
     empty.hidden = true;
+
+    // CS2 (UX-SPEC.md sections 1.1/2.2): the one freshness headline, mounted
+    // here (and in the sidebar - see App.renderChrome) - replaces the old
+    // summary sentence AND the separate "Last run" line, both deleted below.
+    // NOVICE-1: only reached once the addons list is confirmed non-empty -
+    // see the blanking above for the zero-addon case, which would otherwise
+    // contradict "No addons yet".
+    Components.Freshness.render("myaddons-freshness");
 
     filters.hidden = false;
     renderFilters();
@@ -5920,7 +5956,19 @@ Views.browse = (function () {
     if (!w.loading && w.error && !w.results.length) {
       hideAllBodies();
       errorBox.hidden = false;
-      Utils.qs("#browse-error-msg").textContent = "Couldn't reach Wago right now.";
+      // multi-client:wago-browse-unknown-classic-era-silently-shows-retail
+      // (QA findings round): the server now refuses (409) instead of
+      // silently substituting Retail's catalog when it can't resolve this
+      // Classic client's era yet. Show ITS own plain-language reason instead
+      // of the generic connectivity string below, which would otherwise
+      // misdiagnose "Furphy doesn't know this version yet" (an update-Furphy
+      // problem) as "can't reach Wago right now" (a transient network
+      // problem) - the exact class of misleading message this app's "nothing
+      // that lies" rule exists to prevent. Any other error status keeps the
+      // existing generic message, matching the Wago-browse box's established
+      // never-show-raw-exception-text contract.
+      const knownIssue = w.error.status === 409 && w.error.data && w.error.data.error;
+      Utils.qs("#browse-error-msg").textContent = knownIssue ? String(w.error.data.error) : "Couldn't reach Wago right now.";
       summary.textContent = "";
       return;
     }

@@ -130,6 +130,83 @@ Describe 'rollback with no recorded previous version fails cleanly (fully offlin
     }
 }
 
+Describe 'a real rollback stamps a fresh installedAt (novice:NOVICE-2, fully offline)' {
+    # Fully offline (no CurseForge/Wago call at all - Invoke-RollbackForRecord
+    # reinstalls straight from a local backup zip), matching the existing
+    # "no recorded previous version" Describe's own approach above, but this
+    # time WITH a real previousFileId and a hand-crafted backup zip on disk
+    # so the rollback actually SUCCEEDS.
+    $wowRoot = Copy-Fixture
+    $tempRoot = New-TempRoot -Name 'cli-rollback-installedat'
+    $cliPath = Join-Path $tempRoot 'addon-sync.ps1'
+    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination $cliPath -Force
+
+    $flavourDir = Join-Path $tempRoot 'flavours\retail'
+    New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+
+    # Deliberately an OLD installedAt so a real rollback's fresh timestamp
+    # is unambiguously different from it, whatever "now" happens to be.
+    $staleInstalledAt = '2020-01-01T00:00:00Z'
+    $record = [PSCustomObject]@{
+        name             = 'RollbackTimestampAddon'
+        projectId        = 777777
+        fileId           = 2000
+        version          = 'v2'
+        fileName         = 'RollbackTimestampAddon-v2.zip'
+        installedAt      = $staleInstalledAt
+        folders          = @('RollbackTimestampAddon')
+        author           = $null
+        ignoreUpdates    = $false
+        pinnedFileId     = $null
+        releaseType      = $null
+        previousFileId   = 1000
+        previousVersion  = 'v1'
+        previousFileName = 'RollbackTimestampAddon-v1.zip'
+    }
+    $recordsPath = Join-Path $flavourDir 'addons.json'
+    ConvertTo-Json -InputObject @($record) -Depth 6 | Set-Content -LiteralPath $recordsPath -Encoding UTF8
+
+    # The backup zip Invoke-RollbackForRecord will restore from:
+    # flavours\retail\backups\<projectId>\<previousFileId>.zip, a real
+    # top-level "<folder>/<folder>.toc" entry (same shape
+    # Install-AddonPackage requires everywhere else).
+    $backupDir = Join-Path $flavourDir 'backups\777777'
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $zipPath = Join-Path $backupDir '1000.zip'
+    Add-Type -AssemblyName System.IO.Compression
+    $fs = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::Create)
+    $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    $entry = $archive.CreateEntry('RollbackTimestampAddon/RollbackTimestampAddon.toc')
+    $es = $entry.Open()
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("## Interface: 120100`n## Title: RollbackTimestampAddon v1`n")
+    $es.Write($bytes, 0, $bytes.Length)
+    $es.Close()
+    $archive.Dispose()
+    $fs.Dispose()
+
+    It 'a successful rollback replaces installedAt with a fresh timestamp, not the pre-rollback value' {
+        $r = Invoke-CliJson -ScriptPath $cliPath -TimeoutSec 30 -ArgumentList @(
+            '-Rollback', 777777, '-Flavor', 'retail', '-Json', '-WowRoot', $wowRoot)
+        $r.ExitCode | Should Be 0
+        $row = @($r.Json.results) | Where-Object { [string]$_.projectId -eq '777777' }
+        @($row).Count | Should Be 1
+        $row[0].status | Should Be 'Rolled-back'
+
+        $updatedRecord = @($r.Json.addons) | Where-Object { [string]$_.projectId -eq '777777' }
+        @($updatedRecord).Count | Should Be 1
+        # The file itself really did swap back (proves this is a genuine
+        # rollback, not a no-op that happens to also touch installedAt).
+        [string]$updatedRecord[0].fileId | Should Be '1000'
+        ($updatedRecord[0].installedAt) | Should Not Be $staleInstalledAt
+        ([string]::IsNullOrEmpty($updatedRecord[0].installedAt)) | Should Be $false
+
+        # Persisted to disk too, not just the -Json echo.
+        $onDisk = Get-Content -LiteralPath $recordsPath -Raw | ConvertFrom-Json
+        $onDiskRecord = @($onDisk) | Where-Object { [string]$_.projectId -eq '777777' }
+        ($onDiskRecord[0].installedAt) | Should Not Be $staleInstalledAt
+    }
+}
+
 Describe 'install.ps1 upgrade path removes legacy launcher files (Round 34, CS-R12)' {
     # Round 34 (removed at Eric's request, 2026-09-07): -Launcher/the
     # per-flavour launcher pair is gone from install.ps1's own write path

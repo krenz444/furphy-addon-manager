@@ -137,6 +137,25 @@ $Script:SkipWagoGrowthCrawl = -not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST
 # user run ever sets FURPHY_TEST_SKIP_CF_CATALOGUE.
 $Script:SkipCfCatalogueFetch = -not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_SKIP_CF_CATALOGUE)
 
+# Round-fixer (F2 follow-up from the launch round): test-only base-URL
+# override for Save-CfCatalogueIndex's two raw.githubusercontent.com
+# fetches, mirroring $Script:WagoBaseUrl/FURPHY_TEST_WAGO_BASEURL exactly
+# (same seam shape, same "declared above the dot-source guard so a unit
+# test can read it back without reaching the real startup body" reasoning,
+# same "empty/whitespace override falls back to the real host" contract).
+# Before this, the CF catalogue fetch was the one remaining live-network
+# call site in this file with no test seam at all - shots\launch\
+# Measure-Launch.ps1's own header comment documented working around that
+# gap by shadowing the Invoke-WebRequest cmdlet in a wrapper script instead
+# of a real override, which this closes. Save-CfCatalogueIndex builds both
+# of its URIs by appending a fixed path onto this base instead of a literal
+# host, so a stub server only needs to serve those same two relative paths.
+# TEST-ONLY: no real user run ever sets FURPHY_TEST_CF_CATALOGUE_BASEURL.
+$Script:CfCatalogueBaseUrl = 'https://raw.githubusercontent.com'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_CF_CATALOGUE_BASEURL)) {
+    $Script:CfCatalogueBaseUrl = $env:FURPHY_TEST_CF_CATALOGUE_BASEURL.TrimEnd('/')
+}
+
 # =====================================================================
 # Logging
 # =====================================================================
@@ -1358,7 +1377,18 @@ function Get-Settings {
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $result = Get-DefaultSettings
         if ($null -ne $obj.releaseType) { $result.releaseType = [int]$obj.releaseType }
-        if ($null -ne $obj.port) { $result.port = [int]$obj.port }
+        if ($null -ne $obj.port) {
+            # security:security-server-settings-port-no-range-check-bricks-
+            # launch, defense in depth: settings.json can end up with an
+            # out-of-range port from more than just Handle-SettingsPut (a
+            # manual hand-edit, an older/corrupted file) - clamp it out on
+            # every READ too, same reasoning as the backgroundIntervalMinutes
+            # clamp just below, so a bad on-disk value can never round-trip
+            # anywhere (including back into the startup port-resolution
+            # fallback further down this file) unfiltered.
+            $portRead = [int]$obj.port
+            if ($portRead -ge 1 -and $portRead -le 65535) { $result.port = $portRead }
+        }
         # E19: adFilter/hostWindow - see Get-DefaultSettings. hostWindow is
         # copied through as whatever object shape is on disk (the host owns
         # its contents); this server never inspects x/y/w/h itself.
@@ -1437,7 +1467,26 @@ function Get-Settings {
         return $result
     } catch {
         Write-ServerLog "Failed to read settings.json, using defaults: $($_.Exception.Message)"
-        return Get-DefaultSettings
+        # failure-modes:settingsjson-corruption-silent-reset - a corrupt
+        # file used to just fall back to defaults in memory on every single
+        # request, forever, with the file itself never repaired: any real
+        # choice the user had made that differs from a default (most
+        # importantly adFilter/cfFocus, both ON by default) silently
+        # reverted with zero indication, and re-triggered this same log
+        # line on every subsequent GET. Overwrite the corrupt file with
+        # valid defaults on first detection - mirrors the missing/empty-
+        # file branches above it, which already do exactly this - so the
+        # file self-repairs immediately instead of lingering broken for the
+        # life of the install. Best-effort: a failed repair still returns
+        # the in-memory defaults either way, matching this function's
+        # existing "never let a settings problem break the app" contract.
+        $defaults = Get-DefaultSettings
+        try {
+            Save-Settings -Settings $defaults
+        } catch {
+            Write-ServerLog "Failed to repair corrupt settings.json: $($_.Exception.Message)"
+        }
+        return $defaults
     }
 }
 
@@ -1562,24 +1611,57 @@ function Get-AddonRecords {
         return
     }
 
-    # Get-Content is safe here: $raw only feeds ConvertFrom-Json below and is
-    # never returned/serialized itself, so its PSPath/PSDrive/PSProvider note
-    # properties never reach a JSON response (see Update-JobStatus for the
-    # pattern that actually hangs Send-Json).
-    $raw = Get-Content -LiteralPath $Script:AddonsJsonPath -Raw -Encoding UTF8 -ErrorAction Stop
-    if ([string]::IsNullOrWhiteSpace($raw)) {
+    # failure-modes:corrupt-addonsjson-total-lockout - Get-Content/
+    # ConvertFrom-Json used to run unguarded here: a MALFORMED (not just
+    # missing/empty) addons.json - a truncated write, disk-full during
+    # save, a manual edit gone wrong - threw straight out of this function,
+    # through Invoke-Route's blanket catch, as a generic HTTP 500 with the
+    # raw .NET parser exception (including a fragment of the corrupted
+    # file's own content) shown verbatim in the SPA's My Addons error box on
+    # every single /api/state poll - total, permanent lockout with no
+    # recovery path in the UI. Wrapped in try/catch mirroring Get-Settings'
+    # own missing/empty/corrupt handling above: a parse failure logs and
+    # falls back to the same empty list the missing/empty-file branches
+    # above already return, so GET /api/state stays 200 with addons: []
+    # instead of ever reaching Invoke-Route's generic 500. The unreadable
+    # file is also moved aside (never deleted) to addons.json.corrupt-
+    # <timestamp>, mirroring the flavours\_migration-backup-<timestamp>
+    # pattern already used elsewhere in this file, so the user's data is
+    # preserved on disk for recovery rather than silently discarded or
+    # overwritten by the next real write.
+    try {
+        # Get-Content is safe here: $raw only feeds ConvertFrom-Json below and is
+        # never returned/serialized itself, so its PSPath/PSDrive/PSProvider note
+        # properties never reach a JSON response (see Update-JobStatus for the
+        # pattern that actually hangs Send-Json).
+        $raw = Get-Content -LiteralPath $Script:AddonsJsonPath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            Write-Output -NoEnumerate $list
+            return
+        }
+
+        $tmp = $raw | ConvertFrom-Json -ErrorAction Stop
+        $parsed = @($tmp)
+        foreach ($item in $parsed) {
+            if ($null -ne $item) {
+                $list.Add($item)
+            }
+        }
+        Write-Output -NoEnumerate $list
+    } catch {
+        Write-ServerLog "Failed to read addons.json, showing empty list: $($_.Exception.Message)"
+        try {
+            $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+            $corruptPath = "$Script:AddonsJsonPath.corrupt-$stamp"
+            Move-Item -LiteralPath $Script:AddonsJsonPath -Destination $corruptPath -Force -ErrorAction Stop
+            Write-ServerLog "Moved unreadable addons.json aside to $corruptPath - your addon folders on disk are untouched; a fresh addons.json will be created on the next real write."
+        } catch {
+            Write-ServerLog "Failed to move aside corrupt addons.json (left in place): $($_.Exception.Message)"
+        }
+        $list = New-Object 'System.Collections.Generic.List[object]'
         Write-Output -NoEnumerate $list
         return
     }
-
-    $tmp = $raw | ConvertFrom-Json -ErrorAction Stop
-    $parsed = @($tmp)
-    foreach ($item in $parsed) {
-        if ($null -ne $item) {
-            $list.Add($item)
-        }
-    }
-    Write-Output -NoEnumerate $list
 }
 
 # =====================================================================
@@ -2133,6 +2215,32 @@ function Get-ClientBuildInfo {
 # =====================================================================
 # Jobs: CLI process management
 # =====================================================================
+
+function Remove-OldJobFiles {
+    <#
+      Deletes job\*.out/*.err (and the .failed copies a failed job leaves
+      behind - see the request loop's own tick comment) older than 1 day.
+      Called once at startup, and again periodically from the request
+      loop's tick (long-run:failed-job-files-only-pruned-at-startup) so a
+      server kept alive for days/weeks doesn't accumulate these unbounded.
+
+      Deliberately defined here, ABOVE the dot-source guard further down
+      (mirroring $Script:WagoBaseUrl's own placement rationale) so a unit
+      test can dot-source this file, point $Script:JobsDir at a scratch
+      directory, and call this directly without ever reaching the real
+      "start the server" startup body.
+    #>
+    if (-not (Test-Path -LiteralPath $Script:JobsDir)) { return }
+    $cutoff = (Get-Date).AddDays(-1)
+    try {
+        $files = Get-ChildItem -LiteralPath $Script:JobsDir -File -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+            if ($f.LastWriteTime -lt $cutoff) {
+                try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    } catch { }
+}
 
 function New-JobId {
     $Script:JobIdSeq = $Script:JobIdSeq + 1
@@ -4623,6 +4731,23 @@ function Handle-WagoBrowse {
     # 'classic''s dynamic per-Interface resolution (S2.4). Byte-identical to
     # today on a Retail-only machine (WagoField resolves to 'retail').
     $wagoMapping = Get-CfFlavourMapping -Flavor $Script:CurrentFlavour -InstalledInterface $Script:ClientBuildInfo.clientInterface
+    # multi-client:wago-browse-unknown-classic-era-silently-shows-retail -
+    # a Classic client whose Interface falls outside every row of Resolve-
+    # ClassicProgressionTypeId's table (a future Classic expansion this
+    # build doesn't know about yet) resolves to the EraKey='unknown'
+    # sentinel with WagoField=$null. The old `if (-not $wagoGameVersion) {
+    # $wagoGameVersion = 'retail' }` fallback below silently substituted
+    # Retail's Wago catalog in that case - the exact class of bug
+    # addon-sync.ps1's Sync-SingleAddon/Sync-SingleWagoAddon already
+    # hard-fail on for the identical sentinel, rather than ever falling
+    # back to Retail. Refuse the same way here instead of ever reaching
+    # that fallback, so a below-average-tech player on an unrecognized
+    # Classic client never sees Retail-only Wago addons in a Classic search
+    # with no indication anything is wrong.
+    if ($wagoMapping.EraKey -eq 'unknown') {
+        Send-Json -Context $Context -StatusCode 422 -Body @{ error = "Furphy doesn't recognize this Classic version yet - update Furphy to browse new addons for it." }
+        return
+    }
     $wagoGameVersion = $wagoMapping.WagoField
     if (-not $wagoGameVersion) { $wagoGameVersion = 'retail' }
 
@@ -5549,7 +5674,7 @@ function Save-CfCatalogueIndex {
     $source = 'instawow-data'
 
     try {
-        $resp1 = Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/layday/instawow-data/data/base-catalogue-v8.compact.json' -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $resp1 = Invoke-WebRequest -Uri ($Script:CfCatalogueBaseUrl + '/layday/instawow-data/data/base-catalogue-v8.compact.json') -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $data1 = $resp1.Content | ConvertFrom-Json -ErrorAction Stop
         foreach ($entry in @($data1.entries)) {
             if ([string]$entry.source -ne 'curse') { continue }
@@ -5574,7 +5699,7 @@ function Save-CfCatalogueIndex {
     Start-Sleep -Milliseconds 1000
 
     try {
-        $resp2 = Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/ogri-la/strongbox-catalogue/master/curseforge-catalogue.json' -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $resp2 = Invoke-WebRequest -Uri ($Script:CfCatalogueBaseUrl + '/ogri-la/strongbox-catalogue/master/curseforge-catalogue.json') -UserAgent $userAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $data2 = $resp2.Content | ConvertFrom-Json -ErrorAction Stop
         $list2 = $data2.'addon-summary-list'
         foreach ($entry in @($list2)) {
@@ -6148,13 +6273,35 @@ function Get-WagoAutoMatch {
       equals (or is a substring, either direction, of) the queried author
       case-insensitively - never on name similarity alone, never assuming
       result #1 is the match, per SPEC's verified matching rule. Result
-      (including a definitive miss) cached 24h per (name,author) pair.
+      (including a definitive miss) cached 24h per (game_version,name,author)
+      triple - game_version resolves from the CURRENT request's flavour via
+      Get-CfFlavourMapping, same as Handle-WagoBrowse.
       Returns @{ slug } or $null. Never throws.
     #>
     param([string]$Name, [string]$Author)
 
     if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
-    $cacheKey = $Name.Trim().ToLowerInvariant() + '|' + (([string]$Author).Trim().ToLowerInvariant())
+
+    # multi-client:wago-automatch-hardcoded-retail-game-version - this
+    # probe used to search Wago's game_version=retail catalog
+    # unconditionally, even though $rec (the caller's tracked record) is
+    # already resolved from the CURRENT flavour's own addons.json
+    # (Get-AddonRecords is flavour-scoped). Under classic/classic_era that
+    # meant a CurseForge-tracked addon legitimately listed on Wago under a
+    # non-Retail game_version, with no toc X-Wago-ID tag, could never be
+    # found - "also on Wago" enrichment silently stayed empty for it, while
+    # the identical addon under Retail worked fine. Resolve the same way
+    # Handle-WagoBrowse already does instead of hardcoding 'retail' - byte-
+    # identical result on a Retail-only/Retail-active machine.
+    $wagoMapping = Get-CfFlavourMapping -Flavor $Script:CurrentFlavour -InstalledInterface $Script:ClientBuildInfo.clientInterface
+    $wagoGameVersion = $wagoMapping.WagoField
+    if (-not $wagoGameVersion) { $wagoGameVersion = 'retail' }
+
+    # Fold the resolved game_version into the cache key too - otherwise a
+    # cache entry seeded under one flavour's game_version would wrongly
+    # answer a later lookup for the same (name, author) pair under a
+    # different flavour.
+    $cacheKey = $wagoGameVersion + '|' + $Name.Trim().ToLowerInvariant() + '|' + (([string]$Author).Trim().ToLowerInvariant())
     if ($Script:WagoAutoMatchCache.ContainsKey($cacheKey)) {
         $entry = $Script:WagoAutoMatchCache[$cacheKey]
         if (((Get-Date) - $entry.Time).TotalHours -lt 24) { return $entry.Match }
@@ -6162,7 +6309,7 @@ function Get-WagoAutoMatch {
 
     $match = $null
     try {
-        $uri = $Script:WagoBaseUrl + '/?game_version=retail&search=' + [System.Uri]::EscapeDataString($Name)
+        $uri = $Script:WagoBaseUrl + '/?game_version=' + [System.Uri]::EscapeDataString($wagoGameVersion) + '&search=' + [System.Uri]::EscapeDataString($Name)
         $props = Get-WagoCached -PageUri $uri
         $normName = Get-WagoAutoMatchNormalizedName -Value $Name
         if ($props -and $props.addons -and $props.addons.data) {
@@ -7456,6 +7603,21 @@ function Handle-SettingsPut {
             Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'port must be a number' }
             return
         }
+        # security:security-server-settings-port-no-range-check-bricks-
+        # launch - the TryParse guard above only ever ruled out a
+        # non-numeric value; a positive but out-of-range value (e.g.
+        # 999999) used to sail straight into settings.json. "Addon
+        # Manager.vbs" (the real launcher) never passes -Port at all - it
+        # relies entirely on this stored value at every future startup - so
+        # an out-of-range port written here bricked the app completely on
+        # its very next launch: $listener.Start() throws, is logged FATAL,
+        # and the process exits with no listener on any port and no
+        # on-screen error of any kind. Reject the same way releaseType does
+        # just above, instead of ever reaching Save-Settings.
+        if ($p -lt 1 -or $p -gt 65535) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'port must be 1-65535' }
+            return
+        }
         $settings.port = $p
     }
     # E19: adFilter (the CurseForge-tab ad/tracker filter toggle) and
@@ -8424,10 +8586,24 @@ function Handle-Uninstall {
     try {
         $body = Read-Body -Context $Context
         if ($body) {
-            if ($body.PSObject.Properties.Match('noShortcuts').Count -gt 0) { $noShortcuts = [bool]$body.noShortcuts }
-            if ($body.PSObject.Properties.Match('noProtocol').Count -gt 0) { $noProtocol = [bool]$body.noProtocol }
-            if ($body.PSObject.Properties.Match('dryRun').Count -gt 0) { $dryRun = [bool]$body.dryRun }
-            if ($body.PSObject.Properties.Match('quiet').Count -gt 0) { $quiet = [bool]$body.quiet }
+            # security:security-server-uninstall-bool-coercion-lies - a
+            # bare [bool] cast treats ANY non-empty string as truthy (a
+            # JSON STRING "false" silently becomes $true), the exact
+            # hazard Round 20's ConvertTo-SettingsBool was introduced for -
+            # every other boolean settings field in this file already goes
+            # through it, but this Round-33-added handler was still using
+            # the bare cast. For dryRun this let a stringified "false"
+            # silently route a REAL uninstall request into the no-op dry-
+            # run branch (server still answers 200 {"ok":true}, nothing
+            # happens); for quiet specifically the same mistake silently
+            # suppresses the WinForms completion MessageBox that is,
+            # per this handler's own doc comment above, the ONLY visible
+            # sign a real user gets that their uninstall finished, since
+            # the whole process runs -WindowStyle Hidden.
+            if ($body.PSObject.Properties.Match('noShortcuts').Count -gt 0) { $noShortcuts = ConvertTo-SettingsBool $body.noShortcuts }
+            if ($body.PSObject.Properties.Match('noProtocol').Count -gt 0) { $noProtocol = ConvertTo-SettingsBool $body.noProtocol }
+            if ($body.PSObject.Properties.Match('dryRun').Count -gt 0) { $dryRun = ConvertTo-SettingsBool $body.dryRun }
+            if ($body.PSObject.Properties.Match('quiet').Count -gt 0) { $quiet = ConvertTo-SettingsBool $body.quiet }
         }
     } catch {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
@@ -8817,7 +8993,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.18.1'
+$Script:Version = '1.19.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -8930,6 +9106,19 @@ $Script:MaintenanceIntervalMinutes = 60
 $Script:LastMaintenanceAttemptAt = [DateTime]::MinValue
 $Script:CfCatalogueCacheLastWriteUtc = [DateTime]::MinValue
 
+# long-run:failed-job-files-only-pruned-at-startup: Remove-OldJobFiles (near
+# the request loop below) used to run exactly once, at startup - fine for a
+# server that gets relaunched often, but this process is explicitly meant to
+# stay alive for days/weeks (the whole point of the idle-exit + tray
+# design), and a failed job leaves a .out.failed/.err.failed pair behind on
+# every failure. Re-run it periodically from the request loop's own tick,
+# same "at most once an hour" cadence as the maintenance-child spawn check
+# just above - LastJobFilesPruneTime is stamped right after the real
+# startup call (see that call site) so the first re-run doesn't happen
+# again within seconds of it.
+$Script:JobCleanupIntervalMinutes = 60
+$Script:LastJobFilesPruneTime = [DateTime]::MinValue
+
 # =====================================================================
 # Round 37 (server perf pass): -MaintenanceOnly early exit
 #
@@ -8968,6 +9157,19 @@ if ($MaintenanceOnly) {
 
     Write-ServerLog "Maintenance child started (pid $PID)"
     try {
+        # F1 (follow-up from the launch round): on a genuinely fresh
+        # install, ROOT\cache\ does not exist yet the first time this
+        # child runs (nothing has ever written to it) - WriteAllText has no
+        # implicit "create the parent directory" behavior, so this used to
+        # throw immediately and the child limped on with no lock file at
+        # all ("continuing anyway" below), never actually protecting the
+        # section below from a second concurrent child. Create the
+        # directory first, same guarded pattern already used at the two
+        # other CacheDir call sites in this file (Get-WagoGrowthSnapshotPath's
+        # caller / Save-CfCatalogueIndex).
+        if (-not (Test-Path -LiteralPath $Script:CacheDir)) {
+            New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null
+        }
         [System.IO.File]::WriteAllText($Script:MaintenanceLockPath, [string]$PID)
     } catch {
         Write-ServerLog "Maintenance child: could not write lock file, continuing anyway: $($_.Exception.Message)"
@@ -9077,7 +9279,17 @@ if (-not (Test-Path -LiteralPath $Script:JobsDir)) {
 
 if (-not $Port -or $Port -le 0) {
     $settingsForPort = Get-Settings
-    if ($settingsForPort.port -and $settingsForPort.port -gt 0) {
+    # security:security-server-settings-port-no-range-check-bricks-launch,
+    # last line of defense: Get-Settings' own read path already clamps a
+    # bad on-disk port back to the 47831 default (see its own comment), so
+    # this `-le 65535` half is now unreachable through the normal Get-
+    # Settings path - kept anyway as a second, independent guard directly
+    # at the one place that actually feeds $listener.Start(), so a future
+    # change to Get-Settings (or any other future caller of this same
+    # fallback) can never again reintroduce a silent FATAL-exit-with-no-
+    # listener-and-no-onscreen-error bricking, the exact failure this
+    # finding reproduced end-to-end.
+    if ($settingsForPort.port -and $settingsForPort.port -gt 0 -and $settingsForPort.port -le 65535) {
         $Port = $settingsForPort.port
     } else {
         $Port = 47831
@@ -9095,20 +9307,11 @@ $Script:Port = $Port
 # client's very first request.
 Update-InstalledAppsRegistration
 
-function Remove-OldJobFiles {
-    <# Deletes job\*.out/*.err files older than 1 day, run once at startup. #>
-    if (-not (Test-Path -LiteralPath $Script:JobsDir)) { return }
-    $cutoff = (Get-Date).AddDays(-1)
-    try {
-        $files = Get-ChildItem -LiteralPath $Script:JobsDir -File -ErrorAction SilentlyContinue
-        foreach ($f in $files) {
-            if ($f.LastWriteTime -lt $cutoff) {
-                try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue } catch { }
-            }
-        }
-    } catch { }
-}
 Remove-OldJobFiles
+# Stamped here (not left at the [DateTime]::MinValue declared above) so the
+# request loop's own periodic re-run doesn't fire again within seconds of
+# this real startup pass - the next one is due ~$Script:JobCleanupIntervalMinutes later.
+$Script:LastJobFilesPruneTime = Get-Date
 
 # P1 perf pass (item 3): defense in depth on top of the gameRunning gates
 # above - lower this process's own scheduling priority/QoS regardless of
@@ -9249,9 +9452,18 @@ try {
         # CfCatalogueCacheIfChanged is a single file stat unless the cache
         # actually changed underneath this process; Invoke-MaintenanceTick's
         # own interval/game-running/lock-file guards make it a real no-op on
-        # every tick except roughly once an hour.
+        # every tick except roughly once an hour. long-run:failed-job-
+        # files-only-pruned-at-startup: Remove-OldJobFiles gets the same
+        # "at most once an hour" treatment here - a plain directory
+        # listing/delete with no network dependency, so unlike the two
+        # calls above there is no per-call internal gate of its own; this
+        # tick-level check IS the gate.
         Update-CfCatalogueCacheIfChanged
         Invoke-MaintenanceTick -GameRunning $gameRunningNow
+        if (((Get-Date) - $Script:LastJobFilesPruneTime).TotalMinutes -ge $Script:JobCleanupIntervalMinutes) {
+            Remove-OldJobFiles
+            $Script:LastJobFilesPruneTime = Get-Date
+        }
 
         $signaled = $pending.AsyncWaitHandle.WaitOne($waitMs)
         if (-not $signaled) {

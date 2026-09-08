@@ -82,10 +82,38 @@ foreach ($f in $rootFiles) {
     }
 }
 
+# upgrade-1.1.0:upgrade-1.1.0-package-ships-stray-dev-log fix: an explicit
+# file-extension allow-list, mirroring $rootFiles' own allow-list
+# philosophy above - the unfiltered Copy-Item -Recurse this used to be
+# shipped a stray dev artifact (ui\server47896.log, a leftover Python
+# http.server access log from a local test session) straight into the
+# public 1.1.0 release with no exclude rule catching it; 1.17.0's zip was
+# clean only because ui\ happened to be clean at build time, not because
+# anything here stopped it. Walked with Get-ChildItem -Recurse (not
+# Copy-Item -Recurse) so each file's extension can be checked before
+# staging; relative subfolder structure (needed for ui\icons\*) is
+# preserved by re-joining each kept file's path under $uiDst.
 $uiSrc = Join-Path -Path $Source -ChildPath 'ui'
 $uiDst = Join-Path -Path $stageRoot -ChildPath 'ui'
 New-Item -ItemType Directory -Force -Path $uiDst | Out-Null
-Copy-Item -Path (Join-Path -Path $uiSrc -ChildPath '*') -Destination $uiDst -Recurse -Force
+$uiAllowedExtensions = @('.html', '.js', '.css', '.json', '.svg', '.ico', '.png', '.woff', '.woff2')
+$uiSkipped = New-Object 'System.Collections.Generic.List[string]'
+if (Test-Path -LiteralPath $uiSrc -PathType Container) {
+    Get-ChildItem -LiteralPath $uiSrc -File -Recurse | ForEach-Object {
+        $relPath = $_.FullName.Substring($uiSrc.Length).TrimStart('\')
+        if ($uiAllowedExtensions -contains $_.Extension.ToLowerInvariant()) {
+            $destPath = Join-Path -Path $uiDst -ChildPath $relPath
+            $destParent = Split-Path -Path $destPath -Parent
+            if ($destParent -and -not (Test-Path -LiteralPath $destParent)) {
+                New-Item -ItemType Directory -Force -Path $destParent | Out-Null
+            }
+            Copy-Item -LiteralPath $_.FullName -Destination $destPath -Force
+        } else {
+            $uiSkipped.Add($relPath)
+        }
+    }
+}
+foreach ($f in $uiSkipped) { Write-Host "WARNING: ui\ file not on the packaging allow-list, not shipped: $f" -ForegroundColor Yellow }
 $uiCount = (Get-ChildItem -LiteralPath $uiDst -File -Recurse | Measure-Object).Count
 
 # Native host (E19): sources + SDK assemblies + the prebuilt exe. install.ps1 rebuilds the exe when csc.exe

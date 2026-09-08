@@ -88,3 +88,13 @@ SAFETY
     AddOns-backup-pre-cursebreaker-2026-09-01.zip (original Wago-app state), AddOns-removed-*.zip (purged addons),
     AddonSync-backup-*.zip (this folder before each app deployment).
   - The retired CurseBreaker.exe in _retail_ is a dormant fallback; do not run it alongside this tool.
+  - Running an installer OLDER than what's already installed (an old downloaded zip, a stale link) now warns
+    instead of silently replacing the newer app with the older one - your addon list is never touched either way.
+
+TROUBLESHOOTING
+  - If double-clicking the desktop shortcut does nothing at all and no window ever appears, the most likely
+    cause is a missing or broken Microsoft Edge WebView2 Runtime - Furphy now tells you this in an on-screen
+    message when it can detect it; if you ever see total silence instead, install the WebView2 Runtime from
+    Microsoft (search "WebView2 Runtime download") and try again.
+  - Minimizing the app and coming back to it later reconnects on its own; if "Server not reachable" ever sticks
+    around after clicking back into the window, use the desktop shortcut once to restart it fully.

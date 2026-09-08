@@ -393,6 +393,126 @@ Describe 'Install-AddonPackage - zip extraction safety' {
     }
 }
 
+Describe 'Install-AddonPackage - folder swap failure integrity (failure-modes:silent-fake-success-on-locked-addons-folder)' {
+
+    function New-OneFolderZip {
+        <# Builds a minimal valid zip with one top-level "<FolderName>/<FolderName>.toc" entry containing $Content. #>
+        param([string]$ZipPath, [string]$FolderName, [string]$Content)
+
+        Add-Type -AssemblyName System.IO.Compression
+        if (Test-Path -LiteralPath $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
+        $fs = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::Create)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $entry = $archive.CreateEntry("$FolderName/$FolderName.toc")
+                $es = $entry.Open()
+                try {
+                    $bytes = [System.Text.Encoding]::ASCII.GetBytes($Content)
+                    $es.Write($bytes, 0, $bytes.Length)
+                } finally { $es.Close() }
+            } finally { $archive.Dispose() }
+        } finally { $fs.Dispose() }
+    }
+
+    It 'a locked file inside the existing destination folder makes the whole swap throw, leaving the OLD folder completely untouched (never a silent fake success)' {
+        # Mirrors the finding's own live repro #2: an exclusive-ish lock
+        # (FileShare.Read - readers ok, no writers/deleters) held on a file
+        # INSIDE the existing destination folder during the swap, the same
+        # shape a real AV scanner/cloud-sync client/Explorer preview would
+        # produce. Before the fix, Test-Path on $destPath still returned
+        # true (the old folder never actually got removed) so the caller
+        # wrongly counted this as installed; the fix makes
+        # Install-AddonPackage itself throw so no caller can be fooled.
+        $root = New-TempRoot -Name 'swap-locked-single'
+        $staging = Join-Path $root 'staging'
+        $addons = Join-Path $root 'addons'
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        $existingDir = Join-Path $addons 'BigWigs'
+        New-Item -ItemType Directory -Path $existingDir -Force | Out-Null
+        $existingFile = Join-Path $existingDir 'BigWigs.toc'
+        Set-Content -LiteralPath $existingFile -Value 'OLD-VERSION' -Encoding ASCII -NoNewline
+
+        $zipPath = Join-Path $root 'BigWigs-new.zip'
+        New-OneFolderZip -ZipPath $zipPath -FolderName 'BigWigs' -Content 'NEW-VERSION'
+
+        $lockStream = [System.IO.File]::Open($existingFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $threw = $false
+            try {
+                Install-AddonPackage -ZipPath $zipPath -ProjectId 925037 -StagingPath $staging -AddonsPath $addons -PreviousFolders @('BigWigs') | Out-Null
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $true
+        } finally {
+            $lockStream.Close()
+            $lockStream.Dispose()
+        }
+
+        # The OLD file's content must be exactly what it was before -
+        # neither replaced nor left in some half-deleted state.
+        (Test-Path -LiteralPath $existingFile) | Should Be $true
+        (Get-Content -LiteralPath $existingFile -Raw) | Should Be 'OLD-VERSION'
+    }
+
+    It 'a partial swap (one of two folders locked) still throws overall - never silently reports the addon as fully updated' {
+        # failure-modes:silent-fake-success-on-locked-addons-folder's
+        # "partial" case: a real multi-folder addon where only SOME
+        # top-level folders fail to swap. The pre-fix code only ever
+        # checked Count -eq 0, which this scenario would have sailed past
+        # (Count would have been >= 1). Also documents the accepted
+        # tradeoff: folders that CAN swap still do (maximum forward
+        # progress), but the function still throws so the caller never
+        # persists the update as a clean success.
+        $root = New-TempRoot -Name 'swap-locked-partial'
+        $staging = Join-Path $root 'staging'
+        $addons = Join-Path $root 'addons'
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $addons 'FolderA') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $addons 'FolderB') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $addons 'FolderA\FolderA.toc') -Value 'A-OLD' -Encoding ASCII -NoNewline
+        $lockedFile = Join-Path $addons 'FolderB\FolderB.toc'
+        Set-Content -LiteralPath $lockedFile -Value 'B-OLD' -Encoding ASCII -NoNewline
+
+        Add-Type -AssemblyName System.IO.Compression
+        $zipPath = Join-Path $root 'TwoFolders-new.zip'
+        $fs = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::Create)
+        $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($name in @('FolderA', 'FolderB')) {
+            $e = $archive.CreateEntry("$name/$name.toc")
+            $s = $e.Open()
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("$name-NEW")
+            $s.Write($bytes, 0, $bytes.Length)
+            $s.Close()
+        }
+        $archive.Dispose()
+        $fs.Dispose()
+
+        $lockStream = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $threw = $false
+            try {
+                Install-AddonPackage -ZipPath $zipPath -ProjectId 555 -StagingPath $staging -AddonsPath $addons -PreviousFolders @('FolderA', 'FolderB') | Out-Null
+            } catch {
+                $threw = $true
+                ($_.Exception.Message -like '*FolderB*') | Should Be $true
+            }
+            $threw | Should Be $true
+        } finally {
+            $lockStream.Close()
+            $lockStream.Dispose()
+        }
+
+        # FolderA (unlocked) made forward progress and swapped to the new
+        # content, but FolderB (locked) is untouched - and the overall
+        # function still threw, so no caller can mistake this for a clean
+        # "Updated" result.
+        (Get-Content -LiteralPath (Join-Path $addons 'FolderA\FolderA.toc') -Raw) | Should Be 'FolderA-NEW'
+        (Get-Content -LiteralPath $lockedFile -Raw) | Should Be 'B-OLD'
+    }
+}
+
 Describe 'Invoke-HttpDownloadWithProgress' {
 
     It 'downloads a file whose bytes match the source exactly, and writes at least one progress snapshot' {

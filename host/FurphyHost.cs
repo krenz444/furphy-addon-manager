@@ -287,10 +287,22 @@ namespace Furphy
     // with no MainForm at all in --tray/--tray-selftest - call this
     // directly with their own resolved log path so every "[tray] ..."
     // line lands in the same host.log a user would already look at.
+    //
+    // long-run:host-log-no-rotation - server.log/sync.log both rotate at
+    // ~2MB (addon-server.ps1/addon-sync.ps1's own
+    // $Script:LogRotationMaxBytes = 2097152 + Invoke-LogRotationIfNeeded)
+    // specifically because a server left running for days/weeks would
+    // otherwise grow the log without bound. The host process is exactly
+    // as long-lived (the tray/background-updates feature) and LogHost is
+    // called far more often (every WM_DPICHANGED, every WebMessage, every
+    // ad-filter block, every tray cycle step), so host.log needs the same
+    // cap. MaxBytes here matches $Script:LogRotationMaxBytes exactly so
+    // all three long-lived logs share one rotation size.
     // ------------------------------------------------------------------
     internal static class LogWriter
     {
         private static readonly object _lock = new object();
+        private const long MaxBytes = 2097152;
 
         public static void Append(string path, string message)
         {
@@ -299,10 +311,30 @@ namespace Furphy
             {
                 lock (_lock)
                 {
+                    RotateIfNeeded(path);
                     string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
                         "  " + message + Environment.NewLine;
                     File.AppendAllText(path, line, new UTF8Encoding(false));
                 }
+            }
+            catch { }
+        }
+
+        // Best-effort, same contract as the PS side: a rotation failure
+        // (locked file, read-only volume) must never block the append
+        // itself, so this is its own try/catch, called from inside the
+        // caller's lock so a rotate-then-append pair is never split by a
+        // concurrent Append on another thread.
+        private static void RotateIfNeeded(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return;
+                FileInfo info = new FileInfo(path);
+                if (info.Length < MaxBytes) return;
+                string rotatedPath = path + ".1";
+                try { if (File.Exists(rotatedPath)) File.Delete(rotatedPath); } catch { }
+                File.Move(path, rotatedPath);
             }
             catch { }
         }
@@ -893,6 +925,10 @@ namespace Furphy
         private readonly string _settingsPath;
         private readonly string _adFilterListPath;
         private readonly string _hostLogPath;
+        // long-run:minimize-kills-server-no-recovery - resolved the same
+        // way TrayForm's own copy is (HostFiles.FindUpward from exeDir),
+        // used only by CheckServerAndRecoverIfDown below.
+        private readonly string _addonServerScriptPath;
         private readonly int _port;
         private readonly bool _dpiAware;
         private int _effectiveDpi;
@@ -1062,6 +1098,12 @@ namespace Furphy
         private bool _backgroundModeActive;
         private System.Windows.Forms.Timer _backgroundGraceTimer;
 
+        // long-run:minimize-kills-server-no-recovery - guards
+        // CheckServerAndRecoverIfDown so a flurry of un-minimize events
+        // (rapid taskbar clicks, Win+Tab) never queues more than one
+        // ping-and-maybe-restart check at a time.
+        private volatile bool _serverRecoveryInFlight;
+
         // Adversarial-review fix (finding: CF pane stays permanently blank
         // after any background-mode cycle while the CF tab is active):
         // EnterBackgroundMode force-hides _cfWebView regardless of the
@@ -1099,6 +1141,7 @@ namespace Furphy
             string exeDir = HostFiles.ExeDir();
             _settingsPath = HostFiles.FindUpward(exeDir, "settings.json", 4);
             _adFilterListPath = HostFiles.FindUpward(exeDir, "adfilter-hosts.txt", 4);
+            _addonServerScriptPath = HostFiles.FindUpward(exeDir, "addon-server.ps1", 4);
             string logDir = _settingsPath != null ? Path.GetDirectoryName(_settingsPath) : exeDir;
             _hostLogPath = Path.Combine(logDir, "host.log");
 
@@ -2206,7 +2249,57 @@ namespace Furphy
                 if (_backgroundGraceTimer != null) _backgroundGraceTimer.Stop();
                 _isForeground = true;
                 if (_backgroundModeActive) ExitBackgroundMode();
+
+                // long-run:minimize-kills-server-no-recovery - belt-and-
+                // braces recovery for every way addon-server.ps1 can still
+                // be gone by the time the player comes back (a crash, a
+                // manual kill, the PC having slept/hibernated through the
+                // idle-exit window) regardless of what EnterBackgroundMode
+                // did or didn't suspend. See CheckServerAndRecoverIfDown's
+                // own comment.
+                CheckServerAndRecoverIfDown();
             }
+        }
+
+        // long-run:minimize-kills-server-no-recovery - before this fix,
+        // nothing in MainForm ever re-checked or relaunched
+        // addon-server.ps1 on reactivation (only TrayForm.TryStartServer
+        // did, and the tray loop is off by default), so once the server's
+        // own idle-exit fired while this window was minimized, un-
+        // minimizing did nothing and the SPA was stuck on its permanent
+        // "Server not reachable" banner forever. Called from
+        // MainForm_Resize's un-minimize branch: pings the server with a
+        // short timeout off the UI thread (Resize must not block on
+        // network I/O) and, only if that ping fails, relaunches it via the
+        // same ServerLauncher both this class and TrayForm now share.
+        // Deliberately fire-and-forget from the caller's perspective - the
+        // SPA's own reconnect poll (ui/app.js) notices the server come
+        // back on its own once the new process is up; this method's only
+        // job is making sure something actually restarts it.
+        private void CheckServerAndRecoverIfDown()
+        {
+            if (_options.SelftestActive) return; // never touch a live process mid scripted test
+            if (_serverRecoveryInFlight) return;
+            _serverRecoveryInFlight = true;
+
+            string pingUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping";
+            Thread t = new Thread(delegate()
+            {
+                try
+                {
+                    if (!Http.PingAnswers(pingUrl, 2000))
+                    {
+                        LogHost("un-minimize: server not responding, attempting restart");
+                        bool started = ServerLauncher.TryStart(_addonServerScriptPath, _options, LogHost);
+                        LogHost("un-minimize: restart " + (started ? "started" : "failed"));
+                    }
+                }
+                catch (Exception ex) { LogHost("un-minimize server check failed: " + ex.Message); }
+                finally { _serverRecoveryInFlight = false; }
+            });
+            t.IsBackground = true;
+            t.Name = "FurphyServerRecoveryCheck";
+            t.Start();
         }
 
         // Created once; every later call just restarts the countdown
@@ -2261,14 +2354,35 @@ namespace Furphy
             {
                 if (minimized)
                 {
-                    // Nothing to show while minimized either way - full
-                    // suspend, same auto-resume-on-Visible=true story as the
-                    // CF pane above.
+                    // long-run:minimize-kills-server-no-recovery - this
+                    // USED to fully suspend _furphyWebView here, the same
+                    // as the CF pane above. But this is the one webview
+                    // that hosts the SPA's own idle poll (ui/app.js
+                    // scheduleIdlePoll), and a full TrySuspendAsync freezes
+                    // that poll's whole setTimeout chain along with
+                    // everything else in the renderer - with no more
+                    // requests reaching it, addon-server.ps1's idle-exit
+                    // fires (20 min default, 5 min if a WoW client is
+                    // running) purely because the window was minimized,
+                    // and nothing then un-suspends it on its own to notice.
+                    // Nothing to show while minimized either way, so still
+                    // hide it (no rendering cost) - but only trim memory
+                    // (same MemoryUsageTargetLevel.Low treatment as the
+                    // merely-unfocused-but-visible case just below) instead
+                    // of suspending outright, so the idle poll keeps
+                    // running and keeps addon-server.ps1's own
+                    // $Script:LastRequestTime fresh. CheckServerAndRecoverIfDown
+                    // (MainForm_Resize's un-minimize branch) is the
+                    // complementary recovery for every OTHER way the
+                    // server can still go down while minimized.
                     if (_furphyWebView != null && _furphyWebView.Visible)
                     {
                         _furphyWebView.Visible = false;
                     }
-                    SuspendWebViewIfIdle(_furphyWebView);
+                    if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
+                    {
+                        _furphyWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
+                    }
                 }
                 else if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
                 {
@@ -2298,10 +2412,17 @@ namespace Furphy
                 {
                     // Auto-resumes the CoreWebView2 per the SDK's documented
                     // "resumed when it becomes visible" behavior - no
-                    // explicit Resume()/MemoryUsageTargetLevel reset needed.
+                    // explicit Resume() call needed here.
                     _furphyWebView.Visible = true;
                 }
-                else if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
+                // long-run:minimize-kills-server-no-recovery: the minimized
+                // branch above now sets MemoryUsageTargetLevel.Low instead
+                // of suspending (it used to be suspend-only, so this reset
+                // used to only matter for the unfocused-but-visible
+                // branch) - reset unconditionally here so leaving either
+                // background state always restores Normal, not just the
+                // still-visible one.
+                if (_furphyWebView != null && _furphyWebView.CoreWebView2 != null)
                 {
                     _furphyWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
                 }
@@ -2912,6 +3033,18 @@ namespace Furphy
             catch { }
         }
 
+        // failure-modes:webview2-missing-no-fallback - "Addon Manager.vbs"
+        // launches FurphyHost.exe fire-and-forget (waitOnReturn=False) and
+        // can never observe this method's ExitCode=3, so before this fix a
+        // machine with the WebView2 Runtime missing/broken got total
+        // silence: the window flashes open and closes with no error
+        // anywhere. Showing the dialog here - the one place that DOES know
+        // what actually went wrong - guarantees the player sees something
+        // useful regardless of whether the launcher can ever be taught to
+        // read the exit code. Suppressed during --selftest (SelftestActive)
+        // the same way every other user-facing dialog in this file is, so
+        // a scripted run never blocks on a MessageBox with nothing to
+        // click it away.
         private void HandleRuntimeMissing(Exception ex)
         {
             LogHost("WebView2 runtime unavailable: " + (ex == null ? "(unknown)" : ex.Message));
@@ -2919,6 +3052,21 @@ namespace Furphy
             if (_options.SelftestActive && !_selftestMarkerWritten)
             {
                 WriteSelftestMarker(false);
+            }
+            if (!_options.SelftestActive)
+            {
+                try
+                {
+                    MessageBox.Show(
+                        "Furphy Addon Manager needs the Microsoft Edge WebView2 Runtime, " +
+                        "which is missing or broken on this PC.\n\n" +
+                        "Install it from https://go.microsoft.com/fwlink/p/?LinkId=2124703 " +
+                        "and try again.",
+                        "Furphy Addon Manager",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+                catch (Exception mbEx) { LogHost("HandleRuntimeMissing: MessageBox failed: " + mbEx.Message); }
             }
             if (!IsDisposed)
             {
@@ -4454,6 +4602,62 @@ boot();
                 }
             }
             return false;
+        }
+    }
+
+    // long-run:minimize-kills-server-no-recovery - spawns addon-server.ps1
+    // exactly the way Addon Manager.vbs's own launch does. Was previously
+    // TrayForm's own private TryStartServer, used only by the tray's
+    // health-check cycle; pulled out to a shared static so MainForm's
+    // un-minimize recovery check (MainForm.CheckServerAndRecoverIfDown)
+    // can launch the server the same way instead of duplicating - and
+    // risking drifting from - this exact argument/env-var shape.
+    internal static class ServerLauncher
+    {
+        public static bool TryStart(string addonServerScriptPath, HostOptions options, Action<string> log)
+        {
+            if (string.IsNullOrEmpty(addonServerScriptPath))
+            {
+                if (log != null) log("cannot start server: addon-server.ps1 not found");
+                return false;
+            }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "powershell.exe";
+                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + addonServerScriptPath + "\"";
+
+                // Same test-mode forwarding TryStartServer always had (see
+                // its own history: Round-1-fixer verifier finding 1) - keeps
+                // a fake-WoW/selftest host and the addon-server.ps1 child it
+                // spawns agreeing on Test-GameRunning, and skips the child's
+                // unconditional startup Wago growth-snapshot crawl during a
+                // test run.
+                bool testMode = options != null &&
+                    (!string.IsNullOrEmpty(options.WowFakeProcessName) || options.SelftestActive);
+                if (options != null && !string.IsNullOrEmpty(options.WowFakeProcessName))
+                {
+                    arguments += " -WowFakeProcessName \"" + options.WowFakeProcessName + "\"";
+                }
+                psi.Arguments = arguments;
+
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.WorkingDirectory = Path.GetDirectoryName(addonServerScriptPath);
+                if (testMode)
+                {
+                    psi.EnvironmentVariables["FURPHY_TEST_SKIP_WAGO_GROWTH"] = "1";
+                }
+                Process p = Process.Start(psi);
+                if (p != null) { p.Dispose(); }
+                if (log != null) log("started addon-server.ps1");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (log != null) log("failed to start addon-server.ps1: " + ex.Message);
+                return false;
+            }
         }
     }
 
@@ -6238,16 +6442,35 @@ boot();
         }
 
         // "HH:mm" if nextRunAtUtc's local calendar date matches today,
-        // else "tomorrow HH:mm" - the interval is clamped 30..1440
-        // minutes (TraySettingsReader), so the next run is always within
-        // 24h and there is never a third case to handle.
+        // "tomorrow HH:mm" if it's one day out, else a plain "MMM d
+        // HH:mm" date. long-run:tray-next-check-dst-two-day-mislabel:
+        // this used to assume the interval being clamped 30..1440 minutes
+        // (TraySettingsReader) meant the local calendar date could never
+        // be more than one day ahead of today - true for the UTC gap
+        // itself, but NOT for the local-time date that gap lands on. A
+        // DST spring-forward between now and nextRunAtUtc adds a real
+        // wall-clock hour on top of the 24h interval, which can push
+        // nextRunAtUtc's local calendar date two days out even though the
+        // UTC gap never exceeded 24h - e.g. interval=1440 (the max),
+        // "now" at 23:30 local the night of a spring-forward, lands on
+        // 00:30 local the day AFTER tomorrow, not tomorrow. Delegates to
+        // the overload below with the real clock/zone; that overload
+        // takes them as parameters so a test can simulate the DST
+        // transition without touching the system clock.
         private static string FormatNextCheck(DateTime? nextRunAtUtc)
         {
+            return FormatNextCheck(nextRunAtUtc, DateTime.Now, TimeZoneInfo.Local);
+        }
+
+        private static string FormatNextCheck(DateTime? nextRunAtUtc, DateTime nowLocal, TimeZoneInfo tz)
+        {
             if (!nextRunAtUtc.HasValue) return "soon";
-            DateTime local = nextRunAtUtc.Value.ToLocalTime();
+            DateTime local = TimeZoneInfo.ConvertTimeFromUtc(nextRunAtUtc.Value, tz);
             string hhmm = local.ToString("HH:mm", CultureInfo.InvariantCulture);
-            if (local.Date == DateTime.Now.Date) return hhmm;
-            return "tomorrow " + hhmm;
+            int dayDiff = (local.Date - nowLocal.Date).Days;
+            if (dayDiff <= 0) return hhmm;
+            if (dayDiff == 1) return "tomorrow " + hhmm;
+            return local.ToString("MMM d", CultureInfo.InvariantCulture) + " " + hhmm;
         }
 
         // First `cap` names joined with ", ", then " +K more" if more
@@ -6426,59 +6649,16 @@ boot();
         // Starts addon-server.ps1 exactly as Addon Manager.vbs does, but
         // from C# with no window flash (UseShellExecute=false,
         // CreateNoWindow=true) instead of the .vbs's WindowStyle-hidden
-        // sh.Run.
+        // sh.Run. long-run:minimize-kills-server-no-recovery: the actual
+        // spawn logic now lives in the shared ServerLauncher static (so
+        // MainForm's own recovery check launches the child identically);
+        // this stays a thin wrapper so every existing call site here keeps
+        // reading "TryStartServer()" and every log line keeps its "[tray] "
+        // prefix unchanged.
         private bool TryStartServer()
         {
-            if (string.IsNullOrEmpty(_addonServerScriptPath))
-            {
-                LogHost("[tray] cannot start server: addon-server.ps1 not found");
-                return false;
-            }
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "powershell.exe";
-                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + _addonServerScriptPath + "\"";
-
-                // Round-1-fixer (verifier finding 1): forward this host's
-                // own test-only -WowFakeProcessName override to the
-                // addon-server.ps1 child it spawns, so the two processes'
-                // Test-GameRunning agree instead of the server's own probe
-                // being blind to the host's fake-WoW override. Both
-                // -WowFakeProcessName here and --wow-fake/SelftestActive
-                // above are documented as never set by a real launch, so
-                // their mere presence also doubles as a "this is a test
-                // run" signal - used below to skip the Wago growth-snapshot
-                // crawl the child would otherwise run unconditionally at
-                // startup (addon-server.ps1's FURPHY_TEST_SKIP_WAGO_GROWTH),
-                // which was blocking RunCycle's ping-wait deadline during
-                // host-layer tests that have zero interest in Wago
-                // (tests\host\Host.Tests.ps1:450, 100% reproducible before
-                // this fix).
-                bool testMode = !string.IsNullOrEmpty(_options.WowFakeProcessName) || _options.SelftestActive;
-                if (!string.IsNullOrEmpty(_options.WowFakeProcessName))
-                {
-                    arguments += " -WowFakeProcessName \"" + _options.WowFakeProcessName + "\"";
-                }
-                psi.Arguments = arguments;
-
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.WorkingDirectory = Path.GetDirectoryName(_addonServerScriptPath);
-                if (testMode)
-                {
-                    psi.EnvironmentVariables["FURPHY_TEST_SKIP_WAGO_GROWTH"] = "1";
-                }
-                Process p = Process.Start(psi);
-                if (p != null) { p.Dispose(); }
-                LogHost("[tray] started addon-server.ps1");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LogHost("[tray] failed to start addon-server.ps1: " + ex.Message);
-                return false;
-            }
+            return ServerLauncher.TryStart(_addonServerScriptPath, _options,
+                delegate(string msg) { LogHost("[tray] " + msg); });
         }
 
         // -------------------------------------------------- tooltip/icon/state

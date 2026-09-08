@@ -1025,3 +1025,84 @@ Describe 'Wago browse: CSRF (GET is exempt)' {
         Stop-WagoStubServer -Stub $stub
     }
 }
+
+# =====================================================================
+# 12) Unrecognized Classic era refuses instead of silently falling back
+#     to Retail (multi-client:wago-browse-unknown-classic-era-silently-
+#     shows-retail)
+# =====================================================================
+
+Describe 'Wago browse: unrecognized Classic client version refuses instead of silently showing Retail' {
+    <#
+      Before this round's fix, an EraKey='unknown' Classic client (a
+      future expansion Resolve-ClassicProgressionTypeId's table doesn't
+      cover yet) silently substituted 'retail' for the unresolved
+      game_version - the exact class of bug addon-sync.ps1's own
+      Sync-SingleAddon/Sync-SingleWagoAddon already hard-fail on for the
+      identical sentinel. A below-average-tech player on that client
+      would see real Retail-track Wago addons in their Classic search
+      results with zero indication anything was wrong.
+    #>
+    if (-not $Script:CapCore) {
+        It 'a Classic .build.info Interface outside every known progression range returns a clear error, never a silent Retail listing' {
+            Write-PendingSkip 'needs SERVER-1 (WagoBaseUrl seam) and SERVER-2 (Handle-WagoBrowse / /api/wago/browse route)'
+        }
+        return
+    }
+
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'wago-browse-unknown-era'
+    Block-WagoGrowthCrawl -Root $root
+    $stub = $null
+    $server = $null
+    try {
+        # ConvertTo-InterfaceNumber: "6.6.0.12345" -> 60600 - outside every
+        # row of Resolve-ClassicProgressionTypeId's table (mists tops out at
+        # 50599, retail starts at 120000), matching the finding's own live
+        # repro exactly. Plain literal string replace (not regex) - the
+        # fixture's own wow_classic row Version ("5.5.4.61180") is a unique
+        # literal in this file, so this can't accidentally touch the
+        # separate classic_era row.
+        $buildInfoPath = Join-Path $wowRoot '.build.info'
+        $buildInfoText = Get-Content -LiteralPath $buildInfoPath -Raw
+        if (-not $buildInfoText.Contains('|5.5.4.61180||wow_classic')) {
+            throw "fixture .build.info no longer contains the expected wow_classic row - update this test's literal Version match"
+        }
+        $buildInfoText = $buildInfoText.Replace('|5.5.4.61180||wow_classic', '|6.6.0.12345||wow_classic')
+        Set-Content -LiteralPath $buildInfoPath -Value $buildInfoText -Encoding UTF8 -NoNewline
+
+        # Only game_version=retail is mapped at the stub - anything else
+        # (including a genuine bug that still forwards a request) falls to
+        # the empty default, so a regression back to the old silent-
+        # fallback behavior would still surface as an assertion failure
+        # below (real items back on a listing that should be an error),
+        # not a false pass.
+        $stub = Start-WagoStubServer -Routes @(
+            @{ gameVersion = 'retail'; page = '1'; file = 'default-retail-page1.json' }
+        ) -DefaultFile 'empty-retail.json'
+
+        $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        try { $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName)) }
+        finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+
+        It 'GET /api/state confirms the unresolved Interface reached the server' {
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/state?flavour=classic'
+            $r.Ok | Should Be $true
+            $r.Body.clientInterface | Should Be 60600
+        }
+
+        It 'GET /api/wago/browse?flavour=classic returns a clear error (not 200 with items), and never sends game_version=retail for this client' {
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/wago/browse?flavour=classic'
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 422
+            ([string]::IsNullOrEmpty($r.Body.error)) | Should Be $false
+
+            $reqs = Get-WagoStubRequests -Stub $stub
+            @($reqs | Where-Object { $_.query.game_version -eq 'retail' }).Count | Should Be 0
+            @($reqs).Count | Should Be 0
+        }
+    } finally {
+        Stop-TestServer -Server $server
+        Stop-WagoStubServer -Stub $stub
+    }
+}

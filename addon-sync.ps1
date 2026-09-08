@@ -436,9 +436,12 @@ function Write-ProgressStep {
       see UX-SPEC.md section 4.4, not implemented yet in this pass).
       -FailPhase is an additive field (not in the original UX-SPEC.md
       example payload - see that doc's CS1 note) carrying which phase a
-      failure happened during (checking/downloading/installing), so a
-      caller can map it to a plain-language reason without parsing
-      exception text.
+      failure happened during (checking/checking-network/downloading/
+      installing - checking-network added per
+      failure-modes:cf-outage-misdiagnosed-as-incompatible, distinguishing
+      a CurseForge/Wago fetch that threw from a genuine "no compatible
+      file"), so a caller can map it to a plain-language reason without
+      parsing exception text.
 
       checked/updated/failed/upToDate/updatesFound (round 28) are the
       running tallies from $script:ProgressTallies - ALWAYS included
@@ -1187,8 +1190,12 @@ function Install-AddonPackage {
       Extracts a downloaded zip, validates it, swaps its top-level folders
       into the AddOns directory, and removes folders that belonged to the
       previous version of this addon but are not part of the new package.
-      Returns a List[object] of the folder names actually present in
-      AddOns afterwards.
+      Returns a List[object] of the folder names actually installed - every
+      candidate folder, or none at all: THROWS if even one candidate folder
+      fails to swap (locked file, ACL-denied, etc. - see
+      failure-modes:silent-fake-success-on-locked-addons-folder), so a
+      caller's ordinary exception handling is always what decides the
+      outcome and a partial/failed swap can never be mistaken for success.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$ZipPath,
@@ -1239,21 +1246,48 @@ function Install-AddonPackage {
         throw "No valid addon folders (with a .toc file) found in package for project $ProjectId"
     }
 
+    # failure-modes:silent-fake-success-on-locked-addons-folder: Test-Path on
+    # $destPath used to stand in for "did the swap succeed", but it cannot
+    # tell "the OLD folder survived because Remove-Item failed (locked file,
+    # ACL-denied)" apart from "the NEW folder was placed" - both leave
+    # something sitting at $destPath. A per-folder $swapSucceeded flag,
+    # set true only immediately after a successful Move-Item, is the actual
+    # ground truth and replaces the Test-Path check entirely.
     $installedFolders = New-Object 'System.Collections.Generic.List[object]'
+    $failedFolders = New-Object 'System.Collections.Generic.List[object]'
     foreach ($folderName in $candidateFolders) {
         $sourcePath = Join-Path -Path $extractDir -ChildPath $folderName
         $destPath = Join-Path -Path $AddonsPath -ChildPath $folderName
+        $swapSucceeded = $false
         try {
             if (Test-Path -LiteralPath $destPath) {
                 Remove-Item -LiteralPath $destPath -Recurse -Force
             }
             Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
+            $swapSucceeded = $true
         } catch {
             Write-Log -Level 'ERROR' -Message "Failed to install folder '$folderName' for project $ProjectId : $($_.Exception.Message)"
         }
-        if (Test-Path -LiteralPath $destPath) {
+        if ($swapSucceeded) {
             $installedFolders.Add($folderName)
+        } else {
+            $failedFolders.Add($folderName)
         }
+    }
+
+    if ($failedFolders.Count -gt 0) {
+        # Never report even a PARTIAL swap as success: some callers only
+        # checked for Count -eq 0 before this fix, which missed a package
+        # with 2+ top-level folders where only some failed to swap. Throwing
+        # here (rather than returning the partial list) means every caller's
+        # existing try/catch or outer exception handling treats this
+        # uniformly as a failed install/update - the record's
+        # fileId/version/fileName never get overwritten to claim a version
+        # that isn't actually fully on disk. Deliberately skips the stale-
+        # folder cleanup below too: with the swap incomplete, deciding which
+        # of $PreviousFolders is genuinely "no longer part of this project"
+        # vs. "failed to swap and is still needed" can't be done safely here.
+        throw "Failed to install $($failedFolders.Count) of $($candidateFolders.Count) folder(s) for project ${ProjectId}: $($failedFolders -join ', ')"
     }
 
     foreach ($oldFolder in $PreviousFolders) {
@@ -1816,6 +1850,13 @@ function Invoke-RollbackForRecord {
     $Record.previousVersion = $replacedVersion
     $Record.previousFileName = $replacedFileName
     $Record.pinnedFileId = $prevFileId
+    # novice:NOVICE-2: a rollback genuinely reinstalls a different file, so
+    # installedAt must reflect THIS action, same as Sync-SingleAddon/
+    # Sync-SingleWagoAddon already do on every real install/update - without
+    # this the addon detail drawer's "Installed X ago" kept showing the
+    # time of the update that was just rolled back FROM, not the rollback
+    # that just happened.
+    $Record.installedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $Record.folders = $newFolders.ToArray()
 
     # E3 (dependencies): the restored package's folders may declare a
@@ -2760,15 +2801,24 @@ function Initialize-AddonRecordFields {
       Ensures a record (possibly loaded from an older addons.json that
       predates author/ignoreUpdates/pinnedFileId/releaseType/previousFileId/
       previousVersion/previousFileName/requiredDeps/optionalDeps/source/
-      wagoId/slug/curseId) has every one of those properties present, adding
-      whichever are missing with their null/false/empty-array/'curseforge'
-      default and leaving any existing value untouched. PSCustomObject
-      dot-assignment throws on a property that does not already exist, so
-      every record must be normalized before any code path tries to set
-      these fields. source defaults to 'curseforge' (not $null) - a record
-      with no source field at all necessarily predates E12, and every record
-      that predates E12 is a CurseForge one (Wago did not exist as a source
-      before this expansion).
+      wagoId/slug/curseId/fileName/installedAt) has every one of those
+      properties present, adding whichever are missing with their
+      null/false/empty-array/'curseforge' default and leaving any existing
+      value untouched. PSCustomObject dot-assignment throws on a property
+      that does not already exist, so every record must be normalized
+      before any code path tries to set these fields. source defaults to
+      'curseforge' (not $null) - a record with no source field at all
+      necessarily predates E12, and every record that predates E12 is a
+      CurseForge one (Wago did not exist as a source before this
+      expansion). failure-modes:missing-record-fields-crash-loop:
+      fileName/installedAt are backfilled here too (both are among the
+      OLDEST fields New-AddonRecord sets, so a record missing either -
+      hand-edited, partially restored, migrated from outside this app -
+      used to hit a hard property-not-found exception the moment
+      Sync-SingleAddon/Sync-SingleWagoAddon's unconditional
+      $Record.fileName = .../$Record.installedAt = ... ran, and would hit
+      it again identically on every retry since the crash happened before
+      either field was ever set).
     #>
     param(
         [Parameter(Mandatory = $true)]$Record
@@ -2822,6 +2872,15 @@ function Initialize-AddonRecordFields {
     }
     if (-not (Get-Member -InputObject $Record -Name 'latestFileDate' -MemberType NoteProperty)) {
         Add-Member -InputObject $Record -NotePropertyName 'latestFileDate' -NotePropertyValue $null
+    }
+    # failure-modes:missing-record-fields-crash-loop: see the doc comment
+    # above - these two are otherwise-unconditionally dot-assigned by
+    # Sync-SingleAddon/Sync-SingleWagoAddon on every real install/update.
+    if (-not (Get-Member -InputObject $Record -Name 'fileName' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'fileName' -NotePropertyValue $null
+    }
+    if (-not (Get-Member -InputObject $Record -Name 'installedAt' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'installedAt' -NotePropertyValue $null
     }
 }
 
@@ -3241,14 +3300,38 @@ function Sync-SingleAddon {
                 Write-Log -Level 'INFO' -Message "Pinned: project $projectId ($displayLabel) already on fileId $pinTarget"
                 return [PSCustomObject]@{ Status = 'Pinned'; Name = $displayLabel; Version = $Record.version }
             }
-            $selected = Get-CfFileById -ProjectId $projectId -FileId $pinTarget
+            # failure-modes:cf-outage-misdiagnosed-as-incompatible: a
+            # network/parse failure here (CurseForge 503, a bot-challenge
+            # page that isn't JSON, etc.) must never be reported the same
+            # way as a genuine "no such file id" - the former is a transient
+            # hiccup worth retrying, the latter usually means the pin is
+            # stale/wrong. Stamp a distinct phase before re-throwing so the
+            # outer catch's FailPhase tells them apart; the "not found"
+            # return just below (no exception, $selected legitimately $null)
+            # is untouched and keeps FailPhase='checking'.
+            try {
+                $selected = Get-CfFileById -ProjectId $projectId -FileId $pinTarget
+            } catch {
+                $currentPhase = 'checking-network'
+                throw
+            }
             if (-not $selected) {
                 Write-Log -Level 'WARN' -Message "File id $pinTarget not found for project $projectId ($displayLabel)"
                 return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
             }
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
-            $files = Get-CfFiles -ProjectId $projectId -MaxReleaseType $maxReleaseType
+            # Same failure-modes:cf-outage-misdiagnosed-as-incompatible
+            # reasoning as the pin branch above: only the fetch itself is
+            # wrapped, so Select-CfFile finding nothing in a successfully
+            # fetched list (a genuine incompatibility) still falls through
+            # to the unchanged 'checking'-phase Skipped return below.
+            try {
+                $files = Get-CfFiles -ProjectId $projectId -MaxReleaseType $maxReleaseType
+            } catch {
+                $currentPhase = 'checking-network'
+                throw
+            }
             $selected = Select-CfFile -Files $files -MaxReleaseType $maxReleaseType -TypeId $cfMapping.TypeId -VersionPrefix $cfMapping.VersionPrefix
 
             if (-not $selected) {
@@ -3535,14 +3618,33 @@ function Sync-SingleWagoAddon {
                 Write-Log -Level 'INFO' -Message "Pinned: wago:$slug ($displayLabel) already on release $pinTarget"
                 return [PSCustomObject]@{ Status = 'Pinned'; Name = $displayLabel; Version = $Record.version }
             }
-            $selected = Get-WagoReleaseById -Slug $slug -ReleaseId $pinTarget
+            # failure-modes:cf-outage-misdiagnosed-as-incompatible: see
+            # Sync-SingleAddon's identical pin-branch wrap above - only the
+            # fetch itself is stamped 'checking-network' before re-throwing;
+            # a genuine "release id not found" (no exception, $selected
+            # legitimately $null) below is untouched.
+            try {
+                $selected = Get-WagoReleaseById -Slug $slug -ReleaseId $pinTarget
+            } catch {
+                $currentPhase = 'checking-network'
+                throw
+            }
             if (-not $selected) {
                 Write-Log -Level 'WARN' -Message "Release id $pinTarget not found for wago:$slug ($displayLabel)"
                 return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
             }
         } else {
             $maxReleaseType = Get-EffectiveMaxReleaseType -Record $Record -DefaultMax $DefaultMaxReleaseType
-            $releases = Get-WagoAllReleases -Slug $slug
+            # Same reasoning as Sync-SingleAddon's non-pin branch above: only
+            # the fetch is wrapped, so Select-WagoRelease finding nothing in
+            # a successfully fetched list (genuine incompatibility) still
+            # falls through to the unchanged 'checking'-phase Skipped return.
+            try {
+                $releases = Get-WagoAllReleases -Slug $slug
+            } catch {
+                $currentPhase = 'checking-network'
+                throw
+            }
             $selected = Select-WagoRelease -Releases $releases -MaxReleaseType $maxReleaseType -WagoField $cfMapping.WagoField
 
             if (-not $selected) {

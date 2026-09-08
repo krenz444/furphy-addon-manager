@@ -511,6 +511,100 @@ Describe 'POST /api/uninstall - 409 while a job is genuinely still running (busy
     }
 }
 
+Describe 'POST /api/uninstall - a stringified "false" for dryRun is not silently coerced to a no-op dry run (security:security-server-uninstall-bool-coercion-lies)' {
+    <#
+      Before this round's fix, Handle-Uninstall read its four boolean body
+      fields with a bare [bool] cast, which treats ANY non-empty string as
+      truthy - a JSON STRING "false" (an easy real-world mistake for any
+      client that stringifies booleans, or manual testing) silently became
+      $true, so a caller whose literal, expressed intent was a REAL
+      uninstall instead got routed into the dry-run branch: 200
+      {"ok":true,"dryRun":true}, and the server just kept running with
+      nothing actually uninstalled. quiet/noShortcuts/noProtocol are sent
+      as real booleans here (not exercised as strings) specifically to
+      keep this an automatable, unattended run: quiet:"false" would (once
+      correctly coerced) suppress the -Quiet flag and pop a real blocking
+      WinForms MessageBox with nothing to click it - the exact scenario
+      the finding itself flags as too risky to spawn live, and unnecessary
+      here anyway since ConvertTo-SettingsBool's own coercion logic is
+      already covered field-agnostically by tests\unit\
+      Server.Settings.Tests.ps1's "ConvertTo-SettingsBool" Describe; this
+      test's job is only to prove Handle-Uninstall actually calls that
+      helper now, for all four fields alike (they were fixed in one
+      identical edit) - dryRun is the one field whose coercion is both
+      safe to prove end-to-end AND was the finding's own live repro.
+    #>
+
+    It 'dryRun:"false" (a string) proceeds with the REAL uninstall - never returns dryRun:true, and the scratch app is actually removed' {
+
+        # ---- live-safety snapshot BEFORE ----
+        $runBefore = Get-ProductionRunValue
+        $appsBefore = Get-ProductionInstalledAppsSnapshot
+        $trayPidsBefore = Get-LiveFurphyTrayPids
+        Write-Host "  [live-safety BEFORE] Run value present: $([bool]$runBefore) | Installed-Apps key present: $([bool]$appsBefore) | live tray pids: $($trayPidsBefore -join ',')"
+
+        $installed = New-ScratchInstall
+        $installed.ExitCode | Should Be 0
+        (Test-Path -LiteralPath $installed.AppDest) | Should Be $true
+
+        $appsKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager.Test'
+        (Test-Path -LiteralPath $appsKeyPath) | Should Be $true
+
+        $server = $null
+        try {
+            $server = Start-TestServer -Root $installed.AppDest -Port 47899 -ScriptPath (Join-Path $installed.AppDest 'addon-server.ps1')
+
+            # dryRun sent as the STRING "false" - the exact repro shape.
+            # quiet/noShortcuts/noProtocol as real booleans (see the
+            # Describe's own header comment for why).
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/uninstall' -Body '{"dryRun":"false","quiet":true,"noShortcuts":true,"noProtocol":true}'
+            $r.Ok | Should Be $true
+            $r.StatusCode | Should Be 200
+            $r.Body.ok | Should Be $true
+            # The whole point of this test: a broken coercion here returns
+            # 200 {"ok":true,"dryRun":true} and stops there (Handle-
+            # Uninstall's dry-run branch, addon-server.ps1's own
+            # `if ($dryRun) { Send-Json ... @{ ok = $true; dryRun = $true }; return }`).
+            # The REAL-uninstall success response this must take instead
+            # never includes a dryRun field at all (`@{ ok = $true }` only)
+            # - so "dryRun is present and true" is exactly the failure
+            # this test exists to catch; its absence (falsy, not merely
+            # equal to $false) is what proves the real path ran.
+            ([bool]$r.Body.dryRun) | Should Be $false
+
+            $serverDown = Wait-ForCondition -TimeoutSec 20 -Condition { -not (Test-PortOpen -Port 47899 -TimeoutMs 300) }
+            $serverDown | Should Be $true
+
+            $cleaned = Wait-ForCondition -TimeoutSec 30 -Condition {
+                -not (Test-Path -LiteralPath (Join-Path $installed.AppDest 'install.ps1'))
+            }
+            $cleaned | Should Be $true
+            Start-Sleep -Milliseconds 1500
+
+            (Test-Path -LiteralPath (Join-Path $installed.AppDest 'addon-server.ps1')) | Should Be $false
+            (Test-Path -LiteralPath $appsKeyPath) | Should Be $false
+        } finally {
+            Stop-TestServer -Server $server
+            if ($installed.WowRoot -and (Test-Path -LiteralPath $installed.WowRoot)) {
+                Remove-Item -LiteralPath $installed.WowRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $appsKeyPath) {
+                Remove-Item -LiteralPath $appsKeyPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # ---- live-safety snapshot AFTER - must be byte-identical to BEFORE ----
+        $runAfter = Get-ProductionRunValue
+        $appsAfter = Get-ProductionInstalledAppsSnapshot
+        $trayPidsAfter = Get-LiveFurphyTrayPids
+        Write-Host "  [live-safety AFTER]  Run value present: $([bool]$runAfter) | Installed-Apps key present: $([bool]$appsAfter) | live tray pids: $($trayPidsAfter -join ',')"
+
+        $runAfter | Should Be $runBefore
+        (ConvertTo-Json -InputObject $appsAfter -Compress) | Should Be (ConvertTo-Json -InputObject $appsBefore -Compress)
+        (@($trayPidsAfter) -join ',') | Should Be (@($trayPidsBefore) -join ',')
+    }
+}
+
 Describe 'POST /api/uninstall - CSRF: a request with no same-origin Origin/Referer is refused before Handle-Uninstall ever runs' {
 
     It 'is 403, and the scratch app is left completely untouched' {

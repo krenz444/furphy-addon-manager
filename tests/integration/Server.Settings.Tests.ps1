@@ -76,6 +76,43 @@ Describe 'GET/PUT /api/settings' {
             $r.Body.error | Should Be 'port must be a number'
         }
 
+        It 'PUT port=999999 (out of the 1-65535 TCP range) is a clean 400, and settings.json on disk is left unchanged (security:security-server-settings-port-no-range-check-bricks-launch)' {
+            # Before this fix this returned 200 and wrote the out-of-range
+            # value straight to settings.json - harmless-looking in the
+            # response (Get-SettingsView always echoes the server's own
+            # LIVE port, never the stored value), but catastrophic on the
+            # NEXT real launch: "Addon Manager.vbs" never passes -Port at
+            # all, so it relies entirely on this stored value, and
+            # $listener.Start() throws on an out-of-range port - FATAL, no
+            # listener on any port, no on-screen error of any kind.
+            $before = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
+
+            $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ port = 999999 }
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 400
+            $r.Body.error | Should Be 'port must be 1-65535'
+
+            $after = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
+            $after.port | Should Be $before.port
+        }
+
+        It 'PUT port=0 is also a clean 400 (same 1-65535 range check, the other edge)' {
+            $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ port = 0 }
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 400
+            $r.Body.error | Should Be 'port must be 1-65535'
+        }
+
+        It 'PUT a genuinely valid port round-trips through settings.json on disk (the live listener itself is never re-bound by this test)' {
+            $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ port = 47905 }
+            $r.Ok | Should Be $true
+            $onDisk = Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json
+            $onDisk.port | Should Be 47905
+            # restore, so a later It in this Describe (or a future run
+            # reusing this pattern) never depends on ordering here
+            Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ port = 47899 } | Out-Null
+        }
+
         It 'PUT backgroundIntervalMinutes clamps below 30 up to 30' {
             $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ backgroundIntervalMinutes = 5 }
             $r.Ok | Should Be $true
@@ -145,6 +182,52 @@ Describe 'GET/PUT /api/settings' {
             $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body ''
             $r.Ok | Should Be $false
             $r.StatusCode | Should Be 400
+        }
+    } finally {
+        Stop-TestServer -Server $server
+    }
+}
+
+Describe 'GET /api/settings - corrupt settings.json self-repairs, end to end (failure-modes:settingsjson-corruption-silent-reset)' {
+    $root = New-TempRoot -Name 'settings-corrupt'
+    $server = $null
+    try {
+        $server = Start-TestServer -Root $root -Port 47899
+        $settingsPath = Join-Path $root 'settings.json'
+
+        # A real preference the user explicitly chose, different from the
+        # default, so a silent revert-to-defaults is actually observable.
+        Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ adFilter = $false } | Out-Null
+        ((Invoke-Api -Port 47899 -Method Get -Path '/api/settings').Body.adFilter) | Should Be $false
+
+        Set-Content -LiteralPath $settingsPath -Value '{"adFilter": false, garbage!!!' -Encoding UTF8 -NoNewline
+
+        It 'the first GET after corruption returns defaults (not a 500) and repairs the file on disk' {
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/settings'
+            $r.Ok | Should Be $true
+            $r.Body.adFilter | Should Be $true # back to the default - the false choice was lost, but the app never crashes
+
+            $onDiskRaw = Get-Content -LiteralPath $settingsPath -Raw
+            # (parsed directly, not inside a "{...} | Should Not Throw"
+            # scriptblock - Pester 3 runs that scriptblock in its own child
+            # scope, so an assignment inside it never reaches $onDisk out
+            # here; a still-malformed file would fail this It via the
+            # uncaught ConvertFrom-Json exception instead, which is fine)
+            $onDisk = $onDiskRaw | ConvertFrom-Json -ErrorAction Stop
+            $onDisk.adFilter | Should Be $true
+        }
+
+        It 'a second GET no longer needs to repair anything (the file already parses) and server.log stops logging a fresh parse failure' {
+            $logPathBefore = Get-LastLogLines -Path (Join-Path $root 'server.log') -Lines 5000
+            $countBefore = (@($logPathBefore -split "`n") | Where-Object { $_ -match 'Failed to read settings.json' }).Count
+
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/settings'
+            $r.Ok | Should Be $true
+            $r.Body.adFilter | Should Be $true
+
+            $logPathAfter = Get-LastLogLines -Path (Join-Path $root 'server.log') -Lines 5000
+            $countAfter = (@($logPathAfter -split "`n") | Where-Object { $_ -match 'Failed to read settings.json' }).Count
+            $countAfter | Should Be $countBefore
         }
     } finally {
         Stop-TestServer -Server $server

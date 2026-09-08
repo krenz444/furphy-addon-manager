@@ -584,6 +584,23 @@ already exists at L4302-4304; `sort=gaining` reads the SAME
 `$Script:CurrentFlavour`-derived `WagoField` to pick which
 `wago-growth-<gv>.json` file to read.
 
+(Round 38, 2026-09-08: a QA pass found the original build of this
+handler left one case of that "resolve through Get-CfFlavourMapping"
+rule unguarded - when a Classic client's Interface falls outside every
+row of `Resolve-ClassicProgressionTypeId`'s table (a future Classic
+expansion Furphy doesn't cover yet), `WagoField` comes back `$null` with
+`EraKey='unknown'`, and the handler fell back to `game_version=retail`
+with no indication anything was wrong, showing a Classic player Retail's
+own catalog. This directly contradicted the hard-fail convention
+`addon-sync.ps1`'s `Sync-SingleAddon`/`Sync-SingleWagoAddon` already
+enforce for the identical `EraKey -eq 'unknown'` case on the
+tracked-addon sync paths - the browse/search endpoint, added later, was
+never given the equivalent guard. Fixed: `Handle-WagoBrowse` (and every
+sibling `Handle-Wago*` handler that resolves `game_version` the same
+way) now checks for `EraKey -eq 'unknown'` and returns a clear
+client-facing error instead of ever falling through to the
+`game_version=retail` line - see CHANGELOG.md's Round 38 entry.)
+
 --------------------------------------------------------------------------------
 3.7 Prerequisite: WagoBaseUrl test seam
 --------------------------------------------------------------------------------

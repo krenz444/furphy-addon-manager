@@ -68,7 +68,15 @@ param(
     # a second, narrower way to say the same thing for a caller that wants
     # console/wizard behavior untouched but still must not show a dialog
     # (none today, but the two are intentionally independent switches).
-    [switch]$Quiet
+    [switch]$Quiet,
+    # upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons fix: bypasses the
+    # downgrade guard in Invoke-FurphyInstallSteps (an OLDER installer run
+    # over a NEWER on-disk install is refused by default, since the old
+    # code cannot see flavours\<id>\addons.json and reports zero tracked
+    # addons even though nothing was actually deleted). Never needed for a
+    # normal install/upgrade/repair - only to deliberately install an
+    # older release on purpose.
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -159,6 +167,68 @@ function Test-LooksLikeScratchRun {
     if ($p -match '\\scratch(\\|$)') { return $true }
     if ($p -match '\\fixtures\\wowroot(\\|$)') { return $true }
     return $false
+}
+
+# Security fix (security:security-install-uninstall-wowpath-arg-splitting):
+# ported verbatim from addon-server.ps1's own ConvertTo-SafeProcessArg
+# (that file's Round 20 adversarial bug pass) - wraps a single command-line
+# argument in double quotes using CommandLineToArgvW-compatible backslash/
+# quote escaping, so a value containing a literal space (the DEFAULT
+# Windows WoW install path, "C:\Program Files (x86)\World of
+# Warcraft\_retail_", included) can never be re-split into extra argv
+# tokens by the relaunched child. Windows PowerShell 5.1's Start-Process
+# -ArgumentList joins array elements with a bare, unquoted space before
+# CreateProcess sees them - every element handed to a $relaunchArgs-style
+# list in this file must be wrapped with this, not just the ones that used
+# to be hand-quoted.
+function ConvertTo-SafeProcessArg {
+    param([string]$Value)
+
+    if ($null -eq $Value) { $Value = '' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $backslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $backslashes++
+        } elseif ($ch -eq '"') {
+            if ($backslashes -gt 0) { [void]$sb.Append('\', ($backslashes * 2 + 1)) } else { [void]$sb.Append('\') }
+            [void]$sb.Append('"')
+            $backslashes = 0
+        } else {
+            if ($backslashes -gt 0) { [void]$sb.Append('\', $backslashes); $backslashes = 0 }
+            [void]$sb.Append($ch)
+        }
+    }
+    if ($backslashes -gt 0) { [void]$sb.Append('\', ($backslashes * 2)) }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+# novice:NOVICE-3 fix: true ONLY when -Path sits directly in the current
+# user's %TEMP% AND its filename matches the disposable
+# FurphyUninstall-<hex>.ps1 shape every real uninstall trigger copies this
+# script to before launching it (the Settings > Uninstall button via
+# addon-server.ps1's Handle-Uninstall, the Windows Apps & Features
+# UninstallString/QuietUninstallString fallback in
+# Get-InstallUninstallString below, this file's own relaunch-safety-net
+# further down, and the tray's identical fallback in
+# host\FurphyHost.cs's TryTrayUninstall). Used ONLY to gate the trailing
+# self-delete step at the end of the -Uninstall block, so a developer
+# running install.ps1 -Uninstall directly out of the source/app folder
+# during testing is never affected - any other directory, or any other
+# filename, always returns $false.
+function Test-IsTempUninstallScriptCopy {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    try {
+        $tempDirNorm = [System.IO.Path]::GetTempPath().TrimEnd('\')
+        $dirNorm = (Split-Path -Path $Path -Parent).TrimEnd('\')
+        $name = Split-Path -Path $Path -Leaf
+        return (($dirNorm -ieq $tempDirNorm) -and ($name -match '^FurphyUninstall-[0-9a-fA-F]+\.ps1$'))
+    } catch {
+        return $false
+    }
 }
 
 # Round 32 (DISTRIBUTION-SPEC.md section 5.1): the Start-with-Windows value
@@ -266,7 +336,24 @@ function Get-InstallUninstallString {
     $installPs1Esc = $installPs1.Replace("'", "''")
     $wowRootEsc = $WowRootPath.Replace("'", "''")
 
-    $inner = "try { Invoke-RestMethod -Method Post -Uri '$apiUrl' -TimeoutSec 2 -Headers @{Origin='$originUrl'} } catch { `$t = Join-Path `$env:TEMP ('FurphyUninstall-' + [guid]::NewGuid() + '.ps1'); Copy-Item '$installPs1Esc' `$t; Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',`$t,'-WowPath','$wowRootEsc','-Uninstall' }"
+    # Security fix (security:security-install-uninstall-wowpath-arg-
+    # splitting): the fallback's Start-Process used to build -ArgumentList
+    # as a comma-separated PowerShell array literal
+    # ('-NoProfile','-ExecutionPolicy',...,'-WowPath','$wowRootEsc',...) -
+    # Windows PowerShell 5.1 joins array elements with a bare, unquoted
+    # space before CreateProcess sees them, so a WoW root containing a
+    # space (the DEFAULT Windows install path, "C:\Program Files
+    # (x86)\World of Warcraft\_retail_") got split into multiple argv
+    # tokens by the relaunched child, truncating -WowPath. Fixed by having
+    # the INNER script (the one that actually runs later, when this
+    # returned command line is executed) build ONE pre-quoted argument
+    # STRING instead, mirroring host\FurphyHost.cs's RunUninstallSequence
+    # which already gets this right for the identical fallback. The inner
+    # script builds its double quotes via [char]34 at ITS OWN runtime
+    # (never as a literal " character here) so this file's own single-
+    # quoted-only convention for the outer -Command "..." wrapper still
+    # holds - no new escaping is needed against that outer double-quote.
+    $inner = "try { Invoke-RestMethod -Method Post -Uri '$apiUrl' -TimeoutSec 2 -Headers @{Origin='$originUrl'} } catch { `$t = Join-Path `$env:TEMP ('FurphyUninstall-' + [guid]::NewGuid() + '.ps1'); Copy-Item '$installPs1Esc' `$t; `$q = [char]34; `$fArgs = '-NoProfile -ExecutionPolicy Bypass -File ' + `$q + `$t + `$q + ' -WowPath ' + `$q + '$wowRootEsc' + `$q + ' -Uninstall'; Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `$fArgs }"
 
     return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + $inner + '"'
 }
@@ -936,13 +1023,22 @@ if ($Uninstall) {
         $tempCopy = Join-Path -Path $env:TEMP -ChildPath ('FurphyUninstall-' + [guid]::NewGuid().ToString('N') + '.ps1')
         try {
             Copy-Item -LiteralPath (Join-Path -Path $SourceRoot -ChildPath 'install.ps1') -Destination $tempCopy -Force
+            # Security fix (security:security-install-uninstall-wowpath-arg-
+            # splitting): every element wrapped in ConvertTo-SafeProcessArg
+            # before being added, not just the ones that used to look like
+            # they needed it - Start-Process -ArgumentList joins array
+            # elements with a bare, unquoted space under PS 5.1, so an
+            # unquoted $wowRoot/$tempCopy containing a space (the DEFAULT
+            # Windows WoW install path, "C:\Program Files (x86)\World of
+            # Warcraft\_retail_") used to get split into extra argv tokens
+            # by the relaunched child, truncating -WowPath.
             $relaunchArgs = New-Object 'System.Collections.Generic.List[string]'
-            $relaunchArgs.Add('-NoProfile'); $relaunchArgs.Add('-ExecutionPolicy'); $relaunchArgs.Add('Bypass')
-            $relaunchArgs.Add('-File'); $relaunchArgs.Add($tempCopy)
-            $relaunchArgs.Add('-WowPath'); $relaunchArgs.Add($wowRoot)
-            $relaunchArgs.Add('-Uninstall')
-            if ($NoShortcuts) { $relaunchArgs.Add('-NoShortcuts') }
-            if ($NoProtocol) { $relaunchArgs.Add('-NoProtocol') }
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-NoProfile')); $relaunchArgs.Add((ConvertTo-SafeProcessArg '-ExecutionPolicy')); $relaunchArgs.Add((ConvertTo-SafeProcessArg 'Bypass'))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-File')); $relaunchArgs.Add((ConvertTo-SafeProcessArg $tempCopy))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-WowPath')); $relaunchArgs.Add((ConvertTo-SafeProcessArg $wowRoot))
+            $relaunchArgs.Add((ConvertTo-SafeProcessArg '-Uninstall'))
+            if ($NoShortcuts) { $relaunchArgs.Add((ConvertTo-SafeProcessArg '-NoShortcuts')) }
+            if ($NoProtocol) { $relaunchArgs.Add((ConvertTo-SafeProcessArg '-NoProtocol')) }
             $env:FURPHY_INSTALL_RELAUNCHED = '1'
             # Deliberately NOT -WindowStyle Hidden and NOT detached from
             # this console (-NoNewWindow): unlike the tray/Settings/
@@ -1285,6 +1381,47 @@ if ($Uninstall) {
         }
     }
 
+    # novice:NOVICE-3 fix: every real uninstall trigger (the Settings >
+    # Uninstall button via addon-server.ps1's Handle-Uninstall, the Windows
+    # Apps & Features UninstallString/QuietUninstallString fallback in
+    # Get-InstallUninstallString above, this script's own relaunch-safety-
+    # net a few hundred lines up, and the tray's identical fallback in
+    # host\FurphyHost.cs's TryTrayUninstall) copies this script into a
+    # fresh %TEMP%\FurphyUninstall-<guid>.ps1 path and launches THAT copy
+    # with -Uninstall - none of them ever deleted it afterward, an
+    # unbounded %TEMP% leak (100+ leftover ~90KB copies found on this dev
+    # machine alone, purely from this code path being exercised across QA
+    # rounds). Since every one of those four triggers ultimately runs THIS
+    # SAME -Uninstall block inside the temp copy itself, a single guarded
+    # self-delete right here - keyed off $PSCommandPath, the actual
+    # running script's own path - covers all four call sites with no
+    # changes needed at any of them. Test-IsTempUninstallScriptCopy
+    # guarantees this never fires for a developer running install.ps1
+    # -Uninstall directly out of the source/app folder. Deletion is
+    # scheduled from a separate DETACHED process (never in-process) since
+    # this running powershell.exe still has its own script file open.
+    #
+    # The uninstall log ($Script:UninstallLogPath) is deliberately left in
+    # place here even on a clean run: Write-Info just told the user (and
+    # this run's own console output) exactly where it is, and this
+    # codebase's own end-to-end integration coverage
+    # (tests\integration\Server.Uninstall.Tests.ps1) reads it immediately
+    # after a real uninstall completes - auto-deleting it here would race
+    # that read. The log files are also small, human-readable text, a far
+    # smaller and less numerous leak than the ~90KB script copies this fix
+    # targets; they are still worth a person clearing out of %TEMP% by hand
+    # occasionally, same as any other diagnostic log.
+    try {
+        $selfPath = $PSCommandPath
+        if (-not $selfPath) { $selfPath = $MyInvocation.MyCommand.Path }
+        if (Test-IsTempUninstallScriptCopy -Path $selfPath) {
+            $selfDeleteCmd = 'ping -n 2 127.0.0.1 >nul & del "' + $selfPath + '"'
+            Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c ' + $selfDeleteCmd) -WindowStyle Hidden | Out-Null
+        }
+    } catch {
+        # Best-effort cleanup only - never fail the uninstall over this.
+    }
+
     exit 0
 }
 
@@ -1303,6 +1440,45 @@ function Invoke-FurphyInstallSteps {
       called) rather than taking parameters, since a console run and a
       wizard run both already share that same script-scoped state.
     #>
+
+# =====================================================================
+# 2b. Downgrade guard (upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons):
+#     refuse to copy an OLDER installer's code over a NEWER on-disk
+#     install. An old install.ps1 (e.g. a stale cached zip or shortcut)
+#     copied over a current, already-migrated install leaves
+#     settings.json's schemaVersion untouched (old code has no idea
+#     flavours\<id>\addons.json exists) but overwrites addon-sync.ps1/
+#     addon-server.ps1/ui\ with pre-flavour code that hardcodes a
+#     top-level addons.json path - the app then reports the user has ZERO
+#     tracked addons, even though nothing was actually deleted on disk.
+#     Compared as [version] objects (major.minor.patch as integers), never
+#     as strings, so "1.9.0" does not sort ahead of "1.10.0". Bypassed
+#     only by an explicit -Force switch; a same-version repair or a
+#     genuinely newer installer (the normal upgrade path) is unaffected.
+# =====================================================================
+
+$Script:DowngradeSkipped = $false
+try {
+    $destVersionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
+    $srcVersionFile = Join-Path -Path $SourceRoot -ChildPath 'VERSION'
+    if ((-not $Force) -and (Test-Path -LiteralPath $destVersionFile -PathType Leaf) -and (Test-Path -LiteralPath $srcVersionFile -PathType Leaf)) {
+        $destVersionRaw = ([System.IO.File]::ReadAllText($destVersionFile)).Trim()
+        $srcVersionRaw = ([System.IO.File]::ReadAllText($srcVersionFile)).Trim()
+        $destVersionParsed = $null
+        $srcVersionParsed = $null
+        if ([System.Version]::TryParse($destVersionRaw, [ref]$destVersionParsed) -and [System.Version]::TryParse($srcVersionRaw, [ref]$srcVersionParsed)) {
+            if ($destVersionParsed -gt $srcVersionParsed) {
+                Write-Warn2 "This copy of Furphy Addon Manager ($srcVersionRaw) is older than what's already installed ($destVersionRaw) at $appDest. Installing it would replace the newer app with an older one, and your addon list could look empty until you reinstall the newer version instead. Nothing was changed."
+                $Script:DowngradeSkipped = $true
+            }
+        }
+    }
+} catch {
+    # Best-effort only - if the VERSION files can't be read/parsed, fall
+    # through to the normal install rather than blocking a real install
+    # over a comparison failure.
+}
+if ($Script:DowngradeSkipped) { return }
 
 # =====================================================================
 # 3. Copy the app into <home-flavour>\AddonSync (never overwrite user state)
@@ -1522,9 +1698,23 @@ if (-not $NoProtocol) {
 
 if (-not $SkipAdopt) {
     Write-Step 'Looking for existing addons to take over'
-    $showFlavourHeader = ($installedFlavours.Count -gt 1)
+    # multi-client:install-adopt-loop-includes-hidden-ptr-flavour fix:
+    # FLAVORS-SPEC.md S2.5 says PTR/XPTR/Beta stay "detected but excluded
+    # from the switcher and from tray background sync by default" until
+    # the player turns on Settings > Advanced > "Show test realms" - every
+    # other multi-flavour surface (ui/app.js's Store.visibleFlavours(),
+    # addon-server.ps1's update-all-flavours fan-out) already filters
+    # accordingly, but this loop used to iterate the UNFILTERED
+    # $installedFlavours list (every FLAVORS-SPEC S2.1 folder detected,
+    # PTR/XPTR/Beta included). $script:firstClassInstalled (computed by
+    # Set-InstallPathsFromWowRoot, already in scope here) is the same
+    # first-class-only filter those other surfaces use - a first-time
+    # install on a machine with a live PTR client must not scan/offer to
+    # take over PTR addons before the player has ever opted into
+    # seeing/managing PTR anywhere else in the app.
+    $showFlavourHeader = ($script:firstClassInstalled.Count -gt 1)
 
-    foreach ($def in $installedFlavours) {
+    foreach ($def in $script:firstClassInstalled) {
         $flavourAddonsPath = Join-Path -Path (Join-Path -Path $wowRoot -ChildPath $def.Folder) -ChildPath 'Interface\AddOns'
         if (-not (Test-Path -LiteralPath $flavourAddonsPath -PathType Container)) { continue }
         if ($showFlavourHeader) { Write-Info "-- $($def.Label) --" }
@@ -1745,10 +1935,21 @@ function Show-InstallWizard {
         $Script:WizardActive = $true
         $Script:WizardProgressLabel = $progressLabel
         try {
+            $Script:DowngradeSkipped = $false
             Invoke-FurphyInstallSteps
             $Script:WizardActive = $false
-            $lblStatus.Text = 'Furphy Addon Manager is installed.'
-            $progressLabel.Text = "App: $($script:appDest)`r`nNothing in your AddOns folder was touched."
+            # upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons fix: the
+            # downgrade guard inside Invoke-FurphyInstallSteps returns
+            # early (nothing copied) rather than throwing, so this success
+            # branch runs either way - show an honest, distinct message
+            # instead of claiming an install happened when it didn't.
+            if ($Script:DowngradeSkipped) {
+                $lblStatus.Text = 'Nothing was changed - a newer version is already installed there.'
+                $progressLabel.Text = "App: $($script:appDest)`r`nThis copy is older than what's already installed, so it was left alone."
+            } else {
+                $lblStatus.Text = 'Furphy Addon Manager is installed.'
+                $progressLabel.Text = "App: $($script:appDest)`r`nNothing in your AddOns folder was touched."
+            }
             $btnInstall.Visible = $false
             $btnClose = New-Object System.Windows.Forms.Button
             $btnClose.Text = 'Close'
