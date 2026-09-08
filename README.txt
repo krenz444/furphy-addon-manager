@@ -63,7 +63,7 @@ FILES (this folder)
   install.ps1 / Install Furphy.cmd   the installer (see NEW INSTALL above); -Uninstall removes the app cleanly
   addon-sync.ps1      the updater (command line; the app and the background service both use it)
   addon-server.ps1    the local server behind the app (http://localhost:47831, only reachable from this PC)
-  Addon Manager.vbs   starts the server hidden and opens the app window (Edge app mode)
+  Addon Manager.vbs   starts the server hidden if needed and opens the app window right away (native, or Edge as a fallback)
   ui\                 the app's HTML/JS/CSS (no internet resources, works offline except the addon sources)
   addons.json         your addon list and installed state (project id, file id, version, folders, pin/ignore flags)
   settings.json       release channel, background-update flag, port

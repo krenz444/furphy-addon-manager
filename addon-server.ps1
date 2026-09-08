@@ -58,6 +58,19 @@
                         host\FurphyHost.cs's WowDetector.IsRunning already
                         accepts via --wow-fake. Never used by a real launch;
                         intended for tests only.
+   -MaintenanceOnly     Round 37 (server perf pass): runs ONLY the
+                        network-capable startup work this script's normal
+                        invocation used to do inline before it could accept
+                        its first request - Initialize-CfCatalogueIndex's
+                        up-to-two live HTTPS GETs and Initialize-
+                        WagoGrowthSnapshots' up-to-10-page-per-flavour Wago
+                        crawl, each already self-gated on its own 24h/20h
+                        freshness check and Test-GameRunning - then exits.
+                        Never binds a listener, never enters the request
+                        loop. Spawned periodically as a hidden, BelowNormal-
+                        priority child of the real serving process (see
+                        Invoke-MaintenanceTick, near the request loop) -
+                        never launched directly by a real user action.
 =====================================================================
 #>
 
@@ -69,7 +82,8 @@ param(
     [switch]$OpenBrowser,
     [string]$BuildInfoPath,
     [string]$WowRoot,
-    [string]$WowFakeProcessName
+    [string]$WowFakeProcessName,
+    [switch]$MaintenanceOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1707,6 +1721,68 @@ function Get-PresentAddonFolders {
     Write-Output -NoEnumerate $set
 }
 
+function Get-AddonsFolderSnapshot {
+    <#
+      Round 37 (server perf pass): one directory listing of the resolved
+      AddOns folder, reused for BOTH Handle-State's cache fingerprint
+      (Get-HandleStateCacheKey, via .Fingerprint) and, on a cache miss,
+      Get-MissingDeps's PresentFolders set (via Get-PresentAddonFoldersFromDirs
+      on .Dirs) - so a Handle-State call that misses the cache still only
+      lists the AddOns folder once, not the two separate listings a naive
+      "compute the fingerprint, then separately call Get-PresentAddonFolders"
+      approach would pay for.
+
+      .Fingerprint changes whenever the AddOns folder's own LastWriteTime
+      changes, or any immediate child folder is added, removed, renamed, or
+      has ITS OWN LastWriteTime change (NTFS bumps a directory's own
+      LastWriteTime on any of those - an addon install/remove/update always
+      does at least one, a fresh unzip always removes+recreates or at least
+      touches its own folder) - enough to invalidate a toc-derived cache
+      without ever reading a single addon's own file contents. Returns ""
+      (never $null) for .Fingerprint when -AddonsPath can't be resolved or
+      doesn't exist - a real fingerprint (which always starts with a Ticks
+      value) can never equal that, so an unresolvable AddOns path forces a
+      fresh compute on every call, matching this file's behavior before this
+      cache existed. .Dirs is always an array (possibly empty), matching
+      Get-PresentAddonFolders' own "empty, never throws" contract for the
+      same case.
+    #>
+    param([string]$AddonsPath)
+
+    if (-not $AddonsPath -or -not (Test-Path -LiteralPath $AddonsPath -PathType Container)) {
+        return @{ Fingerprint = ''; Dirs = @() }
+    }
+    $selfTicks = 0
+    try {
+        $selfTicks = (Get-Item -LiteralPath $AddonsPath -ErrorAction Stop).LastWriteTimeUtc.Ticks
+    } catch {
+        $selfTicks = 0
+    }
+    $dirs = @(Get-ChildItem -LiteralPath $AddonsPath -Force -Directory -ErrorAction SilentlyContinue | Sort-Object -Property Name)
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    $parts.Add([string]$selfTicks)
+    foreach ($d in $dirs) {
+        $parts.Add($d.Name.ToLowerInvariant() + ':' + $d.LastWriteTimeUtc.Ticks)
+    }
+    return @{ Fingerprint = ($parts -join '|'); Dirs = $dirs }
+}
+
+function Get-PresentAddonFoldersFromDirs {
+    <#
+      Same case-insensitive name-set contract as Get-PresentAddonFolders
+      above, built from an already-fetched directory listing
+      (Get-AddonsFolderSnapshot's own .Dirs) instead of a fresh
+      Get-ChildItem - see that function's own doc comment for why. -NoEnumerate
+      for the identical empty-HashSet-enumerates-to-$null reason
+      Get-PresentAddonFolders documents.
+    #>
+    param($Dirs)
+
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($d in @($Dirs)) { [void]$set.Add($d.Name.ToLowerInvariant()) }
+    Write-Output -NoEnumerate $set
+}
+
 function Get-MissingDeps {
     <# Entries of $DepNames not present (case-insensitively) in $PresentFolders. #>
     param($DepNames, $PresentFolders)
@@ -3227,6 +3303,14 @@ function Apply-JobCompletionSideEffects {
         }
         return
     }
+
+    # Round 37 (server perf pass): "invalidated on job completion" - a
+    # failed job (handled above, already returned) never changed addons.json
+    # or the AddOns folder, so Get-HandleStateCacheKey's own fingerprint
+    # would have caught this anyway; this call is what actually matters for
+    # a job whose OWN completion is what changed them (install/remove/sync/
+    # check/add/rollback/import/switch-source all reach here).
+    Clear-StateCache -Flavor $flavor
 
     $Script:LastCheckFailedByFlavour[$flavor] = $false
     $Script:LastCheckErrorByFlavour[$flavor] = $null
@@ -5250,6 +5334,161 @@ function Initialize-WagoGrowthSnapshots {
 }
 
 # =====================================================================
+# Round 37 (server perf pass) - maintenance child scheduling
+#
+# The real serving process's own startup no longer calls
+# Initialize-CfCatalogueIndex/Initialize-WagoGrowthSnapshots at all (see the
+# startup section's own "Load ONLY what is on disk" comment, right after
+# listener.Start()) - a hidden -MaintenanceOnly child of this same script,
+# spawned from the request loop's own tick below, does that instead. Both
+# functions above are completely unchanged; only their call site moved.
+# =====================================================================
+
+function Test-MaintenanceChildRunning {
+    <#
+      $Script:MaintenanceLockPath holds the PID of the last -MaintenanceOnly
+      child THIS server spawned (written by the -MaintenanceOnly branch
+      itself, right after it starts; removed in its own `finally`, whether
+      it succeeded or failed). Returns $true only when that PID still
+      resolves to a genuinely live process - a lock file left behind by a
+      child that crashed or was force-killed before its own `finally` ran is
+      treated as stale and removed right here, the same "verify the PID,
+      don't just trust the file's existence" pattern
+      Clear-StaleTestServerOnPort uses for a stale test server (tests\lib\
+      common.ps1). Never throws.
+    #>
+    if (-not $Script:MaintenanceLockPath -or -not (Test-Path -LiteralPath $Script:MaintenanceLockPath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $pidText = (Get-Content -LiteralPath $Script:MaintenanceLockPath -Raw -ErrorAction Stop).Trim()
+        $pidValue = 0
+        if ([int]::TryParse($pidText, [ref]$pidValue) -and $pidValue -gt 0) {
+            if (Get-Process -Id $pidValue -ErrorAction SilentlyContinue) {
+                return $true
+            }
+        }
+    } catch {
+        # Falls through to the stale-lock cleanup below.
+    }
+    try { Remove-Item -LiteralPath $Script:MaintenanceLockPath -Force -ErrorAction SilentlyContinue } catch { }
+    return $false
+}
+
+function Invoke-MaintenanceTick {
+    <#
+      Called once per request-loop iteration (the same 2s/15s WaitOne
+      cadence Test-GameRunning's own wait timing already runs on - this
+      file's only existing "timer tick"). Spawns a hidden, BelowNormal-
+      priority -MaintenanceOnly child of THIS SAME SCRIPT at most once every
+      $Script:MaintenanceIntervalMinutes, and only when:
+        - -GameRunning is $false (never while WoW is running - the caller
+          already computed this once for its own wait-length decision, so
+          this just reuses it rather than probing a second time);
+        - $Script:LastMaintenanceAttemptAt is at least that old ($null-
+          initialized to [DateTime]::MinValue, so the very first tick after
+          startup always qualifies - "shortly after startup", per the task
+          brief);
+        - Test-MaintenanceChildRunning says no such child is already up.
+      The spawned child is itself already fully self-gated (Initialize-
+      CfCatalogueIndex/Initialize-WagoGrowthSnapshots's own 24h/20h
+      freshness checks, unchanged) - most attempts do nothing beyond a
+      couple of cheap disk/registry reads before exiting, so this hourly
+      cadence costs nothing extra on the far more common "nothing was
+      actually due" tick, while still comfortably meeting both real
+      freshness SLAs well inside their own windows.
+      $Script:LastMaintenanceAttemptAt is stamped the moment a child is
+      actually SPAWNED, not merely considered - a tick that declined to
+      spawn (game running, or one already in flight) tries again on the
+      very next tick once that condition clears, instead of waiting out the
+      rest of the hour.
+      Best-effort throughout, like every startup/maintenance path in this
+      file: a failure here must never affect request handling.
+    #>
+    param([bool]$GameRunning)
+
+    try {
+        if ($GameRunning) { return }
+        if (((Get-Date) - $Script:LastMaintenanceAttemptAt).TotalMinutes -lt $Script:MaintenanceIntervalMinutes) { return }
+        if (Test-MaintenanceChildRunning) { return }
+
+        $Script:LastMaintenanceAttemptAt = Get-Date
+
+        # Round-1-fixer: the script's own real path ($Script:ScriptSelfPath,
+        # set once at startup - see its own doc comment), NOT
+        # "Join-Path $Script:Root 'addon-server.ps1'" - -Root is a per-test
+        # DATA directory in tests\lib\common.ps1's Start-TestServer, not
+        # necessarily where addon-server.ps1 itself lives (only true, and
+        # only by construction, in a real production deployment).
+        $scriptPath = $Script:ScriptSelfPath
+        $psArgs = New-Object 'System.Collections.Generic.List[object]'
+        $psArgs.Add('-NoProfile')
+        $psArgs.Add('-ExecutionPolicy')
+        $psArgs.Add('Bypass')
+        $psArgs.Add('-File')
+        $psArgs.Add((ConvertTo-SafeProcessArg $scriptPath))
+        $psArgs.Add('-Root')
+        $psArgs.Add((ConvertTo-SafeProcessArg $Script:Root))
+        $psArgs.Add('-MaintenanceOnly')
+        # Thread through the same test-only overrides the real server was
+        # started with, so the child resolves the identical
+        # flavours/AddOns-path/game-running answer a test expects -
+        # mirrors New-CliProcessArgs's own -WowRoot handling for the CLI
+        # child. Never set outside a test harness.
+        if ($Script:WowRootOverride) {
+            $psArgs.Add('-WowRoot')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:WowRootOverride))
+        }
+        if ($Script:BuildInfoPathOverride) {
+            $psArgs.Add('-BuildInfoPath')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:BuildInfoPathOverride))
+        }
+        if ($Script:WowFakeProcessNameOverride) {
+            $psArgs.Add('-WowFakeProcessName')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:WowFakeProcessNameOverride))
+        }
+
+        try {
+            Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -WindowStyle Hidden | Out-Null
+            Write-ServerLog 'Maintenance tick: spawned a -MaintenanceOnly child'
+        } catch {
+            Write-ServerLog "Maintenance tick: failed to spawn -MaintenanceOnly child: $($_.Exception.Message)"
+        }
+    } catch {
+        Write-ServerLog "Maintenance tick failed (request handling unaffected): $($_.Exception.Message)"
+    }
+}
+
+function Update-CfCatalogueCacheIfChanged {
+    <#
+      Called once per request-loop iteration, alongside Invoke-MaintenanceTick
+      above. A cheap per-tick check (one Get-Item stat, never a JSON parse)
+      for whether cache\cf-catalogue.json's own LastWriteTimeUtc has moved
+      since this process last loaded it - true after a -MaintenanceOnly
+      child (this server's own, spawned by Invoke-MaintenanceTick, or in
+      principle any other process sharing this same -Root's cache\ folder)
+      writes a freshly-refreshed catalogue. Only THEN pays for the real
+      reload (Load-CfCatalogueIndexFromDisk's JSON parse over the whole
+      ~18k-entry index, the same cost Round 26's own comment already
+      identified as worth moving off the request-accepting path) - never on
+      a tick where nothing changed (the overwhelming majority), and never
+      inside a request handler. Best-effort; never throws.
+    #>
+    try {
+        if (-not (Test-Path -LiteralPath $Script:CfCatalogueCachePath -PathType Leaf)) { return }
+        $writeTimeUtc = (Get-Item -LiteralPath $Script:CfCatalogueCachePath -ErrorAction Stop).LastWriteTimeUtc
+        if ($writeTimeUtc -eq $Script:CfCatalogueCacheLastWriteUtc) { return }
+        if (Load-CfCatalogueIndexFromDisk) {
+            $Script:CfCatalogueCacheLastWriteUtc = $writeTimeUtc
+            Write-ServerLog "CurseForge catalogue reloaded from disk cache: $($Script:CfCatalogueIndex.Count) entries, fetched $($Script:CfCatalogueFetchedAt)"
+        }
+    } catch {
+        # Best-effort - a failed reload just keeps serving whatever was
+        # already loaded, same as every other best-effort catalogue path.
+    }
+}
+
+# =====================================================================
 # Keyless CurseForge enrichment (E16) - three new, independently-verified,
 # purely additive metadata sources for a CurseForge-sourced record when no
 # API key is configured: an offline catalogue index (instawow-data, with
@@ -6464,6 +6703,72 @@ function Handle-Ping {
     Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; name = $Script:AppName; version = $Script:Version; uptime = [math]::Round($uptime, 1); host = $Script:HostKind; gameRunning = (Test-GameRunning) }
 }
 
+function Get-HandleStateCacheKey {
+    <#
+      Round 37 (server perf pass): the fingerprint Handle-State compares
+      against $Script:AddonExtrasCacheByFlavour[$Flavor].Key to decide
+      whether its cached tocInterfaces/compat/missingDeps/missingOptionalDeps
+      are still good, or need recomputing. Combines:
+        - -Flavor itself (a Classic Era cache entry must never be reused for
+          Retail, or vice versa);
+        - the records file's (addons.json) own LastWriteTimeUtc + Length -
+          any job completion, install, remove, ignore/unpin, or hand-edit
+          that changes a record's folders/requiredDeps/optionalDeps/
+          latestGameVersions changes this too, since all of those rewrite
+          the whole file;
+        - -AddonsFingerprint (Get-AddonsFolderSnapshot's own .Fingerprint) -
+          changes whenever the AddOns folder's own contents change, which
+          every install/remove/rescan does;
+        - -ClientBuildInfo's clientBuild/clientInterface - a different
+          client build changes Get-AddonCompat's own answer for every
+          record even when nothing else did.
+      Never throws; a missing/unreadable addons.json becomes the fixed
+      string "missing"/"error" rather than propagating a real Length/Ticks
+      value - still a stable, comparable fingerprint segment either way.
+    #>
+    param([string]$Flavor, [string]$AddonsFingerprint, $ClientBuildInfo)
+
+    $recordsFp = 'missing'
+    if (Test-Path -LiteralPath $Script:AddonsJsonPath -PathType Leaf) {
+        try {
+            $fi = Get-Item -LiteralPath $Script:AddonsJsonPath -ErrorAction Stop
+            $recordsFp = "$($fi.LastWriteTimeUtc.Ticks):$($fi.Length)"
+        } catch {
+            $recordsFp = 'error'
+        }
+    }
+    $build = [string]$ClientBuildInfo.clientBuild
+    $iface = [string]$ClientBuildInfo.clientInterface
+    return "$Flavor|$build|$iface|$recordsFp|$AddonsFingerprint"
+}
+
+function Clear-StateCache {
+    <#
+      Round 37 (server perf pass): drops Handle-State's per-flavour toc/
+      compat/missingDeps cache. Get-HandleStateCacheKey's own mtime-based
+      fingerprint already invalidates on its own for most mutations (every
+      install/remove/rescan touches addons.json and/or the AddOns folder,
+      both fingerprinted) - this explicit call exists anyway for the one
+      class that does NOT: a settings change (part of this feature's own
+      required invalidation list) touches neither path at all, so relying
+      on the fingerprint alone would silently miss it. Calling this
+      unconditionally at every one of this file's own mutation points (job
+      completion, settings PUT, orphan-folder removal) is cheap - clearing
+      an in-memory hashtable entry - and keeps every call site honest
+      without each one having to reason about whether ITS OWN change
+      happens to touch a fingerprinted path.
+      -Flavor clears just one flavour's entry; omitted clears every
+      flavour's (a settings change is machine-wide, not flavour-scoped).
+    #>
+    param([string]$Flavor)
+
+    if ($Flavor) {
+        $Script:AddonExtrasCacheByFlavour.Remove($Flavor)
+    } else {
+        $Script:AddonExtrasCacheByFlavour = @{}
+    }
+}
+
 function Handle-State {
     param($Context, $RouteMatch)
 
@@ -6473,46 +6778,110 @@ function Handle-State {
     $updateAvailable = Get-FlavourUpdateAvailable -Flavor $flavor
 
     $records = Get-AddonRecords
-    # E3: computed once per /api/state call and shared across every record,
-    # rather than re-listing the AddOns directory per addon.
-    $presentFolders = Get-PresentAddonFolders
-    # E13: likewise computed once and shared - each record's own toc parse
-    # still happens per addon, but resolving the AddOns path itself does not.
+    # E13: computed once and shared - each record's own toc parse still
+    # happens per addon (on a cache miss - see below), but resolving the
+    # AddOns path itself does not.
     $compatAddonsPath = Resolve-EffectiveAddonsPath -Flavor $flavor
+
+    # Round 37 (server perf pass): the expensive part of this loop below
+    # (tocInterfaces/compat/missingDeps/missingOptionalDeps - real disk I/O
+    # per addon folder, measured at 900-1300ms for 34 addons) is cached
+    # per-flavour, keyed on a cheap fingerprint (Get-HandleStateCacheKey)
+    # that changes whenever addons.json or the AddOns folder's own contents
+    # change - see that function's own doc comment, and
+    # Get-AddonsFolderSnapshot's, for exactly what it hashes and why that is
+    # enough to invalidate on every install/remove/rescan without reading a
+    # single addon's own file contents. Clear-StateCache additionally
+    # invalidates explicitly at every mutation point in this file (job
+    # completion, settings changes, orphan-folder removal) - see its own
+    # doc comment for why that is worth having on top of the fingerprint.
+    $folderSnapshot = Get-AddonsFolderSnapshot -AddonsPath $compatAddonsPath
+    $cacheKey = Get-HandleStateCacheKey -Flavor $flavor -AddonsFingerprint $folderSnapshot.Fingerprint -ClientBuildInfo $Script:ClientBuildInfo
+    $cacheEntry = $Script:AddonExtrasCacheByFlavour[$flavor]
+    $cacheHit = [bool]($cacheEntry -and $cacheEntry.Key -eq $cacheKey -and $cacheEntry.Extras -and (@($cacheEntry.Extras)).Count -eq $records.Count)
+
+    $presentFolders = $null
+    $freshExtras = $null
+    if (-not $cacheHit) {
+        # E3: computed once per cache-miss call and shared across every
+        # record, rather than re-listing the AddOns directory per addon -
+        # built from the SAME directory listing Get-AddonsFolderSnapshot
+        # above already did for its own fingerprint, so a cache miss still
+        # only lists the AddOns folder once, not twice.
+        $presentFolders = Get-PresentAddonFoldersFromDirs -Dirs $folderSnapshot.Dirs
+        $freshExtras = New-Object 'System.Collections.Generic.List[object]'
+    }
+
     $addonsOut = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($r in $records) {
+    for ($i = 0; $i -lt $records.Count; $i++) {
+        $r = $records[$i]
         # E12: updateAvailable is keyed by the numeric CurseForge project id
         # (unchanged) OR, for a Wago-sourced record (no numeric projectId at
         # all), by "wago:<slug>" - see Get-UpdateAvailableKeyForRecord.
+        # Always computed live (a cheap in-memory dictionary lookup, not
+        # disk I/O) - never part of the cached extras below.
         $upd = $null
         $key = Get-UpdateAvailableKeyForRecord -Record $r
         if ($key -and $updateAvailable.ContainsKey($key)) {
             $u = $updateAvailable[$key]
             $upd = [PSCustomObject]@{ fileId = $u.fileId; version = $u.version }
         }
-        $clone = [PSCustomObject]@{}
+        # Round-1-fixer (perf): built via an [ordered] hashtable plus ONE
+        # final [PSCustomObject] cast, instead of one [PSCustomObject]@{}
+        # literal followed by ~20+ individual Add-Member calls per record.
+        # Add-Member's reflection/PSMemberInfo-adaptation overhead measured
+        # as the residual cost keeping warm /api/state at ~188ms for 34
+        # addons (25%+ over the round's own <150ms target) even after
+        # Round 37's toc/compat cache eliminated the disk-I/O cost this
+        # loop used to pay - a hashtable Add()/index-set is a plain
+        # dictionary write, and casting a single populated [ordered]
+        # hashtable to [PSCustomObject] is one bulk conversion instead of
+        # N+6 separate ones. An [ordered] hashtable (not a plain one)
+        # preserves the exact same property-insertion order the old
+        # per-property Add-Member loop produced, so ConvertTo-Json's output
+        # order for /api/state is unchanged.
+        $clone = [ordered]@{}
         foreach ($p in $r.PSObject.Properties) {
-            $clone | Add-Member -MemberType NoteProperty -Name $p.Name -Value $p.Value
+            $clone[$p.Name] = $p.Value
         }
-        $clone | Add-Member -MemberType NoteProperty -Name 'updateAvailable' -Value $upd
-        # E3: requiredDeps/optionalDeps reach this response for free via the
-        # generic property clone above (once the CLI starts writing them, same
-        # free ride documented for E1's previousFileId/previousVersion);
-        # missingDeps/missingOptionalDeps are computed live here instead,
-        # since SPEC documents them as "computed live, not stored".
-        $missingDeps = Get-MissingDeps -DepNames $r.requiredDeps -PresentFolders $presentFolders
-        $missingOptionalDeps = Get-MissingDeps -DepNames $r.optionalDeps -PresentFolders $presentFolders
-        $clone | Add-Member -MemberType NoteProperty -Name 'missingDeps' -Value $missingDeps.ToArray()
-        $clone | Add-Member -MemberType NoteProperty -Name 'missingOptionalDeps' -Value $missingOptionalDeps.ToArray()
-        # E13: tocInterfaces/compat computed live the same way missingDeps
-        # just above is - never stored, recomputed every /api/state call.
-        # FLAVORS-SPEC.md CS-F2: -Flavor/-InstalledInterface thread through so
-        # a package's toc selection matches THIS flavour's own era.
-        $tocIfaces = Get-PackageTocInterfaces -AddonsPath $compatAddonsPath -Folders $r.folders -Flavor $flavor -InstalledInterface $Script:ClientBuildInfo.clientInterface
-        $compat = Get-AddonCompat -TocInterfaces $tocIfaces -LatestGameVersions $r.latestGameVersions -ClientInterface $Script:ClientBuildInfo.clientInterface
-        $clone | Add-Member -MemberType NoteProperty -Name 'tocInterfaces' -Value $tocIfaces.ToArray()
-        $clone | Add-Member -MemberType NoteProperty -Name 'compat' -Value $compat
-        $addonsOut.Add($clone)
+        $clone['updateAvailable'] = $upd
+
+        if ($cacheHit) {
+            $extras = $cacheEntry.Extras[$i]
+        } else {
+            # E3: requiredDeps/optionalDeps reach this response for free via
+            # the generic property clone above (once the CLI starts writing
+            # them, same free ride documented for E1's previousFileId/
+            # previousVersion); missingDeps/missingOptionalDeps are computed
+            # live here instead, since SPEC documents them as "computed
+            # live, not stored".
+            $missingDeps = Get-MissingDeps -DepNames $r.requiredDeps -PresentFolders $presentFolders
+            $missingOptionalDeps = Get-MissingDeps -DepNames $r.optionalDeps -PresentFolders $presentFolders
+            # E13: tocInterfaces/compat - never persisted, recomputed on
+            # every cache miss the same way they used to on every single
+            # call. FLAVORS-SPEC.md CS-F2: -Flavor/-InstalledInterface
+            # thread through so a package's toc selection matches THIS
+            # flavour's own era.
+            $tocIfaces = Get-PackageTocInterfaces -AddonsPath $compatAddonsPath -Folders $r.folders -Flavor $flavor -InstalledInterface $Script:ClientBuildInfo.clientInterface
+            $compat = Get-AddonCompat -TocInterfaces $tocIfaces -LatestGameVersions $r.latestGameVersions -ClientInterface $Script:ClientBuildInfo.clientInterface
+            $extras = [PSCustomObject]@{
+                missingDeps         = $missingDeps.ToArray()
+                missingOptionalDeps = $missingOptionalDeps.ToArray()
+                tocInterfaces       = $tocIfaces.ToArray()
+                compat              = $compat
+            }
+            $freshExtras.Add($extras)
+        }
+
+        $clone['missingDeps'] = $extras.missingDeps
+        $clone['missingOptionalDeps'] = $extras.missingOptionalDeps
+        $clone['tocInterfaces'] = $extras.tocInterfaces
+        $clone['compat'] = $extras.compat
+        $addonsOut.Add([PSCustomObject]$clone)
+    }
+
+    if (-not $cacheHit) {
+        $Script:AddonExtrasCacheByFlavour[$flavor] = @{ Key = $cacheKey; Extras = $freshExtras.ToArray() }
     }
 
     $settings = Get-Settings
@@ -6933,6 +7302,11 @@ function Handle-ScanDelete {
             return
         }
     }
+    # Round 37 (server perf pass): "invalidated on ... rescan" - the AddOns
+    # folder's own fingerprint would already catch this deletion, but see
+    # Clear-StateCache's own doc comment for why every mutation point here
+    # calls it explicitly anyway.
+    Clear-StateCache -Flavor $Script:CurrentFlavour
     Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
 }
 
@@ -7182,6 +7556,13 @@ function Handle-SettingsPut {
         Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
         return
     }
+    # Round 37 (server perf pass): "invalidated on ... settings change" -
+    # the one case Get-HandleStateCacheKey's own mtime fingerprint does NOT
+    # already catch on its own (a settings.json write touches neither
+    # addons.json nor the AddOns folder) - see Clear-StateCache's own doc
+    # comment. Machine-wide (no -Flavor), since a settings change is never
+    # scoped to just one flavour.
+    Clear-StateCache
     Send-Json -Context $Context -StatusCode 200 -Body (Get-SettingsView -Settings $settings)
 }
 
@@ -7601,12 +7982,53 @@ function Handle-StartupStatus {
 # curseforge:// protocol handler status (E19; script itself is E17's)
 # =====================================================================
 
+function Get-ProtocolStatusObject {
+    <#
+      Round 37 (server perf pass): GET /api/protocol/status used to spawn a
+      whole hidden powershell.exe child (register-protocol.ps1 -Status
+      -Json) just to read one registry value and stat one file - measured
+      at ~400ms, almost all of it process-start overhead, for what is a
+      pure read with no side effects. This is that exact same read/compute
+      done IN-PROCESS instead - a byte-for-byte port of register-
+      protocol.ps1's own Get-StatusObject (registered/currentHandler/
+      handlerPath/handlerExists), reading $Script:CurseforgeProtocolKeyPath
+      (real default 'HKCU:\Software\Classes\curseforge' - see that
+      variable's own declaration for the test-only override seam) and
+      comparing against $Script:CurseforgeHandlerPath, exactly the two
+      script-scope values that startup already resolved byte-identically to
+      register-protocol.ps1's own defaults. register-protocol.ps1 itself is
+      UNCHANGED and still the sole implementation for an actual write -
+      Handle-ProtocolRegister/Unregister still spawn it via
+      Invoke-ProtocolScript, unaffected by this function's existence. Never
+      throws (a missing/inaccessible registry key just means "not
+      registered", matching register-protocol.ps1's own Get-CurrentCommand
+      try/catch).
+    #>
+    # Plain string concatenation, matching register-protocol.ps1's own
+    # "$keyPath\shell\open\command" exactly - not Join-Path, to avoid any
+    # provider-specific normalization surprise on an HKCU: path.
+    $cmdPath = "$($Script:CurseforgeProtocolKeyPath)\shell\open\command"
+    $current = ''
+    try {
+        $current = [string](Get-ItemProperty -LiteralPath $cmdPath -ErrorAction Stop).'(default)'
+    } catch {
+        $current = ''
+    }
+    $isOurs = ($current -ne '') -and ($current.IndexOf($Script:CurseforgeHandlerPath, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    return [PSCustomObject]@{
+        registered     = $isOurs
+        currentHandler = $current
+        handlerPath    = $Script:CurseforgeHandlerPath
+        handlerExists  = (Test-Path -LiteralPath $Script:CurseforgeHandlerPath)
+    }
+}
+
 function Handle-ProtocolStatus {
-    <# GET /api/protocol/status -> register-protocol.ps1 -Status -Json, unchanged. #>
+    <# GET /api/protocol/status -> Get-ProtocolStatusObject, read entirely in-process (Round 37 - see that function's own doc comment for why this no longer spawns register-protocol.ps1). #>
     param($Context, $RouteMatch)
 
     try {
-        $status = Invoke-ProtocolScript -Switch 'Status'
+        $status = Get-ProtocolStatusObject
         Send-Json -Context $Context -StatusCode 200 -Body $status
     } catch {
         Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
@@ -8278,6 +8700,40 @@ if (-not $Root) {
 }
 
 $Script:Root = $Root
+# Round-1-fixer (WagoBrowse crawl integration-test root cause, not merely
+# a timing/sync issue as first triaged): the ACTUAL path of THIS running
+# script - deliberately NOT "Join-Path $Script:Root 'addon-server.ps1'"
+# (what Invoke-MaintenanceTick used to build below). Those two are only
+# guaranteed identical when -Root is omitted (defaults to $PSScriptRoot,
+# above) or, when passed explicitly, happens to equal the script's own
+# folder - true in every real production deployment (addon-server.ps1
+# always lives directly inside the install root it is given as -Root),
+# but NOT true for tests\lib\common.ps1's Start-TestServer, which
+# deliberately runs the ONE shared build-root addon-server.ps1 against a
+# throwaway scratch -Root that holds only per-test DATA (ui\/addons.json/
+# cache\ etc, never a copy of the script itself - see Start-TestServer's
+# own "T2 fix" comment for $Script:CliPath hitting this identical
+# landmine for addon-sync.ps1 previously). Get-CurrentInstalledFlavours'
+# own -ScriptRoot default already reads $Script:Root the old (now
+# fixed-elsewhere) way for an unrelated purpose (locating flavours\) -
+# untouched here, since THAT one path is a real, intentional data lookup,
+# not "where is this script's own .ps1 file".
+# Before this fix: Invoke-MaintenanceTick's spawned -MaintenanceOnly
+# child's -File argument pointed at a nonexistent
+# "<scratch-root>\addon-server.ps1", so the child process failed
+# powershell.exe's own -File argument validation and exited immediately,
+# before writing a single server.log line - confirmed live (repro script,
+# 2026-09-08): the real server logged "Maintenance tick: spawned a
+# -MaintenanceOnly child" and then nothing else, ever, while running the
+# exact same -MaintenanceOnly invocation directly (bypassing Start-Process)
+# against the script's REAL path completed the crawl correctly in ~4s.
+# Zero live behavior change: $Script:ScriptSelfPath is byte-identical to
+# the old "Join-Path $Script:Root 'addon-server.ps1'" value on every real
+# deployment, where -Root IS the script's own folder.
+$Script:ScriptSelfPath = $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($Script:ScriptSelfPath)) {
+    $Script:ScriptSelfPath = Join-Path -Path $Script:Root -ChildPath 'addon-server.ps1'
+}
 $Script:UiDir = Join-Path -Path $Script:Root -ChildPath 'ui'
 $Script:JobsDir = Join-Path -Path $Script:Root -ChildPath 'jobs'
 $Script:SettingsPath = Join-Path -Path $Script:Root -ChildPath 'settings.json'
@@ -8305,8 +8761,21 @@ foreach ($fse in $Script:FlavourScopedEndpoints) {
 
 $Script:SyncLogPath = Join-Path -Path $Script:Root -ChildPath 'sync.log'
 $Script:CliPath = Join-Path -Path $Script:Root -ChildPath 'addon-sync.ps1'
-# E19 (script itself is E17's, unchanged) - Invoke-ProtocolScript's target.
+# E19 (script itself is E17's, unchanged) - Invoke-ProtocolScript's target
+# (register/unregister only, as of Round 37 - see Get-ProtocolStatusObject).
 $Script:RegisterProtocolPath = Join-Path -Path $Script:Root -ChildPath 'register-protocol.ps1'
+# Round 37 (server perf pass): register-protocol.ps1's own default
+# -HandlerPath is "Join-Path $PSScriptRoot 'curseforge-handler.vbs'" - since
+# Invoke-ProtocolScript always runs it with -File "$Script:RegisterProtocolPath"
+# and no -HandlerPath override, $PSScriptRoot there is exactly $Script:Root,
+# so this is byte-identical to what that script would resolve on its own.
+$Script:CurseforgeHandlerPath = Join-Path -Path $Script:Root -ChildPath 'curseforge-handler.vbs'
+# Test-only override seam for Get-ProtocolStatusObject's own registry read
+# below (mirrors register-protocol.ps1's own -KeyPath test hook,
+# tests\unit\RegisterProtocol.Tests.ps1) - overridden ONLY by a unit test
+# that dot-sources this file (tests\unit\Server.ProtocolStatus.Tests.ps1),
+# never by a real run, which always reads the one real per-user key.
+$Script:CurseforgeProtocolKeyPath = 'HKCU:\Software\Classes\curseforge'
 # E16: on-disk caches for the keyless CurseForge enrichment sources - the
 # catalogue index (refreshed at most once/24h) and per-slug addon-radar.com
 # detail pages (cached 24h each). Both directories are created lazily by
@@ -8316,6 +8785,11 @@ $Script:RegisterProtocolPath = Join-Path -Path $Script:Root -ChildPath 'register
 $Script:CacheDir = Join-Path -Path $Script:Root -ChildPath 'cache'
 $Script:CfCatalogueCachePath = Join-Path -Path $Script:CacheDir -ChildPath 'cf-catalogue.json'
 $Script:AddonRadarCacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'addon-radar'
+# Round 37 (server perf pass): the maintenance child's single-instance lock
+# (its own PID, written/removed by the -MaintenanceOnly branch itself) - see
+# Test-MaintenanceChildRunning/Invoke-MaintenanceTick, both near the request
+# loop below.
+$Script:MaintenanceLockPath = Join-Path -Path $Script:CacheDir -ChildPath 'maintenance.lock'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 # P1 perf pass (item 2): while a WoW client is running, the idle-exit window
@@ -8343,7 +8817,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.17.0'
+$Script:Version = '1.18.1'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -8382,6 +8856,14 @@ $Script:UpdatesCheckedAtByFlavour = @{}
 # for the same S5.3 reason as the three dictionaries just above.
 $Script:LastCheckFailedByFlavour = @{}
 $Script:LastCheckErrorByFlavour = @{}
+# Round 37 (server perf pass): Handle-State's per-flavour cache of the
+# expensive per-record computations (tocInterfaces/compat/missingDeps/
+# missingOptionalDeps) - see Get-HandleStateCacheKey/Get-AddonsFolderSnapshot/
+# Clear-StateCache's own doc comments, all defined alongside Handle-State
+# itself. In-memory only (never persisted) - a server restart recomputing
+# once, cold, is the correct/only sane behavior, same as every other
+# in-memory-only cache in this file.
+$Script:AddonExtrasCacheByFlavour = @{}
 # WAGO-BROWSE-SPEC.md section 4.4 (REQUIRED FIX, judge's data-review finding
 # 2): makes "everything that mutates $Script:CurrentFlavour/
 # $Script:ClientBuildInfo during startup, before the request loop's first
@@ -8421,6 +8903,92 @@ $Script:AddonRadarCache = @{}
 $Script:AddonRadarSearchCache = @{}
 $Script:WagoAutoMatchCache = @{}
 $Script:LastAddonRadarRequestTime = [DateTime]::MinValue
+
+# Round 37 (server perf pass): the serving process no longer fetches the
+# CurseForge catalogue or crawls Wago growth itself (see the startup
+# section's own comment, and Invoke-MaintenanceTick near the request loop) -
+# a periodically-spawned hidden -MaintenanceOnly child does that instead,
+# entirely off this process's own request-handling path.
+#   MaintenanceIntervalMinutes: how often the request loop's own tick even
+#     CONSIDERS spawning a child - not how often real network work happens
+#     (each network-capable function is still separately, internally gated
+#     on its own 24h/20h freshness check, unchanged - most attempts at this
+#     cadence find nothing due and exit almost immediately).
+#   LastMaintenanceAttemptAt: starts at [DateTime]::MinValue so the very
+#     first request-loop tick after startup already qualifies ("shortly
+#     after startup", per the task brief) - stamped the moment a child is
+#     actually SPAWNED, not merely considered, so a tick that skipped
+#     spawning (game running, or one already in flight) retries on the very
+#     next tick once that condition clears instead of waiting out the full
+#     interval.
+#   CfCatalogueCacheLastWriteUtc: the cache file's own LastWriteTimeUtc as
+#     of this process's last successful load of it (startup, or the most
+#     recent Update-CfCatalogueCacheIfChanged reload) - lets that per-tick
+#     check stay a single cheap file stat on every tick that did NOT change
+#     anything, which is nearly all of them.
+$Script:MaintenanceIntervalMinutes = 60
+$Script:LastMaintenanceAttemptAt = [DateTime]::MinValue
+$Script:CfCatalogueCacheLastWriteUtc = [DateTime]::MinValue
+
+# =====================================================================
+# Round 37 (server perf pass): -MaintenanceOnly early exit
+#
+# A hidden, periodically-spawned child of this SAME script (see
+# Invoke-MaintenanceTick, near the request loop below) that does exactly
+# the network-capable work the real serving process's own startup used to
+# do inline, strictly before it could accept its first request:
+# Initialize-CfCatalogueIndex's up-to-two live HTTPS GETs and Initialize-
+# WagoGrowthSnapshots' up-to-10-page-per-flavour Wago crawl. Both functions
+# are completely UNCHANGED below - they are exactly as self-gated on their
+# own 24h/20h freshness checks and Test-GameRunning as before this round;
+# only WHERE they are called from has moved. This branch never binds a
+# listener, never enters the request loop, and never sets
+# $Script:AcceptingRequests true (it stays at its $false default the whole
+# time) - so both functions' own "must run before the request loop starts
+# accepting connections" guards trivially never fire here.
+#
+# Deliberately does its OWN minimal preamble (flavour migration + a
+# default-flavour context, mirroring the two real preamble steps just below
+# that this branch actually needs) rather than falling through into the
+# general preamble - Load-CheckState (job/check history), port resolution,
+# Update-InstalledAppsRegistration (a registry write - must never happen on
+# every ~hourly maintenance tick, only once at real server startup) and
+# Remove-OldJobFiles are all real-server-only concerns this branch has no
+# business touching.
+# =====================================================================
+if ($MaintenanceOnly) {
+    Set-FurphyLowPriority
+    try {
+        Invoke-FlavourMigration -RootPath $Script:Root
+    } catch {
+        Write-ServerLog "Maintenance child: flavour migration failed: $($_.Exception.Message)"
+    }
+    $Script:InstalledFlavoursAtStartup = Get-CurrentInstalledFlavours
+    Set-CurrentFlavourContext -Flavor (Get-DefaultFlavourId -InstalledFlavours $Script:InstalledFlavoursAtStartup)
+
+    Write-ServerLog "Maintenance child started (pid $PID)"
+    try {
+        [System.IO.File]::WriteAllText($Script:MaintenanceLockPath, [string]$PID)
+    } catch {
+        Write-ServerLog "Maintenance child: could not write lock file, continuing anyway: $($_.Exception.Message)"
+    }
+    try {
+        try {
+            Initialize-CfCatalogueIndex
+        } catch {
+            Write-ServerLog "Maintenance child: CurseForge catalogue refresh failed: $($_.Exception.Message)"
+        }
+        try {
+            Initialize-WagoGrowthSnapshots
+        } catch {
+            Write-ServerLog "Maintenance child: Wago growth snapshot crawl failed: $($_.Exception.Message)"
+        }
+    } finally {
+        try { Remove-Item -LiteralPath $Script:MaintenanceLockPath -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    Write-ServerLog 'Maintenance child finished'
+    return
+}
 
 # FLAVORS-SPEC.md CS-F2 S3.3: runs once, before any addons.json/state.json/
 # backups\ path is resolved - moves a pre-flavour install's top-level files
@@ -8604,21 +9172,31 @@ try {
 
 Write-ServerLog "Listening on $(($listener.Prefixes | ForEach-Object { $_ }) -join ' and ')"
 
-# Round 26 (hardening, item 1): moved from before $listener.Start() (see that
-# call site's own comment). The listener is now bound and already queuing
-# any incoming connection (a test's Wait-Port/TCP-connect succeeds against
-# http.sys's own accept queue immediately) before this potentially-slow disk
-# read + JSON parse runs, instead of after it. Still best-effort/never
-# blocks startup on failure - unchanged from before the move.
-Initialize-CfCatalogueIndex
-
-# WAGO-BROWSE-SPEC.md section 4.1: runs once, immediately after the
-# catalogue index above, still strictly before the request loop's first
-# BeginGetContext - $Script:AcceptingRequests (declared near the other
-# startup state above, still $false here) makes that ordering
-# self-enforcing rather than doc-comment-only, see that variable's own
-# comment and Initialize-WagoGrowthSnapshots' own doc comment.
-Initialize-WagoGrowthSnapshots
+# Round 37 (server perf pass): the listener is bound and already queuing any
+# incoming connection (a test's Wait-Port/TCP-connect succeeds against
+# http.sys's own accept queue immediately) - this now loads ONLY what is
+# already on disk (Load-CfCatalogueIndexFromDisk - a JSON parse, but never a
+# network call) and never fetches. The network-capable refresh
+# (Initialize-CfCatalogueIndex, and Initialize-WagoGrowthSnapshots' Wago
+# crawl - both UNCHANGED, just no longer called from here) now happens
+# entirely inside a periodically-spawned hidden -MaintenanceOnly child (see
+# Invoke-MaintenanceTick, called from the request loop below) - so a target
+# server never blocks its first /api/ping on either one, on ANY start
+# (fresh install, stale cache, or warm cache all take the same fast disk-
+# only path here). Still best-effort - a failure never blocks startup.
+if (Load-CfCatalogueIndexFromDisk) {
+    Write-ServerLog "CurseForge catalogue loaded from disk cache: $($Script:CfCatalogueIndex.Count) entries, fetched $($Script:CfCatalogueFetchedAt)"
+} else {
+    Write-ServerLog 'CurseForge catalogue cache not present yet - the next maintenance tick will fetch one'
+}
+try {
+    if (Test-Path -LiteralPath $Script:CfCatalogueCachePath -PathType Leaf) {
+        $Script:CfCatalogueCacheLastWriteUtc = (Get-Item -LiteralPath $Script:CfCatalogueCachePath -ErrorAction Stop).LastWriteTimeUtc
+    }
+} catch {
+    # Best-effort - worst case, the first request-loop tick's own
+    # Update-CfCatalogueCacheIfChanged reloads it again; never fatal.
+}
 
 if ($OpenBrowser) {
     $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
@@ -8663,6 +9241,17 @@ try {
             $waitMs = 15000
             $idleLimit = $Script:IdleMinutesGameRunning
         }
+
+        # Round 37 (server perf pass): this loop's own wake-up cadence is
+        # the only "timer tick" this file has - both calls are cheap and
+        # best-effort on every tick that has nothing to do (nearly all of
+        # them), and MUST NEVER block a pending request: Update-
+        # CfCatalogueCacheIfChanged is a single file stat unless the cache
+        # actually changed underneath this process; Invoke-MaintenanceTick's
+        # own interval/game-running/lock-file guards make it a real no-op on
+        # every tick except roughly once an hour.
+        Update-CfCatalogueCacheIfChanged
+        Invoke-MaintenanceTick -GameRunning $gameRunningNow
 
         $signaled = $pending.AsyncWaitHandle.WaitOne($waitMs)
         if (-not $signaled) {

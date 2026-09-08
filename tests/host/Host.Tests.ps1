@@ -464,6 +464,16 @@ Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
 
             $marker.jobPostStatus | Should Be 202
 
+            # Launch-latency fix (Builder H): StartServerWait polls
+            # GET /api/ping (against the real --port, not the selftest
+            # page URL) before ever navigating _furphyWebView - the real
+            # addon-server.ps1 Start-TestServer started above is already
+            # listening before FurphyHost.exe even runs, so this must
+            # resolve fast, never anywhere near the 45s timeout budget.
+            $marker.serverWaitOutcome | Should Be 'ok'
+            [int]$marker.serverWaitMs | Should BeGreaterThan -1
+            [int]$marker.serverWaitMs | Should BeLessThan 5000
+
             $marker.capturePath | Should Not Be $null
             (Test-Path -LiteralPath $marker.capturePath -PathType Leaf) | Should Be $true
             # A real PNG, not an empty/placeholder file.
@@ -544,6 +554,15 @@ Describe 'Host --selftest (main window)' -Tags 'Host', 'Network' {
             if ($null -ne $marker.jobPostStatus) {
                 $marker.jobPostStatus | Should Be 202
             }
+
+            # Launch-latency fix (Builder H): this stub's catch-all route
+            # answers any unmatched path (including /api/ping) with a
+            # plain 404 - PingAnswers treats any real HTTP response as
+            # "the listener is up", so StartServerWait resolves on its
+            # very first attempt here too, well under this test's own
+            # generous timing margins.
+            $marker.serverWaitOutcome | Should Be 'ok'
+            [int]$marker.serverWaitMs | Should BeLessThan 20000
 
             # The heartbeat Timer (50ms interval; host:
             # host-cf-navigationstarting-blocks-ui-thread fix's own

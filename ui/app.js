@@ -287,6 +287,15 @@ const Mock = (function () {
   let currentJob = null;
   const jobs = [];
 
+  // Launch-perf pass (T3 testability): every request this mock answers is
+  // logged here (method/path/dispatch time, BEFORE the artificial delay
+  // below) - exposed as Mock.requestLog so tests\spa\harness.js can assert
+  // ORDERING (e.g. "/api/protocol/status is never dispatched before
+  // /api/state's response has already landed") without needing to hook
+  // fetch/XHR itself. Harmless in a real (non-?test=1) mock session - just
+  // an ever-growing array nothing else reads.
+  const requestLog = [];
+
   const addons = [
     // Round 5 fix: this mock roster is dev-only fixture data, but naming a
     // real addon that no longer exists in Midnight (12.x) misleads anyone
@@ -906,10 +915,24 @@ const Mock = (function () {
   return {
     enabled: true,
     async handle(method, path, body) {
-      await delay(120 + Math.random() * 120);
       const u = new URL(path, "http://mock.local");
       const p = u.pathname;
       const q = u.searchParams;
+      // Logged at DISPATCH time (before the delay below resolves) so a
+      // caller can tell not just THAT two requests both eventually landed,
+      // but which one was actually sent first / how long the second one
+      // waited for the first to finish - see the requestLog comment above.
+      requestLog.push({ method: method, path: p, at: Date.now() });
+      // Launch-perf pass: ?mock=1&slowState=1 makes /api/state alone take
+      // ~2.5s longer than every other endpoint - lets the harness prove (a)
+      // the loading skeleton stays visible for that whole window instead of
+      // some earlier stale render, and (b) /api/protocol/status genuinely
+      // WAITS for /api/state's response before it is ever dispatched,
+      // rather than merely being reordered to dispatch a few ms earlier
+      // (which a fixed short mock delay could never tell apart from the old
+      // bug). Every other endpoint keeps the normal short delay.
+      const slowState = p === "/api/state" && new URLSearchParams(location.search).get("slowState") === "1";
+      await delay((slowState ? 2500 : 0) + 120 + Math.random() * 120);
 
       if (p === "/api/state") {
         // E13: fixed mock client build - matches the "ok" Auctionator/
@@ -1337,7 +1360,8 @@ const Mock = (function () {
         return { __status: 202, ok: true };
       }
       return { __status: 404, error: "no mock route for " + method + " " + p };
-    }
+    },
+    requestLog: requestLog
   };
 
   function currentSettings() {
@@ -5020,19 +5044,34 @@ const Actions = (function () {
   // null - both call sites render that as "Checking..." rather than an
   // error, since this is a nicety, never something worth an error toast for
   // on its own.
-  async function loadProtocolStatus() {
-    Store.state.protocolLoading = true;
-    if (Store.state.view === "settings") Views.settings.render();
-    if (Store.state.view === "browse") Views.browse.render();
-    try {
-      Store.state.protocol = await Api.protocolStatus();
-    } catch (err) {
-      Store.state.protocol = null;
-    } finally {
-      Store.state.protocolLoading = false;
+  //
+  // Launch-perf pass: this is now CALLED FROM TWO PLACES - App.init(), but
+  // only once the very first /api/state has already come back (never
+  // before - see that call site's own comment), and App.switchView() the
+  // instant Settings is opened, in case that happens first (e.g. the user
+  // clicks Settings while a slow/fresh-catalogue server is still answering
+  // that first /api/state). Whichever fires first wins; protocolStatusPromise
+  // makes every call after that a no-op that reuses the same in-flight/
+  // already-settled fetch rather than firing a second real request - the
+  // single-fetch-ever contract above is unchanged, only WHEN it can start.
+  let protocolStatusPromise = null;
+  function loadProtocolStatus() {
+    if (protocolStatusPromise) return protocolStatusPromise;
+    protocolStatusPromise = (async function () {
+      Store.state.protocolLoading = true;
       if (Store.state.view === "settings") Views.settings.render();
       if (Store.state.view === "browse") Views.browse.render();
-    }
+      try {
+        Store.state.protocol = await Api.protocolStatus();
+      } catch (err) {
+        Store.state.protocol = null;
+      } finally {
+        Store.state.protocolLoading = false;
+        if (Store.state.view === "settings") Views.settings.render();
+        if (Store.state.view === "browse") Views.browse.render();
+      }
+    })();
+    return protocolStatusPromise;
   }
 
   // Flips the curseforge:// handler toggle. `isUndo` suppresses the
@@ -7462,6 +7501,12 @@ const App = (function () {
     // entering Settings, rather than waiting up to one idle-poll tick (see
     // reloadState) for the status line to stop showing stale/empty data.
     if (view === "settings") Actions.refreshTrayStatus();
+    // Launch-perf pass: the curseforge:// handler row also wants a real
+    // answer as soon as Settings is actually opened, rather than only once
+    // the deferred post-first-paint call below gets to it - loadProtocolStatus
+    // is a no-op if the deferred call (or an earlier Settings visit) already
+    // started it, so this never causes a second /api/protocol/status request.
+    if (view === "settings") Actions.loadProtocolStatus();
   }
 
   function renderCurrentView() {
@@ -7850,7 +7895,15 @@ const App = (function () {
       : (Store.state.online === false ? POLL_OFFLINE_MS : POLL_ONLINE_MS);
     idleTimer = setTimeout(async function () {
       if (uninstalling) return;
-      if (!Store.isBusy()) await reloadState(false); // the 800ms job poller already covers the busy window
+      // Launch-perf pass: document.hidden is a free, standard signal for
+      // "this window is minimized or the desktop host has switched away
+      // from it" - the native WebView2 host's own window follows the same
+      // Page Visibility API as a browser tab, so no host->page message is
+      // needed for this. Skips the fetch entirely rather than merely
+      // skipping the repaint - nobody can see the result either way, and
+      // the very next tick (still 5s/10s/60s later, cadence unchanged)
+      // re-checks and catches up the moment the window is visible again.
+      if (!Store.isBusy() && !document.hidden) await reloadState(false); // the 800ms job poller already covers the busy window
       scheduleIdlePoll();
     }, delay);
   }
@@ -8047,6 +8100,20 @@ const App = (function () {
 
   async function init() {
     applyInitialViewFromQuery();
+    // Launch-perf pass: a ?view=settings deep link (or a future caller of
+    // applyInitialViewFromQuery that lands on Settings) already counts as
+    // "Settings is opened" from the very first instant, same as a later
+    // App.switchView("settings") click - starting the fetch here, before
+    // fetchPingInfo/reloadState even run, matches this app's pre-existing
+    // "Settings shows real protocol status as soon as possible" behavior
+    // for that case, rather than making it wait behind the deferred
+    // post-reloadState call below (whose whole point is keeping the LIST's
+    // first paint - not Settings' - off /api/protocol/status's critical
+    // path; Settings isn't even the visible view in that scenario). A no-op
+    // everywhere else (myaddons/browse) - the deferred call after
+    // reloadState still covers those, and App.switchView("settings")
+    // covers a later in-session click into Settings.
+    if (Store.state.view === "settings") Actions.loadProtocolStatus();
     wireGlobal();
     Views.myAddons.bindOnce();
     Views.browse.bindOnce();
@@ -8082,12 +8149,27 @@ const App = (function () {
       Store.state.gameRunning = running;
       renderCurrentView();
     });
-    // E19: fire-and-forget, like maybeShowWelcome below - loadProtocolStatus
-    // catches its own errors (leaves Store.state.protocol null, rendered as
-    // "Checking..."/"Unknown" by Components.ProtocolControl) and is a
-    // nicety, never worth delaying the rest of startup for.
-    Actions.loadProtocolStatus();
     await reloadState(false);
+    // Launch-perf pass: loadProtocolStatus used to fire here BEFORE
+    // reloadState, which cost nothing in this fire-and-forget JS promise
+    // chain but still meant the browser dispatched GET /api/protocol/status
+    // a tick before GET /api/state - against addon-server.ps1's single-
+    // threaded HttpListener loop, whichever request arrives first is the
+    // one answered first, so that ordering could delay the very first
+    // /api/state response (and therefore the first list paint) behind
+    // Handle-ProtocolStatus's own ~400ms child-process spawn for no reason
+    // any user-visible feature needs. Moved to AFTER reloadState's own
+    // await resolves - by construction that guarantees /api/state's
+    // request/response round-trip is already complete (not just
+    // "dispatched a moment earlier") before this page ever asks for
+    // protocol status, on every load, slow or fast. Still fire-and-forget
+    // (catches its own errors, leaves Store.state.protocol null, rendered
+    // as "Checking..."/"Unknown" by Components.ProtocolControl) and still a
+    // nicety never worth delaying startup for - App.switchView's own call
+    // covers the case where Settings is opened before this line even runs;
+    // loadProtocolStatus's protocolStatusPromise guard makes whichever of
+    // the two fires first the only one that actually hits the network.
+    Actions.loadProtocolStatus();
     await maybeShowWelcome();
     startIdlePolling();
     scheduleAutoCheck();
@@ -8128,6 +8210,13 @@ document.addEventListener("DOMContentLoaded", function () {
     // N>1, without having to drive a real background-update cycle through
     // the mock just to observe one string.
     window.__furphyTest.Views = Views;
+    // Launch-perf pass: exposes Mock.requestLog (dispatch-order/timing of
+    // every mocked endpoint call - see that array's own comment in the Mock
+    // module) so the harness can assert request ORDERING, not just DOM
+    // state, for the /api/protocol/status deferral. Mock itself is always
+    // this module's real object (never undefined) when ?test=1 is present,
+    // since the harness only ever drives this page under ?mock=1&test=1.
+    window.__furphyTest.Mock = Mock;
     initPromise.then(function () { window.__furphyTest.ready = true; });
   }
 });

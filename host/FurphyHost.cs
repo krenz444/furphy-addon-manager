@@ -732,6 +732,41 @@ namespace Furphy
             }
         }
 
+        // Returns true iff something answered with ANY HTTP response
+        // (including a 404/500) within timeoutMs - i.e. "is a listener up
+        // and speaking HTTP", not "did the request succeed". Used by
+        // MainForm's startup ping-wait (StartServerWait): a 404 for
+        // /api/ping is impossible in real production addon-server.ps1 (the
+        // route exists), but the whole point of this check is only ever
+        // "is the process alive enough to navigate to" - and treating any
+        // real response as an answer, rather than requiring exactly 200,
+        // also means the minimal HttpListener stubs some tests use, which
+        // answer everything with a 404 catch-all, do not need their own
+        // dedicated /api/ping route just to satisfy this check.
+        public static bool PingAnswers(string url, int timeoutMs)
+        {
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                {
+                    GC.KeepAlive(resp);
+                }
+                return true;
+            }
+            catch (WebException wex)
+            {
+                return wex.Response is HttpWebResponse;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static HttpResult PostJson(string url, string jsonBody, int timeoutMs)
         {
             HttpResult result = new HttpResult();
@@ -909,6 +944,33 @@ namespace Furphy
         private Panel _contentPanel;
         private WebView2 _furphyWebView;
         private WebView2 _cfWebView;
+
+        // Startup ping-wait (Builder H, launch-latency fix): rather than
+        // navigating _furphyWebView straight to the server's URL and
+        // showing a raw WebView2 "can't reach this page" error if
+        // addon-server.ps1 is not answering yet (cold catalogue refresh,
+        // etc.), a small overlay covers both webviews from the moment the
+        // window opens until GET /api/ping answers - see StartServerWait/
+        // ServerWaitThreadBody/OnServerWaitComplete. _startingOverlay is
+        // Dock=Fill over _contentPanel (added last + BringToFront so it
+        // paints above both webviews, same trick _cfWebView's own
+        // BringToFront uses); _startingContent is a TopDown
+        // FlowLayoutPanel holding the label + retry button, re-centered on
+        // every resize (see MainForm_Resize/CenterStartingContent) since a
+        // FlowLayoutPanel's AutoSize means its own size is only known
+        // after layout.
+        private Panel _startingOverlay;
+        private FlowLayoutPanel _startingContent;
+        private Label _startingLabel;
+        private Button _startingRetryButton;
+
+        private const string StartingMessage = "Starting Furphy Addon Manager...";
+        private const string StartingFailedMessage = "Furphy's helper did not start. Try again, or open the logs folder.";
+
+        private int _serverWaitGeneration;
+        private volatile bool _shuttingDown;
+        private int? _serverWaitMs;
+        private string _serverWaitOutcome; // "ok" | "timeout" | null (still pending)
 
         private bool _furphyReady;
         private bool _cfReady;
@@ -1531,6 +1593,13 @@ namespace Furphy
 
             try { _furphyWebView.DefaultBackgroundColor = ChromeBg; } catch { }
             try { _cfWebView.DefaultBackgroundColor = ChromeBg; } catch { }
+
+            if (_startingOverlay != null)
+            {
+                _startingOverlay.BackColor = ChromeBg;
+                _startingContent.BackColor = ChromeBg;
+                _startingLabel.ForeColor = ChromeText;
+            }
         }
 
         // Windows title bar (DWM). Attribute 20 (dark mode) is applied
@@ -2373,7 +2442,73 @@ namespace Furphy
             _contentPanel.Controls.Add(_furphyWebView);
             _contentPanel.Controls.Add(_cfWebView);
 
+            BuildStartingOverlay();
+            _contentPanel.Controls.Add(_startingOverlay);
+            _startingOverlay.BringToFront();
+
             Controls.Add(_contentPanel);
+        }
+
+        // Startup ping-wait overlay (see the field-block comment above).
+        // Built once here with the same InitializeDefaultTheme/
+        // LoadPersistedTheme colors every other chrome control is seeded
+        // with in the constructor - it can only ever be on screen before
+        // the Furphy webview has navigated anywhere, so there is no live
+        // "theme" WebMessage to react to yet; RecolorChrome still repaints
+        // it defensively (see that method) in case a future caller adds
+        // one.
+        private void BuildStartingOverlay()
+        {
+            _startingOverlay = new Panel();
+            _startingOverlay.Dock = DockStyle.Fill;
+            _startingOverlay.BackColor = ChromeBg;
+
+            _startingContent = new FlowLayoutPanel();
+            _startingContent.FlowDirection = FlowDirection.TopDown;
+            _startingContent.WrapContents = false;
+            _startingContent.AutoSize = true;
+            _startingContent.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _startingContent.BackColor = ChromeBg;
+
+            _startingLabel = new Label();
+            _startingLabel.AutoSize = true;
+            _startingLabel.MaximumSize = new Size(420, 0);
+            _startingLabel.TextAlign = ContentAlignment.MiddleCenter;
+            _startingLabel.Font = new Font(Font.FontFamily, 10.5F, FontStyle.Regular);
+            _startingLabel.ForeColor = ChromeText;
+            _startingLabel.BackColor = Color.Transparent;
+            _startingLabel.Margin = new Padding(0, 0, 0, 14);
+            _startingLabel.Text = StartingMessage;
+
+            _startingRetryButton = new Button();
+            _startingRetryButton.AutoSize = true;
+            _startingRetryButton.Text = "Retry";
+            _startingRetryButton.Visible = false;
+            _startingRetryButton.Margin = new Padding(0);
+            _startingRetryButton.Anchor = AnchorStyles.None;
+            _startingRetryButton.Click += new EventHandler(StartingRetryButton_Click);
+
+            _startingContent.Controls.Add(_startingLabel);
+            _startingContent.Controls.Add(_startingRetryButton);
+            _startingContent.Resize += new EventHandler(delegate(object s, EventArgs e) { CenterStartingContent(); });
+
+            _startingOverlay.Controls.Add(_startingContent);
+            _startingOverlay.Resize += new EventHandler(delegate(object s, EventArgs e) { CenterStartingContent(); });
+        }
+
+        // FlowLayoutPanel's own Size is only correct once AutoSize has run
+        // a layout pass, so this re-centers _startingContent inside
+        // _startingOverlay every time either one's size changes (parent
+        // resize, or the label/button text/visibility change altering the
+        // flow panel's own AutoSize result) rather than computing it once.
+        private void CenterStartingContent()
+        {
+            if (_startingOverlay == null || _startingContent == null) return;
+            int x = (_startingOverlay.ClientSize.Width - _startingContent.Width) / 2;
+            int y = (_startingOverlay.ClientSize.Height - _startingContent.Height) / 2;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            _startingContent.Location = new Point(x, y);
         }
 
         private void NavigateCf(string url)
@@ -2402,46 +2537,20 @@ namespace Furphy
 
             try
             {
-                // Round 15 (E20): --selftest's host\selftest.html now loads
-                // AS the Furphy webview's own page, replacing the real
-                // server-hosted SPA for the duration of the test - it is
-                // exercising the page->host messages (hello/theme/cf-show/
-                // cf-rect/cf-hide/cf-nav) that contract E says are ONLY
-                // ever honored from that webview, so it has to actually be
-                // that webview's content to reach HostWebView_WebMessageReceived
-                // at all (see that method's own comment). In production
-                // this is the real app, with --view/--tab (G) appended
-                // when given.
-                if (_options.SelftestActive)
-                {
-                    _furphyWebView.Source = new Uri(_options.SelftestTestPageUrl);
-                }
-                else
-                {
-                    string furphyUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/?host=webview2";
-                    if (!string.IsNullOrEmpty(_options.View))
-                    {
-                        furphyUrl += "&view=" + Uri.EscapeDataString(_options.View);
-                    }
-                    if (!string.IsNullOrEmpty(_options.Tab))
-                    {
-                        furphyUrl += "&tab=" + Uri.EscapeDataString(_options.Tab);
-                    }
-                    if (!string.IsNullOrEmpty(_options.Theme))
-                    {
-                        furphyUrl += "&theme=" + Uri.EscapeDataString(_options.Theme);
-                    }
-                    _furphyWebView.Source = new Uri(furphyUrl);
-                }
-
-                // The CF pane (contract A) starts with no page at all - it
-                // is navigated/shown entirely by cf-show/cf-nav messages
-                // from the Furphy webview, never pre-navigated here. Kick
-                // off its CoreWebView2 initialization now (rather than
-                // waiting for the first such message) so
-                // CfWebView_InitCompleted's ad-filter/interception wiring
-                // is already in place the first time the player switches
-                // to the CurseForge segment.
+                // Launch-latency fix (Builder H): do not navigate
+                // _furphyWebView until /api/ping answers (see
+                // StartServerWait below) - but still kick off BOTH
+                // webviews' own CoreWebView2 browser-process spinup right
+                // now, in parallel with that wait, so the moment the ping
+                // succeeds the only remaining cost is the actual
+                // navigation, not also waiting on WebView2's own startup.
+                // _cfWebView's own EnsureCoreWebView2Async call here is
+                // unchanged from before this fix (contract A: the CF pane
+                // starts with no page at all - it is navigated/shown
+                // entirely by cf-show/cf-nav messages from the Furphy
+                // webview) - only _furphyWebView's own warm-up is new.
+                System.Threading.Tasks.Task furphyInitTask = _furphyWebView.EnsureCoreWebView2Async(null);
+                GC.KeepAlive(furphyInitTask);
                 System.Threading.Tasks.Task cfInitTask = _cfWebView.EnsureCoreWebView2Async(null);
                 GC.KeepAlive(cfInitTask);
             }
@@ -2450,6 +2559,8 @@ namespace Furphy
                 HandleRuntimeMissing(ex);
                 return;
             }
+
+            StartServerWait();
 
             if (_options.SelftestActive)
             {
@@ -2488,9 +2599,164 @@ namespace Furphy
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            _shuttingDown = true;
             SaveWindowBounds();
             try { if (_backgroundGraceTimer != null) { _backgroundGraceTimer.Stop(); _backgroundGraceTimer.Dispose(); } } catch { }
             try { if (_gameCheckTimer != null) { _gameCheckTimer.Stop(); _gameCheckTimer.Dispose(); } } catch { }
+        }
+
+        // ---------------------------------------------- startup ping-wait
+
+        // Kicks off (or restarts, from Retry) the /api/ping poll: shows the
+        // "Starting..." overlay and polls a background thread every 250ms,
+        // up to a 45s budget, until GET http://localhost:<port>/api/ping
+        // answers with ANY HTTP response (see Http.PingAnswers - a 404 or
+        // 500 still proves the listener is up and worth navigating to; it
+        // is deliberately not a strict "got 200" check). Runs the same way
+        // for a real launch and for --selftest (pinging the real --port,
+        // never _options.SelftestTestPageUrl's own URL) - both existing
+        // Host.Tests.ps1 selftest fixtures already have a real listener up
+        // on that port before FurphyHost.exe even starts, so this adds at
+        // most one fast round trip ahead of the exact same navigation that
+        // happened synchronously before this fix, and exercises the new
+        // serverWaitMs/serverWaitOutcome marker fields for real instead of
+        // leaving them permanently untested.
+        //
+        // _serverWaitGeneration guards against a stale poll thread from a
+        // previous Retry click reporting its (now irrelevant) result after
+        // a newer one has already started - ServerWaitThreadBody captures
+        // the generation it was started with and OnServerWaitComplete
+        // drops any callback whose generation no longer matches.
+        private void StartServerWait()
+        {
+            _serverWaitGeneration++;
+            int generation = _serverWaitGeneration;
+            _serverWaitMs = null;
+            _serverWaitOutcome = null;
+
+            ShowStartingOverlay(StartingMessage, false);
+
+            string pingUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping";
+            DateTime startedAt = DateTime.UtcNow;
+            Thread waitThread = new Thread(delegate() { ServerWaitThreadBody(pingUrl, startedAt, generation); });
+            waitThread.IsBackground = true;
+            waitThread.Name = "FurphyServerWait";
+            waitThread.Start();
+        }
+
+        private void ServerWaitThreadBody(string pingUrl, DateTime startedAt, int generation)
+        {
+            const int intervalMs = 250;
+            const int attemptTimeoutMs = 1000;
+            const int budgetMs = 45000;
+
+            bool answered = false;
+            while (!_shuttingDown && (DateTime.UtcNow - startedAt).TotalMilliseconds < budgetMs)
+            {
+                if (Http.PingAnswers(pingUrl, attemptTimeoutMs))
+                {
+                    answered = true;
+                    break;
+                }
+                Thread.Sleep(intervalMs);
+            }
+
+            if (_shuttingDown) return;
+
+            int elapsedMs = (int)Math.Round((DateTime.UtcNow - startedAt).TotalMilliseconds);
+            bool finalAnswered = answered;
+            RunOnUiThread(delegate { OnServerWaitComplete(generation, finalAnswered, elapsedMs); });
+        }
+
+        private void OnServerWaitComplete(int generation, bool answered, int elapsedMs)
+        {
+            if (generation != _serverWaitGeneration) return; // superseded by a newer Retry
+
+            _serverWaitMs = elapsedMs;
+            _serverWaitOutcome = answered ? "ok" : "timeout";
+            LogHost("server wait: outcome=" + _serverWaitOutcome + " elapsedMs=" + elapsedMs.ToString(CultureInfo.InvariantCulture));
+
+            if (answered)
+            {
+                HideStartingOverlay();
+                NavigateFurphyWebView();
+            }
+            else
+            {
+                ShowStartingOverlay(StartingFailedMessage, true);
+            }
+        }
+
+        // The actual navigation, pulled out of MainForm_Load so it can run
+        // once /api/ping answers instead of unconditionally at Load time -
+        // otherwise unchanged from before this fix (same URLs, same
+        // --selftest branch, same HandleRuntimeMissing on failure).
+        private void NavigateFurphyWebView()
+        {
+            try
+            {
+                // Round 15 (E20): --selftest's host\selftest.html now loads
+                // AS the Furphy webview's own page, replacing the real
+                // server-hosted SPA for the duration of the test - it is
+                // exercising the page->host messages (hello/theme/cf-show/
+                // cf-rect/cf-hide/cf-nav) that contract E says are ONLY
+                // ever honored from that webview, so it has to actually be
+                // that webview's content to reach HostWebView_WebMessageReceived
+                // at all (see that method's own comment). In production
+                // this is the real app, with --view/--tab (G) appended
+                // when given.
+                if (_options.SelftestActive)
+                {
+                    _furphyWebView.Source = new Uri(_options.SelftestTestPageUrl);
+                }
+                else
+                {
+                    string furphyUrl = "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/?host=webview2";
+                    if (!string.IsNullOrEmpty(_options.View))
+                    {
+                        furphyUrl += "&view=" + Uri.EscapeDataString(_options.View);
+                    }
+                    if (!string.IsNullOrEmpty(_options.Tab))
+                    {
+                        furphyUrl += "&tab=" + Uri.EscapeDataString(_options.Tab);
+                    }
+                    if (!string.IsNullOrEmpty(_options.Theme))
+                    {
+                        furphyUrl += "&theme=" + Uri.EscapeDataString(_options.Theme);
+                    }
+                    _furphyWebView.Source = new Uri(furphyUrl);
+                }
+            }
+            catch (Exception ex)
+            {
+                HandleRuntimeMissing(ex);
+            }
+        }
+
+        // text/showRetry drive both the "Starting..." state (showRetry
+        // false) and the terminal failure state (showRetry true,
+        // StartingFailedMessage) - one method so both share the same
+        // centering/visibility bookkeeping rather than duplicating it.
+        private void ShowStartingOverlay(string text, bool showRetry)
+        {
+            if (_startingOverlay == null) return;
+            _startingLabel.Text = text;
+            _startingRetryButton.Visible = showRetry;
+            _startingOverlay.Visible = true;
+            _startingOverlay.BringToFront();
+            CenterStartingContent();
+        }
+
+        private void HideStartingOverlay()
+        {
+            if (_startingOverlay == null) return;
+            _startingOverlay.Visible = false;
+        }
+
+        private void StartingRetryButton_Click(object sender, EventArgs e)
+        {
+            LogHost("server wait: retry clicked");
+            StartServerWait();
         }
 
         private void FurphyWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -3759,6 +4025,16 @@ boot();
             marker["version"] = _webviewVersion;
             marker["dpi"] = (long)_effectiveDpi;
             marker["dpiAware"] = _dpiAware;
+
+            // Launch-latency fix (Builder H): how long StartServerWait's
+            // /api/ping poll took before navigating (or timing out) -
+            // "ok"/"timeout", null if the marker is somehow written before
+            // the wait has resolved at all (should not happen in practice;
+            // both real servers this harness starts answer in well under a
+            // second, and the exe's own 8s selftest timer only fires
+            // after that).
+            marker["serverWaitMs"] = _serverWaitMs.HasValue ? (object)(long)_serverWaitMs.Value : null;
+            marker["serverWaitOutcome"] = _serverWaitOutcome;
 
             marker["themeMessages"] = (long)_selftestThemeMessageCount;
             marker["themeBg0"] = ColorToHex(ChromeBg);

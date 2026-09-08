@@ -176,6 +176,37 @@ function Add-WagoBrowsePath {
     return "${Path}?flavour=retail"
 }
 
+function Wait-ForWagoCrawlPages {
+    <#
+      Round 37 (server perf pass) moved Initialize-WagoGrowthSnapshots off
+      the pre-accept startup path and into Invoke-MaintenanceTick's own
+      asynchronously-spawned -MaintenanceOnly child (addon-server.ps1
+      ~L5378-5455) - so unlike before this round, the crawl has NOT
+      necessarily finished (or even started) the instant Start-TestServer
+      returns; it now takes real wall-clock time for that child to spawn,
+      fetch, and write the snapshot file. Polls -Condition (a scriptblock
+      returning the current matching-request count) until it reaches
+      -ExpectedCount or -TimeoutSec elapses, then returns whatever the
+      last count was so the caller's own assertion produces a normal,
+      readable Pester failure (actual N, expected -ExpectedCount) instead
+      of this helper throwing.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Condition,
+        [int]$ExpectedCount = 10,
+        [int]$TimeoutSec = 30,
+        [int]$PollMs = 300
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $count = 0
+    while ((Get-Date) -lt $deadline) {
+        $count = & $Condition
+        if ($count -ge $ExpectedCount) { return $count }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    return (& $Condition)
+}
+
 function Block-WagoGrowthCrawl {
     <#
       Pre-seeds a just-captured (now) snapshot file for every WagoField
@@ -849,12 +880,32 @@ Describe 'Wago browse: snapshot crawl at startup (<=10 pages, spec-shaped file, 
         } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'crawls at most 10 pages for the one installed flavour and writes a spec-shaped, de-duped snapshot file' {
+            # The crawl now runs inside Invoke-MaintenanceTick's own
+            # asynchronously-spawned child (Round 37), so it has not
+            # necessarily finished - or even started - the instant
+            # Start-TestServer above returned. Poll for the crawl to
+            # actually reach its <=10-page cap before asserting on it,
+            # instead of asserting immediately against whatever partial
+            # (possibly zero) request count had landed by this point.
+            $getCrawlReqCount = {
+                @(Get-WagoStubRequests -Stub $stub | Where-Object { $_.query.game_version -eq 'retail' -and [string]::IsNullOrEmpty($_.query.search) -and [string]::IsNullOrEmpty($_.query.category) -and [string]::IsNullOrEmpty($_.query.sort) }).Count
+            }
+            Wait-ForWagoCrawlPages -Condition $getCrawlReqCount -ExpectedCount 10 -TimeoutSec 30 | Out-Null
+
             $reqs = Get-WagoStubRequests -Stub $stub
             $crawlReqs = @($reqs | Where-Object { $_.query.game_version -eq 'retail' -and [string]::IsNullOrEmpty($_.query.search) -and [string]::IsNullOrEmpty($_.query.category) -and [string]::IsNullOrEmpty($_.query.sort) })
             $crawlReqs.Count | Should Be 10
             ($crawlReqs | ForEach-Object { $_.query.page } | Sort-Object -Unique).Count | Should Be 10
 
             $snapshotPath = Join-Path $root 'cache\wago-growth-retail.json'
+            # The 10th page REQUEST landing at the stub (just confirmed
+            # above) only means the crawl's for-loop body has started
+            # running for that page - Save-WagoGrowthSnapshot itself still
+            # has to happen afterward in the same maintenance child (parse
+            # the response, then write the file). A short extra poll on the
+            # file itself closes that small remaining race instead of
+            # asserting immediately.
+            Wait-ForWagoCrawlPages -Condition { if (Test-Path -LiteralPath $snapshotPath) { 1 } else { 0 } } -ExpectedCount 1 -TimeoutSec 10 | Out-Null
             (Test-Path -LiteralPath $snapshotPath) | Should Be $true
             $file = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
             $file.gameVersion | Should Be 'retail'

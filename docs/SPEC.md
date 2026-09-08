@@ -125,7 +125,7 @@ Global
 - No inline event handlers; code organised as modules within app.js (api, state, views, components); comments where logic is non-obvious. Sanitize all upstream HTML before insertion; escape all text.
 
 ## 4. Startup pieces (produced by the deploy step, not by the builders)
-`ROOT\Addon Manager.vbs` starts the server hidden if `/api/ping` fails, then opens the Edge app window. Desktop shortcut "Furphy Addon Manager". (Round 34, removed at Eric's request 2026-09-07: the per-flavour game-launcher `.cmd`/`.vbs` pair that used to call the CLI with `-Launcher -Quiet` before starting WoW is gone entirely - see CHANGELOG.md. The background tray service already updates addons on its own schedule.)
+`ROOT\Addon Manager.vbs` starts the server hidden if `/api/ping` fails, then opens the native `host\bin\FurphyHost.exe` window immediately (falling back to an Edge app window when the host has not been built - E19). Desktop shortcut "Furphy Addon Manager". (Round 34, removed at Eric's request 2026-09-07: the per-flavour game-launcher `.cmd`/`.vbs` pair that used to call the CLI with `-Launcher -Quiet` before starting WoW is gone entirely - see CHANGELOG.md. The background tray service already updates addons on its own schedule.) Round 37 (below) removed the launcher's old up-to-15s `/api/ping` retry loop between spawning the server and opening a window - see that section for the full startup contract.
 
 ## Expansion E1
 
@@ -972,3 +972,56 @@ The `?mock=1` `/api/open` stub now returns 400 `unknown what: <x>` for any targe
 ACCEPTANCE: `tests\unit\Server.Handlers.Tests.ps1` (Describe "Handle-Open (POST /api/open, what=wowfolder / folder / addons ...)", `Start-Process` shadowed to record the would-be launch) - five cases: `'wowfolder'` opens `<WowRoot>\_retail_`, `'folder'` opens `<WowRoot>\_retail_\Interface\AddOns`, both follow `?flavour=classic` via `Set-CurrentFlavourContext` (a `_classic_` tree alongside), a missing flavour folder is the documented 400 with nothing launched, and `'addons'` still opens `addons.json` in Notepad; the file passes 23/23. Verified live in a real browser against the real server (port 47877, root `<scratch>\Fake WoW (x86)\_retail_\AddonSync`, WoW root found by the same parent walk-up production uses - spaces and parentheses in the path on purpose): each Game folders button opened its own row's path, proven by enumerating Explorer's open windows through `Shell.Application` (`_retail_`, `_retail_\Interface\AddOns`, and "Open logs folder"'s app root); with a second `_classic_` client added and the page reloaded, the Retail and Classic rows' "Open" buttons posted `?flavour=retail` / `?flavour=classic` and opened each flavour's own `Interface\AddOns`; "Open addon list file" opened `flavours\retail\addons.json` in Notepad (and, on the root before any addon list existed, returned the pre-existing 400 "addons.json not found"). `node --check ui/app.js` and `[System.Management.Automation.PSParser]::Tokenize` on `addon-server.ps1` pass clean; `addon-server.ps1` remains pure ASCII (byte-scanned).
 
 Known, not fixed here (test harness only): `tests\lib\common.ps1`'s `Start-TestServer` hands `-Root` to `Start-Process -ArgumentList` as a separate unquoted element, so a root path containing spaces is split across arguments and the child server starts mis-rooted. Every test in the suite uses a space-free `tests\.tmp` root, so nothing currently trips it; the live check above launched `addon-server.ps1` with a single quoted argument string instead.
+
+## Round 37 - fast launch (2026-09-07)
+
+Eric's verbatim question: "it can take a while to launch the app when i double click it on the desktop, why is that?" Measured on his machine the night he asked: a cold launch was ~9s when the daily catalogue refresh happened to be due (the old `Addon Manager.vbs` waited out 1s of server startup, then a 5s catalogue refresh, before answering any request at all, then 1s for the window, 0.4s for a protocol-status round trip, and 1.3s for the first `/api/state`), ~4s on other cold starts, ~3s warm. Separately, this round's own verifier measured a completely fresh install taking 21.6s to answer its very first `/api/ping` (catalogue fetch plus the daily Wago snapshot crawl, both run inline before the server's request loop ever started accepting) - past the launcher's old 15s poll budget, so a brand-new player could get "The Addon Manager server did not start" and no window at all on their very first double-click.
+
+**The startup contract, binding on the server, the launcher, and the native host alike:** `/api/ping` answers within 2s of the server process starting, on every kind of start (fresh install, stale catalogue cache, already-warm cache) - every piece of network work the server used to run before accepting requests (the CurseForge catalogue refresh, the daily Wago growth-snapshot crawl) now runs only after the request loop is already accepting, never inside a request handler and never gating the first answer. A visible window shows "Starting Furphy Addon Manager..." within 1.5s of the double-click. The addon list paints within 3s cold / 2s warm. `/api/state` answers under 150ms warm for 34 addons. `/api/protocol/status` answers under 50ms with no child process spawned. The SPA's first paint never waits on protocol status. Nothing about game-mode gating, request politeness, the 24h catalogue freshness window, the snapshot budget, or the 20-minute idle exit changes.
+
+**What changed in `Addon Manager.vbs` (this file's own piece of the contract).** The old launcher polled `/api/ping` for up to 15s (30 tries, 500ms apart) after spawning `addon-server.ps1`, before opening any window at all - exactly the budget the fresh-install measurement above blew past. Now: a single 800ms probe decides whether to spawn the server hidden at all (skipped if one is already answering); the server is spawned, if needed, with no wait afterward; and `host\bin\FurphyHost.exe` (or the Edge app-window fallback when the host has not been built) is launched immediately in either case. There is no polling loop left in this file. This is safe only because of the other half of the contract above: the native host now waits out the server's own short startup gap itself and shows the "Starting..." state, so the launcher no longer needs to prove the server is answering before it opens a window. Two failure boxes remain, both file-existence checks rather than a timing guess: `addon-server.ps1` missing (nothing to spawn - reinstall) and neither `host\bin\FurphyHost.exe` nor Edge present (nothing to show the app in - reinstall); a working install never hits either.
+
+**Before/after (filled in by the verifier's real measurements, not estimated
+- see shots\launch\Verify-Round37.ps1 / verify-round37-results.json, run
+against the unmodified build-root addon-server.ps1 on a 34-addon/109-folder
+scratch install with the real 18,170-entry catalogue):**
+
+| Scenario | Before | After |
+|---|---|---|
+| First `/api/ping` answered (fresh install, catalogue due) | 21.6s | 656.5ms avg / 660.7ms max (fresh, no cache dir) |
+| First `/api/ping` answered (stale cache) | ~7.7s | 1400.1ms avg / 1452.8ms max - the refresh itself now happens entirely after this answer |
+| First `/api/ping` answered (warm cache) | ~1s | 1391.0ms avg / 1409.7ms max |
+| Maintenance child appears / cache lands (one real live fetch) | n/a | child seen 132ms after ping; cache file written 4.6s after ping |
+| Fake-WoW-running: children spawned / network calls | n/a | 0 and 0, after 8s of observation |
+| Window visible, "Starting..." shown | n/a (blank until ping succeeded) | proven via host `--selftest` marker (`serverWaitOutcome=ok`); exact double-click-to-visible wall clock deferred (no live window this round) |
+| List painted, cold | ~9s | not independently stopwatched (window-based, deferred); structurally under budget given the ping numbers above |
+| List painted, warm | ~3s | not independently stopwatched (window-based, deferred); structurally under budget |
+| `/api/state`, warm, 34 addons | ~900-1300ms | round-1 verifier: 187.8ms avg (MISSED <150ms). round-1 fixer (Handle-State's per-record clone loop rebuilt as an `[ordered]` hashtable + one `[PSCustomObject]` cast instead of N+6 `Add-Member` calls): 61.2ms avg / 75.3ms max - MEETS the <150ms target |
+| `/api/protocol/status` | ~400ms (child process) | 27.5ms avg / 32.9ms max, 0 child processes across 5 calls |
+
+Round-1 fixer note: every open item from the round-1 verifier pass below
+is now fixed - `tests\run-all.ps1 -Quick` runs ALL GREEN (static 7/7, unit
+278/278, integration 93/93, host 2/2, spa 1/1). The
+`tests\unit\Server.StateCache.Tests.ps1` failure was a test-only wrong
+assumption (fixed the test's query to lowercase, matching
+`Get-PresentAddonFoldersFromDirs`'s real, unchanged, case-SENSITIVE-set
+contract - addon-server.ps1 needed no change there). The
+`tests\integration\Server.WagoBrowse.Tests.ps1` crawl failure needed both
+a poll/wait (the test genuinely does need to wait for the now-async
+crawl) AND a real product fix: `Invoke-MaintenanceTick` was building its
+spawned `-MaintenanceOnly` child's own `-File` path from `Join-Path
+$Script:Root 'addon-server.ps1'`, which only equals the script's real
+location when `-Root` happens to be the folder the script itself lives in
+(always true in production, not true for `tests\lib\common.ps1`'s
+Start-TestServer, which points the shared build-root script at a
+scratch-only DATA root) - the spawned child was silently failing
+`powershell.exe -File`'s own argument validation and exiting before
+writing a single log line. Fixed by capturing the script's real path once
+at startup (`$Script:ScriptSelfPath`) and having `Invoke-MaintenanceTick`
+use that instead of reconstructing one from `$Script:Root` - zero live
+behavior change, since the two paths were always identical in every real
+deployment. See CHANGELOG.md's round-1-fixer entry for the full account,
+including the (already-resolved-by-re-run) `perf`-layer CPU-contention
+false positive the round-1 verifier also flagged.
+
+ACCEPTANCE: `Addon Manager.vbs` was verified by manual VBScript-syntax/logic review plus running a neutered copy (every `sh.Run`/`MsgBox` side effect replaced with `WScript.Echo`, everything else byte-identical) under `cscript` against four scratch scenarios - `addon-server.ps1` missing (exits 1 with the reinstall message), server not answering with no host build and Edge present (spawns then falls back to the Edge app window), server not answering with a host build present (spawns then launches the host immediately, no wait), and neither the host build nor Edge present (exits 1 with the reinstall message) - all four matched the intended branch with no VBScript parse errors. The real file was not executed directly this round: WoW was flagged running on this machine for the duration of this build, and both `host\bin\FurphyHost.exe` and the Edge fallback path open a real window, which no agent may trigger while `Test-GameRunning` is true - see CHANGELOG.md's Round 37 entry for the full account and the window-based checks this leaves deferred to the verifier.

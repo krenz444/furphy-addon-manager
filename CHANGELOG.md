@@ -1,5 +1,335 @@
 # Furphy Addon Manager - changelog
 
+## Round 37 (1.18.1: fast launch)
+
+Eric's verbatim question: "it can take a while to launch the app when i
+double click it on the desktop, why is that?" Measured on his machine the
+night he asked: cold launch ~9s when the daily catalogue refresh happened
+to be due (1s server startup, then 5s of catalogue refresh before the
+server answered any request, then 1s for the window, 0.4s for a protocol-
+status round trip, and 1.3s for the first /api/state), ~4s on other cold
+starts, ~3s warm. Separately, this round's own verifier measured a brand-
+new install taking 21.6s to answer its first /api/ping (catalogue fetch
+plus the daily Wago snapshot crawl, both run inline before the request loop
+ever accepted anything) - past the old launcher's 15s poll budget, so a
+first-time player could get "The Addon Manager server did not start" and no
+window at all.
+
+Fixed this round, one contract shared across three components: /api/ping
+now answers within 2s of the server process starting on every kind of start
+(fresh, stale-cache, warm) - every piece of network work the server used to
+run before accepting requests (the CurseForge catalogue refresh, the daily
+Wago growth-snapshot crawl) now runs only after the request loop is already
+accepting, never inside a request handler; host\bin\FurphyHost.exe shows
+"Starting Furphy Addon Manager..." and waits out that short gap itself,
+instead of navigating straight to localhost and risking a bare browser
+error; and Addon Manager.vbs no longer polls /api/ping for up to 15s before
+opening a window - it spawns the server (only if a single 800ms probe finds
+nothing already answering) and opens the window immediately either way,
+trusting the host to wait. See SPEC.md's new "Round 37 - fast launch"
+section for the full startup contract and every target.
+
+Measured before/after (verifier-filled, round 1 - real scratch-install runs
+against the unmodified build-root addon-server.ps1, 34-addon/109-folder
+fixture, real 18,170-entry CurseForge catalogue; see
+shots\launch\Verify-Round37.ps1 and verify-round37-results.json):
+
+| Scenario | Before | After |
+|---|---|---|
+| First /api/ping answered (fresh install, catalogue due) | 21.6s | 656.5ms avg / 660.7ms max (no cache dir at all - the real fresh-install case) |
+| First /api/ping answered (stale cache, forces a refresh) | ~7.7s (measurer's pre-fix baseline) | 1400.1ms avg / 1452.8ms max - refresh now happens entirely after this answer, in the background |
+| First /api/ping answered (warm cache) | ~1s | 1391.0ms avg / 1409.7ms max |
+| Maintenance child appears / cache file lands (fresh install, one real live fetch) | n/a (used to block the ping instead) | child observed 132ms after ping; cache\cf-catalogue.json written 4.6s after ping - zero effect on the answer above |
+| Fake-WoW-running: maintenance child / network calls | n/a | 0 children, 0 network calls after 8s - confirmed still gated on Test-GameRunning |
+| Window visible, "Starting..." shown | n/a (blank until ping succeeded) | mechanism proven via host --selftest marker (serverWaitOutcome=ok, serverWaitMs bounded) - exact double-click-to-visible wall clock deferred (no live window this round; WoW-running hard rule was in force for most of this pass) |
+| List painted, cold | ~9s | not independently stopwatched (window-based, deferred) - structurally bounded by the ping number above plus one /api/state round trip, comfortably under the 3s target |
+| List painted, warm | ~3s | not independently stopwatched (window-based, deferred) - structurally bounded by ~1.4s ping + ~0.2s /api/state |
+| /api/state, warm, 34 addons | ~900-1300ms (900-1300ms figure already on file) | round-1 verifier: 187.8ms avg (MISSED <150ms). round-1 fixer, after replacing Handle-State's per-record Add-Member clone loop with an [ordered] hashtable + one [PSCustomObject] cast: 61.2ms avg / 75.3ms max across 9-11 cache-hit calls (2 independent re-measurements, shots\launch\Verify-Round37.ps1 and a standalone scratch run) - MEETS the <150ms target with ~2.4x headroom |
+| /api/protocol/status | ~400ms (child process), avg ~278ms measured | 27.5ms avg / 32.9ms max, 0 child processes spawned across 5 calls - meets the <50ms/no-child target |
+
+Round-1 verifier findings (all fixed by the round-1 fixer below - kept
+here verbatim as the historical record of what was found; see the
+round-1-fixer entry further down for what actually changed and the
+final, all-green `tests\run-all.ps1 -Quick` result):
+- Two test-suite-only bugs block a from-scratch `tests\run-all.ps1` PASS
+  (neither is a product defect - addon-server.ps1/host/vbs/app.js behavior
+  is unaffected either way): `tests\unit\Server.ProtocolStatus.Tests.ps1`
+  declared its throwaway registry key as a plain Describe-scope `$testKey`
+  referenced from `AfterAll` (Pester 3's `AfterAll` runs in its own scope
+  and cannot see it - the same pitfall `tests\unit\RegisterProtocol.Tests.ps1`
+  already documents and works around) - crashed the teardown, which then
+  corrupted Pester's own result aggregation and aborted the ENTIRE suite
+  before host/spa/fixture-acceptance/perf ever ran; fixed by the verifier
+  (mechanical, matches the established `$Script:`-scoped pattern exactly)
+  so the round could be measured at all. Still open, NOT fixed by the
+  verifier: `tests\unit\Server.StateCache.Tests.ps1:99` asserts
+  `Get-PresentAddonFoldersFromDirs`'s returned set `.Contains('MYADDON')`
+  directly, but that function (byte-for-byte matching its unchanged sibling
+  `Get-PresentAddonFolders`) stores lower-cased names in an ordinal
+  (case-SENSITIVE) HashSet - every real caller (`Get-MissingDeps`) already
+  lowercases its own query first, so production behavior is unaffected;
+  only this new test's assumption is wrong. Also open:
+  `tests\integration\Server.WagoBrowse.Tests.ps1`'s "snapshot crawl at
+  startup" Describe (~L816-854) still asserts the Wago growth crawl has
+  already happened immediately after `Start-TestServer` returns - true
+  under the old inline-before-accepting design, false now that the crawl
+  runs in Invoke-MaintenanceTick's own asynchronously-spawned child; the
+  test needs a poll/wait for the crawl to actually finish before asserting
+  page count/snapshot contents (see this round's SPEC.md for the new
+  contract). Both remaining bugs are real `tests\run-all.ps1` FAILures
+  (unit 277/278, integration 98/99) left for the next round to fix.
+- `perf` layer FAILed once (steady-state CPU tolerance) inside the same
+  ~570s full-suite run that produced the numbers above, then PASSed 2/2
+  when re-run alone seconds later with nothing else on the machine
+  contending for CPU - the verifier's own concurrent
+  `Verify-Round37.ps1` measurement runs (see above) were still active
+  during that first attempt. Treated as a false positive caused by
+  verifier methodology, not a product regression; static/host/spa/
+  fixture-acceptance all PASSed cleanly in the same full run.
+- The /api/state shortfall above is real and worth a closer look next
+  round: Handle-State's own toc/compat/missingDeps I/O is now cached
+  exactly as designed (the fix this round set out to make), but the
+  per-record clone loop just above it (`foreach ($p in $r.PSObject.Properties)
+  { $clone | Add-Member ... }`, unchanged by this round, addon-server.ps1's
+  Handle-State) runs unconditionally on every call regardless of cache hit,
+  and PowerShell's `Add-Member` carries enough per-call reflection overhead
+  that ~700-850 calls (34 records x ~20+ properties each) plausibly account
+  for the ~180-200ms now left on every warm call. Worth profiling directly
+  before the next optimization pass.
+
+- `server:round37-background-maintenance-child` - fixed: addon-server.ps1
+  no longer calls Initialize-CfCatalogueIndex or
+  Initialize-WagoGrowthSnapshots before its first BeginGetContext - startup
+  now does only a disk-only, network-free catalogue load
+  (Load-CfCatalogueIndexFromDisk) before accepting, then a new
+  Invoke-MaintenanceTick spawns a hidden, BelowNormal, -MaintenanceOnly
+  child of this SAME script (at most once an hour, never while
+  Test-GameRunning, never more than one at a time) to do the real
+  network-capable refresh/crawl entirely after the loop is already
+  serving; Update-CfCatalogueCacheIfChanged then picks up the child's
+  freshly-written cache file on the next idle tick (one file stat on
+  every tick that changed nothing). Handle-State's own per-addon
+  toc/compat/missingDeps I/O is now cached per flavour, keyed on a cheap
+  folder fingerprint (Get-AddonsFolderSnapshot/Get-HandleStateCacheKey),
+  invalidated automatically the moment a folder is added/removed/touched.
+  Handle-ProtocolStatus reads the registry in-process
+  (Get-ProtocolStatusObject) instead of spawning register-protocol.ps1
+  -Status for every poll. Verified by measurement - see the table above
+  and tests\unit\Server.ProtocolStatus.Tests.ps1,
+  tests\unit\Server.StateCache.Tests.ps1,
+  tests\unit\Server.CfCatalogueGuard.Tests.ps1,
+  tests\integration\Server.WagoBrowse.Tests.ps1's snapshot-crawl Describe.
+- `host:round37-starting-overlay-and-selftest-markers` - fixed:
+  host\FurphyHost.cs no longer navigates its WebView2 straight to
+  localhost on load; MainForm_Load now pre-warms both WebView2 engines
+  and shows a themed "Starting Furphy Addon Manager..." overlay while a
+  background thread polls GET /api/ping (250ms/1s timeout, up to 45s)
+  before navigating for real - a timeout swaps the label for a plain
+  failure message with a Retry button instead of WebView2's raw
+  can't-reach-this-page error. --selftest's marker gained
+  `serverWaitMs`/`serverWaitOutcome` fields covering the identical wait
+  path, proven by two new assertions in tests\host\Host.Tests.ps1.
+- `spa:round37-state-before-protocol-status` - fixed: ui\app.js's
+  App.init() used to fire GET /api/protocol/status before awaiting GET
+  /api/state, so a cold/slow load could let the protocol-status
+  round trip (previously a ~400ms child-process spawn server-side) delay
+  the first list paint behind it. /api/state is now awaited first and the
+  list painted before Actions.loadProtocolStatus() is even called (a
+  Settings-view deep link still fires it immediately, since that view
+  genuinely needs it and paints nothing addon-list-shaped);
+  scheduleIdlePoll's background poll also now skips the /api/state fetch
+  entirely (not just the repaint) while the tab is hidden. Proven by
+  tests\spa\harness.js's new phaseLaunchPerf phase under an artificial
+  2.5s /api/state delay (137/137 SPA harness checks passed this round).
+- `launcher:round37-fast-launch-vbs` - fixed: Addon Manager.vbs dropped its
+  old 15s/30-try /api/ping retry loop between spawning addon-server.ps1 and
+  opening a window; it now spawns the server (only if a single 800ms probe
+  finds nothing already answering, unchanged from before) and opens
+  host\bin\FurphyHost.exe (or the Edge app-window fallback when the host
+  has not been built) immediately either way, since the host now owns
+  waiting out the server's own startup gap and showing "Starting...". The
+  two remaining failure boxes are now plain file-existence checks instead
+  of a timing guess - addon-server.ps1 missing, or neither the host build
+  nor Edge present - and a working install never hits either. Verified by
+  manual VBScript-syntax/logic review plus running a neutered copy (every
+  sh.Run/MsgBox side effect replaced with WScript.Echo, everything else
+  byte-identical) under cscript across four scratch scenarios - server
+  script missing, host missing with Edge present, host present, neither
+  present - all four matched the intended branch cleanly. The real file was
+  not run directly this round: WoW was flagged running on this build
+  machine for the duration of this work, and both the native host and the
+  Edge fallback open a real window, which no agent may trigger while Test-
+  GameRunning is true - the window-based checks (a real double-click
+  actually showing "Starting..." within 1.5s, the window actually painting
+  the list within budget) are deferred to the verifier, once WoW is
+  confirmed not running.
+
+Round-1 fixer (fixed every open item from the round-1 verifier findings
+above; `tests\run-all.ps1 -Quick` now runs ALL GREEN - static 7/7, unit
+278/278, integration 93/93, host 2/2, spa 1/1 (137/137 harness checks) -
+where it was unit 277/278 FAIL / integration 98/99 FAIL before this pass):
+
+- `unit:round1fixer-statecache-test-contract` - fixed:
+  `tests\unit\Server.StateCache.Tests.ps1:99` queried
+  `Get-PresentAddonFoldersFromDirs`'s returned set with `.Contains('MYADDON')`
+  verbatim - the set's real, established, unchanged contract (its own doc
+  comment, and its unchanged sibling `Get-PresentAddonFolders`) stores
+  lower-cased names in an ordinal case-SENSITIVE `HashSet[string]`, and
+  every real caller (`Get-MissingDeps`) already lowercases its own query
+  first. This was a test-only bug, not a product defect - addon-server.ps1
+  itself needed no change. Fixed the test to lowercase its own query
+  (`'MYADDON'.ToLowerInvariant()`) the same way a real caller does, with a
+  comment explaining the contract so a future reader does not reintroduce
+  the same wrong assumption.
+- `integration:round1fixer-wagobrowse-crawl-poll` - fixed (test) and
+  `server:round1fixer-maintenance-child-wrong-script-path` - fixed
+  (product, the ACTUAL root cause): investigating
+  `tests\integration\Server.WagoBrowse.Tests.ps1`'s "snapshot crawl at
+  startup" failure turned up more than a missing poll loop. Adding one (a
+  new `Wait-ForWagoCrawlPages` helper, polling both the stub's own request
+  count and the snapshot file's existence, up to 30s/10s) was necessary
+  but not sufficient - a direct repro (spawning the exact same
+  -MaintenanceOnly child Invoke-MaintenanceTick spawns, both through the
+  real request-loop tick and by hand) showed the child was failing to
+  start at all inside the test harness, silently, before writing a single
+  server.log line: `Invoke-MaintenanceTick` built the child's own `-File`
+  argument as `Join-Path $Script:Root 'addon-server.ps1'`, which is only
+  the real addon-server.ps1's own location when `-Root` happens to equal
+  the folder the script itself lives in - true in every real production
+  deployment (the install root always holds its own addon-server.ps1) but
+  NOT true for `tests\lib\common.ps1`'s `Start-TestServer`, which
+  deliberately points the ONE shared build-root addon-server.ps1 at a
+  throwaway scratch `-Root` holding only per-test DATA (ui\, addons.json,
+  cache\ - never a copy of the script itself), the exact landmine
+  `Start-TestServer`'s own "T2 fix" comment already documents hitting for
+  `$Script:CliPath`/addon-sync.ps1, just not yet fixed for the server
+  spawning itself here. `powershell.exe -File <nonexistent path>` fails
+  argument validation and exits immediately, so the maintenance child
+  never even reached its own first log line - confirmed live: the real
+  server logged "Maintenance tick: spawned a -MaintenanceOnly child" and
+  then nothing else, ever, while running the identical -MaintenanceOnly
+  invocation directly against the script's real path completed the full
+  10-page crawl in ~4s. Fixed by capturing the script's own real path once
+  at startup (`$Script:ScriptSelfPath`, from `$MyInvocation.MyCommand.Path`,
+  falling back to the old Join-Path construction only if that is somehow
+  unavailable) and having `Invoke-MaintenanceTick` use that instead of
+  reconstructing a path from `$Script:Root`. Zero live behavior change -
+  `$Script:ScriptSelfPath` is byte-identical to the old value on every
+  real deployment, where `-Root` IS the script's own folder; re-verified
+  with `shots\launch\Verify-Round37.ps1` after the fix (maintenance child
+  still observed ~109ms after ping, cache file still lands ~4.6s after
+  ping, fake-WoW-running still spawns 0 children - all unchanged from the
+  pre-fix numbers above). The WagoBrowse integration suite now passes
+  16/16 standalone, including the previously-failing crawl test.
+- `server:round1fixer-handle-state-clone-loop` - fixed: the /api/state
+  shortfall the round-1 verifier flagged (187.8ms avg warm, over the
+  <150ms target) traced to exactly the spot that report predicted -
+  Handle-State's per-record clone loop
+  (`$clone = [PSCustomObject]@{}; foreach ($p in $r.PSObject.Properties)
+  { $clone | Add-Member ... }`, then five more individual `Add-Member`
+  calls for updateAvailable/missingDeps/missingOptionalDeps/
+  tocInterfaces/compat) paying PowerShell's per-call `Add-Member`
+  reflection/PSMemberInfo-adaptation overhead across ~700-850 calls per
+  request (34 records x ~20+ properties each) even on a full cache hit,
+  now that Round 37's own toc/compat/missingDeps caching had already
+  eliminated the real disk-I/O cost this loop used to pay. Replaced with
+  building each record via a plain `[ordered]` hashtable (`$clone[$name]
+  = $value` - a dictionary write, not a reflection call) and casting it
+  to `[PSCustomObject]` exactly once at the end, instead of N+6 separate
+  `Add-Member` calls; `[ordered]` (not a plain hashtable) preserves the
+  exact same property-insertion order the old loop produced, so
+  `ConvertTo-Json`'s output order for `/api/state` is unchanged. Measured
+  twice independently (a standalone scratch-server timing script, and a
+  full re-run of `shots\launch\Verify-Round37.ps1`): warm /api/state for
+  34 addons now averages ~61-63ms (9-11 cache-hit calls, max 75.3ms) -
+  comfortably under the 150ms target with room to spare, down from
+  187.8ms (a further ~3x improvement on top of Round 37's own ~5x
+  improvement over the pre-Round-37 900-1300ms baseline). Every other
+  Round 37 target (ping <2s on every start, maintenance-child mechanics,
+  fake-WoW-running gating, single-child locking, /api/protocol/status
+  <50ms/no-child, SPA first-paint-never-waits-on-protocol-status) was
+  re-confirmed unaffected by this pass, matching the round-1 verifier's
+  own numbers within measurement noise.
+- Live-safety snapshot (before/after this pass, matching the round-1
+  verifier's own methodology): HKCU Run value, the live
+  `FurphyHost.exe --tray` pid (33684), and the live install's file count
+  (1258) were all unchanged and correct before, during, and after this
+  entire pass. Every server started during this work was a scratch
+  install on port 47850/47899, never the live one; no window was ever
+  opened (WoW was flagged running on this machine for the duration of
+  this pass); a real live CurseForge catalogue fetch fired exactly once
+  as a side effect of one early direct-child repro run (before the
+  FURPHY_TEST_SKIP_CF_CATALOGUE gap in that specific repro was closed),
+  matching this round's own "live traffic minimal, not zero" allowance.
+- Pre-existing, unrelated `HKCU\...\Uninstall\FurphyAddonManager`
+  corruption the round-1 verifier flagged (informational item 5, not part
+  of this round's own failuresToFix): still present, still untouched by
+  this pass - a concurrent-session hazard on this shared dev machine, not
+  a Furphy Addon Manager code defect, so it is out of scope for a
+  code-level fixer round.
+
+Round-2 verifier (independent re-measurement, no code changes - a from-
+scratch confirmation pass, not a fix round): rebuilt `host\bin\FurphyHost.exe`
+and ran the FULL `tests\run-all.ps1` (no `-Quick`, 606.9s) from a cold
+start - every layer PASSED: static 7/7, unit 278/278, integration 99/99,
+host 6/6 (including both real `--selftest` window Describes and their
+`serverWaitOutcome`/`serverWaitMs` assertions), spa 2/2 (harness 137/137,
+`Run-ThemeAudit` 500/500 across all 16 themes), fixture-acceptance 9/9,
+perf 2/2 (the P3 zero-impact-on-gameplay layer, real minimized host
+window on a scratch port, WoW confirmed not running on this machine at
+the time - `Test-GameRunning` verified false via a live process scan
+before proceeding, consistent with the round's own "otherwise mark it
+deferred" carve-out). Independently re-ran `shots\launch\Verify-Round37.ps1`
+end to end (fresh scratch server starts, one deliberate live CurseForge
+fetch, everything else offline) and got numbers matching the round-1
+fixer's own within normal measurement noise: `/api/ping` warm 1509.8ms
+avg/1563.4ms max, stale 1380.7ms avg/1394.3ms max, fresh (no cache dir)
+694.8ms avg/709.9ms max - all comfortably under the 2s target on every
+scenario; maintenance child observed 123.6ms after ping, cache file
+landed 4.8s after ping; fake-WoW-running produced 0 maintenance children
+and 0 cache writes after 8s; at most 1 maintenance child ever observed
+concurrently; `/api/state` warm/cache-hit averaged 65.4ms across 9 calls
+(max 75.9ms, well under the 150ms target) - the 10th call (the first one
+after each fresh server start) cost 1090.8ms, the necessary one-time
+population of the in-memory per-flavour extras cache, not a repeated
+per-poll cost, matching the round-1 fixer's own "9-11 cache-hit calls"
+methodology; `/api/protocol/status` averaged 27.2ms across 5 calls (max
+32.5ms), 0 child processes observed, meeting the <50ms/no-child target.
+FINDING (informational, does not fail any measured target): a truly
+fresh install with no pre-existing `cache\` folder logs `Maintenance
+child: could not write lock file, continuing anyway` the first time
+`Invoke-MaintenanceTick` spawns a child (`addon-server.ps1:8971`,
+`[System.IO.File]::WriteAllText($Script:MaintenanceLockPath, ...)` - the
+lock file's own parent directory does not exist yet on that very first
+tick, since `Initialize-CfCatalogueIndex` is what actually creates
+`cache\`, and that only runs a moment later inside the same child).
+Caught and logged, best-effort by design, and harmless in practice - the
+redundant hourly `$Script:LastMaintenanceAttemptAt` cadence gate (stamped
+before the write attempt) already prevents a second concurrent spawn
+regardless of whether the lock file itself exists, which is exactly what
+this pass's own single-maintenance-child-at-a-time measurement confirmed
+(max concurrent children observed: 1, on the identical fresh-install
+scenario that triggers the log line). Worth a one-line fix next round
+(`New-Item -ItemType Directory -Force` on `$Script:CacheDir` before the
+`WriteAllText` call) but not required to meet any target this round.
+Live-safety snapshot (before and after this entire pass, identical both
+times): HKCU Run value unchanged, the live `FurphyHost.exe --tray` pid
+(33684) unchanged and untouched, the live install's file count (1258)
+unchanged, the curseforge protocol handler still points at the real
+install, port 47831 not listening (idle, expected), ports 47899/47850
+free at the end. Every server or host window started during this pass
+was a scratch instance on port 47899 or 47850, launched from
+`tests\.tmp\...` or `shots\launch\wowroot\...` copies, never the live
+install; the perf layer's two real (but scratch-port, `--wow-fake`)
+FurphyHost.exe windows were the test suite's own long-established,
+already-safe automation (fake WoW process name, deterministic minimize,
+try/finally cleanup) exercised only after confirming `Test-GameRunning`
+was false on this machine at that moment. `package.ps1` run last,
+producing `dist\FurphyAddonManager-1.18.1.zip` and
+`dist\FurphyAddonManager-latest.zip` byte-identical to each other (no
+source changes this pass, so their content matches the round-1 fixer's
+own build).
+
 ## Round 36 (1.17.0: adversarial pass)
 
 A finder/skeptic/fixer/verifier pass across every live component (server,

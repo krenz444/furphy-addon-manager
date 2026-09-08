@@ -174,6 +174,25 @@
     await waitForReady(win, 8000);
     check("readiness hook fired", true);
 
+    // Launch-perf pass: proves the first render never depended on
+    // /api/protocol/status having answered - by construction, App.init()
+    // only ever calls Actions.loadProtocolStatus() AFTER its own
+    // await reloadState(false) resolves (see that file's own comment), so
+    // /api/state must always be DISPATCHED no later than /api/protocol/
+    // status, on every load, not just a slow one. win.__furphyTest.Mock.
+    // requestLog (Mock's own testability hook - see ui\app.js) records
+    // dispatch order for every mocked endpoint; phaseLaunchPerf below
+    // exercises the stronger ?slowState=1 case (a real multi-second gap
+    // between the two, proving a genuine wait rather than a lucky
+    // few-ms reorder) plus the loading-skeleton-stays-visible half of the
+    // same acceptance bar.
+    checkTry("first render never depends on /api/protocol/status: /api/state is dispatched no later than it", function () {
+      const log = (win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+      const stateEntry = log.find(function (e) { return e.path === "/api/state"; });
+      const protoEntry = log.find(function (e) { return e.path === "/api/protocol/status"; });
+      return !!stateEntry && !!protoEntry && stateEntry.at <= protoEntry.at;
+    });
+
     // Freshness headline: exactly one on screen (sidebar dot-only + the
     // My Addons headline text - UX-SPEC.md 2.2/11). P3 perf-pass fix: the
     // old version only checked whether EACH CONTAINER'S textContent was
@@ -593,6 +612,49 @@
       return hits.length === 0 && !q(win, "#btn-update-play") && !q(win, "#btn-launch-wow");
     });
 
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase 1b (launch-perf pass): ?mock=1&test=1&slowState=1 gives /api/state
+  // alone a real ~2.5s extra mock delay (ui\app.js's Mock.handle, every
+  // other endpoint unaffected) - exercises the two acceptance bars a fast
+  // mock server can never distinguish from luck: the loading skeleton
+  // actually STAYS UP for the whole time /api/state is pending (never a
+  // blank/stale list), and /api/protocol/status is dispatched only once
+  // /api/state's real response has landed, not just reordered a few ms
+  // ahead of it. Deliberately its own short, cheap phase (one frame, no
+  // long polling loops) rather than folded into phaseDefault's much bigger
+  // one, to keep this addition's virtual-time-budget cost small - see
+  // Run-SpaHarness.ps1's own header comment on why that budget is a real
+  // constraint here.
+  // ------------------------------------------------------------------
+  async function phaseLaunchPerf() {
+    beginPhase("launch perf (?mock=1&test=1&slowState=1) - loading state stays up, protocol status genuinely deferred");
+    const win = await loadFrame("?mock=1&test=1&slowState=1");
+    // Checked immediately on the frame's own `load` event, well before the
+    // mock's extra ~2.5s /api/state delay resolves - script.js's own
+    // top-level `defer` means App.init() (and therefore its first
+    // Api.ping()/Api.getState() dispatches) has already run by the time
+    // `load` fires (see this file's own loadFrame comment), so this is a
+    // genuine "still pending" snapshot, not a race.
+    checkTry("loading skeleton is visible (table hidden) immediately, while /api/state is still pending", function () {
+      return !visible(q(win, "#myaddons-table")) && visible(q(win, "#myaddons-skeleton"));
+    });
+    checkTry("/api/protocol/status has not been dispatched yet while /api/state is still pending", function () {
+      const log = (win.__furphyTest && win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+      return !log.some(function (e) { return e.path === "/api/protocol/status"; });
+    });
+    await waitForReady(win, 8000);
+    checkTry("/api/protocol/status was dispatched only AFTER /api/state's slow response actually landed (>=2s gap under slowState=1) - a genuine wait, not a few-ms reorder", function () {
+      const log = win.__furphyTest.Mock.requestLog;
+      const stateEntry = log.find(function (e) { return e.path === "/api/state"; });
+      const protoEntry = log.find(function (e) { return e.path === "/api/protocol/status"; });
+      return !!stateEntry && !!protoEntry && (protoEntry.at - stateEntry.at) >= 2000;
+    });
+    checkTry("the list is painted (skeleton hidden, rows present) once /api/state's slow response lands", function () {
+      return visible(q(win, "#myaddons-table")) && !visible(q(win, "#myaddons-skeleton")) && qa(win, "#myaddons-tbody tr").length > 0;
+    });
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
@@ -1352,6 +1414,7 @@
 
   async function main() {
     await phaseDefault();
+    await phaseLaunchPerf();
     await phaseFlavours();
     await phaseHostWebview2();
     await phaseWagoBrowse();
