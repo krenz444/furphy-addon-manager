@@ -100,8 +100,44 @@ finished after this draft.
 | 1.17.0 | 36 | Adversarial pass: 15 confirmed fixes (dual-launcher start race, CurseForge Install click off the UI thread, catalogue startup guard, docs) plus the critical one-client installer fix found by the other session | Sept 7 23:00 |
 | 1.18.1 | 37 | Fast launch: measured on this machine after deploy - server answers its first request 1.5 s after the process starts (was 5-20 s when a refresh was due), addon state 60-66 ms per call after the first (was ~970 ms), install-links status 37 ms (was 413 ms); the window shows "Starting..." immediately and the shortcut no longer waits 15 s | Sept 8 01:39 |
 | 1.19.0 | 38 | QA journeys: 21 confirmed findings fixed (9 high) - minimized window recovers after the helper's idle exit, Windows uninstall entry and relaunch handle "Program Files (x86)", downgrade guard, Settings port range check, honest errors for locked folders / CurseForge outages / corrupt files, Classic Wago mapping, PTR adopt gate, WebView2-missing message, log rotation and pruning; upgrade from the public 1.1.0 re-tested end to end | Sept 8 03:45 |
-| 1.20.0 | 39 | IN PROGRESS: QA lens round 2 - keyboard/accessibility, installer at other display scalings, 16-theme visual regression on every view, tray text truth, documentation truth, regression-guard audit | running |
+| 1.20.0 | 39 | QA lens round 2: 17 confirmed findings fixed plus one re-checked - keyboard and screen-reader use everywhere (rows, tabs, arrows, dialogs with focus trap and return, lightbox as a dialog), live regions, reduced motion for every spinner, zoom no longer hides Settings toggles, next-check wording matches the tray across DST, installer visual styles + progress bar + Enter installs, docs corrected, new regression tests (window minimum size per DPI, tray Start-with-Windows click, Wago search race), capture tooling repaired | Sept 8 06:34 |
 
 The "overnight" ran through the evening of Sept 7 and the night into Sept 8
 because the usage-limit pause covered most of Sept 7's daytime. Nothing was
 skipped; the order was kept.
+
+## Final state, 2026-09-08 06:40
+
+Live on GIZMO: 1.20.0. Nine versions shipped in about 40 hours of wall
+clock (1.12.0 -> 1.20.0), every one through the full gate. The test suite
+now runs 331 unit, 124 integration, 20 host, 2 SPA (harness 140+ checks
+plus a 16-theme contrast audit of 500 pairs), 9 fixture-acceptance and 2
+performance assertions, in about 11 minutes; the quick gate takes under 5.
+
+Two QA rounds ran after the feature work: 21 journey findings and 17
+lens findings, all confirmed by independent skeptics before fixing and
+re-reproduced by verifiers after. Two findings were deliberately NOT fixed
+because they are product decisions for you: the unfiltered Wago names
+under Name (A-Z), and code signing.
+
+Measured launch on this machine after 1.18.1: helper answers in 1.5 s,
+addon state 60 ms, install-links status 37 ms, window shows "Starting..."
+immediately.
+
+## What only you can do
+
+1. Force-push the rewritten history (two commands given earlier). Then I
+   publish 19 releases (1.2.0 to 1.20.0) with the notes in dist\ and
+   enable GitHub Pages on main:/docs for the download page.
+2. Revoke the old CurseForge API key at console.curseforge.com.
+3. Decide on code signing (DISTRIBUTION-SPEC.md 6.4) and on a Wago name
+   filter.
+
+## Suggested next rounds
+
+- A third QA lens round: long-session soak (24 h server + tray with the
+  real catalogue and snapshot schedule), Classic-only machine end to end,
+  and a fresh-Windows VM install of the public zip.
+- Performance re-measure of the whole app after these nine versions
+  against the round-25 numbers (the perf layer still passes, but the
+  numbers themselves are worth a fresh table).
