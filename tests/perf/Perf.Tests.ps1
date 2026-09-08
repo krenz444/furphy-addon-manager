@@ -146,12 +146,7 @@ function New-PerfAppRoot {
     #>
     param([Parameter(Mandatory = $true)][string]$Root, [int]$Port = 47899)
 
-    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination (Join-Path $Root 'addon-sync.ps1') -Force
-    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-server.ps1') -Destination (Join-Path $Root 'addon-server.ps1') -Force
-    Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'ui') -Destination (Join-Path $Root 'ui') -Recurse -Force
-    $binDst = Join-Path $Root 'host\bin'
-    New-Item -ItemType Directory -Path $binDst -Force | Out-Null
-    Get-ChildItem -LiteralPath $Script:HostBinDir -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $binDst -Recurse -Force }
+    Copy-FurphyAppFiles -Destination $Root | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Root 'flavours\retail') -Force | Out-Null
     '[]' | Set-Content -LiteralPath (Join-Path $Root 'flavours\retail\addons.json') -Encoding UTF8
 
@@ -243,8 +238,15 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             $hostLogLinesBefore = if (Test-Path -LiteralPath $hostLogPath) { @(Get-Content -LiteralPath $hostLogPath).Count } else { 0 }
             $serverLogLenBefore = if (Test-Path -LiteralPath $serverLogPath) { (Get-Item -LiteralPath $serverLogPath).Length } else { 0 }
 
+            # -ScopeRoot $root: every process this It legitimately measures
+            # (fake WoW exe, server, tray, host window, its webview2
+            # children) was copied/started under this It's own scratch
+            # root (New-PerfAppRoot -Root $root above) - never the whole
+            # shared build root, which a parallel fixer's/the verifier's
+            # own concurrent scratch root elsewhere under tests\.tmp\
+            # could otherwise leak into this measurement.
             $result = & (Join-Path $PSScriptRoot 'Measure-Furphy.ps1') -Label 'p3-steadystate' -DurationSec $Script:MeasureWindowSec `
-                -ServerLogPath $serverLogPath -Quiet `
+                -ServerLogPath $serverLogPath -ScopeRoot $root -Quiet `
                 -Notes 'P3 perf test: fake Wow.exe running, tray past its first skip, host window minimized (background mode engaged). Steady-state zero-impact assertion window.'
 
             $trayStateAfter = if (Test-Path -LiteralPath $trayStatePath) { Get-Content -LiteralPath $trayStatePath -Raw } else { $null }
@@ -362,8 +364,11 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             [FurphyPerfTest.User32]::SetForegroundWindow($hwnd) | Out-Null
             Start-Sleep -Seconds $Script:ForegroundSettleWaitSec
 
+            # -ScopeRoot $root: same rationale as the steady-state It above
+            # - fake WoW exe, server, and host window (plus its webview2
+            # children) all live under this It's own scratch root.
             $result = & (Join-Path $PSScriptRoot 'Measure-Furphy.ps1') -Label 'p3-foreground' -DurationSec 60 `
-                -ServerLogPath $serverLogPath -Quiet `
+                -ServerLogPath $serverLogPath -ScopeRoot $root -Quiet `
                 -Notes 'P3 perf test: fake Wow.exe running, host window OPEN and FOCUSED on My Addons (no minimize, no tray). Regression guard for QA round 3 webview2-gpu-cpu-open-foreground.'
 
             $totalCpu = $result.TotalCpuSeconds

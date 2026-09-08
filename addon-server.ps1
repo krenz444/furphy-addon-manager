@@ -228,6 +228,19 @@ $Script:KnownWowProcessNames = @(
 # is to add as close to zero overhead as possible, so a real request burst
 # (a dozen /api/state polls in a few seconds from an open SPA tab) pays for
 # exactly one live process scan, not one per request.
+#
+# Round 41b (idle-loop pass): [System.Diagnostics.Process]::GetProcesses()
+# walks and disposes every process object on the whole machine (typically
+# 150-300+ on a real desktop), not just the ~7 WoW-flavour names it
+# compares against - real, measurable per-call CPU, unlike the two
+# Get-Date comparisons that make up every OTHER request-loop tick. F1's
+# single-scan rewrite already cut this from 7 calls/probe to 1; this
+# stays at 30s. Round 41b tried 60s: an independent before/after on a
+# quiet machine could not tell the two apart (both ~0.05 CPU-s/min, at
+# the 15.625ms scheduler-tick noise floor), so the only measurable
+# effect would have been noticing a WoW launch up to 30s later. Not
+# worth it. The one contract test (Server.GameState.Tests.ps1) reads
+# this var back symbolically rather than hardcoding a number.
 $Script:GameProbeIntervalSeconds = 30
 $Script:GameRunningCache = $false
 $Script:GameRunningCacheAt = [DateTime]::MinValue
@@ -236,12 +249,26 @@ function Test-GameRunning {
     <#
       Returns $true if any known WoW client process is running, cached for
       $Script:GameProbeIntervalSeconds so a burst of requests/internal calls
-      pays for one Get-Process scan, not one per call. -WowFakeProcessName
+      pays for one process-table scan, not one per call. -WowFakeProcessName
       (module-level $Script:WowFakeProcessNameOverride, set once at startup
       from the -WowFakeProcessName param) substitutes a single caller-chosen
       process name for the whole known-names list, the same test-only
       substitution host\FurphyHost.cs's WowDetector.IsRunning accepts via
       --wow-fake - never used by a real launch.
+
+      F1 (idle-loop perf pass): used to call Get-Process -Name once PER
+      known name - seven separate full process-table enumerations every
+      30s (one per $Script:KnownWowProcessNames entry), even though at
+      most one of them ever matches. [System.Diagnostics.Process]::
+      GetProcesses() walks the process table exactly ONCE per probe
+      instead; this just compares each returned .ProcessName
+      case-insensitively against the (usually 7-entry, or single-entry
+      under -WowFakeProcessName) name list already held in memory - same
+      7x-or-1x comparisons as before, just against an in-memory array
+      instead of re-querying the OS seven times. Every Process object
+      GetProcesses() hands back is disposed before this returns (whether
+      or not it matched) so this long-lived background-service loop never
+      accumulates OS handles across probes.
     #>
     $now = Get-Date
     if (($now - $Script:GameRunningCacheAt).TotalSeconds -lt $Script:GameProbeIntervalSeconds) {
@@ -254,12 +281,28 @@ function Test-GameRunning {
     }
 
     $running = $false
-    foreach ($n in $names) {
-        try {
-            $procs = Get-Process -Name $n -ErrorAction SilentlyContinue
-            if ($procs -and $procs.Count -gt 0) { $running = $true; break }
-        } catch {
-            # Ignore and check the next known name.
+    $procs = [System.Diagnostics.Process]::GetProcesses()
+    try {
+        foreach ($p in $procs) {
+            try {
+                $pname = $p.ProcessName
+                foreach ($n in $names) {
+                    if ([string]::Equals($pname, $n, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $running = $true
+                        break
+                    }
+                }
+            } catch {
+                # A process can exit between GetProcesses() enumerating it
+                # and this reading its .ProcessName; ignore and move on.
+            }
+            if ($running) { break }
+        }
+    } finally {
+        # Dispose every handle GetProcesses() opened, not just the ones we
+        # actually inspected before breaking out early on a match.
+        foreach ($p in $procs) {
+            try { $p.Dispose() } catch { }
         }
     }
 
@@ -5587,21 +5630,45 @@ function Invoke-MaintenanceTick {
 function Update-CfCatalogueCacheIfChanged {
     <#
       Called once per request-loop iteration, alongside Invoke-MaintenanceTick
-      above. A cheap per-tick check (one Get-Item stat, never a JSON parse)
-      for whether cache\cf-catalogue.json's own LastWriteTimeUtc has moved
-      since this process last loaded it - true after a -MaintenanceOnly
-      child (this server's own, spawned by Invoke-MaintenanceTick, or in
-      principle any other process sharing this same -Root's cache\ folder)
-      writes a freshly-refreshed catalogue. Only THEN pays for the real
-      reload (Load-CfCatalogueIndexFromDisk's JSON parse over the whole
-      ~18k-entry index, the same cost Round 26's own comment already
-      identified as worth moving off the request-accepting path) - never on
-      a tick where nothing changed (the overwhelming majority), and never
-      inside a request handler. Best-effort; never throws.
+      above. A cheap per-tick check for whether cache\cf-catalogue.json's own
+      LastWriteTimeUtc has moved since this process last loaded it - true
+      after a -MaintenanceOnly child (this server's own, spawned by
+      Invoke-MaintenanceTick, or in principle any other process sharing this
+      same -Root's cache\ folder) writes a freshly-refreshed catalogue. Only
+      THEN pays for the real reload (Load-CfCatalogueIndexFromDisk's JSON
+      parse over the whole ~18k-entry index, the same cost Round 26's own
+      comment already identified as worth moving off the request-accepting
+      path) - never on a tick where nothing changed (the overwhelming
+      majority), and never inside a request handler. Best-effort; never
+      throws.
+
+      F1 (idle-loop perf pass): the disk stat itself is now throttled to at
+      most once every $Script:CfCatalogueCacheStatIntervalSeconds (30s),
+      via $Script:CfCatalogueCacheLastStatAt -
+      this used to stat the file on literally every 2s request-loop tick
+      (~1800 stats/hour) even though the maintenance child that could
+      possibly change it runs at most once an HOUR (Invoke-MaintenanceTick's
+      own $Script:MaintenanceIntervalMinutes gate). A freshly-written
+      catalogue can therefore take up to 30s longer to be picked up by this
+      process than before - fine, since the writer itself only ever writes
+      at most once an hour, so 30s of extra latency on top of that is
+      noise. Also swaps Test-Path + Get-Item (two calls,
+      one of which throws-and-is-caught-elsewhere-shaped for a missing file)
+      for a single [System.IO.File]::GetLastWriteTimeUtc call, which returns
+      1601-01-01T00:00:00Z for a missing file instead of throwing -
+      $Script:CfCatalogueCacheLastWriteUtc is seeded with that exact sentinel
+      (see its own declaration, near Invoke-MaintenanceTick's script-level
+      vars) so the common "catalogue file has never been written on this
+      -Root" case (most integration tests, and a genuinely fresh install
+      before its first maintenance tick) compares equal immediately and
+      returns without ever calling Load-CfCatalogueIndexFromDisk.
     #>
     try {
-        if (-not (Test-Path -LiteralPath $Script:CfCatalogueCachePath -PathType Leaf)) { return }
-        $writeTimeUtc = (Get-Item -LiteralPath $Script:CfCatalogueCachePath -ErrorAction Stop).LastWriteTimeUtc
+        $nowStat = Get-Date
+        if (($nowStat - $Script:CfCatalogueCacheLastStatAt).TotalSeconds -lt $Script:CfCatalogueCacheStatIntervalSeconds) { return }
+        $Script:CfCatalogueCacheLastStatAt = $nowStat
+
+        $writeTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($Script:CfCatalogueCachePath)
         if ($writeTimeUtc -eq $Script:CfCatalogueCacheLastWriteUtc) { return }
         if (Load-CfCatalogueIndexFromDisk) {
             $Script:CfCatalogueCacheLastWriteUtc = $writeTimeUtc
@@ -8993,7 +9060,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.20.1'
+$Script:Version = '1.21.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -9101,10 +9168,23 @@ $Script:LastAddonRadarRequestTime = [DateTime]::MinValue
 #     of this process's last successful load of it (startup, or the most
 #     recent Update-CfCatalogueCacheIfChanged reload) - lets that per-tick
 #     check stay a single cheap file stat on every tick that did NOT change
-#     anything, which is nearly all of them.
+#     anything, which is nearly all of them. Seeded with the exact sentinel
+#     [System.IO.File]::GetLastWriteTimeUtc returns for a MISSING file
+#     (1601-01-01T00:00:00Z, i.e. [DateTime]::FromFileTimeUtc(0)) rather
+#     than [DateTime]::MinValue, so a -Root whose cache\cf-catalogue.json
+#     has never been written (most integration tests; a fresh install
+#     before its first maintenance tick) compares equal on the very first
+#     stat instead of always mismatching.
+#   CfCatalogueCacheLastStatAt / CfCatalogueCacheStatIntervalSeconds (F1,
+#     idle-loop perf pass; 30s - see Update-CfCatalogueCacheIfChanged's
+#     own doc comment) - throttles that per-tick file stat itself, since a stat
+#     this infrequent is still plenty fresh given the writer's own
+#     at-most-hourly cadence.
 $Script:MaintenanceIntervalMinutes = 60
 $Script:LastMaintenanceAttemptAt = [DateTime]::MinValue
-$Script:CfCatalogueCacheLastWriteUtc = [DateTime]::MinValue
+$Script:CfCatalogueCacheLastWriteUtc = [DateTime]::FromFileTimeUtc(0)
+$Script:CfCatalogueCacheLastStatAt = [DateTime]::MinValue
+$Script:CfCatalogueCacheStatIntervalSeconds = 30
 
 # long-run:failed-job-files-only-pruned-at-startup: Remove-OldJobFiles (near
 # the request loop below) used to run exactly once, at startup - fine for a
@@ -9428,17 +9508,48 @@ try {
         if ($Script:ShuttingDown) { break }
 
         # P1 perf pass (item 2): while a WoW client is running, wait longer
-        # between wake-ups (15s instead of 2s) - WaitOne still returns the
-        # instant a real request arrives (this only bounds how often the
-        # idle loop wakes up with nothing to do), so this has zero effect on
-        # request latency and only reduces how often an otherwise-idle
-        # process wakes the thread at all during a play session. Also
-        # shortens the idle-exit window itself (5 minutes instead of the
-        # normal -IdleMinutes) for the same reason Test-GameRunning's own
-        # section documents - nothing should still be polling this server
-        # deep into a play session.
+        # between wake-ups (15s instead of the normal-mode wait) - WaitOne
+        # still returns the instant a real request arrives (this only
+        # bounds how often the idle loop wakes up with nothing to do), so
+        # this has zero effect on request latency and only reduces how
+        # often an otherwise-idle process wakes the thread at all during a
+        # play session. Also shortens the idle-exit window itself (5
+        # minutes instead of the normal -IdleMinutes) for the same reason
+        # Test-GameRunning's own section documents - nothing should still
+        # be polling this server deep into a play session.
+        #
+        # F1 (idle-loop perf pass): the normal-mode wait was 2000ms; raised
+        # to 5000ms since nothing in tests\ depends on a sub-5s reaction to
+        # something happening between requests - checked specifically:
+        # Server.MaintenanceTick.Tests.ps1's 20s Wait-ForLogLine window for
+        # "Maintenance child started" is unaffected because
+        # Update-CfCatalogueCacheIfChanged/Invoke-MaintenanceTick above are
+        # both called BEFORE this WaitOne, so the very first tick after the
+        # listener starts accepting connections spawns the maintenance
+        # child immediately - not gated by $waitMs at all; there is no
+        # Idle*/GameMode*.Tests.ps1 (grepped tests\integration\ and
+        # tests\unit\ - neither exists) and the one idle-exit check that
+        # does exist compares against -IdleMinutes in whole MINUTES, never
+        # seconds; and no test polls server.log with a sub-5s timeout tied
+        # to this loop's cadence (grepped for TimeoutSec 1-4 and for
+        # literal "2000"/"2s cadence" mentions - none found). Request
+        # latency is unaffected either way: WaitOne returns the instant a
+        # request arrives regardless of $waitMs.
+        #
+        # Round 41b's refix pass briefly widened this to 10000ms (and the
+        # probe/stat intervals to 60s); the independent before/after could
+        # not measure any difference, so those were reverted - see the
+        # comment right below.
+        # touch Test-GameRunning/Update-CfCatalogueCacheIfChanged's own
+        # cost (both are independently interval-gated at 30s, well above
+        # the tick rate). Round 41b also tried 10000ms here together with
+        # 60s probe/stat intervals; an independent before/after on a quiet
+        # machine measured no difference (~0.05 CPU-s/min either way), so
+        # the tick stays at 5000ms - the idle-exit check and the
+        # maintenance spawn check still run every 5s, and WaitOne returns
+        # the instant a request arrives regardless.
         $gameRunningNow = Test-GameRunning
-        $waitMs = 2000
+        $waitMs = 5000
         $idleLimit = $Script:IdleMinutesNormal
         if ($gameRunningNow) {
             $waitMs = 15000

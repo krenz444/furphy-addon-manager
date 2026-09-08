@@ -39,6 +39,15 @@
    -Json         Prints the final report as compact JSON to stdout
                  instead of the human-readable table (the two report
                  files are always written either way).
+   -SweepOnly    Acquires the run-all.lock as usual, runs ONLY the START
+                 hygiene sweep (ports/stray-process/HKCU/tests\.tmp -
+                 see Invoke-HygieneSweep), prints what it removed/
+                 stopped, releases the lock, and exits 0 - no layers run
+                 at all, no Pester import, no report files written.
+                 Overrides -Only/-Quick/-NoNetwork/-NoTray/-Json (all
+                 ignored when passed alongside -SweepOnly). Use this to
+                 clean a build root (e.g. after a runaway nested-tree
+                 decoy) without paying for a full or -Quick run.
 
  HYGIENE: every port this run might have touched (47899, 47890-47897) is
  checked and any owning process force-stopped, and tests\.tmp is swept
@@ -49,6 +58,33 @@
  production Run value are never touched - independent of whatever cleanup the failing test itself attempted -
  logged loudly if it had to do anything, since that means some test's
  own `finally` did not run to completion.
+
+ Runaway nested trees: a plain `Remove-Item -Recurse` cannot walk a
+ self-nested scratch copy whose paths run far beyond 260 chars (seen for
+ real 2026-09-08 - see Copy-FurphyAppFiles's own docstring in
+ tests\lib\common.ps1 - 1,777 directory levels, cleaned up by hand with
+ `robocopy <empty-dir> <target> /MIR` then Remove-Item on the emptied
+ target). Every tests\.tmp entry the sweep removes now goes through
+ Remove-DirectoryTreeSafely, which tries plain Remove-Item -Recurse
+ first and only falls back to that same robocopy /MIR recipe when it
+ fails or a cheap bounded probe finds a descendant path over 240 chars -
+ see Remove-DirectoryTreeSafely's own docstring below. It never touches
+ anything outside tests\.tmp.
+
+ Orphaned WebView2 children: Stop-Process on a straggler FurphyHost.exe
+ above does not cascade to its child msedgewebview2.exe process(es), so
+ one can survive its parent host being force-stopped (seen for real with
+ a --user-data-dir under tests\.tmp\host-unminimize-recovery-*). The same
+ sweep therefore also stops any msedgewebview2.exe whose --user-data-dir
+ is a path under THIS build root's tests\.tmp (path-prefix match on the
+ normalized full path, case-insensitive) - see Get-StrayTestWebViewProcesses.
+ It never touches the live install's own WebView2 children (their
+ --user-data-dir is under Program Files, outside tests\.tmp, by
+ construction) and it never touches a tests\.tmp\soak-* child while
+ Test-SoakActive reports a Soak-Furphy.ps1 run's scratch root is still on
+ disk (soak-owned WebView2 children are excluded outright, not just left
+ for a human to notice - Soak-Furphy.ps1 stops its own on its own
+ graceful teardown; this sweep must never race it).
 
  Review fix: this same sweep also now runs once at the very START of a
  run (before any layer executes), not only at the end. Start-TestServer
@@ -80,7 +116,8 @@ param(
     [switch]$NoNetwork,
     [switch]$NoTray,
     [string[]]$Only,
-    [switch]$Json
+    [switch]$Json,
+    [switch]$SweepOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,11 +147,13 @@ if (Test-PortOpen -Port 47899 -TimeoutMs 300) {
 }
 [string]$PID | Set-Content -LiteralPath $Script:RunAllLockPath -Encoding Ascii -Force
 
-try {
-    Import-Module Pester -RequiredVersion 3.4.0 -ErrorAction Stop -Force
-} catch {
-    Write-Host "FATAL: could not load Pester 3.4.0 ($($_.Exception.Message))" -ForegroundColor Red
-    exit 1
+if (-not $SweepOnly) {
+    try {
+        Import-Module Pester -RequiredVersion 3.4.0 -ErrorAction Stop -Force
+    } catch {
+        Write-Host "FATAL: could not load Pester 3.4.0 ($($_.Exception.Message))" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $Script:AllLayers = @('static', 'unit', 'integration', 'host', 'spa', 'fixture-acceptance', 'perf')
@@ -281,6 +320,225 @@ function Stop-ProcessOnPort {
     } catch { }
 }
 
+function Test-SoakActive {
+    <#
+      Detects whether a tests\perf\Soak-Furphy.ps1 run currently owns a
+      scratch root under tests\.tmp. Soak-Furphy.ps1 has no separate
+      pid/lock file - its own -Root defaults to New-TempRoot -Name 'soak'
+      (tests\lib\common.ps1), which creates tests\.tmp\soak-<stamp>-<suffix>,
+      and that directory is only ever removed in Soak-Furphy.ps1's OWN
+      `finally` teardown (unless -KeepRoot - see its Remove-TempRoots /
+      Remove-Item block), alongside its own msedgewebview2.exe children
+      (its Stop-Process -Filter '*$Root*' block right before that). So a
+      tests\.tmp\soak-* directory still existing on disk IS the soak's
+      still-running / not-yet-torn-down marker - the same signal this
+      build root's operator uses to know a soak is live.
+    #>
+    if (-not (Test-Path -LiteralPath $Script:FurphyTmpRoot)) { return $false }
+    $soakDirs = @(Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'soak-*' })
+    return ($soakDirs.Count -gt 0)
+}
+
+function Get-CommandLineSwitchValue {
+    <#
+      Pulls the value of a --name=value (or --name="quoted value") style
+      switch out of a raw process command-line string. Returns $null if
+      the switch is absent. Chromium/WebView2 processes always use the
+      '=' form for --user-data-dir, quoting the value only when it
+      contains a space - both are handled here.
+    #>
+    param([string]$CommandLine, [string]$SwitchName)
+    if (-not $CommandLine) { return $null }
+    $pattern = [regex]::Escape($SwitchName) + '=(?:"([^"]*)"|(\S+))'
+    $m = [regex]::Match($CommandLine, $pattern)
+    if (-not $m.Success) { return $null }
+    if ($m.Groups[1].Success) { return $m.Groups[1].Value } else { return $m.Groups[2].Value }
+}
+
+function Test-PathUnderRoot {
+    <#
+      Case-insensitive path-prefix test: is $Path (a file/dir path, not
+      necessarily existing on disk) equal to or nested under $Root, once
+      both are resolved to normalized full paths? Used instead of a
+      simple -like/-match string check so trailing slashes, '..' segments,
+      and forward/back slash mixing in a process's own command-line value
+      cannot slip a path that is NOT really under tests\.tmp past the
+      filter (or vice versa).
+    #>
+    param([string]$Path, [string]$Root)
+    if (-not $Path -or -not $Root) { return $false }
+    try {
+        $pFull = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $rFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    } catch { return $false }
+    return ($pFull.Equals($rFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $pFull.StartsWith($rFull + '\', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Test-PathUnderSoakRoot {
+    <#
+      True when $Path's FIRST path segment under $TmpRoot itself starts
+      with 'soak-' (tests\.tmp\soak-<stamp>-<suffix>\..., any depth) -
+      i.e. $Path is inside a Soak-Furphy.ps1 scratch root, not merely
+      somewhere that happens to contain the substring 'soak-'. A plain
+      Test-PathUnderRoot check against a Join-Path'd '...\tests\.tmp\soak-'
+      root would NOT work here: it would require the next character after
+      'soak-' to be a literal '\', which is never true for a real
+      '...\soak-<stamp>-<suffix>' directory name, so this uses its own
+      first-segment comparison instead.
+    #>
+    param([string]$Path, [string]$TmpRoot)
+    if (-not $Path -or -not $TmpRoot) { return $false }
+    try {
+        $pFull = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $tFull = [System.IO.Path]::GetFullPath($TmpRoot).TrimEnd('\')
+    } catch { return $false }
+    if (-not $pFull.StartsWith($tFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $firstSegment = $pFull.Substring($tFull.Length + 1).Split('\')[0]
+    return ($firstSegment -like 'soak-*')
+}
+
+function Get-StrayTestWebViewProcesses {
+    <#
+      msedgewebview2.exe orphans left behind after a straggler TEST
+      FurphyHost.exe was force-stopped elsewhere in this sweep -
+      Stop-Process does not cascade to children, and one such orphan (its
+      --user-data-dir under tests\.tmp\host-unminimize-recovery-*)
+      survived a killed test host. Matches ONLY on a --user-data-dir path
+      under THIS build root's tests\.tmp ($Script:FurphyTmpRoot, path-
+      prefix, case-insensitive - see Test-PathUnderRoot); a process with
+      no --user-data-dir, or one outside tests\.tmp entirely (the live
+      install's own WebView2 children live under Program Files), is left
+      alone. While Test-SoakActive is true, a --user-data-dir under
+      tests\.tmp\soak-* is excluded outright (Test-PathUnderSoakRoot),
+      regardless of the tests\.tmp match above - a running Soak-Furphy.ps1's
+      own WebView2 children must never be touched here; it stops its own
+      on its own teardown.
+    #>
+    $tmpRoot = $Script:FurphyTmpRoot
+    $soakActive = Test-SoakActive
+
+    $procs = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue)
+    $stray = @()
+    foreach ($p in $procs) {
+        $udd = Get-CommandLineSwitchValue -CommandLine ([string]$p.CommandLine) -SwitchName '--user-data-dir'
+        if (-not $udd) { continue }
+        if (-not (Test-PathUnderRoot -Path $udd -Root $tmpRoot)) { continue }
+        if ($soakActive -and (Test-PathUnderSoakRoot -Path $udd -TmpRoot $tmpRoot)) { continue }
+        $stray += $p
+    }
+    return $stray
+}
+
+function Test-PathTreeExceedsSafeDepth {
+    <#
+      Cheap, bounded probe for a runaway self-nested tree under $Path:
+      returns $true if a descendant path is already over 240 chars (a
+      conservative margin under the classic 260-char MAX_PATH limit that
+      plain Remove-Item -Recurse cannot walk in PowerShell 5.1 - see the
+      2026-09-08 incident: a self-nested scratch copy 1,777 directory
+      levels deep, cleaned up by hand with robocopy /MIR), or if the
+      enumeration itself throws (a PathTooLongException mid-walk is
+      exactly the same signal, just surfaced as an error instead of a
+      long string). -Depth is capped at 150: a normal tests\.tmp entry
+      never nests anywhere near that deep, and 150 levels of even a
+      single-character directory name alone already exceeds 240 chars,
+      so a genuine runaway tree is always caught long before the cap -
+      this keeps the probe cheap and bounded rather than a full recursive
+      walk of a tree that might be enormous.
+    #>
+    param([string]$Path)
+    try {
+        $hit = Get-ChildItem -LiteralPath $Path -Recurse -Depth 150 -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -and $_.FullName.Length -gt 240 } |
+            Select-Object -First 1
+        return ($null -ne $hit)
+    } catch {
+        return $true
+    }
+}
+
+function Remove-DirectoryTreeSafely {
+    <#
+      Removes one tests\.tmp entry (file or directory tree), tolerating a
+      runaway self-nested tree that plain Remove-Item -Recurse cannot
+      walk in PowerShell 5.1 (paths far beyond 260 chars - see the
+      2026-09-08 incident referenced throughout this file and in
+      Copy-FurphyAppFiles's own docstring in tests\lib\common.ps1).
+
+      -Path MUST resolve under $Script:FurphyTmpRoot (tests\.tmp) - a
+      hard guard, not just a convention: this function's fallback runs
+      an external robocopy.exe /MIR against -Path, and that is only ever
+      safe to do against a target this sweep already owns under
+      tests\.tmp, never against an arbitrary caller-supplied path.
+
+      Strategy:
+        1. A plain file (or anything Get-Item can't stat, e.g. mid-
+           delete by another process) has no runaway-tree case - a
+           single Remove-Item -Force is enough.
+        2. For a directory: if Test-PathTreeExceedsSafeDepth says a
+           descendant is already too long, skip straight to the
+           robocopy fallback (never even attempt Remove-Item -Recurse
+           on a tree known to be pathological - it is the thing that
+           could not be walked by hand on 2026-09-08). Otherwise try
+           Remove-Item -Recurse -Force first (the fast, common case);
+           any OTHER failure (locked file, permissions, ...) also falls
+           back to robocopy rather than giving up.
+        3. Fallback: create an empty scratch directory under
+           tests\.tmp, run `robocopy.exe <empty> <target> /MIR /NFL
+           /NDL /NJH /NJS /NP /R:1 /W:1` via the call operator (mirroring
+           nothing onto the target recursively empties it - robocopy has
+           its own long-path handling, unlike Remove-Item -Recurse; exit
+           codes 0-7 are success, >=8 is a real failure), then
+           Remove-Item both the now-empty target and the scratch mirror
+           source.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if (-not (Test-PathUnderRoot -Path $Path -Root $Script:FurphyTmpRoot)) {
+        throw "Remove-DirectoryTreeSafely refuses a path outside tests\.tmp: $Path"
+    }
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return
+    }
+
+    $tooDeep = Test-PathTreeExceedsSafeDepth -Path $Path
+    $removed = $false
+    if (-not $tooDeep) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            $removed = $true
+        } catch {
+            Write-Host "  WARN: Remove-Item -Recurse failed on $Path ($($_.Exception.Message)) - falling back to robocopy /MIR" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  WARN: $Path has a descendant path over 240 chars long - skipping Remove-Item -Recurse, falling back to robocopy /MIR" -ForegroundColor Yellow
+    }
+
+    if (-not $removed) {
+        $scratchEmpty = Join-Path $Script:FurphyTmpRoot ('sweep-empty-' + [Guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path $scratchEmpty -Force -ErrorAction Stop | Out-Null
+            & robocopy.exe $scratchEmpty $Path /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+            $roboExit = $LASTEXITCODE
+            if ($roboExit -ge 8) {
+                throw "robocopy /MIR exit code $roboExit (>=8 is a real failure) mirroring an empty dir onto $Path"
+            }
+            if (Test-Path -LiteralPath $Path) {
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+        } finally {
+            if (Test-Path -LiteralPath $scratchEmpty) {
+                Remove-Item -LiteralPath $scratchEmpty -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Invoke-HygieneSweep {
     <#
       Ports/stray-process/HKCU/tests\.tmp sweep, shared by BOTH a
@@ -304,10 +562,29 @@ function Invoke-HygieneSweep {
     # The owner's LIVE tray (the exe under the installed AddonSync folder,
     # no test port) must never be stopped by the test runner - it was, twice,
     # before this guard existed.
+    #
+    # Round 41 refix: the code above used to implement "non-live executable
+    # path" as "-notlike '*\Program Files*'", which is not the same claim -
+    # it also matches a completely different, legitimate, concurrent
+    # FurphyHost.exe belonging to a DIFFERENT build root's own workflow
+    # (e.g. a separate measurement setup under its own scratch root), which
+    # is neither a straggler of THIS suite nor under Program Files. That
+    # collision force-stopped exactly such a process. Narrowed to match the
+    # comment's actual claim: a reserved test port, OR command
+    # line/executable path actually under THIS build root's own tree
+    # (covers both a root-level run and a scratch copy under this root's
+    # own tests\.tmp, same as Start-TestServer/Copy-Fixture always place
+    # them - see also Measure-Furphy.ps1's own "scope root" substring match
+    # for the identical problem solved the same way elsewhere in this
+    # suite). A different build root's own non-test FurphyHost.exe is now
+    # correctly left alone alongside the real Program Files live tray.
     $allHosts = @(Get-CimInstance Win32_Process -Filter "Name='FurphyHost.exe'" -ErrorAction SilentlyContinue)
+    $buildRootLower = $Script:FurphyBuildRoot.TrimEnd('\').ToLowerInvariant()
     $strayHost = @($allHosts | Where-Object {
         $cl = [string]$_.CommandLine; $ep = [string]$_.ExecutablePath
-        ($cl -match '--port\s+4789\d') -or ($ep -and ($ep -notlike '*\Program Files*'))
+        ($cl -match '--port\s+4789\d') -or
+            ([string]$cl).ToLowerInvariant().Contains($buildRootLower) -or
+            ([string]$ep).ToLowerInvariant().Contains($buildRootLower)
     })
     $liveHosts = @($allHosts | Where-Object { $strayHost -notcontains $_ })
     if ($strayHost.Count -gt 0) {
@@ -317,6 +594,21 @@ function Invoke-HygieneSweep {
         Write-Host "  ok: no straggler test FurphyHost.exe process"
     }
     if ($liveHosts.Count -gt 0) { Write-Host "  info: $($liveHosts.Count) live FurphyHost.exe process(es) left alone (not test instances)" }
+
+    # Orphaned WebView2 children of a straggler test host (Stop-Process
+    # above does not cascade to them) - see Get-StrayTestWebViewProcesses'
+    # own comment. Runs before the tests\.tmp directory sweep below so a
+    # process still holding a --user-data-dir open there is gone first.
+    $strayWebView = @(Get-StrayTestWebViewProcesses)
+    if ($strayWebView.Count -gt 0) {
+        Write-Host "  WARN: $($strayWebView.Count) orphaned TEST msedgewebview2.exe process(es) found under tests\.tmp - force-stopping" -ForegroundColor Yellow
+        foreach ($p in $strayWebView) {
+            Write-Host "    stopping pid $($p.ProcessId)"
+            try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    } else {
+        Write-Host "  ok: no orphaned test msedgewebview2.exe process under tests\.tmp"
+    }
 
     try {
         $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -340,13 +632,25 @@ function Invoke-HygieneSweep {
         # run-all.ps1 started moments later would see no lock and start
         # concurrently anyway - removed explicitly, once, after the run.
         $lockLeafName = Split-Path -Path $Script:RunAllLockPath -Leaf
-        $sweepItems = @(Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $lockLeafName })
+        # A live Soak-Furphy.ps1 run's own scratch root (tests\.tmp\soak-*)
+        # is never swept while Test-SoakActive reports it still on disk -
+        # see that function's own docstring and the header comment's
+        # "this sweep must never race it" note; Soak-Furphy.ps1 tears its
+        # own root (and its own WebView2 children) down itself.
+        $soakActiveForSweep = Test-SoakActive
+        $allTmpItems = @(Get-ChildItem -LiteralPath $Script:FurphyTmpRoot -Force -ErrorAction SilentlyContinue)
+        $sweepItems = @($allTmpItems | Where-Object {
+            ($_.Name -ne $lockLeafName) -and
+            -not ($soakActiveForSweep -and (Test-PathUnderSoakRoot -Path $_.FullName -TmpRoot $Script:FurphyTmpRoot))
+        })
+        $skippedSoakCount = if ($soakActiveForSweep) { @($allTmpItems | Where-Object { $_.Name -like 'soak-*' }).Count } else { 0 }
         foreach ($item in $sweepItems) {
-            try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch {
+            try { Remove-DirectoryTreeSafely -Path $item.FullName } catch {
                 Write-Host "  WARN: could not remove $($item.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
-        Write-Host "  ok: tests\.tmp swept ($($sweepItems.Count) item(s) found, removed where possible; run-all.lock preserved)"
+        $soakNote = if ($skippedSoakCount -gt 0) { "; $skippedSoakCount soak-* root(s) left alone (soak active)" } else { '' }
+        Write-Host "  ok: tests\.tmp swept ($($sweepItems.Count) item(s) found, removed where possible; run-all.lock preserved$soakNote)"
     }
 }
 
@@ -354,6 +658,17 @@ function Invoke-HygieneSweep {
 # trailing `finally` below - see the header comment's "Review fix" note
 # and Start-TestServer's matching pre-flight port check.
 Invoke-HygieneSweep -Label 'Hygiene sweep (pre-flight)'
+
+if ($SweepOnly) {
+    # -SweepOnly: the sweep above IS the whole run - acquire the lock as
+    # usual (already done), run the START sweep (already done, right
+    # above - it already printed everything removed/stopped), release
+    # the lock, and exit 0. No layers, no Pester, no report files.
+    Remove-Item -LiteralPath $Script:RunAllLockPath -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "SweepOnly: hygiene sweep complete, no test layers run." -ForegroundColor Green
+    exit 0
+}
 
 # =====================================================================
 # Every layer below runs inside one try; an unexpected terminating error

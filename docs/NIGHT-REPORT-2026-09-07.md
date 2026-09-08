@@ -82,10 +82,10 @@ labelled new, rising, trending or "this season".
   contributor, with tags v1.0.0 through v1.15.0. The deploy script no longer
   adds a co-author line. Release notes and zips are ready for 1.2.0 through
   1.15.0; they publish the moment the push lands.
-- **Code signing** (optional): the installer is unsigned, so Windows shows a
-  warning the first time. DISTRIBUTION-SPEC.md section 6.4 lists the options
-  and costs (Azure Trusted Signing, SignPath for open source, Certum).
-- **Revoke the old CurseForge API key** at console.curseforge.com.
+- **Code signing**: closed 2026-09-08 - Eric delegated the call; decision is
+  no signing for now (the app is compiled on the player's PC, so nothing
+  downloaded meets SmartScreen; see DISTRIBUTION-SPEC.md 6.4).
+- **Old CurseForge API key**: closed 2026-09-08 - dropped, already disabled.
 
 ## Status at the time of writing
 
@@ -129,9 +129,9 @@ immediately.
 1. Force-push the rewritten history (two commands given earlier). Then I
    publish 19 releases (1.2.0 to 1.20.0) with the notes in dist\ and
    enable GitHub Pages on main:/docs for the download page.
-2. Revoke the old CurseForge API key at console.curseforge.com.
-3. Decide on code signing (DISTRIBUTION-SPEC.md 6.4) and on a Wago name
-   filter.
+2. (Closed 2026-09-08) The old CurseForge API key: Eric dropped it - it is already disabled.
+3. (Closed 2026-09-08) Code signing: decided - none for now, see DISTRIBUTION-SPEC.md 6.4 for the reasoning; Wago name
+   filter: none, at Eric's direction.
 
 ## Suggested next rounds
 

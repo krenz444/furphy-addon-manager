@@ -1032,7 +1032,12 @@ button { font-family: inherit; }
   padding: 4px 8px 12px;
   border-bottom: 1px solid var(--border);
 }
-.brand-icon { width: 26px; height: 26px; flex: none; display: block; border-radius: 6px; }
+/* Wrapper reserves the exact same 26x26 flex-row slot the bare <img> used
+   to occupy (net zero layout change) and gives Strawberry Cream's
+   .sc-icon-glow below a positioning context - see this theme's own
+   sc-sparkle rule further down for why. */
+.brand-icon-wrap { position: relative; width: 26px; height: 26px; flex: none; display: block; }
+.brand-icon { width: 26px; height: 26px; display: block; border-radius: 6px; }
 .brand-name { font-weight: 700; font-size: 13px; letter-spacing: 0.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
@@ -2726,25 +2731,46 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   pointer-events: none;
 }
 
-/* Twinkling stars: four staggered timings so the sky never blinks in unison. */
+/* Twinkling stars. Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   see THEMES-SPEC.md): steps(6) instead of a smooth ease-in-out - a twinkle
+   already reads as a series of discrete brightness steps rather than a
+   continuous fade, so steps() looks the same (arguably more "twinkly")
+   while letting the compositor skip real work on the frames it can hold
+   flat. will-change promotes the star layer once up front instead of a
+   promote/demote per-frame churn.
+
+   Verification-pass follow-up: this markup actually had 14 individual
+   animated <rect> elements across 4 timing classes (not the "4 stars"
+   THEMES-SPEC.md originally described), and live measurement (isolating
+   count-of-concurrently-animating-elements from count-of-distinct-timelines
+   as separate variables) showed cost tracks the former, not the latter -
+   see ui/index.html's own note on the single merged <g> above this rule.
+   All 4 classes now resolve to the same one animated element and are kept
+   identical (one shared timeline, no delay) so this stays a single
+   compositor-promoted layer rather than reintroducing concurrent instances;
+   the 4 separate selectors are kept (rather than collapsed to 1) purely so
+   the existing reduced-motion query and game-active/window-inactive gate
+   below need no further changes. */
 @keyframes lofi-twinkle {
   0%, 100% { opacity: 0.28; }
   50% { opacity: 1; }
 }
-.lofi-star-1 { animation: lofi-twinkle 3.6s ease-in-out infinite; }
-.lofi-star-2 { animation: lofi-twinkle 4.2s ease-in-out infinite 0.7s; }
-.lofi-star-3 { animation: lofi-twinkle 3.9s ease-in-out infinite 1.4s; }
-.lofi-star-4 { animation: lofi-twinkle 4.6s ease-in-out infinite 2.1s; }
+.lofi-star-1 { animation: lofi-twinkle 3.6s steps(6) infinite; will-change: opacity; }
+.lofi-star-2 { animation: lofi-twinkle 3.6s steps(6) infinite; will-change: opacity; }
+.lofi-star-3 { animation: lofi-twinkle 3.6s steps(6) infinite; will-change: opacity; }
+.lofi-star-4 { animation: lofi-twinkle 3.6s steps(6) infinite; will-change: opacity; }
 
 /* Swaying cat tail (the sitting cat only - the curled cat's tail is tucked
    in and stays still). transform-origin is set inline in the SVG markup at
    the tail's own base coordinate so it pivots from where it meets the body,
-   not the shape's bounding-box center. */
+   not the shape's bounding-box center. Left on smooth easing (transform-
+   only, one instance, cheap) - see the perf-fix note above the stars; a
+   sway reads mechanical if stepped, so only the stars were converted. */
 @keyframes lofi-tail-sway {
   0%, 100% { transform: rotate(-5deg); }
   50% { transform: rotate(5deg); }
 }
-.lofi-cat-tail { animation: lofi-tail-sway 3.6s ease-in-out infinite; }
+.lofi-cat-tail { animation: lofi-tail-sway 3.6s ease-in-out infinite; will-change: transform; }
 
 /* Motion-sensitive users get a static skyline: no twinkle, no tail sway. */
 @media (prefers-reduced-motion: reduce) {
@@ -2803,6 +2829,12 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   box-shadow: 0 0 0 1px rgba(57, 255, 136, .4), 0 0 6px rgba(57, 255, 136, .55);
 }
 @media (prefers-reduced-motion: no-preference) {
+  /* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+     THEMES-SPEC.md): steps(4) - already the cheapest animated theme
+     measured, this is low-priority polish rather than a structural fix,
+     same steps()-over-smooth reasoning as every other flicker/twinkle in
+     this file (a "flicker" already reads as discrete beats). will-change
+     promotes the three synced targets once instead of per-frame churn. */
   @keyframes terminal-flicker {
     0%, 100% { opacity: .94; }
     50% { opacity: 1; }
@@ -2810,7 +2842,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   :root[data-theme="terminal-green"] .brand-name,
   :root[data-theme="terminal-green"] .nav-item.is-active,
   :root[data-theme="terminal-green"] .btn-accent {
-    animation: terminal-flicker 3s ease-in-out infinite;
+    animation: terminal-flicker 3s steps(4) infinite;
+    will-change: opacity;
   }
 }
 
@@ -2927,12 +2960,19 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   background-size: contain;
 }
 @media (prefers-reduced-motion: no-preference) {
+  /* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+     THEMES-SPEC.md): steps(8) - a slow ambient "breathe" at this duration
+     reads identically whether interpolated smoothly or held across 8 discrete
+     frames per cycle, and letting the compositor skip the frames in between
+     is free CPU. will-change scoped to this exact pseudo-element, not the
+     whole .sidebar. */
   @keyframes matcha-steam {
     0%, 100% { opacity: .7; transform: translateY(0); }
     50% { opacity: 1; transform: translateY(-3px); }
   }
   :root[data-theme="matcha"] .sidebar::after {
-    animation: matcha-steam 4s ease-in-out infinite;
+    animation: matcha-steam 4s steps(8) infinite;
+    will-change: opacity, transform;
   }
 }
 
@@ -2979,12 +3019,17 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   opacity: .5;
 }
 @media (prefers-reduced-motion: no-preference) {
+  /* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+     THEMES-SPEC.md): steps(8), same reasoning as matcha-steam above - a
+     twinkle already reads as discrete beats, so stepping it costs nothing
+     visually while letting the compositor skip in-between frames. */
   @keyframes desert-twinkle {
     0%, 100% { opacity: .3; }
     50% { opacity: .8; }
   }
   :root[data-theme="desert-night"] .sidebar::before {
-    animation: desert-twinkle 4s ease-in-out infinite;
+    animation: desert-twinkle 4s steps(8) infinite;
+    will-change: opacity;
   }
 }
 
@@ -3001,6 +3046,31 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   position: relative;
   z-index: 1;
 }
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): split into two layers instead of one. The rain-streak
+   hairline grid never actually moved (only the whole layer's opacity was
+   animated) but its repeating-linear-gradient still had to be
+   recomposited every frame as part of the single masked ::after - by
+   moving it to its own un-animated ::before, the compositor only ever has
+   to touch the small 120px-wide neon-blob radial-gradient on ::after each
+   frame, not the full-width streak grid too. ::before's own opacity below
+   (.7, matching tokyo-pulse's 0%/100% value) bakes in exactly the "rest"
+   appearance the combined layer used to sit at when not mid-pulse, so
+   nothing about the static composite changes; only the region that
+   actually has to be re-touched per frame shrinks. */
+:root[data-theme="tokyo-rain"] .sidebar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 150px;
+  pointer-events: none;
+  z-index: 0;
+  background: repeating-linear-gradient(115deg, rgba(154, 163, 186, .05) 0, rgba(154, 163, 186, .05) 1px, transparent 1px, transparent 18px);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
 :root[data-theme="tokyo-rain"] .sidebar::after {
   content: "";
   position: absolute;
@@ -3011,19 +3081,28 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   pointer-events: none;
   z-index: 0;
   background:
-    repeating-linear-gradient(115deg, rgba(154, 163, 186, .05) 0, rgba(154, 163, 186, .05) 1px, transparent 1px, transparent 18px),
     radial-gradient(circle 60px at 15% 100%, rgba(255, 90, 168, .12), transparent 100%),
     radial-gradient(circle 60px at 85% 100%, rgba(77, 217, 255, .12), transparent 100%);
   -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
   mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
 }
 @media (prefers-reduced-motion: no-preference) {
+  /* Static rest-state opacity for the streak layer, matching the old
+     combined layer's own 0%/100% keyframe value exactly - scoped inside
+     this same media query (not a bare rule) so reduced-motion still gets
+     the original fallback (both layers at their default opacity: 1, same
+     as the old single-element fallback, since this rule never applied
+     there either). */
+  :root[data-theme="tokyo-rain"] .sidebar::before {
+    opacity: .7;
+  }
   @keyframes tokyo-pulse {
     0%, 100% { opacity: .7; }
     50% { opacity: 1; }
   }
   :root[data-theme="tokyo-rain"] .sidebar::after {
-    animation: tokyo-pulse 6s ease-in-out infinite;
+    animation: tokyo-pulse 6s steps(8) infinite;
+    will-change: opacity;
   }
 }
 
@@ -3078,7 +3157,13 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   position: relative;
   z-index: 1;
 }
-:root[data-theme="aurora-sky"] .sidebar::after {
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): split the three bands - only the middle (violet)
+   ellipse is "the breathing one"; the outer green/pink pair never needs
+   independent motion (they always drifted/faded in lockstep with it) so
+   they move to a static ::before, leaving ::after (below) to animate just
+   the one, smaller band each frame. */
+:root[data-theme="aurora-sky"] .sidebar::before {
   content: "";
   position: absolute;
   left: -20px;
@@ -3089,18 +3174,41 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   z-index: 0;
   background:
     radial-gradient(ellipse 140px 40px at 30% 100%, rgba(76, 232, 163, .10), transparent 100%),
-    radial-gradient(ellipse 160px 50px at 60% 80%, rgba(185, 140, 247, .10), transparent 100%),
     radial-gradient(ellipse 150px 45px at 85% 100%, rgba(255, 122, 209, .08), transparent 100%);
   -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
   mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
 }
+:root[data-theme="aurora-sky"] .sidebar::after {
+  content: "";
+  position: absolute;
+  left: -20px;
+  right: -20px;
+  bottom: -10px;
+  height: 170px;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(ellipse 160px 50px at 60% 80%, rgba(185, 140, 247, .10), transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent);
+}
 @media (prefers-reduced-motion: no-preference) {
+  /* Bakes in the old animation's own 0%/100% keyframe (-8px, .85) as a
+     static value for the now-unanimated outer pair, so the combined
+     rest-state composite is pixel-identical to before splitting - scoped
+     inside this same media query (not a bare rule) so reduced motion still
+     falls back to this pseudo-element's own default transform:none/
+     opacity:1, exactly like the old single-layer fallback did. */
+  :root[data-theme="aurora-sky"] .sidebar::before {
+    transform: translateX(-8px);
+    opacity: .85;
+  }
   @keyframes aurora-drift {
     0%, 100% { transform: translateX(-8px); opacity: .85; }
     50% { transform: translateX(8px); opacity: 1; }
   }
   :root[data-theme="aurora-sky"] .sidebar::after {
-    animation: aurora-drift 18s ease-in-out infinite;
+    animation: aurora-drift 18s steps(8) infinite;
+    will-change: opacity, transform;
   }
 }
 
@@ -3130,18 +3238,41 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   z-index: 0;
   background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='232' height='60' viewBox='0 0 232 60'><rect x='20' y='14' width='8' height='2.5' rx='1.25' fill='%23c43d59' opacity='.3' transform='rotate(20 24 15)'/><circle cx='60' cy='30' r='2' fill='%23e8a0b0' opacity='.3'/><rect x='100' y='10' width='7' height='2.5' rx='1.25' fill='%237d5400' opacity='.3' transform='rotate(-15 103 11)'/><circle cx='150' cy='24' r='2.2' fill='%23c43d59' opacity='.3'/><rect x='185' y='16' width='8' height='2.5' rx='1.25' fill='%23e8a0b0' opacity='.3' transform='rotate(40 189 17)'/><circle cx='210' cy='32' r='1.8' fill='%237d5400' opacity='.3'/></svg>") no-repeat;
 }
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): this used to animate filter:drop-shadow() directly on
+   .brand-icon - measured as the #2 most expensive theme despite being a
+   single ~24px element, because filter has no compositor-only fast path
+   (every frame re-rasterizes the icon's own alpha silhouette through a
+   blur). Replaced with the same technique .arcane-hero-glow already uses
+   elsewhere in this file: a small pre-blurred glow shape (a radial-
+   gradient circle, sized/positioned once at rest, see .sc-icon-glow
+   below) layered behind .brand-icon (index.html) and animated via opacity
+   only - opacity is compositor-only, so the icon itself is never
+   re-rasterized. Same visual "sparkle pulse" (a soft pink glow blooming
+   and fading behind the icon), just built the cheap way. */
+.sc-icon-glow { display: none; }
+:root[data-theme="strawberry-cream"] .sc-icon-glow {
+  display: block;
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(196, 61, 89, .55) 0%, rgba(196, 61, 89, .18) 55%, transparent 78%);
+  opacity: 0;
+  pointer-events: none;
+}
 @media (prefers-reduced-motion: no-preference) {
   @keyframes sc-sparkle {
-    0%, 100% { filter: drop-shadow(0 0 0 rgba(196, 61, 89, 0)); }
-    50% { filter: drop-shadow(0 0 3px rgba(196, 61, 89, .7)); }
+    0%, 100% { opacity: 0; }
+    50% { opacity: 1; }
   }
-  :root[data-theme="strawberry-cream"] .brand-icon {
-    animation: sc-sparkle 3s ease-in-out infinite;
+  :root[data-theme="strawberry-cream"] .sc-icon-glow {
+    animation: sc-sparkle 3s steps(6) infinite;
+    will-change: opacity;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme="strawberry-cream"] .brand-icon {
-    filter: drop-shadow(0 0 2px rgba(196, 61, 89, .56));
+  :root[data-theme="strawberry-cream"] .sc-icon-glow {
+    opacity: .56;
   }
 }
 
@@ -3223,6 +3354,19 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    above) via clamp(floor, ...cqh..., ceiling) so a much taller real window
    (Eric's) gets visibly bigger flakes than the 845x539 default without ever
    shrinking past the floor on a short one. */
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): max-height caps .snow-scene itself (not just this
+   layer) at 280px - the same ceiling and bottom-anchoring technique
+   .arcane-alcove/.arcane-hero-cat use above, closing the same latent risk
+   documented in this block's own history comment (.snow-scene's freed
+   flex:1 slot reaches 500-1000px on a real tall multi-flavour window, and
+   every .snow-layer below scales its rendered/composited area directly
+   with that box's size via `inset:-140px`). Below the cap, nothing
+   changes - min()/max() only bites once the freed space actually exceeds
+   280px, which today's default-size measurement never did. */
+:root[data-theme="snow-day"] .snow-scene {
+  max-height: 280px;
+}
 :root[data-theme="snow-day"] .snow-layer {
   position: absolute;
   inset: -140px;
@@ -3234,13 +3378,21 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    overcast wash the whole way down), which is what actually sank the
    original touch: on the sidebar's own stark-white background, near-white
    flakes had nothing to read against at all. */
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): steps(10-14) instead of linear on all three fall
+   timelines - "falling in discrete steps" is a legitimate pixel-snow look
+   (this is a shape-rendering:crispEdges pixel-art theme throughout) and
+   lets the compositor skip most in-between frames each loop, same
+   mechanism as every other steps() conversion in this file. will-change
+   promotes each layer once up front. */
 :root[data-theme="snow-day"] .snow-layer-far {
   background-image:
     radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 20% 30%, rgba(255,255,255,.8) 0%, transparent 100%),
     radial-gradient(circle clamp(2px, .7cqh, 3.5px) at 70% 65%, rgba(255,255,255,.75) 0%, transparent 100%);
   background-size: 64px 108px;
   opacity: .85;
-  animation: snow-day-fall-far 24s linear infinite;
+  animation: snow-day-fall-far 24s steps(14) infinite;
+  will-change: transform;
 }
 :root[data-theme="snow-day"] .snow-layer-mid {
   background-image:
@@ -3249,7 +3401,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
     radial-gradient(circle clamp(2.6px, .9cqh, 4.5px) at 10% 75%, rgba(255,255,255,.9) 0%, transparent 100%);
   background-size: 58px 96px;
   opacity: .92;
-  animation: snow-day-fall-mid 16s linear infinite;
+  animation: snow-day-fall-mid 16s steps(12) infinite;
+  will-change: transform;
 }
 :root[data-theme="snow-day"] .snow-layer-near {
   background-image:
@@ -3257,7 +3410,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
     radial-gradient(circle clamp(3.5px, 1.2cqh, 6.5px) at 68% 55%, rgba(255,255,255,.95) 0%, transparent 100%);
   background-size: 52px 88px;
   opacity: 1;
-  animation: snow-day-fall-near 11s linear infinite;
+  animation: snow-day-fall-near 11s steps(10) infinite;
+  will-change: transform;
 }
 @keyframes snow-day-fall-far  { from { transform: translate(0,0); } to { transform: translate(-64px, 108px); } }
 @keyframes snow-day-fall-mid  { from { transform: translate(0,0); } to { transform: translate(58px, 96px); } }
@@ -3430,28 +3584,71 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    nothing left over to clip. .arcane-hero itself is `position: relative;
    overflow: hidden` so this can never bleed into .nav or
    .sidebar-bottom. */
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): height capped at min(100%, 280px), same ceiling and
+   same bottom-anchored technique .arcane-hero-cat below already uses (that
+   rule's own comment explains the 280px number). Closes an asymmetry the
+   round-21 fix above left open: .arcane-hero-cat was already bounded so a
+   real tall window (Eric's 2530x1591, 500-1000px of freed space per this
+   file's own history comments) can't blow its render size past what was
+   ever actually measured, but .arcane-alcove - the animated flame/motes'
+   own <svg> - was still `height:100%`, meaning on a genuinely tall window
+   those animated elements get stretched across a proportionally larger
+   painted area every frame, unboundedly. Bottom-anchoring (left/right/
+   bottom:0 instead of inset:0) means only the TOP of a very tall
+   .arcane-hero ever goes uncovered above the capped art - the same
+   "vanish/stop-growing rather than scale unboundedly" contract already
+   used for the cat below and for Snow Day's own layers, not a new
+   pattern. */
 :root[data-theme="arcane-library"] .arcane-alcove {
   display: block;
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   width: 100%;
-  height: 100%;
+  height: min(100%, 280px);
   pointer-events: none;
 }
 
+/* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+   THEMES-SPEC.md): this theme measured as the single worst-performing one
+   - not because any one animation is expensive, but because 8 independent
+   CSS animations run concurrently across two inline <svg>s (flame + 3
+   motes here, tail/2 eyes/glow further below), each one triggering its own
+   per-frame style-recalc/paint-invalidation walk. steps(6-8) on the
+   flicker/drift timelines (already read as pulses, not smooth fades) lets
+   the compositor hold most frames flat instead of interpolating every
+   vsync; will-change on every one of the 8 selectors below (here and at
+   .arcane-hero-tail/-eye-l/-eye-r/-glow further down) promotes each once
+   up front instead of promote/demote churn across 8 concurrent instances.
+   Tail-sway is deliberately left off steps() - see its own note below.
+
+   Verification-pass follow-up (same finding ID, re-measured independently):
+   steps()/will-change alone left this theme ~8x over target - they cut
+   per-instance cost but never cut the instance COUNT, which the original
+   analysis had already identified as the real driver. Two of the 8
+   instances are now consolidated (motes below; eyes further down) per the
+   plan's own "consolidate staggered motes/eyes into fewer layers"
+   suggestion, taking the concurrent count from 8 to 5. Flame, tail, and
+   glow stay as their own single instances - already 1 each, nothing to
+   consolidate there. */
 @keyframes arcane-flame-flicker { 0%, 100% { opacity: .85; } 45% { opacity: 1; } 60% { opacity: .55; } }
-.arcane-flame { animation: arcane-flame-flicker 2.2s ease-in-out infinite; }
+.arcane-flame { animation: arcane-flame-flicker 2.2s steps(6) infinite; will-change: opacity; }
 
 @keyframes arcane-mote-drift {
   0%, 100% { opacity: .4; transform: translateY(0); }
   50% { opacity: .85; transform: translateY(-5px); }
 }
-.arcane-mote-1 { animation: arcane-mote-drift 5.5s ease-in-out infinite; }
-.arcane-mote-2 { animation: arcane-mote-drift 6.5s ease-in-out infinite 1.2s; }
-.arcane-mote-3 { animation: arcane-mote-drift 6s ease-in-out infinite 2.4s; }
+/* Verification-pass follow-up: was 3 separately-animated rects
+   (arcane-mote-1/2/3, staggered 5.5s/6.5s/6s with 0/1.2s/2.4s delays) -
+   now one group (ui/index.html: .arcane-motes wraps all 3 rects), a single
+   running instance instead of 3. The 3 dust motes drift in sync now
+   instead of independently - a deliberate motion change, not a bug. */
+.arcane-motes { animation: arcane-mote-drift 6s steps(8) infinite; will-change: opacity, transform; }
 
 @media (prefers-reduced-motion: reduce) {
-  .arcane-flame, .arcane-mote-1, .arcane-mote-2, .arcane-mote-3 { animation: none; }
+  .arcane-flame, .arcane-motes { animation: none; }
 }
 
 /* ==========================================================================
@@ -3572,26 +3769,39 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   :root[data-theme="arcane-library"] .arcane-hero { display: none; }
 }
 
+/* Left on smooth easing, not steps() - same reasoning as .lofi-cat-tail's
+   own note above, a sway reads mechanical if stepped. will-change still
+   added, per the section-header note above. */
 @keyframes arcane-hero-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
-.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s ease-in-out infinite; }
+.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s ease-in-out infinite; will-change: transform; }
 
 /* Blink: both eyes squash to a sliver just before the 6s mark, held briefly,
-   then release - transform-box:fill-box so the squash pivots around each
-   eye's own center instead of the SVG's origin corner. Right eye lags 0.05s
-   so the two lids don't read as one mechanical flat plane. */
+   then release - transform-box:fill-box so the squash pivots around the
+   group's own center. Already a snap rather than a smooth interpolation
+   (92%->95%->100% is most of the cycle held flat at scaleY(1)), so left
+   off steps(); will-change added.
+   Verification-pass follow-up (perf-remeasure:webview2-gpu-cpu-4-anim-elements):
+   was 2 separately-animated rects (arcane-hero-eye-l/-r, right eye 0.05s
+   behind the left "so the two lids don't read as one mechanical flat
+   plane") - now one group (ui/index.html: .arcane-hero-eyes wraps both
+   rects), a single running instance instead of 2. Losing the 0.05s offset
+   is visually a non-event (each eye is only 11px tall) and the squash
+   itself is pixel-identical: both eyes already share the same y/height, so
+   the group's fill-box center lands at the same vertical midpoint each
+   eye's own per-element center did, and this animation only scales Y. */
 @keyframes arcane-hero-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
-.arcane-hero-eye-l, .arcane-hero-eye-r {
+.arcane-hero-eyes {
   animation: arcane-hero-blink 6.2s ease-in-out infinite;
   transform-box: fill-box;
   transform-origin: center;
+  will-change: transform;
 }
-.arcane-hero-eye-r { animation-delay: .05s; }
 
 @keyframes arcane-hero-glow-pulse { 0%, 100% { opacity: .5; } 50% { opacity: .8; } }
-.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s ease-in-out infinite; }
+.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s ease-in-out infinite; will-change: opacity; }
 
 @media (prefers-reduced-motion: reduce) {
-  .arcane-hero-tail, .arcane-hero-eye-l, .arcane-hero-eye-r, .arcane-hero-glow {
+  .arcane-hero-tail, .arcane-hero-eyes, .arcane-hero-glow {
     animation: none;
   }
 }
@@ -3653,13 +3863,13 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    own top-of-file animations and tests\spa\harness.js's own reduced-motion
    coverage check) - those must keep animating regardless of window/game
    state, so they are deliberately absent from every list below.
-   Every animated property used above is already compositor-only (opacity/
-   transform) except sc-sparkle (an animated filter:drop-shadow(), used only
-   because generated content isn't reliably rendered on an <img> - see that
-   theme's own file-header note) - filter has no compositor-only equivalent
-   without adding a real extra layer to the art, which is out of this fix's
-   scope ("the art itself unchanged"), so it is covered here by the same
-   pause-when-not-looking gate as everything else instead.
+   Every animated property used above is compositor-only (opacity/transform).
+   sc-sparkle used to be the one exception (an animated filter:drop-shadow()
+   on .brand-icon directly, since generated content isn't reliably rendered
+   on an <img>) - the perf-remeasure:webview2-gpu-cpu-4-anim-elements fix
+   replaced it with a pre-blurred glow shape animated via opacity only (see
+   that theme's own rule above), so this section no longer has to carry a
+   filter-property caveat; it is gated the same as everything else below.
    ========================================================================== */
 
 /* Lofi Night - lofi-twinkle (4 stars) + lofi-tail-sway. Bare, unscoped
@@ -3705,9 +3915,13 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   animation: none !important;
 }
 
-/* Strawberry Cream - sc-sparkle (see this section's own header note on why
-   this one animates filter instead of opacity/transform). */
-:root[data-theme="strawberry-cream"]:is([data-game-active], [data-window-inactive]) .brand-icon {
+/* Strawberry Cream - sc-sparkle, now on .sc-icon-glow (the pre-blurred glow
+   shape behind .brand-icon) since the perf fix moved this off an animated
+   filter:drop-shadow() on the icon itself - see that theme's own rule
+   above for the full history. Gating off here just stops the animation;
+   the glow's own rest-state opacity:0 already means "invisible" whether
+   paused or mid-cycle-at-0%, so this has the same effect as before. */
+:root[data-theme="strawberry-cream"]:is([data-game-active], [data-window-inactive]) .sc-icon-glow {
   animation: none !important;
 }
 
@@ -3718,19 +3932,17 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   animation: none !important;
 }
 
-/* Arcane Library - arcane-flame-flicker, arcane-mote-drift (x3),
-   arcane-hero-tail-sway, arcane-hero-blink (x2 eyes), arcane-hero-glow-pulse.
-   Bare, unscoped selectors above (same reasoning as Lofi Night's stars -
-   theme-gating happens via display:none on .arcane-alcove/.arcane-hero, not
-   on these animation rules), so no [data-theme=] prefix is needed here
-   either. */
+/* Arcane Library - arcane-flame-flicker, arcane-mote-drift (now 1 grouped
+   instance, was x3 - see verification-pass follow-up note above),
+   arcane-hero-tail-sway, arcane-hero-blink (now 1 grouped instance, was x2
+   eyes - see that note above too), arcane-hero-glow-pulse. Bare, unscoped
+   selectors above (same reasoning as Lofi Night's stars - theme-gating
+   happens via display:none on .arcane-alcove/.arcane-hero, not on these
+   animation rules), so no [data-theme=] prefix is needed here either. */
 :root:is([data-game-active], [data-window-inactive]) .arcane-flame,
-:root:is([data-game-active], [data-window-inactive]) .arcane-mote-1,
-:root:is([data-game-active], [data-window-inactive]) .arcane-mote-2,
-:root:is([data-game-active], [data-window-inactive]) .arcane-mote-3,
+:root:is([data-game-active], [data-window-inactive]) .arcane-motes,
 :root:is([data-game-active], [data-window-inactive]) .arcane-hero-tail,
-:root:is([data-game-active], [data-window-inactive]) .arcane-hero-eye-l,
-:root:is([data-game-active], [data-window-inactive]) .arcane-hero-eye-r,
+:root:is([data-game-active], [data-window-inactive]) .arcane-hero-eyes,
 :root:is([data-game-active], [data-window-inactive]) .arcane-hero-glow {
   animation: none !important;
 }

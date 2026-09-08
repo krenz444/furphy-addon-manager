@@ -20,23 +20,30 @@
  unrelated powershell.exe/FurphyHost.exe/msedgewebview2.exe elsewhere
  on the machine):
    - powershell.exe whose command line names addon-server.ps1 or
-     addon-sync.ps1 AND whose command line contains this build root's
+     addon-sync.ps1 AND whose command line contains the scope root's
      own path (covers both a root-level run and a copy under
      tests\.tmp\..., which Start-TestServer/Copy-Fixture always place
      under the build root).
    - FurphyHost.exe whose command line or executable path contains the
-     build root's path.
-   - msedgewebview2.exe whose command line contains the build root's
+     scope root's path.
+   - msedgewebview2.exe whose command line contains the scope root's
      path (the default WebView2 profile folder is
      "<exeDir>\FurphyHost.exe.WebView2", always a subfolder of wherever
-     FurphyHost.exe itself was copied to, so this same build-root
-     substring check also scopes the WebView2 child processes without
-     needing to know the exact profile path up front).
+     FurphyHost.exe itself was copied to, so this same substring check
+     also scopes the WebView2 child processes - via its --user-data-dir
+     argument - without needing to know the exact profile path up
+     front).
+
+ The "scope root" above is -ScopeRoot when given, else the whole build
+ root (see -ScopeRoot below) - this is recorded in the JSON/MD output
+ (ScopeRoot/ScopeSource) so a reader can see exactly what was measured.
 
  USAGE
    tests\perf\Measure-Furphy.ps1 -Label A-server-idle-no-wow
    tests\perf\Measure-Furphy.ps1 -Label F-sync-job -DurationSec 45 `
        -ServerLogPath C:\path\to\test-root\server.log -Notes "..."
+   tests\perf\Measure-Furphy.ps1 -Label p3-steadystate -DurationSec 90 `
+       -ScopeRoot C:\path\to\this-its-own-scratch-root -Quiet
 
  PARAMS
    -Label              Short, filename-safe state label (e.g. "A",
@@ -48,6 +55,21 @@
                          window matching "<ts> METHOD /path ..." are
                          counted as the server's own request count for
                          the window.
+   -ScopeRoot           Optional. When given, a process is scoped in
+                         only if its CommandLine or ExecutablePath
+                         contains THIS path (normalized: resolved to a
+                         full path, trailing backslash trimmed,
+                         lower-cased) - mirrors Soak-Furphy.ps1's own
+                         Get-SoakRole scoping. Use this to scope a
+                         single caller's own scratch app root (e.g. an
+                         individual Pester It's own New-TempRoot
+                         result) so a leftover/unrelated
+                         addon-server.ps1, FurphyHost.exe, or
+                         msedgewebview2.exe elsewhere under the shared
+                         build root is never swept into the
+                         measurement. When omitted, falls back to
+                         today's build-root-wide behaviour (backward
+                         compatible with existing callers).
    -OutDir              Where to write <Label>-<stamp>.json/.md.
                          Default tests\perf\bench next to this script.
    -Notes               Free-text context folded into the JSON/MD
@@ -61,6 +83,7 @@ param(
     [int]$DurationSec = 60,
     [int]$SampleIntervalSec = 2,
     [string]$ServerLogPath,
+    [string]$ScopeRoot,
     [string]$OutDir,
     [string]$Notes,
     [switch]$Quiet
@@ -72,6 +95,28 @@ $ErrorActionPreference = 'Stop'
 # tests\perf\Measure-Furphy.ps1 -> tests\perf -> tests -> <build root>
 $Script:BuildRoot = Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent
 $Script:BuildRootLower = $Script:BuildRoot.ToLowerInvariant()
+
+# Effective scope root: -ScopeRoot when given (normalized: resolved to a
+# full path, trailing backslash trimmed, lower-cased - same normalization
+# Soak-Furphy.ps1's Get-SoakRole applies to its own -Root), else the whole
+# build root (today's behaviour, kept for backward compatibility with
+# existing callers that don't pass -ScopeRoot). Recorded in the result
+# below so a reader of the JSON/MD can see exactly what was measured.
+if ($ScopeRoot) {
+    $resolvedScopeRoot = $ScopeRoot
+    try {
+        $resolvedScopeRoot = (Resolve-Path -LiteralPath $ScopeRoot -ErrorAction Stop).Path
+    } catch {
+        $resolvedScopeRoot = $ScopeRoot
+    }
+    $Script:EffectiveScopeRoot = $resolvedScopeRoot.TrimEnd('\')
+    $Script:EffectiveScopeRootLower = $Script:EffectiveScopeRoot.ToLowerInvariant()
+    $Script:ScopeSource = 'ScopeRoot parameter'
+} else {
+    $Script:EffectiveScopeRoot = $Script:BuildRoot
+    $Script:EffectiveScopeRootLower = $Script:BuildRootLower
+    $Script:ScopeSource = 'BuildRoot (default - no -ScopeRoot given, backward compatible)'
+}
 
 if (-not $OutDir) {
     $OutDir = Join-Path -Path $PSScriptRoot -ChildPath 'bench'
@@ -90,7 +135,9 @@ function Get-FurphyRole {
     <#
       Classifies one Win32_Process row as a Furphy process this bench
       cares about, or returns $null (excluded). See header comment for
-      the exact scoping rule.
+      the exact scoping rule. Scoped to $Script:EffectiveScopeRootLower -
+      either the caller's own -ScopeRoot (normalized) or, when -ScopeRoot
+      was not given, the whole build root (today's default behaviour).
     #>
     param([string]$Name, [string]$CommandLine, [string]$ExecutablePath)
 
@@ -98,7 +145,7 @@ function Get-FurphyRole {
     $exe = if ($ExecutablePath) { $ExecutablePath } else { '' }
     $clLower = $cl.ToLowerInvariant()
     $exeLower = $exe.ToLowerInvariant()
-    $inRoot = $clLower.Contains($Script:BuildRootLower) -or $exeLower.Contains($Script:BuildRootLower)
+    $inRoot = $clLower.Contains($Script:EffectiveScopeRootLower) -or $exeLower.Contains($Script:EffectiveScopeRootLower)
     if (-not $inRoot) { return $null }
 
     # Self-exclusion: this bench script's own -Notes text sometimes names
@@ -170,7 +217,7 @@ $windowStart = Get-Date
 $endTime = $windowStart.AddSeconds($DurationSec)
 
 if (-not $Quiet) {
-    Write-Host "Measure-Furphy: label='$Label' duration=${DurationSec}s interval=${SampleIntervalSec}s -> $OutDir"
+    Write-Host "Measure-Furphy: label='$Label' duration=${DurationSec}s interval=${SampleIntervalSec}s scope='$Script:EffectiveScopeRoot' ($Script:ScopeSource) -> $OutDir"
 }
 
 while ((Get-Date) -lt $endTime) {
@@ -310,6 +357,8 @@ if ($rowsSorted.Count -gt 0) { $peakWsTotal = ($rowsSorted | Measure-Object -Pro
 $result = [PSCustomObject]@{
     Label            = $Label
     Notes            = $Notes
+    ScopeRoot        = $Script:EffectiveScopeRoot
+    ScopeSource      = $Script:ScopeSource
     DurationSec      = $DurationSec
     SampleIntervalSec = $SampleIntervalSec
     SampleCount      = $sampleCount
@@ -347,6 +396,7 @@ if ($Notes) {
     $mdLines.Add($Notes)
     $mdLines.Add('')
 }
+$mdLines.Add("Scope: $($result.ScopeRoot) [$($result.ScopeSource)]")
 $mdLines.Add("Window: $($result.WindowStart) -> $($result.WindowEnd) ($($result.ActualDurationSec)s actual, $($result.SampleCount) samples at ${SampleIntervalSec}s)")
 if ($null -ne $requestCount) {
     $mdLines.Add("Server requests in window (from $ServerLogPath): $requestCount")

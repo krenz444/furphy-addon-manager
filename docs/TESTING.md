@@ -350,6 +350,18 @@ transcript.
   if it's a genuinely new layer (rare) - the seven layers above are meant
   to be the complete set for the foreseeable future.
 
+## Scratch roots
+
+Building a scratch app root by hand (a copy of `addon-sync.ps1`/
+`addon-server.ps1`/`ui\`/`host\bin\`) always goes `New-TempRoot` +
+`Copy-FurphyAppFiles -Destination <root>`, never a hand-written
+`Copy-Item`. **Never copy `tests\` itself into a root under
+`tests\.tmp`** - a 2026-09-08 incident did exactly that (destination
+lived inside `tests\.tmp`, itself under `tests\`, so the recursive copy
+of `tests\` copied itself into itself until Windows' path limits
+stopped it) and `Copy-FurphyAppFiles` exists specifically so that
+mistake cannot happen again.
+
 ## Hygiene rules (apply to every test you write)
 
 - Never touch `C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync`,

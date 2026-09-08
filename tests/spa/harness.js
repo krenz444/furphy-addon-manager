@@ -1720,10 +1720,21 @@
       ".lofi-star-1", ".lofi-star-2", ".lofi-star-3", ".lofi-star-4", ".lofi-cat-tail",
       ".brand-name", ".nav-item.is-active", ".btn-accent",
       ".sidebar::after", ".sidebar::before",
-      ".brand-icon",
+      // Strawberry Cream's sc-sparkle moved off .brand-icon onto a
+      // dedicated glow element behind it (perf-remeasure:
+      // webview2-gpu-cpu-4-anim-elements - filter:drop-shadow() has no
+      // compositor-only fast path; see ui\style.css's own history note on
+      // this theme's rule) - the gate now covers .sc-icon-glow instead.
+      ".sc-icon-glow",
       ".snow-layer-far", ".snow-layer-mid", ".snow-layer-near",
-      ".arcane-flame", ".arcane-mote-1", ".arcane-mote-2", ".arcane-mote-3",
-      ".arcane-hero-tail", ".arcane-hero-eye-l", ".arcane-hero-eye-r", ".arcane-hero-glow"
+      // Arcane Library's motes (was arcane-mote-1/2/3) and eyes (was
+      // arcane-hero-eye-l/-r) were each consolidated from N separately-
+      // animated elements into one grouped instance apiece
+      // (perf-remeasure:webview2-gpu-cpu-4-anim-elements verification pass,
+      // THEMES-SPEC.md section 10 follow-up) - same rationale as
+      // sc-icon-glow above, the gate now covers the group class instead.
+      ".arcane-flame", ".arcane-motes",
+      ".arcane-hero-tail", ".arcane-hero-eyes", ".arcane-hero-glow"
     ].forEach(function (sel) {
       checkTry("a :is([data-game-active],[data-window-inactive]) rule sets animation:none!important covering " + sel, function () {
         return covered.indexOf(sel) !== -1;

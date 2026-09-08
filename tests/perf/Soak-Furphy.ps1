@@ -203,12 +203,7 @@ if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path 
 Write-Host "Soak-Furphy: scratch root = $Root"
 Write-Host "Soak-Furphy: output dir   = $OutDir"
 
-Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-sync.ps1') -Destination (Join-Path $Root 'addon-sync.ps1') -Force
-Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'addon-server.ps1') -Destination (Join-Path $Root 'addon-server.ps1') -Force
-Copy-Item -LiteralPath (Join-Path $Script:FurphyBuildRoot 'ui') -Destination (Join-Path $Root 'ui') -Recurse -Force
-$binDst = Join-Path $Root 'host\bin'
-New-Item -ItemType Directory -Path $binDst -Force | Out-Null
-Get-ChildItem -LiteralPath $Script:HostBinDir -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $binDst -Recurse -Force }
+Copy-FurphyAppFiles -Destination $Root | Out-Null
 
 New-Item -ItemType Directory -Path (Join-Path $Root 'flavours\retail') -Force | Out-Null
 if ($SeedAddonsJsonPath) {
@@ -409,6 +404,13 @@ function Invoke-SoakSample {
     }
     $lastTrayState = $trayStateNow
 
+    $serverAliveNow = $false
+    try {
+        if ($server -and $server.Process) { $server.Process.Refresh(); $serverAliveNow = -not $server.Process.HasExited }
+    } catch { }
+    $realWowNow = Test-RealWowClientRunning
+    if ($realWowNow) { $trayStateChangeLog.Add("[$sampleTimeUtc] real WoW client process seen") }
+
     $systemRows.Add([PSCustomObject]@{
         SampleTimeUtc     = $sampleTimeUtc
         ElapsedMinutes    = $ElapsedMinutes
@@ -421,6 +423,15 @@ function Invoke-SoakSample {
         CacheTotalBytes   = $cacheStats.TotalBytes
         TrayStateChanged  = $trayStateChanged
         TrayStatePresent  = ($null -ne $trayStateNow)
+        # Round 41 follow-up: the 2h soak on 2026-09-08 saw the server exit
+        # between the 115- and 120-minute samples with -IdleMinutes 150 and
+        # the scratch root already deleted, so nothing explained it. Record
+        # per sample whether the server process is still alive and whether a
+        # real WoW client is running (the server drops its idle-exit limit to
+        # 5 minutes while one runs), and keep the server.log tail in the
+        # summary (below) so the exit reason survives root cleanup.
+        ServerAlive       = $serverAliveNow
+        RealWowRunning    = $realWowNow
     })
 
     Write-Host ("Soak-Furphy: sample @ {0}min ({1} processes, tray-state {2})" -f $ElapsedMinutes, $thisSamplePids.Count, $(if ($trayStateChanged) { 'CHANGED' } else { 'unchanged' }))
@@ -547,6 +558,26 @@ try {
     }
     $md.Add('')
 
+    $md.Add('## Server process / real WoW client')
+    $md.Add('')
+    $lastSysRow = if ($systemRows.Count -gt 0) { $systemRows[$systemRows.Count - 1] } else { $null }
+    $aliveSamples = @($systemRows | Where-Object { $_.ServerAlive }).Count
+    $wowSamples = @($systemRows | Where-Object { $_.RealWowRunning }).Count
+    if ($lastSysRow) {
+        $md.Add("addon-server.ps1 alive at the last sample: $($lastSysRow.ServerAlive) ($aliveSamples of $($systemRows.Count) samples alive).")
+    }
+    $md.Add("Real WoW client seen in $wowSamples of $($systemRows.Count) samples (the server shortens its idle-exit limit to 5 minutes while a client runs).")
+    $md.Add('')
+    $md.Add('### server.log tail (last 40 lines, captured before the scratch root is removed)')
+    $md.Add('')
+    $md.Add('```')
+    if (Test-Path -LiteralPath $serverLogPath) {
+        foreach ($logLine in @(Get-Content -LiteralPath $serverLogPath -Tail 40 -ErrorAction SilentlyContinue)) { $md.Add([string]$logLine) }
+    } else {
+        $md.Add('(server.log missing)')
+    }
+    $md.Add('```')
+    $md.Add('')
     $md.Add('## Process-stability notes')
     $md.Add('')
     if ($vanishedPids.Count -eq 0 -and $errors.Count -eq 0) {

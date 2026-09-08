@@ -759,6 +759,7 @@ not a one-time fix.
   a true single-double-click, no-console, no-warning experience is worth
   paying for. Name Azure Trusted Signing as the concrete fallback if that
   becomes the ask.
+- **DECISION (2026-09-08, delegated to the agent by Eric: 'decide on the code signing yourself'): no code signing.** Reasoning: the only downloaded artifact is a zip of PowerShell scripts and a .cmd; FurphyHost.exe is compiled on the player's own PC by install.ps1 from the shipped source, so no downloaded executable ever meets SmartScreen's reputation check; the one prompt a novice sees is Windows' generic downloaded-file warning on Install Furphy.cmd, which an Authenticode certificate does not remove for .cmd files; and a certificate would add USD 100+ a year, identity verification, and a signing step to every release for little practical gain. Revisit only if a downloaded EXE installer is ever shipped - Azure Trusted Signing is the pick then. README/README.txt/site now say 'isn't signed with a paid certificate' (no 'yet').
 - **No winget/MSIX/MSI.** winget still requires opening a terminal (same
   friction class as a PowerShell one-liner); MSIX/MSI both expect a signed
   package to dodge the same SmartScreen wall. All three are downstream of

@@ -52,7 +52,21 @@
 
   <aside id="sidebar" class="sidebar">
     <div class="brand">
-      <img class="brand-icon" src="icon.svg" alt="">
+      <span class="brand-icon-wrap">
+        <!-- Strawberry Cream only (perf-remeasure:webview2-gpu-cpu-4-anim-
+             elements fix, THEMES-SPEC.md): a pre-blurred glow shape behind
+             the icon, animated via opacity only, replacing the old
+             animated filter:drop-shadow() on .brand-icon itself (filter
+             has no compositor-only fast path; see this theme's own
+             sc-sparkle rule in style.css for the measured cost and the
+             .arcane-hero-glow precedent this mirrors). Hidden on every
+             other theme via its own default display:none in style.css, so
+             it is inert markup elsewhere - same convention as every other
+             signature-touch element in this file. aria-hidden: purely
+             decorative. -->
+        <span class="sc-icon-glow" aria-hidden="true"></span>
+        <img class="brand-icon" src="icon.svg" alt="">
+      </span>
       <!-- Lofi Night only (E15b): a tiny pixel cat curled up right next to
            the brand icon - hidden on every other theme via .lofi-brand-cat's
            default display:none in style.css. -->
@@ -224,21 +238,102 @@
         </linearGradient>
       </defs>
       <rect x="0" y="0" width="232" height="140" fill="url(#lofiSky)"/>
+      <!-- Round perf fix follow-up (perf-remeasure:webview2-gpu-cpu-4-anim-elements
+           verification pass, THEMES-SPEC.md section 10): THEMES-SPEC.md and
+           the original driver analysis both said "4 stars", but this markup
+           actually had 14 individual <rect class="lofi-star-N"> elements,
+           each its own separately-animated/promoted instance (4 timing
+           classes reused across 14 positions) - the true instance count was
+           3.5x what the perf fix's own per-instance-cost reasoning assumed,
+           which is why steps()/will-change alone left this theme ~8x over
+           target.
+
+           First attempt here grouped the rects sharing a timing class under
+           4 separate <g class="lofi-star-N"> elements (14 rects -> 4
+           animated elements, same 4 keyframe durations/delays) - re-measured
+           live and it barely moved the number (~5% CPU reduction). A second
+           experiment then gave all 4 groups the SAME single timeline (same
+           duration, no delay) - also barely moved it. Isolating each
+           variable live (CDP + tests\perf\Measure-Furphy.ps1, 60s
+           foreground samples) pinned the actual driver: cost tracks the
+           COUNT OF CONCURRENTLY-ANIMATING ELEMENTS in this SVG, not how many
+           DOM nodes share a timeline and not how many DISTINCT timelines
+           exist. With only 1 of the 4 groups animating (other 3 + tail
+           forced off), this theme's total cost matched the other themes'
+           own single-instance baseline almost exactly (~2.9 CPU-s/60s, right
+           in line with tokyo-rain/matcha/snow-day's own ~2.9-3.5). With all
+           4 groups animating (even sharing one identical timeline), it
+           stayed near 12 CPU-s/60s - so 4 concurrently-promoted elements
+           cost roughly 4x a single one, regardless of whether they share a
+           clock.
+
+           That round's "fix" merged all 4 groups into ONE <g> (14 rects,
+           1 concurrently-animating element, down from the original 15
+           counting the tail). Live-measured afterward: NO material
+           improvement (12.03-12.61 CPU-s/60s, essentially unchanged from
+           the pre-fix ~12.3-13.3) - despite CDP confirming exactly 2
+           running animation instances post-fix vs 15 before. That result
+           contradicted the "cost tracks concurrently-animating element
+           count" theory the same round had just used to justify the merge:
+           going 4 elements -> 1 barely moved the number, while separately
+           forcing all-but-one of the original 4 groups off (so a SINGLE
+           element animated alone) dropped cost all the way to ~2.9
+           CPU-s/60s, right in line with other themes' own single-instance
+           baseline. The one variable that test never isolated: bounding
+           box. This merged group's <rect> children are scattered from
+           x=14 to x=188 of this SVG's 232-wide viewBox - a bbox spanning
+           81% of the width, unioned into a single animated element. If a
+           `<g>` with an opacity animation forces the compositor to
+           allocate an offscreen buffer sized to that bbox (the standard
+           reason a CSS opacity-animated group gets isolated before
+           compositing), a near-full-width group costs far more to
+           raster/recomposite per frame than a small one, independent of
+           how many child <rect>s it contains or how many *other* elements
+           are also animating - which would explain both: (a) 4 wide groups
+           -> 1 wide group barely moving the number (bbox stayed ~full-width
+           throughout, only child-count changed), and (b) the "1 of 4"
+           isolation test reading low (whichever single timing-class group
+           was left on evidently didn't happen to span the full width).
+
+           Round-2 fixer's experiment (this change, still unconfirmed live -
+           see THEMES-SPEC.md section 10.2 for why): split the single wide
+           group back into 3 groups by spatial position instead of by the
+           old timing-class assignment, each covering a narrow x-band
+           (~60px, ~58px, ~34px of the 232px viewBox - roughly a third the
+           width of the merged group each) rather than one group spanning
+           nearly the whole thing. All 3 groups keep the exact same 4 class
+           names and therefore the exact same shared timeline (3.6s,
+           steps(6), no delay) as before, so the rendered result is
+           frame-for-frame IDENTICAL to the single-group version - still a
+           perfect-unison flash, zero visual change, byte-identical
+           screenshots expected. This isolates bbox as a variable while
+           holding "all stars flash together" and "3 concurrently-promoted
+           elements" constant, distinguishing it from the earlier 4-group
+           test (which also had multiple concurrent elements but never
+           controlled for each group's own bbox width). style.css:
+           unchanged - same 4 .lofi-star-N rules/gate/reduced-motion query
+           apply to all 3 groups without any selector text changing. -->
       <g fill="#f2eee6">
-        <rect class="lofi-star lofi-star-1" x="14" y="10" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-2" x="34" y="18" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-3" x="54" y="8" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-4" x="72" y="22" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-1" x="92" y="12" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-2" x="118" y="9" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-3" x="138" y="20" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-4" x="158" y="14" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-1" x="26" y="30" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-2" x="66" y="32" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-3" x="104" y="28" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-4" x="146" y="30" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-1" x="178" y="24" width="2" height="2"/>
-        <rect class="lofi-star lofi-star-2" x="188" y="34" width="2" height="2"/>
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="14" y="10" width="2" height="2"/>
+          <rect x="34" y="18" width="2" height="2"/>
+          <rect x="54" y="8" width="2" height="2"/>
+          <rect x="72" y="22" width="2" height="2"/>
+          <rect x="26" y="30" width="2" height="2"/>
+          <rect x="66" y="32" width="2" height="2"/>
+        </g>
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="92" y="12" width="2" height="2"/>
+          <rect x="118" y="9" width="2" height="2"/>
+          <rect x="138" y="20" width="2" height="2"/>
+          <rect x="104" y="28" width="2" height="2"/>
+          <rect x="146" y="30" width="2" height="2"/>
+        </g>
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="158" y="14" width="2" height="2"/>
+          <rect x="178" y="24" width="2" height="2"/>
+          <rect x="188" y="34" width="2" height="2"/>
+        </g>
       </g>
       <!-- crescent moon: a filled pixel blob, then a sky-colour blob bitten in
            to the upper-left to carve the crescent shadow -->
@@ -439,11 +534,24 @@
         <rect x="4" y="82" width="9" height="2"/><rect x="63" y="79" width="10" height="2"/>
       </g>
 
-      <!-- drifting arcane motes -->
-      <g fill="#8fc4ff">
-        <rect class="arcane-mote-1" style="opacity:.4" x="70" y="18" width="2" height="2"/>
-        <rect class="arcane-mote-2" style="opacity:.4" x="150" y="60" width="2" height="2"/>
-        <rect class="arcane-mote-3" style="opacity:.4" x="30" y="100" width="2" height="2"/>
+      <!-- drifting arcane motes. Round perf fix follow-up
+           (perf-remeasure:webview2-gpu-cpu-4-anim-elements verification
+           pass, THEMES-SPEC.md section 10): used to be 3 individually
+           animated rects (arcane-mote-1/2/3, staggered durations/delays for
+           an organic drift) - one of the 8 concurrent animation instances
+           this theme's own perf-fix note identified as the real cost driver
+           (instance count, not per-instance cost). Consolidated into one
+           group (style.css: .arcane-motes, single arcane-mote-drift
+           instance, no stagger) - the 3 dust motes now drift in sync
+           instead of independently (a real, deliberate motion change per
+           the round's own "may move less often or more subtly" allowance),
+           but stay visible at their same 3 positions. Base opacity (.4,
+           matching the keyframe's own 0%/100% value) moved from each rect
+           onto the group so the at-rest look is unchanged. -->
+      <g class="arcane-motes" style="opacity:.4" fill="#8fc4ff">
+        <rect x="70" y="18" width="2" height="2"/>
+        <rect x="150" y="60" width="2" height="2"/>
+        <rect x="30" y="100" width="2" height="2"/>
       </g>
 
       <!-- foreground: leaning, gold-trimmed stack of tomes -->
@@ -565,9 +673,24 @@
       <!-- muzzle patch -->
       <rect fill="#f4eedd" x="44" y="66" width="28" height="12"/>
 
-      <!-- eyes: rune-blue, gentle blink -->
-      <rect class="arcane-hero-eye-l" fill="#88afff" x="39" y="57" width="11" height="11"/>
-      <rect class="arcane-hero-eye-r" fill="#88afff" x="66" y="57" width="11" height="11"/>
+      <!-- eyes: rune-blue, gentle blink. Round perf fix follow-up
+           (perf-remeasure:webview2-gpu-cpu-4-anim-elements verification
+           pass, THEMES-SPEC.md section 10): used to be 2 individually
+           animated rects (arcane-hero-eye-l/-r, right eye 0.05s behind the
+           left) - another of the 8 concurrent animation instances the
+           perf-fix note's own cost-driver analysis identified. Consolidated
+           into one group (style.css: .arcane-hero-eyes, single
+           arcane-hero-blink instance, no stagger) - safe because both eyes
+           already share the same y/height (y=57, height=11), so the
+           group's own fill-box center lands at the same vertical midpoint
+           each eye's own center did, and the animation only scales Y: the
+           squash is pixel-identical to before, just losing the two lids'
+           0.05s offset (per the round's own "may move ... more subtly"
+           allowance). -->
+      <g class="arcane-hero-eyes" fill="#88afff">
+        <rect x="39" y="57" width="11" height="11"/>
+        <rect x="66" y="57" width="11" height="11"/>
+      </g>
 
       <!-- nose -->
       <rect fill="#453c70" x="54" y="70" width="8" height="5"/>

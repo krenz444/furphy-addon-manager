@@ -1,5 +1,105 @@
 # Furphy Addon Manager - changelog
 
+## Round 41 (1.21.0: cheaper playing animations, honest measurements, test tooling hardened, server idle loop tidied)
+
+Shipped from a partly finished QA round on Eric's "just ship what you
+can / know" call while he was using the PC, so this entry says exactly
+what was verified and what was not. Everything below was validated
+headlessly on the final tree (static, unit and SPA layers of
+tests\run-all.ps1 plus the server integration files that start no
+window); the host, fixture-acceptance and perf layers of the gate were
+NOT run for this release because they open real windows on the desktop
+and were stealing focus from the user. hostbin\FurphyHost.exe is
+byte-identical to the 1.20.1 build (built 08:22 on 2026-09-08), so the
+host layer's coverage from 1.20.1 still applies to the binary that ships.
+
+**SPA (themes):**
+- Round 40 already pauses every decorative animation while the window is
+  unfocused, minimized or WoW is running. This round makes the
+  animations cheaper while they actually play (window open and focused,
+  no game): steps() timing functions and will-change promotion on all
+  nine animated themes; the arcane-library alcove and the snow-day
+  scene no longer grow with the window (height caps of 280px, they used
+  to reach 500-1000px on a large window); tokyo-rain and aurora-sky
+  split their static backdrop from the small animated part so the
+  compositor only repaints the moving layer; strawberry-cream's
+  animated filter: drop-shadow() (the one property here with no
+  compositor fast path) became an opacity-only glow layer
+  (.sc-icon-glow). Measured live with tests\perf\Measure-Furphy.ps1,
+  60s focused window: strawberry-cream 11.08 -> 0.86 CPU-s per 40s
+  webview total (fixed); snow-day 1.95 CPU-s/60s total against a 1.06
+  static-theme floor (fixed); tokyo-rain 2.69 (about 1.6 above the
+  floor, marginal). Art at rest is unchanged - only timing, layering
+  and promotion changed; the theme audit's 16 screenshots and 500 checks
+  and the 233-check SPA harness pass.
+- NOT fixed, stated plainly: lofi and arcane-library still cost 15.3
+  and 19.3 CPU-s per 60s while focused (they pause the moment the
+  window loses focus or WoW starts, as before). Lofi's 14 animated star
+  rects were merged into one group and then split into three narrow
+  groups - neither moved the number, so per-element count is not the
+  driver there. A further experiment (moving the moving parts into a
+  separate <svg> layer) was in progress when this release was cut; it
+  is saved as an unverified patch outside the tree and is not shipped.
+  matcha, desert-night, terminal-green and aurora-sky received the same
+  steps()/will-change treatment but could not be focus-verified this
+  round (the measurement window kept losing focus to real user
+  activity, which pauses the animation and would fake a pass).
+
+**Server:**
+- Test-GameRunning now does one process enumeration per probe instead of
+  seven separate Get-Process calls (one per known WoW client name); the
+  CurseForge catalogue-cache freshness stat runs at most every 30s via
+  [IO.File]::GetLastWriteTimeUtc instead of Test-Path + Get-Item on
+  every tick; the idle request-loop wake went from 2s to 5s (WaitOne
+  still returns the instant a request arrives, so request latency is
+  unchanged; the maintenance-spawn and idle-exit checks still run every
+  5s). Honest result: an independent before/after on a quiet machine
+  could not tell old from new (both about 0.05 CPU-s per idle minute,
+  at the 15.6ms scheduler-tick noise floor). The 2-hour soak's higher
+  figure (0.175 CPU-s/min) was the tray's status polling plus the
+  hourly maintenance child, i.e. real work, not the idle loop. A refix
+  that widened the probe interval to 60s and the wake to 10s was
+  reverted: unmeasurable gain for a slower WoW-launch detection.
+- The soak's server exit at minute 115 of 120 was the game-mode idle
+  rule working as designed (WoW client seen -> 5-minute idle exit):
+  server.log grew by exactly the 131 bytes of "Idle for 5 minutes -
+  shutting down" + "Stopping listener" + "Server stopped".
+
+**Tests / tooling:**
+- tests\perf\Measure-Furphy.ps1 -ScopeRoot: the perf measurements only
+  count processes under the given scratch root (a stray
+  msedgewebview2.exe from another app was being included; proven with a
+  decoy). Perf.Tests.ps1 passes its scratch root.
+- tests\integration\Server.WagoBrowse.Tests.ps1: the crawl request
+  counter piped a comma-wrapped array straight into Where-Object, so the
+  whole array arrived as one $_ and -eq vectorised - flaky counts.
+  Assign first, then filter. Verified 3x standalone, exactly 10 pages.
+- tests\perf\Soak-Furphy.ps1 records per sample whether the server is
+  alive and whether a real WoW client is running, and embeds the
+  server.log tail in its summary so an exit reason survives root cleanup.
+- tests\lib\common.ps1 Copy-FurphyAppFiles: copies exactly the app
+  files (addon-sync.ps1, addon-server.ps1, ui\, hostbin) into a
+  scratch root and refuses nested-copy targets. Added after a hand-rolled
+  copy that included tests\ into a root under tests\.tmp produced a
+  756 MB tree 1,777 directories deep. Soak-Furphy.ps1 and Perf.Tests.ps1
+  use it; TESTING.md documents the rule.
+- tests\run-all.ps1: new -SweepOnly switch (runs the hygiene sweep and
+  exits); Remove-DirectoryTreeSafely falls back to robocopy /MIR from an
+  empty directory for trees Remove-Item cannot delete (paths over 240
+  characters); the sweep also stops orphaned msedgewebview2.exe children
+  whose --user-data-dir sits under this build root's tests\.tmp, and it
+  now treats a FurphyHost.exe as a test straggler only when it runs from
+  THIS build root or on a test port - the previous "anything outside
+  Program Files" rule killed an unrelated scratch window belonging to a
+  concurrent measurement on 2026-09-08. Soak roots (tests\.tmp\soak-*)
+  are still left alone while a soak is active.
+
+**Verification on the final tree (headless only, see the note at the
+top):** static 7/7, unit 343/343, spa 2/2 (SPA harness 233/233, theme
+audit 500/500). Server integration files that start no window: 93/93
+before the interval revert, Server.GameState 4/4 and
+Server.MaintenanceTick 1/1 re-run after it.
+
 ## Round 40 (1.20.1: cheaper theme animations, uninstall stops its helper, foreground-CPU test, soak script)
 
 A skeptic QA pass across four lenses (perf-remeasure, soak, classic-only/

@@ -22,7 +22,7 @@ Furphy also manages Classic and Classic Era addons, not just Retail - it detects
 1. Download the latest zip - from the project's [Releases page](https://github.com/krenz444/furphy-addon-manager/releases/latest) (or the download button on the [landing page](https://krenz444.github.io/furphy-addon-manager/), if it's live), or clone this repo.
 2. Right-click the zip and choose **Extract All...** (use Explorer's own unzip, not a third-party tool - it's what carries the "downloaded from the internet" flag through to the next step correctly).
 3. Open the extracted folder and double-click **`Install Furphy.cmd`**.
-4. Windows may show a small "Open File - Security Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate yet - click Run. Furphy only writes inside your WoW folder and never asks for admin access.
+4. Windows may show a small "Open File - Security Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate - click Run. Furphy only writes inside your WoW folder and never asks for admin access.
 5. On most machines, one small window opens: "Furphy found World of Warcraft in `<path>`" with a single **Install** button (or a folder picker if it can't find WoW - point it at your WoW folder and click Install). A progress bar shows while it copies files and builds the native host, then a success screen offers **Open Furphy Addon Manager**. On some machines you may see the console-only flow instead of that window - that's fine, it does exactly the same thing, just as plain text.
 
 Either way, the installer:

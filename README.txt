@@ -6,7 +6,7 @@ them. No API key required for any of this - see NO API KEY NEEDED below.
 NEW INSTALL
   Download the zip, right-click it and choose Extract All, open the extracted folder, then double-click
   "Install Furphy.cmd" (or run "install.ps1" from PowerShell). Windows may show a small "Open File - Security
-  Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate yet -
+  Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate -
   click Run. Furphy only writes inside your WoW folder and never asks for admin access. On most machines one
   small window then opens with a single Install button (or a folder picker if it can't find WoW); on some
   machines you may see plain console text instead - that's fine, it does the same thing. Either way it finds

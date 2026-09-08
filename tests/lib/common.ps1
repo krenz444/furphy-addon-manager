@@ -125,6 +125,86 @@ function Copy-Fixture {
     return $Destination
 }
 
+function Copy-FurphyAppFiles {
+    <#
+      Copies exactly the four things a scratch app root needs to run
+      addon-server.ps1/FurphyHost.exe against - addon-sync.ps1,
+      addon-server.ps1, the ui\ folder, and host\bin\* (into
+      <Destination>\host\bin) - and nothing else: never tests\, never
+      .git, never a runtime cache\/jobs\/flavours\ folder. -Source
+      defaults to $Script:FurphyBuildRoot; -Destination is required and
+      is validated before anything is copied.
+
+      2026-09-08 incident this replaces: a measurement agent hand-built
+      a scratch app root under tests\.tmp and threw in its own
+      'Copy-Item ... tests -Recurse'; because the destination lived
+      INSIDE tests\.tmp (itself under tests\), that copy recursed into
+      itself until Windows' path-length limit stopped it - 756 MB,
+      11,263 files, 1,777 directory levels deep, cleaned up by hand with
+      robocopy. This helper exists so no caller ever hand-rolls that
+      copy again - it copies a fixed, narrow file list and validates
+      -Destination/-Source before touching disk.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [string]$Source
+    )
+
+    if (-not $Source) { $Source = $Script:FurphyBuildRoot }
+
+    # Normalize lexically (neither path need exist yet - GetFullPath
+    # collapses '..' segments without touching disk) so a dot-segment
+    # trick like '...\tests\.tmp\x\..\..\..' can't disguise a
+    # build-root-escaping destination as a legitimate tests\.tmp root.
+    $fullSource = [System.IO.Path]::GetFullPath($Source)
+    $fullDest = [System.IO.Path]::GetFullPath($Destination)
+    $fullBuildRoot = [System.IO.Path]::GetFullPath($Script:FurphyBuildRoot)
+    $fullTmpRoot = [System.IO.Path]::GetFullPath((Join-Path $Script:FurphyBuildRoot 'tests\.tmp'))
+
+    $destWithSep = $fullDest.TrimEnd('\') + '\'
+    $tmpRootWithSep = $fullTmpRoot.TrimEnd('\') + '\'
+    $buildRootWithSep = $fullBuildRoot.TrimEnd('\') + '\'
+    $sourceWithSep = $fullSource.TrimEnd('\') + '\'
+
+    $destUnderTmpRoot = $destWithSep.ToLowerInvariant().StartsWith($tmpRootWithSep.ToLowerInvariant())
+    $destInsideBuildRoot = $destWithSep.ToLowerInvariant().StartsWith($buildRootWithSep.ToLowerInvariant())
+
+    if ((-not $destUnderTmpRoot) -and $destInsideBuildRoot) {
+        throw "Copy-FurphyAppFiles: -Destination '$Destination' (resolves to '$fullDest') is inside the build root ('$fullBuildRoot') but not under tests\.tmp ('$fullTmpRoot') - refusing a nested-copy target. Use New-TempRoot to get a safe scratch root."
+    }
+
+    if ($sourceWithSep.ToLowerInvariant().StartsWith($destWithSep.ToLowerInvariant())) {
+        throw "Copy-FurphyAppFiles: -Source '$Source' (resolves to '$fullSource') is inside -Destination '$Destination' (resolves to '$fullDest') - refusing, this is the 2026-09-08 incident shape in reverse."
+    }
+
+    if (-not (Test-Path -LiteralPath $fullDest)) {
+        New-Item -ItemType Directory -Path $fullDest -Force | Out-Null
+    }
+
+    $syncSrc = Join-Path -Path $fullSource -ChildPath 'addon-sync.ps1'
+    $serverSrc = Join-Path -Path $fullSource -ChildPath 'addon-server.ps1'
+    $uiSrc = Join-Path -Path $fullSource -ChildPath 'ui'
+    $hostBinSrc = Join-Path -Path $fullSource -ChildPath 'host\bin'
+
+    foreach ($p in @($syncSrc, $serverSrc, $uiSrc, $hostBinSrc)) {
+        if (-not (Test-Path -LiteralPath $p)) {
+            throw "Copy-FurphyAppFiles: expected source item not found: $p"
+        }
+    }
+
+    Copy-Item -LiteralPath $syncSrc -Destination (Join-Path -Path $fullDest -ChildPath 'addon-sync.ps1') -Force
+    Copy-Item -LiteralPath $serverSrc -Destination (Join-Path -Path $fullDest -ChildPath 'addon-server.ps1') -Force
+    Copy-Item -LiteralPath $uiSrc -Destination (Join-Path -Path $fullDest -ChildPath 'ui') -Recurse -Force
+
+    $binDst = Join-Path -Path $fullDest -ChildPath 'host\bin'
+    New-Item -ItemType Directory -Path $binDst -Force | Out-Null
+    Get-ChildItem -LiteralPath $hostBinSrc -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $binDst -Recurse -Force
+    }
+
+    return $fullDest
+}
+
 function Assert-FixturePristine {
     <#
       Sanity check a caller can run before/after a pass touching a fixture

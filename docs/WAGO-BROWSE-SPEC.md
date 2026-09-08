@@ -1345,3 +1345,5 @@ noted "one size is enough")
 ================================================================================
 END OF WAGO-BROWSE-SPEC.md
 ================================================================================
+
+DECISION 2026-09-08 (Eric, verbatim: 'don't add a wagon name filter'): no content or profanity filter on Wago addon names or descriptions. Furphy shows Wago's catalogue as Wago publishes it. Recorded so future reviews do not re-open it.
