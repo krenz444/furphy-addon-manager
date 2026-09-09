@@ -2707,19 +2707,29 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 
 /* Pixel night cityscape along the bottom of the sidebar - positioned and
    layered exactly like Vaporwave's ::after grid (behind the real nav/status
-   content, cropped to the sidebar's own edges, never intercepts a click),
-   but as a real <svg> element so its stars/cat-tail can be animated by the
-   rules below. Hidden on every other theme by the bare .lofi-cityscape rule. */
-.lofi-cityscape { display: none; }
+   content, cropped to the sidebar's own edges, never intercepts a click).
+   Section 10.3 perf fix (THEMES-SPEC.md): now a purely static <svg> - the
+   animated stars/cat-tail live in the separate .lofi-motion-layer stacked
+   on top (see ui/index.html), so this one's compositing surface never has
+   to be touched again after first paint. Hidden on every other theme by
+   the bare .lofi-cityscape rule below. */
+.lofi-cityscape, .lofi-motion-layer { display: none; }
 :root[data-theme="lofi"] .sidebar {
   position: relative;
   overflow: hidden;
 }
-:root[data-theme="lofi"] .sidebar > *:not(.lofi-cityscape) {
+:root[data-theme="lofi"] .sidebar > *:not(.lofi-cityscape):not(.lofi-motion-layer) {
   position: relative;
   z-index: 1;
 }
-:root[data-theme="lofi"] .lofi-cityscape {
+/* Section 10.3 perf fix (THEMES-SPEC.md): .lofi-motion-layer (the animated
+   stars + cat tail, see ui/index.html) is a separate <svg> stacked exactly
+   on top of .lofi-cityscape (the static art) - same box, same z-index, so
+   it depends only on DOM order (it comes second) to paint above the
+   backdrop. Written as one shared rule so the two can never drift out of
+   alignment with each other. */
+:root[data-theme="lofi"] .lofi-cityscape,
+:root[data-theme="lofi"] .lofi-motion-layer {
   display: block;
   position: absolute;
   left: 0;
@@ -2739,18 +2749,18 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    flat. will-change promotes the star layer once up front instead of a
    promote/demote per-frame churn.
 
-   Verification-pass follow-up: this markup actually had 14 individual
-   animated <rect> elements across 4 timing classes (not the "4 stars"
-   THEMES-SPEC.md originally described), and live measurement (isolating
-   count-of-concurrently-animating-elements from count-of-distinct-timelines
-   as separate variables) showed cost tracks the former, not the latter -
-   see ui/index.html's own note on the single merged <g> above this rule.
-   All 4 classes now resolve to the same one animated element and are kept
-   identical (one shared timeline, no delay) so this stays a single
-   compositor-promoted layer rather than reintroducing concurrent instances;
-   the 4 separate selectors are kept (rather than collapsed to 1) purely so
-   the existing reduced-motion query and game-active/window-inactive gate
-   below need no further changes. */
+   History (THEMES-SPEC.md sections 10/10.1/10.2): this markup went through
+   14 separate rects, then 4 grouped, then 1 merged <g>, then 3
+   spatially-narrower groups - none of it moved the number, because in
+   every variant the animated element(s) still shared one <svg> document
+   (and its one compositing surface) with ~150 static building/window/moon
+   rects. Section 10.3's fix left the grouping exactly as the 1-group state
+   above (all 4 legacy classes on one <g>, one shared timeline, no
+   staggering) but moved that <g> - and the tail below - into their own
+   separate <svg class="lofi-motion-layer"> (ui/index.html), containing
+   nothing else. The 4 separate .lofi-star-N selectors are kept (rather
+   than collapsed to 1) purely so the existing reduced-motion query and
+   game-active/window-inactive gate below need no further changes. */
 @keyframes lofi-twinkle {
   0%, 100% { opacity: 0.28; }
   50% { opacity: 1; }
@@ -2761,16 +2771,33 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .lofi-star-4 { animation: lofi-twinkle 3.6s steps(6) infinite; will-change: opacity; }
 
 /* Swaying cat tail (the sitting cat only - the curled cat's tail is tucked
-   in and stays still). transform-origin is set inline in the SVG markup at
-   the tail's own base coordinate so it pivots from where it meets the body,
-   not the shape's bounding-box center. Left on smooth easing (transform-
-   only, one instance, cheap) - see the perf-fix note above the stars; a
-   sway reads mechanical if stepped, so only the stars were converted. */
+   in and stays still). transform-origin is set inline on the wrapping div
+   (ui/index.html - Section 10.3 fix moved this element off an animated SVG
+   <g> onto a <div> in a <foreignObject>) at the tail's own base coordinate,
+   expressed as a percentage of that div's own box, so it still pivots from
+   where it meets the body, not the shape's bounding-box center.
+
+   Section 10.3 fix, live-CDP-verified follow-up: this was left on smooth
+   ease-in-out (see this comment's own prior wording: "a sway reads
+   mechanical if stepped, so only the stars were converted") back when the
+   open question was concurrent-instance count, not per-frame draw cost.
+   Live CDP tracing (Tracing domain, this round) showed the real remaining
+   cost once the SVG-vs-HTML issue above was fixed: a smooth, continuously-
+   interpolated transform forces the compositor to redraw+raster+present a
+   new frame on every vsync (496 draws/3s on this machine's high-refresh
+   monitor), because the animated value is never bit-identical between
+   frames. rotate(-5deg)-to-rotate(5deg) is a tiny, slow sway (3.6s per
+   half-cycle) - discretizing it into steps(12) measured a ~4.5x cut in
+   ProxyImpl::ScheduledActionDraw's own duration and let the compositor
+   skip ~95% of frames outright (LayerTreeHostImpl::DidNotProduceFrame),
+   while still reading as a fluid sway rather than a mechanical tick at 12
+   steps over 3.6s (~0.3s per step - about 3x finer than the stars' own
+   steps(6)/3.6s twinkle, which already reads fine per the note above). */
 @keyframes lofi-tail-sway {
   0%, 100% { transform: rotate(-5deg); }
   50% { transform: rotate(5deg); }
 }
-.lofi-cat-tail { animation: lofi-tail-sway 3.6s ease-in-out infinite; will-change: transform; }
+.lofi-cat-tail { animation: lofi-tail-sway 3.6s steps(12) infinite; will-change: transform; }
 
 /* Motion-sensitive users get a static skyline: no twinkle, no tail sway. */
 @media (prefers-reduced-motion: reduce) {
@@ -3567,7 +3594,8 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 }
 :root[data-theme="arcane-library"] .addon-row { box-shadow: 0 2px 8px rgba(5, 4, 12, 0.32); }
 
-.arcane-alcove { display: none; }
+.arcane-alcove, .arcane-alcove-motion-layer,
+.arcane-hero-glow-layer, .arcane-hero-motion-layer { display: none; }
 /* Round-21 verification fix: .arcane-alcove used to be its own flex
    sibling with a fixed flex:0 0 140px slot between .arcane-hero and
    .sidebar-bottom. That fixed slot did two things wrong: it capped the
@@ -3610,6 +3638,22 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   height: min(100%, 280px);
   pointer-events: none;
 }
+/* Section 10.3 perf fix (THEMES-SPEC.md): .arcane-alcove-motion-layer (the
+   flame + motes, see ui/index.html) is a separate <svg> stacked exactly on
+   top of .arcane-alcove - same box, so it depends only on DOM order (it
+   comes second) to paint above the backdrop. Written as its own rule
+   sharing every geometry value with .arcane-alcove above so the two can
+   never drift out of alignment. */
+:root[data-theme="arcane-library"] .arcane-alcove-motion-layer {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: min(100%, 280px);
+  pointer-events: none;
+}
 
 /* Round perf fix (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
    THEMES-SPEC.md): this theme measured as the single worst-performing one
@@ -3636,16 +3680,29 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 @keyframes arcane-flame-flicker { 0%, 100% { opacity: .85; } 45% { opacity: 1; } 60% { opacity: .55; } }
 .arcane-flame { animation: arcane-flame-flicker 2.2s steps(6) infinite; will-change: opacity; }
 
+/* Section 10.3 fix, live-CDP-verified follow-up: -5px became
+   translateY(-5.3191%) - .arcane-motes is now a <div> (ui/index.html),
+   and percentage translateY resolves against ITS OWN border box (94
+   viewBox units tall, see that div's own comment), so -5/94*100 =
+   -5.3191% is an exact restatement of the same 5-unit motion, not a
+   rounded approximation. */
 @keyframes arcane-mote-drift {
   0%, 100% { opacity: .4; transform: translateY(0); }
-  50% { opacity: .85; transform: translateY(-5px); }
+  50% { opacity: .85; transform: translateY(-5.3191%); }
 }
 /* Verification-pass follow-up: was 3 separately-animated rects
    (arcane-mote-1/2/3, staggered 5.5s/6.5s/6s with 0/1.2s/2.4s delays) -
    now one group (ui/index.html: .arcane-motes wraps all 3 rects), a single
    running instance instead of 3. The 3 dust motes drift in sync now
    instead of independently - a deliberate motion change, not a bug. */
-.arcane-motes { animation: arcane-mote-drift 6s steps(8) infinite; will-change: opacity, transform; }
+/* Section 10.3 fix, live-CDP-verified follow-up: steps(8) -> steps(6)
+   (matching the flame's own cadence just above) - even with every element
+   in this theme off the expensive SVG-transform path, having 5
+   independently-timed step cadences running at once still means SOME
+   element changes fairly often; coarsening this slow 6s drift's own step
+   count trims its share of that combined change-rate a little further
+   with no perceptible loss of "still drifting" character. */
+.arcane-motes { animation: arcane-mote-drift 6s steps(6) infinite; will-change: opacity, transform; }
 
 @media (prefers-reduced-motion: reduce) {
   .arcane-flame, .arcane-motes { animation: none; }
@@ -3745,16 +3802,38 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   height: min(100%, 280px);
   display: block;
 }
+/* Section 10.3 perf fix (THEMES-SPEC.md): .arcane-hero-glow-layer (the rune
+   glow, BELOW the cat) and .arcane-hero-motion-layer (the blinking eyes,
+   ABOVE the cat) are separate <svg>s sharing this exact same box - see
+   ui/index.html for why the glow needed a below layer while the eyes (like
+   .arcane-alcove-motion-layer above) could just go on top. Stacking is
+   DOM-order only (glow-layer written first, cat second, motion-layer
+   third), so all three keep whatever z-index this rule gives them: 0. */
+:root[data-theme="arcane-library"] .arcane-hero-glow-layer,
+:root[data-theme="arcane-library"] .arcane-hero-motion-layer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: min(100%, 280px);
+  display: block;
+}
 /* Below its own 110px recognizability floor, hide the cat and its
    backdrop rather than showing a shrunk or clipped fragment that no
    longer reads as a cat at a glance - queried against .arcane-hero's own
    real size (container-name: arcane-hero, set above), so this correctly
    fires whenever the ACTUAL freed space is too small, whether that is
    because the window itself is short or because a real multi-flavour nav
-   ate most of a not-so-short window. */
+   ate most of a not-so-short window. Section 10.3: the new glow/motion
+   split layers hide alongside the cat/alcove they belong to, same
+   condition, so nothing is ever left floating without its backdrop. */
 @container arcane-hero (max-height: 109px) {
   :root[data-theme="arcane-library"] .arcane-hero-cat,
-  :root[data-theme="arcane-library"] .arcane-alcove {
+  :root[data-theme="arcane-library"] .arcane-alcove,
+  :root[data-theme="arcane-library"] .arcane-alcove-motion-layer,
+  :root[data-theme="arcane-library"] .arcane-hero-glow-layer,
+  :root[data-theme="arcane-library"] .arcane-hero-motion-layer {
     display: none;
   }
 }
@@ -3769,11 +3848,17 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   :root[data-theme="arcane-library"] .arcane-hero { display: none; }
 }
 
-/* Left on smooth easing, not steps() - same reasoning as .lofi-cat-tail's
-   own note above, a sway reads mechanical if stepped. will-change still
-   added, per the section-header note above. */
+/* Section 10.3 fix, live-CDP-verified follow-up: was left on smooth
+   ease-in-out ("a sway reads mechanical if stepped") back when the open
+   question was concurrent-instance count. See .lofi-cat-tail's own,
+   longer note above for the live-traced reason this changed: a smooth,
+   continuously-interpolated transform forces the compositor to redraw
+   every vsync, and steps(12) over this tail's own 4.6s cycle (~0.38s per
+   step) measured the same large cut in draw work while still reading as a
+   fluid sway. will-change still added, per the section-header note
+   above. */
 @keyframes arcane-hero-tail-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
-.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s ease-in-out infinite; will-change: transform; }
+.arcane-hero-tail { animation: arcane-hero-tail-sway 4.6s steps(12) infinite; will-change: transform; }
 
 /* Blink: both eyes squash to a sliver just before the 6s mark, held briefly,
    then release - transform-box:fill-box so the squash pivots around the
@@ -3797,8 +3882,28 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   will-change: transform;
 }
 
+/* Section 10.3 fix, live-CDP-verified follow-up: was smooth ease-in-out
+   (never flat, unlike arcane-hero-blink's own mostly-held keyframe just
+   above). Live CDP tracing (Tracing domain, this round) found this was
+   the LAST remaining always-redraw driver in this theme even after every
+   other fix above: flame/motes/tail/eyes each let the compositor skip the
+   large majority of frames (opacity's own flat spans, or steps()), but
+   this glow's continuously-changing opacity forced a full draw+raster
+   pass on every single vsync regardless of what the other 4 elements were
+   doing (measured: TileManager::PrepareTiles went from every-frame back
+   down to the same low level as the other 4 alone, purely from switching
+   this one rule to steps(8) - see THEMES-SPEC.md section 10.3). Opacity
+   pulsing in 8 discrete beats over the same 3.6s reads the same as the
+   flame's own steps(6)/2.2s flicker just above; the "pulse" glow was
+   already the SLOWEST-changing of this theme's 5 animations, so this is
+   the smallest step()-count risk of the five. Coarsened once more to
+   steps(6) (matching flame's own cadence exactly) after live measurement
+   showed 5 independently-timed step cadences running at once still adds
+   up to a non-trivial combined change-rate even with every element off
+   the expensive SVG-transform path - trimming the two slowest cadences
+   (this one and the motes' drift just above) a little further. */
 @keyframes arcane-hero-glow-pulse { 0%, 100% { opacity: .5; } 50% { opacity: .8; } }
-.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s ease-in-out infinite; will-change: opacity; }
+.arcane-hero-glow { animation: arcane-hero-glow-pulse 3.6s steps(6) infinite; will-change: opacity; }
 
 @media (prefers-reduced-motion: reduce) {
   .arcane-hero-tail, .arcane-hero-eyes, .arcane-hero-glow {

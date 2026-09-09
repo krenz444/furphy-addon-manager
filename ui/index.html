@@ -238,103 +238,26 @@
         </linearGradient>
       </defs>
       <rect x="0" y="0" width="232" height="140" fill="url(#lofiSky)"/>
-      <!-- Round perf fix follow-up (perf-remeasure:webview2-gpu-cpu-4-anim-elements
-           verification pass, THEMES-SPEC.md section 10): THEMES-SPEC.md and
-           the original driver analysis both said "4 stars", but this markup
-           actually had 14 individual <rect class="lofi-star-N"> elements,
-           each its own separately-animated/promoted instance (4 timing
-           classes reused across 14 positions) - the true instance count was
-           3.5x what the perf fix's own per-instance-cost reasoning assumed,
-           which is why steps()/will-change alone left this theme ~8x over
-           target.
-
-           First attempt here grouped the rects sharing a timing class under
-           4 separate <g class="lofi-star-N"> elements (14 rects -> 4
-           animated elements, same 4 keyframe durations/delays) - re-measured
-           live and it barely moved the number (~5% CPU reduction). A second
-           experiment then gave all 4 groups the SAME single timeline (same
-           duration, no delay) - also barely moved it. Isolating each
-           variable live (CDP + tests\perf\Measure-Furphy.ps1, 60s
-           foreground samples) pinned the actual driver: cost tracks the
-           COUNT OF CONCURRENTLY-ANIMATING ELEMENTS in this SVG, not how many
-           DOM nodes share a timeline and not how many DISTINCT timelines
-           exist. With only 1 of the 4 groups animating (other 3 + tail
-           forced off), this theme's total cost matched the other themes'
-           own single-instance baseline almost exactly (~2.9 CPU-s/60s, right
-           in line with tokyo-rain/matcha/snow-day's own ~2.9-3.5). With all
-           4 groups animating (even sharing one identical timeline), it
-           stayed near 12 CPU-s/60s - so 4 concurrently-promoted elements
-           cost roughly 4x a single one, regardless of whether they share a
-           clock.
-
-           That round's "fix" merged all 4 groups into ONE <g> (14 rects,
-           1 concurrently-animating element, down from the original 15
-           counting the tail). Live-measured afterward: NO material
-           improvement (12.03-12.61 CPU-s/60s, essentially unchanged from
-           the pre-fix ~12.3-13.3) - despite CDP confirming exactly 2
-           running animation instances post-fix vs 15 before. That result
-           contradicted the "cost tracks concurrently-animating element
-           count" theory the same round had just used to justify the merge:
-           going 4 elements -> 1 barely moved the number, while separately
-           forcing all-but-one of the original 4 groups off (so a SINGLE
-           element animated alone) dropped cost all the way to ~2.9
-           CPU-s/60s, right in line with other themes' own single-instance
-           baseline. The one variable that test never isolated: bounding
-           box. This merged group's <rect> children are scattered from
-           x=14 to x=188 of this SVG's 232-wide viewBox - a bbox spanning
-           81% of the width, unioned into a single animated element. If a
-           `<g>` with an opacity animation forces the compositor to
-           allocate an offscreen buffer sized to that bbox (the standard
-           reason a CSS opacity-animated group gets isolated before
-           compositing), a near-full-width group costs far more to
-           raster/recomposite per frame than a small one, independent of
-           how many child <rect>s it contains or how many *other* elements
-           are also animating - which would explain both: (a) 4 wide groups
-           -> 1 wide group barely moving the number (bbox stayed ~full-width
-           throughout, only child-count changed), and (b) the "1 of 4"
-           isolation test reading low (whichever single timing-class group
-           was left on evidently didn't happen to span the full width).
-
-           Round-2 fixer's experiment (this change, still unconfirmed live -
-           see THEMES-SPEC.md section 10.2 for why): split the single wide
-           group back into 3 groups by spatial position instead of by the
-           old timing-class assignment, each covering a narrow x-band
-           (~60px, ~58px, ~34px of the 232px viewBox - roughly a third the
-           width of the merged group each) rather than one group spanning
-           nearly the whole thing. All 3 groups keep the exact same 4 class
-           names and therefore the exact same shared timeline (3.6s,
-           steps(6), no delay) as before, so the rendered result is
-           frame-for-frame IDENTICAL to the single-group version - still a
-           perfect-unison flash, zero visual change, byte-identical
-           screenshots expected. This isolates bbox as a variable while
-           holding "all stars flash together" and "3 concurrently-promoted
-           elements" constant, distinguishing it from the earlier 4-group
-           test (which also had multiple concurrent elements but never
-           controlled for each group's own bbox width). style.css:
-           unchanged - same 4 .lofi-star-N rules/gate/reduced-motion query
-           apply to all 3 groups without any selector text changing. -->
-      <g fill="#f2eee6">
-        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
-          <rect x="14" y="10" width="2" height="2"/>
-          <rect x="34" y="18" width="2" height="2"/>
-          <rect x="54" y="8" width="2" height="2"/>
-          <rect x="72" y="22" width="2" height="2"/>
-          <rect x="26" y="30" width="2" height="2"/>
-          <rect x="66" y="32" width="2" height="2"/>
-        </g>
-        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
-          <rect x="92" y="12" width="2" height="2"/>
-          <rect x="118" y="9" width="2" height="2"/>
-          <rect x="138" y="20" width="2" height="2"/>
-          <rect x="104" y="28" width="2" height="2"/>
-          <rect x="146" y="30" width="2" height="2"/>
-        </g>
-        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
-          <rect x="158" y="14" width="2" height="2"/>
-          <rect x="178" y="24" width="2" height="2"/>
-          <rect x="188" y="34" width="2" height="2"/>
-        </g>
-      </g>
+      <!-- Round perf fix history (perf-remeasure:webview2-gpu-cpu-4-anim-elements,
+           THEMES-SPEC.md sections 10/10.1/10.2): this SVG used to hold 14,
+           then 4, then 1 merged <g> of animated star <rect>s directly among
+           ~150 static building/window/moon rects, plus the tail-sway group
+           lower down. Three structural variants (many small instances, one
+           huge-bbox instance, three medium-bbox instances) all measured
+           within noise of each other and all stayed far over target -
+           conclusive evidence the cost was never really about instance
+           count or bbox width alone. Section 10.3's fix: the animated stars
+           and the tail (still the exact same classed elements, same
+           keyframes, same gating/reduced-motion coverage - nothing here
+           renamed) moved OUT of this static-only SVG into a second,
+           separate <svg class="lofi-motion-layer"> stacked on top of it
+           (see below) - the actual untested variable across every earlier
+           attempt was that the animated element always shared ONE
+           compositing surface with ~150 other static shapes, forcing that
+           whole surface to be touched every frame regardless of how the
+           animated part itself was grouped. This SVG is now 100% static art
+           - sky, moon, buildings, windows, both cat bodies - nothing in it
+           ever restyles after first paint. -->
       <!-- crescent moon: a filled pixel blob, then a sky-colour blob bitten in
            to the upper-left to carve the crescent shadow -->
       <g fill="#f4eede"><rect x="193" y="10" width="3" height="3"/><rect x="196" y="10" width="3" height="3"/><rect x="199" y="10" width="3" height="3"/><rect x="202" y="10" width="3" height="3"/><rect x="190" y="13" width="3" height="3"/><rect x="193" y="13" width="3" height="3"/><rect x="196" y="13" width="3" height="3"/><rect x="199" y="13" width="3" height="3"/><rect x="202" y="13" width="3" height="3"/><rect x="205" y="13" width="3" height="3"/><rect x="190" y="16" width="3" height="3"/><rect x="193" y="16" width="3" height="3"/><rect x="196" y="16" width="3" height="3"/><rect x="199" y="16" width="3" height="3"/><rect x="202" y="16" width="3" height="3"/><rect x="205" y="16" width="3" height="3"/><rect x="190" y="19" width="3" height="3"/><rect x="193" y="19" width="3" height="3"/><rect x="196" y="19" width="3" height="3"/><rect x="199" y="19" width="3" height="3"/><rect x="202" y="19" width="3" height="3"/><rect x="205" y="19" width="3" height="3"/><rect x="190" y="22" width="3" height="3"/><rect x="193" y="22" width="3" height="3"/><rect x="196" y="22" width="3" height="3"/><rect x="199" y="22" width="3" height="3"/><rect x="202" y="22" width="3" height="3"/><rect x="205" y="22" width="3" height="3"/><rect x="193" y="25" width="3" height="3"/><rect x="196" y="25" width="3" height="3"/><rect x="199" y="25" width="3" height="3"/><rect x="202" y="25" width="3" height="3"/></g>
@@ -426,11 +349,71 @@
       <rect fill="#ffb86b" x="229" y="118" width="2" height="3"/>
       <rect fill="#39d3c3" x="197" y="128" width="2" height="3"/>
       <rect fill="#a980ff" x="205" y="128" width="2" height="3"/>
-      <!-- lofi cat 1: sitting upright on the rooftop, tail sways (.lofi-cat-tail) -->
+      <!-- lofi cat 1: sitting upright on the rooftop; its tail (.lofi-cat-tail,
+           animated) now lives in the .lofi-motion-layer overlay below, drawn
+           at the exact same coordinates so it still meets the body here -->
       <g class="lofi-cat lofi-cat-sitting" fill="#4a3f78"><rect x="163" y="79" width="16" height="9"/><rect x="165" y="74" width="12" height="6"/><rect x="166" y="67" width="9" height="8"/><rect x="166" y="65" width="2" height="3"/><rect x="172" y="65" width="2" height="3"/></g><rect fill="#ffcf94" x="168" y="70" width="1.5" height="1.5"/>
-      <g class="lofi-cat-tail" fill="#4a3f78" style="transform-origin:178px 80px;"><rect x="178" y="78" width="3" height="4"/><rect x="180" y="73" width="3" height="5"/><rect x="181" y="68" width="3" height="5"/><rect x="179" y="65" width="3" height="4"/></g>
       <!-- lofi cat 2: curled up asleep on another rooftop, tail tucked in (static) -->
       <g class="lofi-cat lofi-cat-curled" fill="#4a3f78"><rect x="40" y="74" width="16" height="6"/><rect x="38" y="70" width="20" height="6"/><rect x="41" y="67" width="14" height="5"/><rect x="41" y="65" width="2" height="3"/><rect x="45" y="64" width="2" height="3"/><rect x="54" y="72" width="4" height="2"/><rect x="56" y="69" width="3" height="4"/></g><rect fill="#ffcf94" x="44" y="69" width="1.5" height="1.5"/>
+    </svg>
+    <!-- Section 10.3 perf fix (THEMES-SPEC.md): the twinkling stars and the
+         swaying cat tail, split out of .lofi-cityscape above into their own
+         SVG document so their compositing surface never includes the ~150
+         static building/window/moon/cat shapes. Same viewBox, same
+         preserveAspectRatio, same absolute-fill positioning as
+         .lofi-cityscape (see style.css - the two rules are written
+         together so they can never drift apart), stacked directly on top
+         of it, fully transparent except for the drawn shapes. Classes,
+         keyframes, gating (section "Decorative animation gating" below)
+         and the reduced-motion query are all unchanged - only WHERE these
+         elements live in the DOM moved, not what they are. -->
+    <svg class="lofi-motion-layer" viewBox="0 0 232 140" preserveAspectRatio="none" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+      <g fill="#f2eee6">
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="14" y="10" width="2" height="2"/>
+          <rect x="34" y="18" width="2" height="2"/>
+          <rect x="54" y="8" width="2" height="2"/>
+          <rect x="72" y="22" width="2" height="2"/>
+          <rect x="26" y="30" width="2" height="2"/>
+          <rect x="66" y="32" width="2" height="2"/>
+        </g>
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="92" y="12" width="2" height="2"/>
+          <rect x="118" y="9" width="2" height="2"/>
+          <rect x="138" y="20" width="2" height="2"/>
+          <rect x="104" y="28" width="2" height="2"/>
+          <rect x="146" y="30" width="2" height="2"/>
+        </g>
+        <g class="lofi-star-1 lofi-star-2 lofi-star-3 lofi-star-4">
+          <rect x="158" y="14" width="2" height="2"/>
+          <rect x="178" y="24" width="2" height="2"/>
+          <rect x="188" y="34" width="2" height="2"/>
+        </g>
+      </g>
+      <!-- Section 10.3 fix, live-CDP-verified follow-up: moved from an
+           animated SVG <g> to a <div> inside a <foreignObject>, positioned
+           via the surrounding SVG's own coordinate system (foreignObject
+           x/y/width/height are in viewBox units, so no separate scale/
+           letterbox math is needed - the browser applies the same ambient
+           transform to this box as to every other shape here). Live CDP
+           tracing (Tracing domain, this round) proved CSS `transform`
+           animations on an SVG element force a full style+layout+paint
+           pass on EVERY frame in this WebView2 build (415+ layout passes
+           per 2.5s sample), while the identical transform on a real HTML
+           element gets the normal compositor-only fast path (0-1 layout
+           passes per multi-second sample) - opacity-only SVG animations
+           (the stars above) were separately confirmed cheap this same way
+           and are untouched. transform-origin is now a percentage of this
+           foreignObject's own tightly-padded box (20% 80.95%) instead of
+           an absolute 178px/80px point in the parent SVG's coordinate
+           system - the same pivot point, just expressed relative to the
+           tighter box. The nested <svg> redraws the same 4 rects,
+           unanimated - shape/size/position identical to before. -->
+      <foreignObject x="176" y="63" width="10" height="21" style="overflow:visible;">
+        <div class="lofi-cat-tail" style="width:100%;height:100%;transform-origin:20% 80.95%;">
+          <svg viewBox="176 63 10 21" preserveAspectRatio="none" shape-rendering="crispEdges" width="100%" height="100%" aria-hidden="true" focusable="false"><g fill="#4a3f78"><rect x="178" y="78" width="3" height="4"/><rect x="180" y="73" width="3" height="5"/><rect x="181" y="68" width="3" height="5"/><rect x="179" y="65" width="3" height="4"/></g></svg>
+        </div>
+      </foreignObject>
     </svg>
 
     <!-- Arcane Library only (round 20, Pixel Artist A - THEMES-SPEC.md 7.5;
@@ -503,13 +486,12 @@
         <rect x="148" y="26" width="36" height="18"/><rect x="188" y="26" width="44" height="18"/>
       </g>
 
-      <!-- wall sconce, upper right, flickering flame - flat two-layer fill,
-           zero gradient (THEMES-SPEC.md 7.2 graft #2). -->
+      <!-- wall sconce, upper right - flat two-layer fill, zero gradient
+           (THEMES-SPEC.md 7.2 graft #2). Its flickering flame (.arcane-flame,
+           animated) now lives in the .arcane-alcove-motion-layer overlay
+           below, drawn at these same coordinates - section 10.3 perf fix,
+           see that layer's own comment. -->
       <g fill="#332c54"><rect x="196" y="14" width="4" height="14"/><rect x="190" y="26" width="16" height="4"/></g>
-      <g class="arcane-flame" style="opacity:.85">
-        <rect fill="#e0a83c" x="195" y="6" width="6" height="6"/>
-        <rect fill="#ff7a7a" x="196.5" y="9" width="3" height="4"/>
-      </g>
 
       <!-- two shelves of stacked, gold-trimmed tome spines -->
       <g fill="#332c54"><rect x="0" y="52" width="232" height="4"/><rect x="0" y="92" width="232" height="4"/></g>
@@ -534,26 +516,6 @@
         <rect x="4" y="82" width="9" height="2"/><rect x="63" y="79" width="10" height="2"/>
       </g>
 
-      <!-- drifting arcane motes. Round perf fix follow-up
-           (perf-remeasure:webview2-gpu-cpu-4-anim-elements verification
-           pass, THEMES-SPEC.md section 10): used to be 3 individually
-           animated rects (arcane-mote-1/2/3, staggered durations/delays for
-           an organic drift) - one of the 8 concurrent animation instances
-           this theme's own perf-fix note identified as the real cost driver
-           (instance count, not per-instance cost). Consolidated into one
-           group (style.css: .arcane-motes, single arcane-mote-drift
-           instance, no stagger) - the 3 dust motes now drift in sync
-           instead of independently (a real, deliberate motion change per
-           the round's own "may move less often or more subtly" allowance),
-           but stay visible at their same 3 positions. Base opacity (.4,
-           matching the keyframe's own 0%/100% value) moved from each rect
-           onto the group so the at-rest look is unchanged. -->
-      <g class="arcane-motes" style="opacity:.4" fill="#8fc4ff">
-        <rect x="70" y="18" width="2" height="2"/>
-        <rect x="150" y="60" width="2" height="2"/>
-        <rect x="30" y="100" width="2" height="2"/>
-      </g>
-
       <!-- foreground: leaning, gold-trimmed stack of tomes -->
       <g fill="#242040">
         <rect x="150" y="118" width="60" height="10"/><rect x="154" y="108" width="52" height="10"/>
@@ -565,7 +527,57 @@
       </g>
 
     </svg>
-    <svg class="arcane-hero-cat" viewBox="0 0 116 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+    <!-- Section 10.3 perf fix (THEMES-SPEC.md): the flickering sconce flame
+         and the drifting motes, split out of .arcane-alcove above into their
+         own SVG document so their compositing surface never includes the
+         ~30 static stone/shelf/tome shapes. Same viewBox, same
+         preserveAspectRatio, same absolute-fill sizing as .arcane-alcove
+         (see style.css - the two rules are written together so they can
+         never drift apart), stacked directly on top of it. Classes,
+         keyframes, gating and the reduced-motion query below are all
+         unchanged - only WHERE these elements live in the DOM moved. -->
+    <svg class="arcane-alcove-motion-layer" viewBox="0 0 232 140" preserveAspectRatio="none" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+      <g class="arcane-flame" style="opacity:.85">
+        <rect fill="#e0a83c" x="195" y="6" width="6" height="6"/>
+        <rect fill="#ff7a7a" x="196.5" y="9" width="3" height="4"/>
+      </g>
+      <!-- drifting arcane motes. Section 10.3 fix, live-CDP-verified
+           follow-up: moved from an animated SVG <g> to a <div> inside a
+           <foreignObject> - see the lofi cat-tail's own comment above for
+           why (live CDP tracing proved `transform` on an SVG element
+           forces a full per-frame layout pass; opacity-only SVG
+           animations, like the sconce flame just above, were separately
+           confirmed cheap and are untouched). This box is padded upward by
+           10 viewBox units beyond the motes' own resting position so the
+           -5px keyframe travel never reaches the foreignObject's own edge.
+           The -5px vertical drift is now translateY(-5.3191%) - a
+           percentage of THIS box's own height (94 units) - percentage
+           translateY resolves against the element's own border box, so
+           this is an exact, scale-independent restatement of the same
+           5-unit motion (not an approximation), regardless of the ambient
+           non-uniform (preserveAspectRatio="none") stretch this whole
+           layer is under. Base opacity .4 stays on the div (same keyframe
+           0% value). -->
+      <foreignObject x="30" y="8" width="122" height="94" style="overflow:visible;">
+        <div class="arcane-motes" style="width:100%;height:100%;opacity:.4;">
+          <svg viewBox="30 8 122 94" preserveAspectRatio="none" shape-rendering="crispEdges" width="100%" height="100%" aria-hidden="true" focusable="false"><g fill="#8fc4ff">
+            <rect x="70" y="18" width="2" height="2"/>
+            <rect x="150" y="60" width="2" height="2"/>
+            <rect x="30" y="100" width="2" height="2"/>
+          </g></svg>
+        </div>
+      </foreignObject>
+    </svg>
+    <!-- Section 10.3 perf fix (THEMES-SPEC.md): the rune glow (.arcane-hero-glow)
+         needs to sit BEHIND every static shape in .arcane-hero-cat below (it
+         was always drawn first, "so everything else sits in front of it" -
+         see its own original comment) - unlike the flame/motes above or the
+         tail/eyes further below, it cannot simply move to a layer ON TOP,
+         so it gets its own layer UNDERNEATH instead. Same viewBox/sizing as
+         .arcane-hero-cat (style.css - the rules are written together).
+         Nothing else lives here: a single ellipse is the smallest possible
+         compositing surface for this animation. -->
+    <svg class="arcane-hero-glow-layer" viewBox="0 0 116 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
       <defs>
         <radialGradient id="arcaneHeroGlow" cx="50%" cy="55%" r="55%">
           <stop offset="0%" stop-color="#88afff" stop-opacity="0.55"/>
@@ -573,10 +585,9 @@
           <stop offset="100%" stop-color="#88afff" stop-opacity="0"/>
         </radialGradient>
       </defs>
-
-      <!-- rune glow, drawn first so everything else sits in front of it -->
       <ellipse class="arcane-hero-glow" cx="60" cy="96" rx="56" ry="62" fill="url(#arcaneHeroGlow)"/>
-
+    </svg>
+    <svg class="arcane-hero-cat" viewBox="0 0 116 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
       <!-- low stone ledge: subordinate backdrop that grounds the cat -->
       <g fill="#1c1832">
         <rect x="0" y="140" width="116" height="18"/>
@@ -617,13 +628,44 @@
 
       <!-- ================= HERO CAT ================= -->
 
-      <!-- tail: curls from the right hip around to the front paws -->
-      <g class="arcane-hero-tail" fill="#a99adf" style="transform-origin:101px 112px;">
-        <rect x="94" y="104" width="15" height="16"/>
-        <rect x="99" y="119" width="15" height="15"/>
-        <rect x="87" y="130" width="17" height="12"/>
-        <rect x="68" y="134" width="18" height="10"/>
-      </g>
+      <!-- tail: curls from the right hip around to the front paws. Section
+           10.3 perf fix (THEMES-SPEC.md): UNLIKE the glow/eyes elsewhere on
+           this cat, the tail stays right here rather than moving to a
+           separate layer - the body/paws drawn further below are meant to
+           overlap and partly cover its base (that is how "the tail curls
+           behind the cat" reads at all), so pulling it out to a layer above
+           or below the static art would visibly break that overlap. It
+           remains the one animated element left in this SVG; will-change
+           (style.css) still promotes it to its own compositor layer. -->
+      <!-- Section 10.3 fix, live-CDP-verified follow-up: still drawn at
+           this exact spot in the DOM/paint order (so the body-overlap
+           relationship the comment above describes is unchanged) but is
+           now a <div> inside a <foreignObject> rather than an animated SVG
+           <g> - live CDP tracing (this round) proved CSS `transform` on an
+           SVG element forces a full per-frame style+layout+paint pass in
+           this WebView2 build. Because .arcane-hero-cat's own
+           preserveAspectRatio is "meet" (uniform scaling, unlike lofi's
+           "none"), this conversion is exact, not approximate: a uniform
+           scale commutes with rotation, so rotating this foreignObject's
+           own box produces the identical rotation as before, regardless
+           of the ambient scale or any letterbox offset "meet" introduces -
+           foreignObject content is positioned via the SVG's own coordinate
+           transform, so the letterbox is inherited automatically, not
+           something this fix has to compute. transform-origin is now a
+           percentage of this foreignObject's own box (70% 22.7%) instead
+           of an absolute 101px/112px point in .arcane-hero-cat's
+           coordinate system - the same pivot point, expressed relative to
+           the tighter box. will-change (style.css) still promotes it. -->
+      <foreignObject x="66" y="102" width="50" height="44" style="overflow:visible;">
+        <div class="arcane-hero-tail" style="width:100%;height:100%;transform-origin:70% 22.7%;">
+          <svg viewBox="66 102 50 44" preserveAspectRatio="none" shape-rendering="crispEdges" width="100%" height="100%" aria-hidden="true" focusable="false"><g fill="#a99adf">
+            <rect x="94" y="104" width="15" height="16"/>
+            <rect x="99" y="119" width="15" height="15"/>
+            <rect x="87" y="130" width="17" height="12"/>
+            <rect x="68" y="134" width="18" height="10"/>
+          </g></svg>
+        </div>
+      </foreignObject>
       <rect fill="#f4eedd" x="65" y="136" width="7" height="7"/>
 
       <!-- body: sitting trapezoid, three stacked bands widening toward the base -->
@@ -673,24 +715,12 @@
       <!-- muzzle patch -->
       <rect fill="#f4eedd" x="44" y="66" width="28" height="12"/>
 
-      <!-- eyes: rune-blue, gentle blink. Round perf fix follow-up
-           (perf-remeasure:webview2-gpu-cpu-4-anim-elements verification
-           pass, THEMES-SPEC.md section 10): used to be 2 individually
-           animated rects (arcane-hero-eye-l/-r, right eye 0.05s behind the
-           left) - another of the 8 concurrent animation instances the
-           perf-fix note's own cost-driver analysis identified. Consolidated
-           into one group (style.css: .arcane-hero-eyes, single
-           arcane-hero-blink instance, no stagger) - safe because both eyes
-           already share the same y/height (y=57, height=11), so the
-           group's own fill-box center lands at the same vertical midpoint
-           each eye's own center did, and the animation only scales Y: the
-           squash is pixel-identical to before, just losing the two lids'
-           0.05s offset (per the round's own "may move ... more subtly"
-           allowance). -->
-      <g class="arcane-hero-eyes" fill="#88afff">
-        <rect x="39" y="57" width="11" height="11"/>
-        <rect x="66" y="57" width="11" height="11"/>
-      </g>
+      <!-- eyes (.arcane-hero-eyes, rune-blue, gentle blink) now live in the
+           .arcane-hero-motion-layer overlay below, drawn at these same
+           coordinates - section 10.3 perf fix (THEMES-SPEC.md). Safe to
+           stack purely on top of every static shape here: nothing after
+           this point in the original art (nose, whiskers) ever overlapped
+           the eyes' own pixels. -->
 
       <!-- nose -->
       <rect fill="#453c70" x="54" y="70" width="8" height="5"/>
@@ -702,6 +732,35 @@
         <rect x="92" y="63" width="20" height="2"/>
         <rect x="92" y="69" width="22" height="2"/>
       </g>
+    </svg>
+    <!-- Section 10.3 perf fix (THEMES-SPEC.md): the blinking eyes, split out
+         of .arcane-hero-cat above into their own SVG document so their
+         compositing surface never includes the ~25 static body/head/helm
+         shapes. Same viewBox/sizing as .arcane-hero-cat (style.css - the
+         rules are written together), stacked directly on top of it (safe -
+         see the comment left in its place above). -->
+    <svg class="arcane-hero-motion-layer" viewBox="0 0 116 158" preserveAspectRatio="xMidYMax meet" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+      <!-- eyes: rune-blue, gentle blink. Section 10.3 fix, live-CDP-
+           verified follow-up: moved from an animated SVG <g> to a <div>
+           inside a <foreignObject> - see .arcane-hero-tail's own comment
+           above for why and for the exactness argument (uniform "meet"
+           scaling on this SVG makes the conversion exact, not
+           approximate). This foreignObject's own box is padded 1 unit past
+           the eyes' own tight bounding box on every side so the EXISTING,
+           unchanged CSS rule's transform-origin:center (its transform-box:
+           fill-box falls back to the standard border-box for a non-SVG
+           element, per spec) lands at the exact same point the old
+           transform-box:fill-box + transform-origin:center pair used to -
+           both eyes already shared the same y/height, so that point is
+           still the shared vertical midpoint the old comment described. -->
+      <foreignObject x="38" y="56" width="40" height="13" style="overflow:visible;">
+        <div class="arcane-hero-eyes" style="width:100%;height:100%;">
+          <svg viewBox="38 56 40 13" preserveAspectRatio="none" shape-rendering="crispEdges" width="100%" height="100%" aria-hidden="true" focusable="false"><g fill="#88afff">
+            <rect x="39" y="57" width="11" height="11"/>
+            <rect x="66" y="57" width="11" height="11"/>
+          </g></svg>
+        </div>
+      </foreignObject>
     </svg>
     </div>
 

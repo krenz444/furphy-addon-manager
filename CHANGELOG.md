@@ -1,5 +1,62 @@
 # Furphy Addon Manager - changelog
 
+## Round 41.1 (1.21.1: Lofi Night and Arcane Library animations finally cheap - the real driver found)
+
+Follow-up to Round 41, shipped on Eric's standing "put out a release"
+while he was at the PC. Verified headlessly on the final tree (static
+and unit layers of tests\run-all.ps1; tests\spa\Run-SpaHarness.ps1
+233/233 and tests\spa\Run-ThemeAudit.ps1 500/500 run fresh by an
+independent verifier on exactly these files; pixel-level art-at-rest
+diff against the pre-round screenshots). The independent LIVE CPU
+re-measurement did not happen: the PC was in continuous use and WoW
+was running for the whole verification window, and the measurement
+protocol refuses to open a window in either state. The numbers below
+are therefore the fixer's own live samples, stated as such.
+
+**SPA (themes):**
+- Root cause, found with Chrome DevTools Protocol tracing attached to a
+  live scratch window rather than by more structural guessing: in this
+  WebView2 build a `transform` animation on an SVG element (`<g>`,
+  `<ellipse>`) forces a full main-thread style + layout + paint pass on
+  every frame (~165/s), while an `opacity`-only SVG animation takes the
+  cheap compositor path. None of the earlier rounds (THEMES-SPEC.md
+  sections 10 to 10.2) varied WHICH property was animated, which is why
+  merging, splitting and re-layering the star and mote groups never
+  moved the number. A second, smaller finding: even on the compositor
+  path a smooth (non-`steps()`) animation forces a draw + raster +
+  present every vsync; `steps()` lets the compositor skip unchanged
+  frames.
+- Fix: the four transform-animated parts (`.lofi-cat-tail`,
+  `.arcane-motes`, `.arcane-hero-tail`, `.arcane-hero-eyes`) moved from
+  animated SVG groups into HTML `<div>`s inside an SVG `<foreignObject>`
+  (ui\index.html), which inherits the ambient SVG scale so the
+  transform origins stay exact for Arcane Library and within a
+  documented, imperceptible approximation for Lofi Night's tail
+  rotation; `.arcane-mote-drift` now translates by a percentage of the
+  element's own box instead of pixels; tail sway runs at `steps(12)`,
+  the glow pulse and mote drift at `steps(6)`. Opacity-only parts
+  (`.lofi-star-*`, `.arcane-flame`, `.arcane-hero-glow` target) were
+  already cheap and are unchanged. The saved motion-layer-split
+  experiment from Round 41 was applied and measured first: it did NOT
+  move the number (11.296 -> 11.094 and 11.25 -> 10.469, noise), which
+  falsified the shared-compositing-surface hypothesis for good.
+- Measured by the fixer (tests\perf\Measure-Furphy.ps1, 60s focused
+  window, no game, idle-gated): Lofi Night 11.296 -> 2.265 and 1.844
+  CPU-s/60s in two samples of the final code (pass line that session
+  2.15-2.45; right at the line, best read as a pass). Arcane Library
+  11.25 -> 3.750 before the final `steps(6)` edit; the final state has
+  no live sample yet. Art at rest is pixel-identical outside the
+  animated regions; inside them only the captured animation frame
+  differs (0.06% and 0.31% of pixels). Details and the CDP trace
+  method: THEMES-SPEC.md sections 10.3 and 10.4.
+
+**Not changed:** server, installer, host binary (still byte-identical
+to the 1.20.1 build) and all other themes. The nine other animated
+themes were re-measured live earlier in Round 41d with focus verified
+and all passed (floor 0.946; tokyo-rain 1.642, snow-day 1.625,
+strawberry-cream 1.984, matcha 1.611, desert-night 1.969,
+terminal-green 1.703, aurora-sky 1.546 CPU-s/60s).
+
 ## Round 41 (1.21.0: cheaper playing animations, honest measurements, test tooling hardened, server idle loop tidied)
 
 Shipped from a partly finished QA round on Eric's "just ship what you
