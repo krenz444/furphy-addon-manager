@@ -27,6 +27,20 @@ UNINSTALL (three equivalent ways)
   you where your addon list/settings/logs were left. Or run "install.ps1 -Uninstall" directly from an unzipped
   copy of the app - the same mechanism the three paths above use.
 
+UPDATES ITSELF (starting with version 1.22.0)
+  Furphy checks for a newer version of ITSELF and installs it on its own, the next time doing so is safe - never
+  while WoW is running, never mid-addon-update, and (for the fully automatic path) never while a Furphy window is
+  open. If a window is open when an update is ready, you'll see a small banner with an Install now button instead;
+  either way it takes only a few seconds and your addon list/settings/logs are never touched. A tray balloon lets
+  you know once, after a silent update finishes.
+  Settings has its own "App updates" section (separate from "Update addons in the background" above - that one
+  updates your ADDONS, this one updates FURPHY ITSELF) with a toggle, Install app updates automatically (on by
+  default), plus Check now / Install now buttons. Turning the toggle off only stops it from installing on its own
+  - checking still happens, and you can always click Install now yourself. Every update is verified before it
+  touches your installed copy, and a failed update automatically restores the version you had.
+  Coming from a version older than 1.22.0? This feature doesn't run for you yet - update to 1.22.0 by hand, once
+  (same NEW INSTALL steps above), and every version after that updates itself.
+
 ONE WAY IN
   Desktop shortcut "Furphy Addon Manager" opens the app (installed list, updates, versions, browse, settings).
   The tray icon's own background service keeps your addons updated on its own schedule (its "Update addons in

@@ -71,6 +71,20 @@
                         priority child of the real serving process (see
                         Invoke-MaintenanceTick, near the request loop) -
                         never launched directly by a real user action.
+   -AppUpdateOnly       APP-UPDATE-SPEC.md section 5/7/11: structural
+                        sibling of -MaintenanceOnly just above - runs ONLY
+                        Invoke-AppUpdateMaintenance (unconditionally,
+                        bypassing that function's own 24h/rate-limit
+                        gates - see its own doc comment), then exits.
+                        Never binds a listener, never enters the request
+                        loop. Spawned on demand by POST
+                        /api/app-update/check ("Check now") as a hidden
+                        child of the real serving process, so a manual
+                        check feels instant instead of waiting for the
+                        next hourly -MaintenanceOnly tick (which also
+                        runs Invoke-AppUpdateMaintenance, gated, inside
+                        its own try/finally). Never launched directly by
+                        a real user action.
 =====================================================================
 #>
 
@@ -83,7 +97,8 @@ param(
     [string]$BuildInfoPath,
     [string]$WowRoot,
     [string]$WowFakeProcessName,
-    [switch]$MaintenanceOnly
+    [switch]$MaintenanceOnly,
+    [switch]$AppUpdateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,6 +120,23 @@ $ProgressPreference = 'SilentlyContinue'
 $Script:WagoBaseUrl = 'https://addons.wago.io'
 if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL)) {
     $Script:WagoBaseUrl = $env:FURPHY_TEST_WAGO_BASEURL.TrimEnd('/')
+}
+
+# APP-UPDATE-SPEC.md section 8.1: test-only base-URL override surface for
+# the self-updater's GitHub Releases lookup, mirroring $Script:WagoBaseUrl/
+# FURPHY_TEST_WAGO_BASEURL exactly (same seam shape, same "declared above
+# the dot-source guard so a unit test can read it back without reaching the
+# real startup body" reasoning, same "empty/whitespace override falls back
+# to the real host" contract). Invoke-AppUpdateMaintenance builds its
+# release-lookup URI by appending the fixed
+# '/repos/krenz444/furphy-addon-manager/releases/latest' path onto this
+# base instead of a literal host - a stub test server only needs to serve
+# that one relative path. TEST-ONLY: no real user run ever sets
+# FURPHY_TEST_GITHUB_BASEURL - the pinned repo path itself never changes,
+# only which host it is requested from (section 9's "pinned repo" note).
+$Script:GitHubBaseUrl = 'https://api.github.com'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_GITHUB_BASEURL)) {
+    $Script:GitHubBaseUrl = $env:FURPHY_TEST_GITHUB_BASEURL.TrimEnd('/')
 }
 
 # Round-1-fixer (verifier finding 1): test-only escape hatch for
@@ -1368,6 +1400,15 @@ function Get-DefaultSettings {
         backgroundUpdates          = $false
         backgroundIntervalMinutes  = 120
         runAtStartup               = $false
+        # APP-UPDATE-SPEC.md section 6: whether a staged, verified app
+        # update installs itself automatically the next time doing so is
+        # safe (never while WoW is running or a job is running, and - for
+        # this automatic path only - never while any Furphy window is
+        # open). Default ON - opposite polarity from backgroundUpdates just
+        # above (that one defaults OFF), intentional per Eric's brief.
+        # Checking for updates always happens either way; this toggle only
+        # gates automatic INSTALLING (section 3.5).
+        appUpdateAutoInstall       = $true
         # FLAVORS-SPEC.md CS-F2 S3.4: schemaVersion 2 is what
         # Invoke-FlavourMigration stamps once every existing top-level
         # addons.json/state.json/backups\ has landed under flavours\<id>\ -
@@ -1462,6 +1503,13 @@ function Get-Settings {
             $result.backgroundIntervalMinutes = $interval
         }
         if ($null -ne $obj.runAtStartup) { $result.runAtStartup = [bool]$obj.runAtStartup }
+        # APP-UPDATE-SPEC.md section 6: plain bool coercion, same pattern
+        # as backgroundUpdates/runAtStartup just above. No migration step -
+        # a pre-1.22.0 settings.json simply lacks the key and this falls
+        # through to Get-DefaultSettings' $true default via the same
+        # "$null -ne" tolerance every other boolean setting here already
+        # uses.
+        if ($null -ne $obj.appUpdateAutoInstall) { $result.appUpdateAutoInstall = [bool]$obj.appUpdateAutoInstall }
         # FLAVORS-SPEC.md CS-F2 S3.4: schemaVersion is normally stamped
         # directly by Invoke-FlavourMigration (a raw settings.json read/write,
         # bypassing this function entirely - same reason hostWindow/hostTheme
@@ -1563,6 +1611,9 @@ function Get-SettingsView {
         backgroundUpdates         = $Settings.backgroundUpdates
         backgroundIntervalMinutes = $Settings.backgroundIntervalMinutes
         runAtStartup              = $Settings.runAtStartup
+        # APP-UPDATE-SPEC.md section 6: pass through unmasked, same as
+        # backgroundUpdates/runAtStartup just above - not a secret.
+        appUpdateAutoInstall      = $Settings.appUpdateAutoInstall
         # FLAVORS-SPEC.md CS-F2 S3.4/S5.2: pass through unmasked, same as
         # adFilter/cfFocus - none of these are secrets. schemaVersion is
         # informational only (never drives a client decision - S5.2's
@@ -6986,6 +7037,12 @@ function Clear-StateCache {
 function Handle-State {
     param($Context, $RouteMatch)
 
+    # APP-UPDATE-SPEC.md section 7: Handle-State is the one, verified,
+    # "requires a window to be open" call site the "is a window open"
+    # signal is stamped from - see Set-AppUpdateWindowOpenAt's own doc
+    # comment for why this must NOT be a global per-request hook.
+    Set-AppUpdateWindowOpenAt
+
     $flavor = $Script:CurrentFlavour
     if (-not $flavor) { $flavor = 'retail' }
     $installedFlavours = Get-CurrentInstalledFlavours
@@ -7157,6 +7214,12 @@ function Handle-State {
         # its own poll cadence/window visibility on this without a second
         # request to /api/ping.
         gameRunning      = (Test-GameRunning)
+        # APP-UPDATE-SPEC.md section 5: folded in next to gameRunning so the
+        # SPA's existing 5s/idle poll (App.reloadState) picks up update state
+        # on the poll it already makes - no new poll loop. Byte-identical
+        # shape to GET /api/app-update/status's own body (Get-AppUpdateStatusObject
+        # is the single shared builder for both).
+        appUpdate        = (Get-AppUpdateStatusObject -Settings $settings)
     }
     Send-Json -Context $Context -StatusCode 200 -Body $body
 }
@@ -7751,6 +7814,12 @@ function Handle-SettingsPut {
     }
     if ($null -ne $body.runAtStartup) {
         $settings.runAtStartup = ConvertTo-SettingsBool $body.runAtStartup
+    }
+    # APP-UPDATE-SPEC.md section 6: appUpdateAutoInstall saves exactly like
+    # backgroundUpdates/runAtStartup just above - bool coercion, no
+    # rejection possible.
+    if ($null -ne $body.appUpdateAutoInstall) {
+        $settings.appUpdateAutoInstall = ConvertTo-SettingsBool $body.appUpdateAutoInstall
     }
     # FLAVORS-SPEC.md CS-F2 S3.4: activeFlavour is a pure UI-continuity
     # default (S5.1's principle 5 - "never load-bearing for a data
@@ -8481,9 +8550,11 @@ function Handle-Open {
             'url' {
                 # E3: drawer's "Search CurseForge" button for a missing dependency,
                 # used only when no API key is configured (a keyed session switches
-                # to Browse client-side instead). Restricted to the two addon
-                # marketplaces this app ever links to, so this endpoint can never be
-                # used to open an arbitrary URL in the user's default browser.
+                # to Browse client-side instead). Restricted to the addon
+                # marketplaces and GitHub host this app ever links to (APP-UPDATE-
+                # SPEC.md section 3.1 added github.com for the "What's new" release-
+                # notes link), so this endpoint can never be used to open an
+                # arbitrary URL in the user's default browser.
                 #
                 # Round 20 (adversarial bug pass, server-3): a plain
                 # StartsWith prefix check on the raw string is not enough -
@@ -8507,7 +8578,14 @@ function Handle-Open {
                 }
                 $parsedOpenUrl = $null
                 $isValidOpenUrl = [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$parsedOpenUrl)
-                $allowedOpenHosts = @('www.curseforge.com', 'addons.wago.io')
+                # APP-UPDATE-SPEC.md section 3.1: github.com added as a third
+                # allowed host so #link-app-update-whatsnew/#banner-app-update-
+                # whatsnew can open a release's own html_url
+                # (github.com/krenz444/furphy-addon-manager/releases/tag/...)
+                # the exact same way Actions.openOnWago already opens an
+                # addons.wago.io URL - never a hand-built link, always the
+                # release JSON's own html_url (persisted in app-update.json).
+                $allowedOpenHosts = @('www.curseforge.com', 'addons.wago.io', 'github.com')
                 $allowed = $false
                 if ($isValidOpenUrl -and $parsedOpenUrl.Scheme -eq 'https') {
                     foreach ($allowedHost in $allowedOpenHosts) {
@@ -8518,7 +8596,7 @@ function Handle-Open {
                     }
                 }
                 if (-not $allowed) {
-                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url must start with https://www.curseforge.com/ or https://addons.wago.io/' }
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'url must start with https://www.curseforge.com/, https://addons.wago.io/, or https://github.com/' }
                     return
                 }
                 Open-InBrowser -Url $parsedOpenUrl.AbsoluteUri
@@ -8743,6 +8821,1108 @@ function Handle-Shutdown {
 }
 
 # =====================================================================
+# APP-UPDATE-SPEC.md - self-updater (Package A: state machine, settings,
+# GitHub pipeline). $Script:AppUpdatePath (set alongside $Script:SettingsPath
+# in the startup section below) is app-update.json - sibling of settings.json/
+# state.json, operational state rather than a user setting, so it gets its
+# own file rather than being folded into either (section 4).
+# =====================================================================
+
+function Get-DefaultAppUpdateState {
+    <# APP-UPDATE-SPEC.md section 4: the shape of app-update.json, and what
+       a MISSING file is read as - state "idle", currentVersion mirroring
+       $Script:Version, everything else $null. rateLimitedUntil is this
+       implementation's own addition (Eric's Q2 decision: honour GitHub's
+       Retry-After/X-RateLimit-Reset on a 403/429 before the next AUTOMATIC
+       check, capped at 6 hours) - purely additive, never read by
+       install.ps1's own direct writes (section 8.6), so Package B's shape
+       expectations for this file are unaffected. testDryRunCommandLine is
+       TEST-ONLY (FURPHY_TEST_APPUPDATE_DRYRUN, see Handle-AppUpdateInstall)
+       - declared here rather than added ad hoc via dot-assignment because
+       Windows PowerShell 5.1's [PSCustomObject] (unlike PS7+) throws
+       "the property ... cannot be found on this object" on an attempt to
+       set a property that was not present at construction time; confirmed
+       live while verifying this round. #>
+    return [PSCustomObject]@{
+        state                  = 'idle'
+        currentVersion         = $Script:Version
+        latestVersion          = $null
+        releaseTag             = $null
+        releaseUrl             = $null
+        assetUrl               = $null
+        shaAssetUrl            = $null
+        checkedAt              = $null
+        downloadedAt           = $null
+        stagedPath             = $null
+        installAttemptedAt     = $null
+        installedAt            = $null
+        lastError              = $null
+        lastErrorAt            = $null
+        deferredReason         = $null
+        windowOpenAt           = $null
+        rateLimitedUntil       = $null
+        testDryRunCommandLine  = $null
+    }
+}
+
+function Save-AppUpdateState {
+    <# Atomic tmp+Move-Item write, byte-for-byte mirroring Save-Settings
+       (addon-server.ps1:1390-1397) - app-update.json gets the exact same
+       crash-safety treatment even though it is operational state, not a
+       user setting. install.ps1 -Upgrade's own rollback path (section 8.6)
+       writes this same file directly via plain file I/O when it runs
+       (outside this process entirely) - this server always re-reads it
+       fresh on its next access, so the two writers never need to
+       coordinate beyond "atomic write, one file". #>
+    param($State)
+
+    $json = ConvertTo-Json -InputObject $State -Depth 5
+    $tmpPath = "$Script:AppUpdatePath.tmp"
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpPath, $json, $encoding)
+    Move-Item -LiteralPath $tmpPath -Destination $Script:AppUpdatePath -Force
+}
+
+function Get-AppUpdateState {
+    <# Reads app-update.json, tolerating a missing or corrupt file (section
+       4's "no migration needed" contract) - unlike Get-Settings this never
+       rewrites the file on a mere read: there is no user-authored content
+       here to repair/preserve, so a missing/corrupt file is just re-derived
+       from defaults every time, and the next real state change writes it
+       via Save-AppUpdateState anyway. currentVersion is always overridden
+       to the LIVE $Script:Version on the way out, regardless of whatever
+       value is on disk - section 4 describes this field as "mirrors
+       $Script:Version", i.e. a live fact, not a stored one; this keeps it
+       correct even immediately after an in-place upgrade re-launch, before
+       anything in this process has rewritten the file. #>
+    $defaults = Get-DefaultAppUpdateState
+    if (-not (Test-Path -LiteralPath $Script:AppUpdatePath -PathType Leaf)) {
+        return $defaults
+    }
+    try {
+        $raw = Get-Content -LiteralPath $Script:AppUpdatePath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $defaults }
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $result = Get-DefaultAppUpdateState
+        foreach ($p in $result.PSObject.Properties) {
+            $name = $p.Name
+            $val = $obj.$name
+            if ($null -ne $val) { $result.$name = $val }
+        }
+        $result.currentVersion = $Script:Version
+        return $result
+    } catch {
+        Write-ServerLog "Failed to read app-update.json, using defaults: $($_.Exception.Message)"
+        return $defaults
+    }
+}
+
+function Get-AppUpdateVersionFromTag {
+    <# Strips a leading "v"/"V" from a GitHub release tag_name (e.g.
+       "v1.23.0" -> "1.23.0"), case-insensitively - GitHub's own tag
+       convention. Never itself validates the result as a real version;
+       Test-AppUpdateVersionNewer's [System.Version] parse is what actually
+       validates it (APP-UPDATE-SPEC.md section 8.4: "case-insensitive,
+       leading 'v' stripped"). #>
+    param([string]$Tag)
+
+    if ([string]::IsNullOrWhiteSpace($Tag)) { return '' }
+    $t = $Tag.Trim()
+    if ($t.Length -gt 0 -and ($t.Substring(0, 1) -eq 'v' -or $t.Substring(0, 1) -eq 'V')) {
+        return $t.Substring(1)
+    }
+    return $t
+}
+
+function Test-AppUpdateVersionNewer {
+    <# Returns $true only when $Candidate is STRICTLY newer than $Current,
+       using [System.Version] compare - the exact idiom install.ps1's own
+       downgrade guard already uses (install.ps1:1562: "1.9.0" must not sort
+       ahead of "1.10.0", which a plain string compare would get wrong),
+       reused verbatim rather than reimplemented (APP-UPDATE-SPEC.md section
+       8.2). Never throws: a malformed version string on either side is
+       treated as "not newer" rather than raising - Server.
+       AppUpdateVersionCompare.Tests.ps1 (section 12) exercises this
+       directly against equal/older/malformed inputs. #>
+    param([string]$Current, [string]$Candidate)
+
+    if ([string]::IsNullOrWhiteSpace($Current) -or [string]::IsNullOrWhiteSpace($Candidate)) { return $false }
+    $currentParsed = $null
+    $candidateParsed = $null
+    if (-not [System.Version]::TryParse($Current.Trim(), [ref]$currentParsed)) { return $false }
+    if (-not [System.Version]::TryParse($Candidate.Trim(), [ref]$candidateParsed)) { return $false }
+    return ($candidateParsed.CompareTo($currentParsed) -gt 0)
+}
+
+function Get-AppUpdateAssetsFromRelease {
+    <# APP-UPDATE-SPEC.md section 8.2: given one GitHub releases/latest (or
+       releases/tags/<tag>) response object, returns the exact-name-matched
+       zip + .sha256 sidecar - "FurphyAddonManager-<tag-without-v>.zip" and
+       that name + ".sha256" - or $null if either is missing. Exact name
+       match only, NEVER "first .zip found" - Server.AppUpdateReleaseParse.
+       Tests.ps1 (section 12) exercises a release with extra unrelated
+       assets present to prove this. Every URL comes from the asset's OWN
+       browser_download_url, never hand-built (section 8.2's own note),
+       so a test's FURPHY_TEST_GITHUB_BASEURL stub can point assets anywhere
+       it likes, including back at itself. #>
+    param($Release)
+
+    if ($null -eq $Release -or [string]::IsNullOrWhiteSpace([string]$Release.tag_name)) { return $null }
+    $version = Get-AppUpdateVersionFromTag -Tag ([string]$Release.tag_name)
+    if ($version.Length -eq 0) { return $null }
+    $zipName = "FurphyAddonManager-$version.zip"
+    $shaName = "$zipName.sha256"
+
+    $zipUrl = $null
+    $shaUrl = $null
+    foreach ($asset in @($Release.assets)) {
+        if (-not $asset) { continue }
+        $assetName = [string]$asset.name
+        if ($assetName -eq $zipName) {
+            $zipUrl = [string]$asset.browser_download_url
+        } elseif ($assetName -eq $shaName) {
+            $shaUrl = [string]$asset.browser_download_url
+        }
+    }
+    if (-not $zipUrl -or -not $shaUrl) { return $null }
+
+    $releaseUrl = $null
+    if ($Release.html_url) { $releaseUrl = [string]$Release.html_url }
+    return [PSCustomObject]@{
+        ZipUrl     = $zipUrl
+        ShaUrl     = $shaUrl
+        Version    = $version
+        Tag        = [string]$Release.tag_name
+        ReleaseUrl = $releaseUrl
+    }
+}
+
+function Get-AppUpdateDateTimeStyles {
+    <# The exact DateTimeStyles this file's other ParseExact call sites
+       already use for a 'yyyy-MM-ddTHH:mm:ssZ' stamp (e.g. Test-DiagLastSync's
+       neighbor at line ~6740) - AssumeUniversal + AdjustToUniversal, so a
+       parsed value round-trips as UTC regardless of the local machine's own
+       time zone. Factored into one place since app-update.json now has four
+       separate stamps that all need parsing back (installAttemptedAt,
+       checkedAt, windowOpenAt, rateLimitedUntil). #>
+    return ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+}
+
+function ConvertTo-AppUpdateUtcDateTime {
+    <# Parses one of app-update.json's ISO 8601 UTC stamps back into a
+       [DateTime] using the shared styles above; returns $null (never
+       throws) on a missing/unparseable value - every caller treats that the
+       same way "no timestamp yet" would be treated. #>
+    param([string]$Iso)
+
+    if ([string]::IsNullOrWhiteSpace($Iso)) { return $null }
+    try {
+        return [DateTime]::ParseExact($Iso, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, (Get-AppUpdateDateTimeStyles))
+    } catch {
+        return $null
+    }
+}
+
+function Get-AppUpdateStatusObject {
+    <# APP-UPDATE-SPEC.md section 5: the FIXED shape shared verbatim by GET
+       /api/app-update/status's own body and Handle-State's `appUpdate`
+       fold-in - built fresh from app-update.json + settings.
+       appUpdateAutoInstall on every call, so the two callers can never
+       drift apart. `windowOpen` is the only field computed live (section
+       7): (Get-Date) - windowOpenAt < 15 seconds, comfortably above the
+       SPA's own 5s poll interval so a genuinely open window is never
+       misread as closed. #>
+    param($Settings)
+
+    $state = Get-AppUpdateState
+    $windowOpen = $false
+    $openedAt = ConvertTo-AppUpdateUtcDateTime -Iso ([string]$state.windowOpenAt)
+    if ($openedAt) {
+        $windowOpen = (((Get-Date).ToUniversalTime() - $openedAt).TotalSeconds -lt 15)
+    }
+
+    return [PSCustomObject]@{
+        state          = $state.state
+        currentVersion = $state.currentVersion
+        latestVersion  = $state.latestVersion
+        releaseTag     = $state.releaseTag
+        releaseUrl     = $state.releaseUrl
+        checkedAt      = $state.checkedAt
+        downloadedAt   = $state.downloadedAt
+        installedAt    = $state.installedAt
+        lastError      = $state.lastError
+        autoInstall    = [bool]$Settings.appUpdateAutoInstall
+        deferredReason = $state.deferredReason
+        windowOpen     = $windowOpen
+    }
+}
+
+function Set-AppUpdateWindowOpenAt {
+    <# APP-UPDATE-SPEC.md section 7: stamps app-update.json's windowOpenAt to
+       "now" - called from Handle-State ONLY (verified there to be reached
+       only by the SPA's own poll and MainForm's protocol-link handler, both
+       of which require a window to be open), NEVER from a global per-
+       request hook, which is exactly the self-poisoning shape section 7
+       calls out and rejects (the tray's own PingUrl/JobsUrl/JobUrl traffic,
+       and this signal's own status-poll reader, would otherwise keep
+       re-arming it). Best-effort and silent: a failed write here must never
+       affect /api/state's own response - Handle-State's normal body is
+       unaffected either way. #>
+    try {
+        $state = Get-AppUpdateState
+        $state.windowOpenAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        Save-AppUpdateState -State $state
+    } catch {
+        Write-ServerLog "App-update: failed to stamp windowOpenAt: $($_.Exception.Message)"
+    }
+}
+
+function Test-AppUpdateChildRunning {
+    <# Same best-effort PID-liveness contract as Test-MaintenanceChildRunning
+       just above (this is a distinct lock, $Script:AppUpdateLockPath - see
+       its own declaration for why the app-update pipeline needs a SEPARATE
+       one rather than sharing $Script:MaintenanceLockPath). Never throws;
+       a stale lock (a crashed prior child) is cleaned up right here, same
+       "verify the PID, don't just trust the file's existence" pattern.
+
+       REFIX (this round): the lock file used to hold ONLY the PID as bare
+       text - a live-but-UNRELATED process later reusing that exact PID
+       (Windows recycles PIDs; not rare on a long-lived machine) would read
+       back as "still running" FOREVER, since nothing ever re-validates
+       WHOSE process it actually is. Confirmed live while verifying this
+       round as the mechanism that can turn the stuck-"checking" race
+       (Invoke-AppUpdateMaintenance's own doc comment) from "self-heals
+       once the real owner finishes" into "wedged until someone manually
+       deletes app-update-maintenance.lock" - once Test-AppUpdateChildRunning
+       is permanently wrong, EVERY future caller (the hourly -MaintenanceOnly
+       tick AND every "Check now" click) is blocked from ever entering
+       Invoke-AppUpdateMaintenanceCore again, so fix (c)'s stuck-checking/
+       downloading watchdog just below in Invoke-AppUpdateMaintenanceCore
+       never even gets a chance to run either. Fixed by writing (and now
+       requiring) "<pid>:<processStartTimeUtcTicks>" instead of a bare PID
+       (Invoke-AppUpdateMaintenance's own lock-write, just below) - a live
+       process with a matching PID but a DIFFERENT start time is exactly
+       the recycled-PID case, and is now treated the same as a dead PID:
+       stale, lock deleted, caller proceeds. A live process whose StartTime
+       cannot even be READ (e.g. access denied) is treated the same way -
+       unverifiable is not the same as verified, and the whole point of
+       this fix is to stop trusting a lock we cannot actually confirm. #>
+    if (-not $Script:AppUpdateLockPath -or -not (Test-Path -LiteralPath $Script:AppUpdateLockPath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $lockText = (Get-Content -LiteralPath $Script:AppUpdateLockPath -Raw -ErrorAction Stop).Trim()
+        $parts = $lockText -split ':', 2
+        $pidValue = 0
+        $lockStartTicks = 0L
+        if ($parts.Count -eq 2 -and [int]::TryParse($parts[0], [ref]$pidValue) -and $pidValue -gt 0 -and [long]::TryParse($parts[1], [ref]$lockStartTicks) -and $lockStartTicks -gt 0) {
+            $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+            if ($proc) {
+                try {
+                    if ($proc.StartTime.ToUniversalTime().Ticks -eq $lockStartTicks) {
+                        return $true
+                    }
+                } catch {
+                    # StartTime unreadable for this PID (e.g. access denied,
+                    # or the process exited between Get-Process and here) -
+                    # cannot confirm ownership, so don't assume it - falls
+                    # through to the stale-lock cleanup below, same as a
+                    # dead or mismatched PID.
+                }
+            }
+        }
+    } catch {
+        # Falls through to the stale-lock cleanup below.
+    }
+    try { Remove-Item -LiteralPath $Script:AppUpdateLockPath -Force -ErrorAction SilentlyContinue } catch { }
+    return $false
+}
+
+function Invoke-AppUpdateMaintenance {
+    <# Thin, lock-acquiring wrapper around Invoke-AppUpdateMaintenanceCore
+       (the real pipeline, just below) - closes a real race confirmed live
+       while verifying this round: the very first -MaintenanceOnly tick
+       after startup "always qualifies" and now itself calls this function
+       unconditionally, gated only by ITS OWN 24h/rate-limit checks (which a
+       brand-new app-update.json's null checkedAt never blocks) - a "Check
+       now" click landing in that same narrow startup window would
+       otherwise spawn a SECOND, fully concurrent -AppUpdateOnly child
+       racing the first over the exact same release-lookup/download/extract
+       work, including two concurrent downloads to the identical
+       cache\app-update\*.zip path. Skips entirely (does nothing, not even
+       the watchdog) when another app-update child already holds the lock -
+       the other instance's own tick already covers this one.
+
+       The lock file is written as "<ownPid>:<ownProcessStartTimeUtcTicks>",
+       not a bare PID - see Test-AppUpdateChildRunning's own doc comment
+       (this round's REFIX) for why the second field exists: it is what
+       lets a future reader tell a genuinely-live child of ours apart from
+       an unrelated process that later happens to reuse the same PID. #>
+    param([switch]$Force)
+
+    if (Test-AppUpdateChildRunning) { return }
+    $lockAcquired = $false
+    try {
+        if (-not (Test-Path -LiteralPath $Script:CacheDir)) { New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null }
+        $ownStartTicks = 0L
+        try { $ownStartTicks = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks } catch { $ownStartTicks = 0L }
+        [System.IO.File]::WriteAllText($Script:AppUpdateLockPath, "$PID`:$ownStartTicks")
+        $lockAcquired = $true
+    } catch {
+        # Best-effort, matching Test-MaintenanceChildRunning's own lock -
+        # a failed lock write never blocks the real work below.
+    }
+    try {
+        Invoke-AppUpdateMaintenanceCore -Force:$Force
+    } finally {
+        if ($lockAcquired) { try { Remove-Item -LiteralPath $Script:AppUpdateLockPath -Force -ErrorAction SilentlyContinue } catch { } }
+    }
+}
+
+function Remove-AppUpdateStaleStaging {
+    <# APP-UPDATE-SPEC.md section 8.8, failure-with-rollback branch:
+       "keep the staged folder and downloaded assets around for one more
+       tick in case the failure was transient ... only delete them once a
+       SUBSEQUENT check confirms the same tag is still not newer, or a
+       fresh newer tag supersedes them." A leftover extraction folder
+       (%TEMP%\FurphyUpdate-<tag>-<guid>) can outlive the app-update.json
+       "error" state that install.ps1's own Invoke-InstallRollbackAndRelaunchOld
+       writes (section 8.6) - that write is a read-merge-write
+       (Set-InstallAppUpdateJsonFields, install.ps1) that only ever
+       touches state/lastError/lastErrorAt, so the PRE-EXISTING
+       `stagedPath` value (pointing at the now-abandoned staged folder)
+       survives untouched on disk. Nothing in install.ps1 ever revisits
+       that folder again - the "one more tick" / "subsequent check"
+       language in the spec places that job on the periodic maintenance
+       pipeline instead, so it belongs here, not in install.ps1.
+
+       Called only from the three points below where THIS SAME function
+       call has just fully completed a check and reached one of the two
+       spec-named outcomes (idle: "still not newer"; ready with a new
+       $stagingRoot: "a fresh newer tag supersedes them") - never from a
+       mid-check failure branch (rate limit, lookup failure, download
+       failure, integrity failure, extraction failure, tag mismatch),
+       since none of those "confirm" anything about a DIFFERENT, earlier
+       leftover - they leave it for yet another tick, exactly as the
+       "in case the failure was transient" reasoning intends. Best-effort
+       and silent: a leftover temp folder that fails to delete is disk
+       clutter, never a reason to fail an otherwise-successful check. #>
+    param(
+        [string]$StaleStagedPath,
+        [string]$KeepPath
+    )
+    if (-not $StaleStagedPath) { return }
+    if ($KeepPath -and [string]::Equals($StaleStagedPath, $KeepPath, [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    try {
+        if (Test-Path -LiteralPath $StaleStagedPath) {
+            Remove-Item -LiteralPath $StaleStagedPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-ServerLog "App-update: removed leftover staged folder from a prior failed/abandoned install attempt ($StaleStagedPath)"
+        }
+    } catch {
+        # Best-effort only - see doc comment above.
+    }
+}
+
+function Invoke-AppUpdateMaintenanceCore {
+    <# APP-UPDATE-SPEC.md sections 4, 7, 8.1-8.4: the self-updater's own
+       check/download/verify/stage pipeline against $Script:GitHubBaseUrl.
+       Called from Invoke-AppUpdateMaintenance ONLY (the lock-acquiring
+       wrapper just above) - from inside the existing -MaintenanceOnly
+       try/finally (section 7 - self-gated below, respects the
+       24h-since-last-check and rate-limit-backoff windows) AND from the
+       new -AppUpdateOnly early-exit branch (-Force:$true - "Check now"
+       bypasses both gates so a manual click feels instant, per section 7).
+
+       Every exit point below writes app-update.json via Save-AppUpdateState
+       and returns - this function never throws back into its caller (both
+       call sites already wrap it in their own try/catch as an extra net,
+       matching this file's "maintenance work never breaks the app"
+       contract, but this stays true to that on its own too).
+
+       Section 4's stuck-"installing" watchdog runs FIRST, unconditionally,
+       on every call regardless of -Force - a hung install must clear on the
+       very next tick of EITHER path, not just the automatic one.
+
+       REFIX (this round) - a second watchdog, structurally identical to
+       the "installing" one, runs immediately after it for a stuck
+       "checking"/"downloading" state: >10 minutes for "checking", >60
+       minutes for "downloading", both measured off app-update.json's OWN
+       LastWriteTimeUtc (see this block's own comment just below for why
+       the FILE's mtime, not a `state` field, is the right anchor here -
+       the cleanest rule found in this pass, and the one that survives a
+       real regression this round's own verifying caught: an earlier
+       version of this fix stamped `checkedAt` from Handle-AppUpdateCheck
+       too, which then falsely satisfied the 24h-since-last-check gate a
+       few lines below for a COMPLETELY UNRELATED unforced caller - the
+       periodic maintenance tick - racing to look at the same file before
+       any real GitHub lookup had happened, silently folding a
+       never-actually-checked "checking" straight back to "idle". mtime
+       carries no such second meaning anywhere else in this file, so nothing
+       else can be confused by an earlier write bumping it).
+
+       Needed because "checking"/"downloading" can be left with no live
+       owner in a way "installing" cannot: Handle-AppUpdateInstall spawns
+       install.ps1 directly and nothing else in this file ever writes
+       "installing", but "checking" is ALSO written synchronously by
+       Handle-AppUpdateCheck itself (section 5), in the calling HTTP
+       request, before the -AppUpdateOnly child it spawns has done
+       anything at all - if that child then loses the
+       Test-AppUpdateChildRunning race (another app-update child already
+       holds $Script:AppUpdateLockPath) it returns having never reached
+       THIS function, per that gate's own doc comment, leaving
+       Handle-AppUpdateCheck's "checking" write with no one left to
+       resolve it. The two REAL owners (a genuinely in-flight check/
+       download in THIS SAME call, or a resumed one via the `$resuming`
+       branch below) are unaffected by this watchdog: every write to
+       app-update.json (Handle-AppUpdateCheck's own, and every one this
+       function itself makes) goes through Save-AppUpdateState's atomic
+       tmp+Move-Item, which bumps the file's real mtime every time - so
+       this watchdog only ever fires on a leftover that NOTHING has
+       written to in over 10/60 real minutes - by definition abandoned,
+       since a live owner reaching this same function would already have
+       moved it on with a fresh write of its own. #>
+    param([switch]$Force)
+
+    $nowUtc = (Get-Date).ToUniversalTime()
+    $nowIso = $nowUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $state = Get-AppUpdateState
+    # Section 8.8 cleanup gap fix: a settled "error" state can carry a
+    # leftover `stagedPath` from an install attempt install.ps1 rolled
+    # back from (see Remove-AppUpdateStaleStaging's own doc comment) -
+    # captured HERE, before anything below mutates $state, so the THREE
+    # confirmed-outcome call sites downstream can delete it once this
+    # same call has actually confirmed one of the spec's two conditions.
+    # Deliberately keyed off `stagedPath` alone, NOT `state -eq 'error'` -
+    # confirmed live while verifying this round: Handle-AppUpdateCheck
+    # (section 5) writes state="checking" to app-update.json SYNCHRONOUSLY,
+    # in the calling HTTP request, before it ever spawns the
+    # -AppUpdateOnly child that runs THIS function - so by the time this
+    # child's own Get-AppUpdateState just above runs, an on-disk "error"
+    # from install.ps1's own rollback has ALREADY been overwritten to
+    # "checking" and would never be seen here. `stagedPath` is only ever
+    # WRITTEN in one place in this whole file (the "ready" assignment
+    # near the bottom of this function) - so ANY state other than the two
+    # that legitimately still need it ("ready" itself, and "installing",
+    # which reads it to build install.ps1's own command line) can only be
+    # carrying a stale leftover, regardless of which transient state
+    # happens to be sitting on disk when this particular call started.
+    $staleStagedPath = $null
+    if ($state.stagedPath -and $state.state -ne 'ready' -and $state.state -ne 'installing') {
+        $staleStagedPath = [string]$state.stagedPath
+    }
+    # Failure-modes table (section 10): several failure branches below must
+    # leave `state` UNCHANGED from what it was before this call. NOTE this
+    # is deliberately NOT simply "whatever $state.state reads as right
+    # now" - Handle-AppUpdateCheck (section 5) itself writes state="checking"
+    # to disk SYNCHRONOUSLY, in the calling request, before ever spawning
+    # the -AppUpdateOnly child that runs this function - so by the time
+    # this function's own Get-AppUpdateState above runs, that transient
+    # marker may already be sitting on disk with nothing real behind it
+    # yet. Confirmed live while verifying this round: without the
+    # 'checking'/'downloading' normalization below, a 403 response
+    # "restored" state to 'checking' itself, leaving the status line stuck
+    # on "Checking for updates..." forever - worse than the bug this
+    # restore logic exists to fix. $preLookupState (used by the two
+    # rate-limit/24h-freshness early-return gates AND the release-lookup
+    # failure branches just below) collapses any such transient
+    # leftover down to 'idle'; $preDownloadState (captured fresh,
+    # immediately before the download step flips state to "downloading",
+    # long after this function's own writes are the only thing touching
+    # the file) is never subject to this hazard and is used for the
+    # download-failure branch instead.
+    if ($state.state -eq 'installing') {
+        $stuck = $true
+        $attemptedAt = ConvertTo-AppUpdateUtcDateTime -Iso ([string]$state.installAttemptedAt)
+        if ($attemptedAt -and (($nowUtc - $attemptedAt).TotalMinutes -lt 5)) { $stuck = $false }
+        if ($stuck) {
+            $state.state = 'error'
+            $state.lastError = 'the last update attempt did not finish - try Check now again.'
+            $state.lastErrorAt = $nowIso
+            try { Save-AppUpdateState -State $state } catch { Write-ServerLog "App-update watchdog: failed to write app-update.json: $($_.Exception.Message)" }
+            Write-ServerLog 'App-update: stuck "installing" state cleared by watchdog'
+        }
+        return
+    }
+
+    if ($state.state -eq 'checking' -or $state.state -eq 'downloading') {
+        # REFIX (this round): mirrors the "installing" watchdog just above -
+        # runs FIRST, unconditionally, before the 24h/rate-limit gates and
+        # the `$resuming` logic below get a chance to touch `state` at all
+        # (both of those, on a leftover "checking"/"downloading", would at
+        # best silently fold it back to "idle" with no explanation, and at
+        # worst - the 24h gate specifically - leave it sitting for up to a
+        # full day since `checkedAt` is left untouched by that gate; see
+        # this function's own doc comment above).
+        #
+        # app-update.json's own on-disk LastWriteTimeUtc is the age anchor
+        # for BOTH states, deliberately NOT `checkedAt` (a field this same
+        # function's own 24h-since-last-check gate a few lines below also
+        # reads, for a DIFFERENT purpose - "did we already make a real
+        # GitHub call recently" - confirmed live while verifying this
+        # round: stamping `checkedAt` from anywhere OTHER than a genuine
+        # lookup attempt, even just to give this watchdog something to
+        # measure, falsely satisfies THAT gate for any other unforced
+        # caller that reads it before a real lookup has actually happened,
+        # silently swallowing the check instead of performing it). The
+        # file's own mtime needs no such care: EVERY write this pipeline
+        # ever makes to app-update.json goes through Save-AppUpdateState's
+        # atomic tmp+Move-Item, which bumps it - by construction, "how long
+        # since anything last touched this file" is exactly "how long has
+        # THIS on-disk checking/downloading marker gone unresolved",
+        # nothing more.
+        $stuck = $true
+        $fileWriteAnchor = $null
+        try {
+            if (Test-Path -LiteralPath $Script:AppUpdatePath -PathType Leaf) {
+                $fileWriteAnchor = (Get-Item -LiteralPath $Script:AppUpdatePath).LastWriteTimeUtc
+            }
+        } catch { $fileWriteAnchor = $null }
+        $stuckThresholdMinutes = if ($state.state -eq 'checking') { 10 } else { 60 }
+        if ($fileWriteAnchor -and (($nowUtc - $fileWriteAnchor).TotalMinutes -lt $stuckThresholdMinutes)) { $stuck = $false }
+        if ($stuck) {
+            $staleState = $state.state
+            $state.state = 'error'
+            $state.lastError = 'the last update check did not finish - try Check now again.'
+            $state.lastErrorAt = $nowIso
+            try { Save-AppUpdateState -State $state } catch { Write-ServerLog "App-update watchdog: failed to write app-update.json: $($_.Exception.Message)" }
+            Write-ServerLog "App-update: stuck `"$staleState`" state cleared by watchdog"
+            return
+        }
+        # Not stuck yet - fall through to the normal pipeline below, which
+        # already handles both cases correctly on its own: a fresh-enough
+        # "checking" is folded into `$preLookupState` and re-checked (or
+        # normalized to idle by the 24h/rate-limit gates, same as before
+        # this round), and a fresh-enough "downloading" is picked up by the
+        # `$resuming` branch and retried.
+    }
+
+    if ($state.state -eq 'ready') {
+        # Already staged, waiting for Install now/the tray's own eligible
+        # cycle - nothing to check or download while a verified build sits
+        # ready. Prevents re-fetching/re-downloading on every hourly tick
+        # for as long as the user leaves an update sitting uninstalled.
+        return
+    }
+
+    $resuming = (@('available', 'downloading') -contains $state.state)
+    if (-not $resuming) {
+        # Real settled states reaching this branch are only ever 'idle' or
+        # 'error' ('ready'/'installing' already returned above; 'available'/
+        # 'downloading' are the $resuming branch) - anything else (i.e. a
+        # stale 'checking' Handle-AppUpdateCheck itself just wrote) is
+        # normalized to 'idle', per this function's own top-of-file note.
+        $preLookupState = $state.state
+        if ($preLookupState -ne 'idle' -and $preLookupState -ne 'error') { $preLookupState = 'idle' }
+        if (-not $Force) {
+            # REFIX (verifier pass 1, finding 1): these two gates used to
+            # `return` bare, discarding the $preLookupState normalization
+            # computed just above. Handle-AppUpdateCheck (section 5) writes
+            # state="checking" to disk SYNCHRONOUSLY, in the calling HTTP
+            # request, before it ever spawns the -AppUpdateOnly child that
+            # runs this function - so an unforced -MaintenanceOnly tick that
+            # loses the Test-AppUpdateChildRunning race can observe that
+            # transient "checking" marker here and, without this write,
+            # exit through one of these two gates having done nothing at
+            # all: the marker is then never resolved (checkedAt is also
+            # left untouched by these gates, so the next hourly tick hits
+            # the identical 24h/rate-limit gate again), leaving the status
+            # line stuck on "Checking for updates..." forever. Mirrors every
+            # other early-exit branch in this function, which already
+            # restores state before returning.
+            $limitedUntil = ConvertTo-AppUpdateUtcDateTime -Iso ([string]$state.rateLimitedUntil)
+            if ($limitedUntil -and $nowUtc -lt $limitedUntil) {
+                if ($state.state -ne $preLookupState) {
+                    $state.state = $preLookupState
+                    try { Save-AppUpdateState -State $state } catch { }
+                }
+                return
+            }
+            $checkedAt = ConvertTo-AppUpdateUtcDateTime -Iso ([string]$state.checkedAt)
+            if ($checkedAt -and (($nowUtc - $checkedAt).TotalHours -lt 24)) {
+                if ($state.state -ne $preLookupState) {
+                    $state.state = $preLookupState
+                    try { Save-AppUpdateState -State $state } catch { }
+                }
+                return
+            }
+        }
+
+        # 8.1: release lookup.
+        $userAgent = 'FurphyAddonManager/' + $Script:Version
+        $releaseUri = $Script:GitHubBaseUrl + '/repos/krenz444/furphy-addon-manager/releases/latest'
+        $state.state = 'checking'
+        $state.checkedAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+
+        $release = $null
+        try {
+            $resp = Invoke-WebRequest -Uri $releaseUri -Headers @{ 'User-Agent' = $userAgent; 'Accept' = 'application/vnd.github+json' } -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            $release = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $statusCode = 0
+            try { if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode } } catch { $statusCode = 0 }
+            if ($statusCode -eq 403 -or $statusCode -eq 429) {
+                # Eric's Q2 decision: honour Retry-After (seconds) or
+                # X-RateLimit-Reset (unix epoch seconds) - Retry-After
+                # preferred when present - capped at 6 hours, floored at 60s
+                # so a header parse quirk can never produce a near-zero
+                # backoff that just re-hits the limit next tick. No auth
+                # token (unauthenticated 60/hr cap, section 8.1) - `state`
+                # is left exactly as it was (never regressed to idle on a
+                # failed re-check).
+                $backoffSeconds = 3600
+                try {
+                    $retryAfterHeader = $_.Exception.Response.Headers['Retry-After']
+                    $resetHeader = $_.Exception.Response.Headers['X-RateLimit-Reset']
+                    if ($retryAfterHeader) {
+                        $ras = 0
+                        if ([int]::TryParse([string]$retryAfterHeader, [ref]$ras) -and $ras -gt 0) { $backoffSeconds = $ras }
+                    } elseif ($resetHeader) {
+                        $resetEpoch = 0L
+                        if ([long]::TryParse([string]$resetHeader, [ref]$resetEpoch) -and $resetEpoch -gt 0) {
+                            $resetAt = [DateTimeOffset]::FromUnixTimeSeconds($resetEpoch).UtcDateTime
+                            $backoffSeconds = [Math]::Max(0, ($resetAt - $nowUtc).TotalSeconds)
+                        }
+                    }
+                } catch { }
+                if ($backoffSeconds -gt 21600) { $backoffSeconds = 21600 }
+                if ($backoffSeconds -lt 60) { $backoffSeconds = 60 }
+                $state.state = $preLookupState
+                $state.rateLimitedUntil = $nowUtc.AddSeconds($backoffSeconds).ToString('yyyy-MM-ddTHH:mm:ssZ')
+                $state.lastError = 'GitHub rate limit reached - try again later.'
+                $state.lastErrorAt = $nowIso
+                try { Save-AppUpdateState -State $state } catch { }
+                Write-ServerLog "App-update check rate-limited by GitHub, will retry on the next tick (backoff $([int]$backoffSeconds)s)"
+                return
+            }
+            $state.state = $preLookupState
+            $state.lastError = "Couldn't check for updates - try again later."
+            $state.lastErrorAt = $nowIso
+            try { Save-AppUpdateState -State $state } catch { }
+            Write-ServerLog "App-update check failed: $($_.Exception.Message)"
+            return
+        }
+        $state.rateLimitedUntil = $null
+
+        # 8.2: asset selection + version compare.
+        $assets = Get-AppUpdateAssetsFromRelease -Release $release
+        if (-not $assets) {
+            $state.state = 'error'
+            $state.lastError = "Couldn't check for updates - try again later."
+            $state.lastErrorAt = $nowIso
+            try { Save-AppUpdateState -State $state } catch { }
+            Write-ServerLog "App-update check: release $([string]$release.tag_name) is missing the expected zip/.sha256 asset"
+            return
+        }
+        if (-not (Test-AppUpdateVersionNewer -Current $Script:Version -Candidate $assets.Version)) {
+            # Section 8.8: this check just confirmed the latest tag is
+            # still not newer - any leftover staged folder from a prior
+            # failed/rolled-back install is now settled-stale, per spec.
+            Remove-AppUpdateStaleStaging -StaleStagedPath $staleStagedPath
+            $state.state = 'idle'
+            $state.stagedPath = $null
+            $state.lastError = $null
+            $state.lastErrorAt = $null
+            try { Save-AppUpdateState -State $state } catch { }
+            Write-ServerLog 'App-update check: already on the latest version'
+            return
+        }
+
+        $state.state = 'available'
+        $state.latestVersion = $assets.Version
+        $state.releaseTag = $assets.Tag
+        $state.releaseUrl = $assets.ReleaseUrl
+        $state.assetUrl = $assets.ZipUrl
+        $state.shaAssetUrl = $assets.ShaUrl
+        try { Save-AppUpdateState -State $state } catch { }
+    } else {
+        # Resuming an incomplete prior run (section 7: "resumes rather than
+        # re-checking") - reuse the release info already persisted from the
+        # earlier successful lookup instead of spending another GitHub API
+        # call on it.
+        $assets = [PSCustomObject]@{
+            ZipUrl     = $state.assetUrl
+            ShaUrl     = $state.shaAssetUrl
+            Version    = $state.latestVersion
+            Tag        = $state.releaseTag
+            ReleaseUrl = $state.releaseUrl
+        }
+        if (-not $assets.ZipUrl -or -not $assets.ShaUrl -or -not $assets.Version) {
+            # Persisted state is incomplete somehow (hand-edited file, a
+            # partial write) - fall back to idle rather than trying to
+            # download with missing URLs.
+            $state.state = 'idle'
+            try { Save-AppUpdateState -State $state } catch { }
+            Write-ServerLog 'App-update: resumable state was missing required fields, reset to idle'
+            return
+        }
+    }
+
+    $userAgent = 'FurphyAddonManager/' + $Script:Version
+
+    # 8.3: download + integrity. $preDownloadState is captured FRESH here
+    # (never the function-entry $state.state / $preLookupState above) -
+    # by this point in the function, $state.state is either 'available'
+    # (this SAME call just set it, a few lines above) or 'downloading'
+    # (the $resuming branch, reusing an earlier successful lookup) - both
+    # are real, current, non-stale facts this process itself just
+    # established or read, unlike $preLookupState's own hazard above.
+    $preDownloadState = $state.state
+    $cacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'app-update'
+    try {
+        if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+    } catch {
+        $state.state = $preDownloadState
+        $state.lastError = "Couldn't check for updates - try again later."
+        $state.lastErrorAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog "App-update download failed: $($_.Exception.Message)"
+        return
+    }
+    $zipPath = Join-Path -Path $cacheDir -ChildPath ("FurphyAddonManager-$($assets.Version).zip")
+    $shaPath = "$zipPath.sha256"
+    $state.state = 'downloading'
+    try { Save-AppUpdateState -State $state } catch { }
+    try {
+        Invoke-WebRequest -Uri $assets.ZipUrl -Headers @{ 'User-Agent' = $userAgent } -UseBasicParsing -TimeoutSec 120 -OutFile $zipPath -ErrorAction Stop
+        Invoke-WebRequest -Uri $assets.ShaUrl -Headers @{ 'User-Agent' = $userAgent } -UseBasicParsing -TimeoutSec 30 -OutFile $shaPath -ErrorAction Stop
+    } catch {
+        try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+        # Failure-modes table: "state stays as before" the download attempt
+        # - restores to $preDownloadState (see its own capture above), never
+        # left stuck at the transient "downloading" marker.
+        $state.state = $preDownloadState
+        $state.lastError = "download failed"
+        $state.lastErrorAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog "App-update download failed: $($_.Exception.Message)"
+        return
+    }
+
+    $shaExpected = $null
+    try { $shaExpected = (Get-Content -LiteralPath $shaPath -Raw -ErrorAction Stop).Trim().ToLowerInvariant() } catch { $shaExpected = $null }
+    $shaActual = $null
+    try { $shaActual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath -ErrorAction Stop).Hash.ToLowerInvariant() } catch { $shaActual = $null }
+    if (-not $shaExpected -or -not $shaActual -or $shaExpected -ne $shaActual) {
+        try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+        $state.state = 'error'
+        $state.lastError = 'integrity check failed'
+        $state.lastErrorAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog "App-update integrity check FAILED for $($assets.Tag) - sha256 mismatch, discarding download"
+        return
+    }
+
+    # 8.4: staged extraction (OUTSIDE $appDest, per the fixed decision) +
+    # VERSION check.
+    $stagingRoot = Join-Path -Path $env:TEMP -ChildPath ("FurphyUpdate-$($assets.Tag)-" + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $stagingRoot -Force -ErrorAction Stop
+    } catch {
+        try { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+        $state.state = 'error'
+        $state.lastError = "Couldn't finish updating - kept your current version ($($Script:Version))."
+        $state.lastErrorAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog "App-update extraction failed: $($_.Exception.Message)"
+        return
+    }
+
+    $versionFilePath = Join-Path -Path $stagingRoot -ChildPath 'VERSION'
+    $packageVersion = $null
+    try { $packageVersion = [IO.File]::ReadAllText($versionFilePath).Trim() } catch { $packageVersion = $null }
+    $tagVersion = Get-AppUpdateVersionFromTag -Tag $assets.Tag
+    if (-not $packageVersion -or -not [string]::Equals($packageVersion, $tagVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
+        try { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+        $state.state = 'error'
+        $state.lastError = "downloaded package's VERSION did not match the release"
+        $state.lastErrorAt = $nowIso
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog "App-update package VERSION ($packageVersion) did not match release tag ($($assets.Tag)) - discarding"
+        return
+    }
+    if (-not (Test-AppUpdateVersionNewer -Current $Script:Version -Candidate $packageVersion)) {
+        try { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+        try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+        # Section 8.8: this check just confirmed the (re-resolved) tag is
+        # still not newer - any leftover staged folder from a prior
+        # failed/rolled-back install is now settled-stale, per spec.
+        Remove-AppUpdateStaleStaging -StaleStagedPath $staleStagedPath
+        $state.state = 'idle'
+        $state.stagedPath = $null
+        $state.lastError = $null
+        $state.lastErrorAt = $null
+        try { Save-AppUpdateState -State $state } catch { }
+        Write-ServerLog 'App-update refused: staged version is not newer than the running version'
+        return
+    }
+
+    # Section 8.8: a freshly-staged, verified-newer build now supersedes
+    # any leftover staged folder from a prior failed/rolled-back install.
+    Remove-AppUpdateStaleStaging -StaleStagedPath $staleStagedPath -KeepPath $stagingRoot
+    $state.state = 'ready'
+    $state.stagedPath = $stagingRoot
+    $state.downloadedAt = $nowIso
+    $state.lastError = $null
+    $state.lastErrorAt = $null
+    try { Save-AppUpdateState -State $state } catch { }
+    try { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue } catch { }
+    try { Remove-Item -LiteralPath $shaPath -Force -ErrorAction SilentlyContinue } catch { }
+    Write-ServerLog "App-update: staged $($assets.Tag), ready to install"
+}
+
+function Handle-AppUpdateStatus {
+    <# GET /api/app-update/status (APP-UPDATE-SPEC.md section 5). No CSRF
+       (GET, read-only). #>
+    param($Context, $RouteMatch)
+
+    Send-Json -Context $Context -StatusCode 200 -Body (Get-AppUpdateStatusObject -Settings (Get-Settings))
+}
+
+function Handle-AppUpdateCheck {
+    <# POST /api/app-update/check (APP-UPDATE-SPEC.md section 5) - "Check
+       now" and any future caller. CSRF required (inherited automatically
+       from Invoke-Route's Test-SameOriginRequest gate, like every other
+       non-GET route in this file - no new CSRF code needed here).
+
+       REFIX (this round, rule (b) of the stuck-"checking" fix): the
+       idempotent dedup check below used to be state-based only (section
+       5's own wording: "if state is already checking or downloading").
+       Confirmed live while verifying this round: that leaves a gap right
+       at server startup - the first -MaintenanceOnly tick's own unforced
+       app-update check (Invoke-AppUpdateMaintenance's doc comment) can
+       already hold $Script:AppUpdateLockPath while `state` on disk is
+       STILL "idle" (it hasn't reached its own `state.state = 'checking'`
+       write yet). A "Check now" landing in that exact window reads
+       "idle", so the state-based check alone lets it through: THIS
+       request then writes state="checking" itself and spawns a SECOND
+       -AppUpdateOnly child, which loses the Test-AppUpdateChildRunning
+       race inside Invoke-AppUpdateMaintenance and returns before ever
+       reaching Invoke-AppUpdateMaintenanceCore - so the "checking" THIS
+       request just wrote has no live owner left to resolve it (the
+       watchdog in Invoke-AppUpdateMaintenanceCore is this round's
+       backstop for exactly that, but the fix here is to not create the
+       problem in the first place). Fixed by ALSO checking
+       Test-AppUpdateChildRunning: the rule this function now follows is
+       "only write state=checking when this same call is also the one
+       about to spawn the child that owns resolving it" - if another
+       app-update child (found via the lock, not just via `state`) is
+       already running, this request changes nothing and just reports
+       the current status, exactly like the state-based case already did.
+       A child that later exits on that SAME dedup gate inside
+       Invoke-AppUpdateMaintenance therefore never had a "checking" write
+       attributed to it in the first place - there is nothing for it to
+       leave behind uncleared.
+
+       Deliberately does NOT also stamp `checkedAt` on this write (an
+       earlier version of this fix did, to give Invoke-AppUpdateMaintenanceCore's
+       stuck-checking/downloading watchdog - fix (c) - something fresh to
+       measure) - confirmed live while verifying this round that doing so
+       backfires: `checkedAt` is also what that same function's own
+       24h-since-last-check gate reads, and stamping it here, before any
+       real GitHub lookup has happened, falsely tells the NEXT unforced
+       caller to read it (typically the periodic maintenance tick, racing
+       this same request) "we already checked within 24h", silently
+       folding its own attempt back to idle instead of letting it actually
+       run. The watchdog anchors on app-update.json's own on-disk
+       LastWriteTimeUtc instead (see its own doc comment) - this write's
+       Save-AppUpdateState call already bumps that for free, so nothing
+       extra is needed here. #>
+    param($Context, $RouteMatch)
+
+    if (Test-GameRunning) {
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; skipped = 'game running' }
+        return
+    }
+
+    $state = Get-AppUpdateState
+    if ($state.state -eq 'checking' -or $state.state -eq 'downloading' -or (Test-AppUpdateChildRunning)) {
+        # Idempotent - no double-spawn, mirroring Test-MaintenanceChildRunning's
+        # own re-entrancy guard (addon-server.ps1's maintenance-child section).
+        # The Test-AppUpdateChildRunning half is this round's own addition -
+        # see this function's doc comment above for the race it closes.
+        Send-Json -Context $Context -StatusCode 200 -Body (Get-AppUpdateStatusObject -Settings (Get-Settings))
+        return
+    }
+
+    $state.state = 'checking'
+    try {
+        Save-AppUpdateState -State $state
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+        return
+    }
+
+    try {
+        # Hidden, detached -AppUpdateOnly child of THIS SAME SCRIPT - exact
+        # ConvertTo-SafeProcessArg-quoted List[object]+Start-Process idiom
+        # Invoke-MaintenanceTick already uses for its own -MaintenanceOnly
+        # child, threading through the same test-only overrides so this
+        # child resolves the identical game-running/root answer a test
+        # expects.
+        $psArgs = New-Object 'System.Collections.Generic.List[object]'
+        $psArgs.Add('-NoProfile')
+        $psArgs.Add('-ExecutionPolicy')
+        $psArgs.Add('Bypass')
+        $psArgs.Add('-File')
+        $psArgs.Add((ConvertTo-SafeProcessArg $Script:ScriptSelfPath))
+        $psArgs.Add('-Root')
+        $psArgs.Add((ConvertTo-SafeProcessArg $Script:Root))
+        $psArgs.Add('-AppUpdateOnly')
+        if ($Script:WowRootOverride) {
+            $psArgs.Add('-WowRoot')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:WowRootOverride))
+        }
+        if ($Script:BuildInfoPathOverride) {
+            $psArgs.Add('-BuildInfoPath')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:BuildInfoPathOverride))
+        }
+        if ($Script:WowFakeProcessNameOverride) {
+            $psArgs.Add('-WowFakeProcessName')
+            $psArgs.Add((ConvertTo-SafeProcessArg $Script:WowFakeProcessNameOverride))
+        }
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -WindowStyle Hidden | Out-Null
+        Write-ServerLog 'App-update check: spawned a -AppUpdateOnly child'
+    } catch {
+        Write-ServerLog "App-update check: failed to spawn -AppUpdateOnly child: $($_.Exception.Message)"
+    }
+
+    Send-Json -Context $Context -StatusCode 202 -Body @{ ok = $true; state = 'checking' }
+}
+
+function Handle-AppUpdateInstall {
+    <# POST /api/app-update/install (APP-UPDATE-SPEC.md section 5) -
+       "Install now" and the tray's own silent trigger, both funnelled
+       through this ONE handler; the two callers differ only in the
+       `relaunch` value they pass. CSRF required (inherited automatically). #>
+    param($Context, $RouteMatch)
+
+    $body = $null
+    try {
+        $body = Read-Body -Context $Context
+    } catch {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = $_.Exception.Message }
+        return
+    }
+    # REFIX (verifier pass 1, finding 4): section 5's contract is exactly
+    # {"relaunch":"window"|"tray"} - the two real callers (SPA "Install now"/
+    # the in-window banner, and the tray's own silent trigger) always send
+    # one of those two literal strings. Anything else (missing, malformed, a
+    # typo, or install.ps1's own TEST-ONLY "none" value, which is a CLI-only
+    # concept for install.ps1 and never reachable through this HTTP route -
+    # see tests\fixture-acceptance\AppUpdate.SilentUpgrade.Tests.ps1's own
+    # header note) used to silently fall through to the 'window' default,
+    # which is the RISKIER of the two real actions to take on unrecognized
+    # input. 400 here instead of guessing.
+    $relaunchRaw = $null
+    if ($body) { $relaunchRaw = [string]$body.relaunch }
+    if ($relaunchRaw -ne 'window' -and $relaunchRaw -ne 'tray') {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = "relaunch must be 'window' or 'tray'" }
+        return
+    }
+    $relaunch = $relaunchRaw
+
+    $state = Get-AppUpdateState
+    if ($state.state -ne 'ready') {
+        Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'nothing staged to install' }
+        return
+    }
+
+    # Same $Script:CurrentJobByFlavour busy-check loop Handle-Shutdown/
+    # Handle-Uninstall already run - reused, not duplicated (section 5).
+    $anyRunning = $false
+    foreach ($cj in @($Script:CurrentJobByFlavour.Values)) {
+        if ($cj) {
+            $refreshed = Update-JobStatus -Job $cj
+            if ($refreshed -and $refreshed.state -eq 'running') { $anyRunning = $true }
+        }
+    }
+    if ($anyRunning) {
+        $state.deferredReason = 'job-running'
+        try { Save-AppUpdateState -State $state } catch { }
+        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy: a job is running' }
+        return
+    }
+
+    if (Test-GameRunning) {
+        $state.deferredReason = 'game-running'
+        try { Save-AppUpdateState -State $state } catch { }
+        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'WoW is running' }
+        return
+    }
+
+    $wowRootPath = Get-FlavourWowRootPath -Flavor 'retail'
+    if (-not $wowRootPath) { $wowRootPath = Get-FlavourWowRootPath }
+    if (-not $wowRootPath) {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = 'Could not resolve the WoW folder for this install.' }
+        return
+    }
+
+    $state.deferredReason = $null
+    $state.state = 'installing'
+    $state.installAttemptedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    try {
+        Save-AppUpdateState -State $state
+    } catch {
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = $_.Exception.Message }
+        return
+    }
+
+    # Exact command line from section 5/8.5 - the fixed interface Package B
+    # (install.ps1) builds against. Launched from the STAGED extraction
+    # (never $Script:Root's own install.ps1) - this is what makes "runs from
+    # OUTSIDE the app folder" and "detached from the server process it
+    # replaces" true by construction.
+    $psArgs = New-Object 'System.Collections.Generic.List[string]'
+    $psArgs.Add('-NoProfile')
+    $psArgs.Add('-ExecutionPolicy'); $psArgs.Add('Bypass')
+    $psArgs.Add('-WindowStyle'); $psArgs.Add('Hidden')
+    $psArgs.Add('-File'); $psArgs.Add((ConvertTo-SafeProcessArg (Join-Path -Path $state.stagedPath -ChildPath 'install.ps1')))
+    $psArgs.Add('-WowPath'); $psArgs.Add((ConvertTo-SafeProcessArg $wowRootPath))
+    $psArgs.Add('-Upgrade')
+    $psArgs.Add('-Relaunch'); $psArgs.Add($relaunch)
+    $psArgs.Add('-Console')
+    $psArgs.Add('-Quiet')
+
+    if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_APPUPDATE_DRYRUN)) {
+        # TEST-ONLY (never set outside a test harness, same contract as
+        # every other FURPHY_TEST_* seam in this file): install.ps1 is
+        # Package B's own file, under active parallel development, and this
+        # build root's hard live-safety rules forbid running the host/tray/
+        # window layers a real -Upgrade would relaunch - so this records the
+        # fully-constructed command line into app-update.json instead of
+        # spawning anything, letting a test assert on its exact shape
+        # without ever invoking install.ps1.
+        $state.testDryRunCommandLine = ($psArgs.ToArray() -join ' ')
+        try { Save-AppUpdateState -State $state } catch { }
+        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
+        return
+    }
+
+    try {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs.ToArray() -WindowStyle Hidden | Out-Null
+    } catch {
+        $state.state = 'error'
+        $state.lastError = "Couldn't finish updating - kept your current version ($($Script:Version))."
+        $state.lastErrorAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        try { Save-AppUpdateState -State $state } catch { }
+        Send-Json -Context $Context -StatusCode 500 -Body @{ error = "Could not launch the installer: $($_.Exception.Message)" }
+        return
+    }
+
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true }
+    $Script:ShuttingDown = $true
+}
+
+# =====================================================================
 # Route table and dispatcher
 # =====================================================================
 
@@ -8797,6 +9977,12 @@ $Script:Routes = @(
     @{ Method = 'POST'; Pattern = '^/api/shutdown$'; Handler = 'Handle-Shutdown' }
     # Round 33 (DISTRIBUTION-SPEC.md section 3.4)
     @{ Method = 'POST'; Pattern = '^/api/uninstall$'; Handler = 'Handle-Uninstall' }
+    # APP-UPDATE-SPEC.md section 5. Deliberately NOT added to
+    # $Script:FlavourScopedEndpoints (that section's own flavour-routing
+    # note) - none of the three handlers ever reads $Script:CurrentFlavourContext.
+    @{ Method = 'GET'; Pattern = '^/api/app-update/status$'; Handler = 'Handle-AppUpdateStatus' }
+    @{ Method = 'POST'; Pattern = '^/api/app-update/check$'; Handler = 'Handle-AppUpdateCheck' }
+    @{ Method = 'POST'; Pattern = '^/api/app-update/install$'; Handler = 'Handle-AppUpdateInstall' }
 )
 
 function Test-SameOriginRequest {
@@ -8980,6 +10166,9 @@ if ([string]::IsNullOrWhiteSpace($Script:ScriptSelfPath)) {
 $Script:UiDir = Join-Path -Path $Script:Root -ChildPath 'ui'
 $Script:JobsDir = Join-Path -Path $Script:Root -ChildPath 'jobs'
 $Script:SettingsPath = Join-Path -Path $Script:Root -ChildPath 'settings.json'
+# APP-UPDATE-SPEC.md section 4: sibling of settings.json/state.json - the
+# self-updater's own operational state, never a user setting.
+$Script:AppUpdatePath = Join-Path -Path $Script:Root -ChildPath 'app-update.json'
 $Script:StatePath = Join-Path -Path $Script:Root -ChildPath 'state.json'
 $Script:AddonsJsonPath = Join-Path -Path $Script:Root -ChildPath 'addons.json'
 $Script:ServerLogPath = Join-Path -Path $Script:Root -ChildPath 'server.log'
@@ -9033,6 +10222,23 @@ $Script:AddonRadarCacheDir = Join-Path -Path $Script:CacheDir -ChildPath 'addon-
 # Test-MaintenanceChildRunning/Invoke-MaintenanceTick, both near the request
 # loop below.
 $Script:MaintenanceLockPath = Join-Path -Path $Script:CacheDir -ChildPath 'maintenance.lock'
+# APP-UPDATE-SPEC.md section 7: a second, SEPARATE lock for
+# Invoke-AppUpdateMaintenance specifically - the very first
+# -MaintenanceOnly tick after startup "always qualifies" (LastMaintenanceAttemptAt
+# starts at MinValue) and now itself calls Invoke-AppUpdateMaintenance
+# unconditionally (gated only by ITS OWN 24h/rate-limit checks, which a
+# brand-new app-update.json's null checkedAt never blocks) - a "Check now"
+# click landing in that same narrow startup window would otherwise spawn a
+# SECOND, fully concurrent -AppUpdateOnly child racing the first over the
+# exact same release-lookup/download/extract work (confirmed live while
+# verifying this round: both children reached the same terminal state
+# harmlessly on a deterministic stub, but two real concurrent downloads to
+# the identical cache\app-update\*.zip path is a genuine corruption risk
+# this closes). Same best-effort PID-liveness contract as
+# Test-MaintenanceChildRunning/$Script:MaintenanceLockPath just above (not
+# a true atomic mutex - matches this file's own established standard of
+# care for this class of guard).
+$Script:AppUpdateLockPath = Join-Path -Path $Script:CacheDir -ChildPath 'app-update-maintenance.lock'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
 # P1 perf pass (item 2): while a WoW client is running, the idle-exit window
@@ -9060,7 +10266,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.21.1'
+$Script:Version = '1.22.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -9265,10 +10471,48 @@ if ($MaintenanceOnly) {
         } catch {
             Write-ServerLog "Maintenance child: Wago growth snapshot crawl failed: $($_.Exception.Message)"
         }
+        try {
+            # APP-UPDATE-SPEC.md section 7: one more call inside the SAME
+            # try/finally the two above already sit in - self-gated on its
+            # own 24h-since-last-check/rate-limit-backoff windows (see
+            # Invoke-AppUpdateMaintenance's own doc comment), so this hourly
+            # tick costs nothing extra beyond a cheap disk read + timestamp
+            # comparison on the overwhelming majority of ticks where nothing
+            # is actually due. Never -Force here - only the -AppUpdateOnly
+            # branch below bypasses those gates.
+            Invoke-AppUpdateMaintenance
+        } catch {
+            Write-ServerLog "Maintenance child: app-update check failed: $($_.Exception.Message)"
+        }
     } finally {
         try { Remove-Item -LiteralPath $Script:MaintenanceLockPath -Force -ErrorAction SilentlyContinue } catch { }
     }
     Write-ServerLog 'Maintenance child finished'
+    return
+}
+
+# =====================================================================
+# APP-UPDATE-SPEC.md section 5/7/11: -AppUpdateOnly early exit.
+#
+# Structural sibling of the -MaintenanceOnly branch just above, spawned on
+# demand by POST /api/app-update/check (Handle-AppUpdateCheck) so a manual
+# "Check now" click feels instant rather than waiting for the next hourly
+# -MaintenanceOnly tick. Runs ONLY Invoke-AppUpdateMaintenance, with -Force
+# so it unconditionally bypasses that function's own 24h-since-last-check
+# and rate-limit-backoff gates (section 7: "bypasses the 24h gate and spawns
+# ... immediately"). Never binds a listener, never enters the request loop,
+# and - unlike -MaintenanceOnly - needs no flavour migration/context at all:
+# app-update.json is machine-wide, never per-flavour.
+# =====================================================================
+if ($AppUpdateOnly) {
+    Set-FurphyLowPriority
+    Write-ServerLog "App-update child started (pid $PID)"
+    try {
+        Invoke-AppUpdateMaintenance -Force
+    } catch {
+        Write-ServerLog "App-update child failed: $($_.Exception.Message)"
+    }
+    Write-ServerLog 'App-update child finished'
     return
 }
 

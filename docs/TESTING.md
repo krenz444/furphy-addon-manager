@@ -233,6 +233,142 @@ next ..."` core sentence (from `ui\app.js`'s Mock, whose fabricated
 `/api/tray/start` cycle now carries the full `status`/tallies shape, not
 just the pre-round-28 `lastResult`/`message` fields).
 
+## Round 42: self-update tests (addon-sync.ps1/addon-server.ps1/install.ps1 - APP-UPDATE-SPEC.md)
+
+Four new files, all standing on the same base-URL-override seam pattern
+`FURPHY_TEST_WAGO_BASEURL`/`FURPHY_TEST_CF_CATALOGUE_BASEURL` already
+use, this time for GitHub Releases:
+
+- `$Script:GitHubBaseUrl` / `$env:FURPHY_TEST_GITHUB_BASEURL`
+  (addon-server.ps1, Package A) replaces `https://api.github.com` for
+  the life of one server process, exactly like the two existing seams -
+  never set by a real user run.
+- `tests\lib\common.ps1` gained `Start-GitHubReleaseStubServer` /
+  `Stop-GitHubReleaseStubServer` / `Get-GitHubReleaseStubRequests`, plus
+  two small builders it uses internally, `New-GitHubReleaseFixtureZip`
+  and `New-GitHubReleaseFixtureShaSidecar`. The actual listener is a
+  real subprocess, `tests\fixtures\github-release-stub\GitHubReleaseStubServer.ps1`
+  (same shape as the pre-existing `tests\fixtures\wago-stub\WagoStubServer.ps1`)
+  serving a `releases/latest`-shaped JSON body plus each asset's own
+  `browser_download_url` (a real, local zip + `.sha256` sidecar), with
+  knobs for a tampered sha256, a wrong VERSION baked into the zip, a
+  403/429 with `Retry-After`/`X-RateLimit-Reset`, and any tag (older,
+  equal, or newer than the running server's own version).
+
+  **Sidecar format note, load-bearing for anyone writing/reading these
+  tests:** the stub's default `.sha256` shape is BARE (a lone lowercase
+  hex hash, nothing else) - matching `package.ps1`'s own Round 42 output
+  AND `Invoke-AppUpdateMaintenanceCore`'s real, landed integrity check
+  (`(Get-Content -Raw $shaPath).Trim().ToLowerInvariant()`, compared as
+  one whole string against `Get-FileHash`) exactly. An earlier draft of
+  this stub AND of `package.ps1` used the two-column "sha256sum" shape
+  instead (`<hash>  <filename>`) - confirmed LIVE, before 1.22.0 shipped,
+  to be a real, total-feature-breaking mismatch against Package A's
+  actual comparison (every real download, however correct, would have
+  read as a mismatch), and fixed in both places. Pass
+  `-ShaSidecarFormat 'sha256sum'` to `Start-GitHubReleaseStubServer` only
+  if that comparison is ever changed to tolerate it.
+
+  **A second real bug found and fixed the same way, scoped to
+  `Start-TestServer` itself (tests\lib\common.ps1) rather than to any one
+  test file:** `Invoke-MaintenanceTick`'s very first tick after ANY fresh
+  server startup now also runs `Invoke-AppUpdateMaintenance`
+  unconditionally - so EVERY caller of `Start-TestServer` in this entire
+  suite, not just this round's own new files, made one real,
+  unauthenticated GET to the real `api.github.com` on every server
+  startup, before a caller's own `$env:FURPHY_TEST_GITHUB_BASEURL`
+  assignment (made AFTER `Start-TestServer` returns, in every existing
+  call-site convention this file documents) had any chance to take
+  effect - a real "never touch the real GitHub" violation caused by this
+  suite's own tooling, not by any test's authored intent. Fixed by
+  defaulting `$env:FURPHY_TEST_GITHUB_BASEURL` itself to a
+  guaranteed-closed loopback port inside `Start-TestServer` unless a
+  caller has already pointed it at a real stub BEFORE calling
+  `Start-TestServer` (the same "skip by default unless the caller opted
+  in" contract `FURPHY_TEST_SKIP_WAGO_GROWTH`/`FURPHY_TEST_SKIP_CF_CATALOGUE`
+  already use) - any test that itself wants to exercise the real seam
+  must therefore set the env var BEFORE `Start-TestServer`, never only
+  around a later API call (see `Server.AppUpdate.Tests.ps1`'s own header
+  for the full ordering explanation and its `Start-AppUpdateTestServer`
+  helper).
+
+- `tests\unit\Server.AppUpdateVersionCompare.Tests.ps1` /
+  `Server.AppUpdateReleaseParse.Tests.ps1` - pure-function coverage for
+  Package A's real `Test-AppUpdateVersionNewer` (`-Current`/`-Candidate`,
+  returns `[bool]`) and `Get-AppUpdateAssetsFromRelease` (`-Release`,
+  returns `$null` or `{ZipUrl;ShaUrl;Version;Tag;ReleaseUrl}`) -
+  APP-UPDATE-SPEC.md section 8.2's semantic-version compare and
+  exact-name asset selection. Both are capability-gated (a static source
+  grep for the real function names in addon-server.ps1) and print a
+  PENDING skip rather than failing if a future edit ever removes either
+  function. Verified passing for real against the landed tree: 9/9 and
+  8/8.
+- `tests\integration\Server.AppUpdate.Tests.ps1` - a real scratch
+  addon-server.ps1 on port 47935 against the stub above: the full
+  check/download/verify/extract happy path, a tampered-sha256 refusal, a
+  VERSION-vs-tag mismatch refusal, install-refused-while-WoW-running,
+  install-deferred-while-a-job-is-running, the `windowOpenAt` signal
+  (stamped only by `GET /api/state`, never by tray-style
+  ping/jobs traffic), a false-409 check for a window-initiated install
+  (via `$env:FURPHY_TEST_APPUPDATE_DRYRUN`, Package A's own test-only
+  seam that records the fully-built install.ps1 command line into
+  app-update.json instead of spawning it), and the GitHub rate-limit
+  backoff decision. Capability-gated the same way
+  `Server.WagoBrowse.Tests.ps1` already is. Two real, load-bearing
+  findings from writing this file against the landed tree, beyond the
+  env-var-ordering bug above: `Handle-AppUpdateInstall` checks
+  `state == "ready"` BEFORE the job/game-running gates (a 400 "nothing
+  staged" fires first otherwise, so the WoW-running and job-running
+  Describes must stage a real ready update before they can observe their
+  own 409), and `Test-GameRunning` caches its answer for
+  `$Script:GameProbeIntervalSeconds` (30s) - starting a fake WoW process
+  right before an install attempt still reads the stale "not running"
+  answer for up to 30s. Verified passing for real: 9/9, stable across
+  repeated runs.
+- `tests\fixture-acceptance\AppUpdate.SilentUpgrade.Tests.ps1` - a real
+  `install.ps1 -Upgrade` run against a scratch install on port 47940,
+  never through the HTTP route (so this file needs none of Package A's
+  own server code, only Package B's install.ps1 change set). Uses a
+  **test-only `-Relaunch none`** value (install.ps1's own param-block
+  comment confirms the identical intent this file's own header
+  independently reasoned to: "a headless verification pass can exercise
+  the file-level upgrade without starting a window or tray on the
+  machine running it" - not part of APP-UPDATE-SPEC.md section 5's own
+  fixed `"window"|"tray"` request-body contract, never reachable through
+  the HTTP route at all) specifically so this file never starts a real
+  window or tray process on the machine it runs on - this project's
+  tray/host/perf layers are already excluded from a normal `-Quick` run
+  for the identical "would touch the real desktop" reason. One Describe
+  (a forced health-check-failure rollback) is therefore a **permanent**,
+  environment-scoped skip, not a "package not landed" one - see that
+  file's own header for the reasoning and where real coverage for it
+  belongs instead (an isolated/CI-only environment). Two more
+  load-bearing live-safety findings from writing this file against the
+  landed tree: `Invoke-FurphyInstallSteps`'s desktop-shortcut/
+  curseforge-protocol/adopt steps (6-8) run unconditionally after
+  `-Upgrade`'s own block, gated only on `-NoShortcuts`/`-NoProtocol`/
+  `-SkipAdopt` (never on `-Upgrade` itself) - install.ps1's own
+  `Test-LooksLikeScratchRun` defense-in-depth guard on steps 6/7 does
+  NOT recognize this suite's `tests\.tmp\`-based scratch paths (only
+  bare `%TEMP%`, `\scratch\`, or `fixtures\wowroot`), so the `-Upgrade`
+  invocation here passes all three flags explicitly, same as every
+  plain install in this suite - APP-UPDATE-SPEC.md section 5's own real
+  `Handle-AppUpdateInstall` command line does not pass them, which never
+  matters against a real production path but is flagged in this file's
+  own header for whoever next reviews Package A/B. Backup folders are
+  named by a deterministic SHA256 hash of the install's own path
+  (`FurphyRollback-<16 hex chars>`), never
+  `FurphyRollback-<version>-<guid>` as an earlier reading of section
+  8.6's own literal example assumed - `Get-AppUpdateRollbackBackupPath`
+  in this file reproduces the real computation exactly, both for
+  assertions and for this file's own scoped cleanup (never a blind
+  `FurphyRollback-*` sweep of `%TEMP%`, which could otherwise delete a
+  REAL production rollback backup). Verified passing for real: 7/7
+  (6 real assertions, 1 permanent pending skip), with a full
+  before/after live-safety snapshot (production Run value, Uninstall
+  DisplayVersion, live tray pid, the real Desktop, and the real
+  `curseforge://` registry key) confirming byte-identical state.
+
 ## Running the suite
 
 One entry point, `tests\run-all.ps1`, runs every layer below in order,
@@ -259,7 +395,7 @@ fixture-acceptance -> perf`):
 | `integration` | `tests\integration\*.Tests.ps1` (Pester 3) - real HTTP against a real `addon-server.ps1` test instance and real CLI child processes. Two Describes tagged `Network` (a real CurseForge install, a mid-flight freshness check); one tagged `Tray` (a real tray process + HKCU round-trip). | yes (network/tray-tagged pieces skip only if you also pass `-NoNetwork`/`-NoTray`) |
 | `host` | `tests\host\Host.Tests.ps1` (Pester 3, `-Tag Host`) - builds/uses the real `host\bin\FurphyHost.exe`, drives `--selftest`/`--tray-selftest`. The `--selftest` Describe is tagged `Network` (the CF pane really navigates to curseforge.com); the first two `--tray-selftest` Its (multi-flavour, zero tracked addons) are fully offline. Round 28 added a second `--tray-selftest` Describe, both Its tagged `Network` (real CurseForge installs against a single-flavour retail-only root) - see "Round 28: tray tooltip/icon/menu/balloon history" below. | yes (the two new Network-tagged Its skip under `-Quick`/`-NoNetwork`, same as every other Network-tagged piece) |
 | `spa` | `tests\spa\Run-SpaHarness.ps1` (always) - a same-origin copy of `ui\` driven headlessly, 47 DOM/behavior checks (this count drifts release to release - see Round 28 below for the latest addition; do not treat any specific number here as load-bearing). `tests\spa\Run-ThemeAudit.ps1` (full-run only) - live-computed WCAG contrast for all 16 themes plus one screenshot per theme into `tests\theme-screenshots\`. | harness only; theme audit is full-only |
-| `fixture-acceptance` | `tests\fixture-acceptance\FlavorsSpec.Section8.Tests.ps1` (Pester 3) - a traceability pass over FLAVORS-SPEC.md section 8's own checklist: install.ps1's home-flavour fallback ordering (including the fixture install into `_classic_era_`) and the CurseForge auto-target flavour-resolution cases (S5.5). Real `install.ps1` runs (incl. a real `host\` rebuild) make this full-run-only. | no |
+| `fixture-acceptance` | `tests\fixture-acceptance\FlavorsSpec.Section8.Tests.ps1` (Pester 3) - a traceability pass over FLAVORS-SPEC.md section 8's own checklist: install.ps1's home-flavour fallback ordering (including the fixture install into `_classic_era_`) and the CurseForge auto-target flavour-resolution cases (S5.5). Real `install.ps1` runs (incl. a real `host\` rebuild) make this full-run-only. `AppUpdate.SilentUpgrade.Tests.ps1` (Round 42, Pester 3) - a real `install.ps1 -Upgrade -Relaunch none` run on scratch port 47940 (see "Round 42" above); a real host\ rebuild makes this full-run-only too. | no |
 | `perf` | `tests\perf\Perf.Tests.ps1` (Pester 3) - Eric's "zero impact on gameplay" pass, asserted: a real fake-Wow.exe + real `addon-server.ps1` + real `--tray` + a real (minimized) host window, sampled over a 90-second steady-state window (server CPU, tray CPU, new TCP connections, server requests, `server.log` growth, `tray-state.json`/host.log all asserted against fixed tolerances); a second Describe stops the fake WoW and asserts normal behaviour resumes within 60s; a third asserts the `-Launcher` fresh-check launch-chain budget (< 3s). The tray's own ~90-second first-cycle delay alone puts this well over the Quick budget - full-run-only. | no |
 
 **Hygiene, unconditional:** the same port/process/HKCU/`tests\.tmp` sweep

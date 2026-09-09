@@ -275,7 +275,7 @@ const Mock = (function () {
   // FLAVORS-SPEC.md CS-F4: activeFlavour/showTestRealms join the mock
   // settings shape too (S3.4 - same plain client-writable pattern as
   // adFilter/cfFocus), round-tripped by the PUT handler below.
-  const mockSettings = { releaseType: 1, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false };
+  const mockSettings = { releaseType: 1, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false, appUpdateAutoInstall: true };
 
   // FLAVORS-SPEC.md CS-F4 (section 8's own acceptance item / task brief's own
   // "?mock=1&flavours=3" verify step): ?mock=1&flavours=N (2-4) fakes an
@@ -339,6 +339,46 @@ const Mock = (function () {
   let nextJobId = 1;
   let currentJob = null;
   const jobs = [];
+
+  // APP-UPDATE-SPEC.md section 5/12's mock fixtures: ?mock=1&appUpdate=<state>
+  // forces GET /api/app-update/status (and the appUpdate field folded into
+  // /api/state) into exactly one of the state machine's own values, so the
+  // whole Settings section/banner/toast is demoable without a real server -
+  // matching how ?game=1/?flavours=N already preview other server-only
+  // contracts under ?mock=1. Unforced (no ?appUpdate= at all) defaults to
+  // "idle" (Furphy already up to date), the real steady-state default.
+  const APP_CURRENT_VERSION = "1.22.0";
+  const APP_LATEST_VERSION = "1.23.0";
+  const mockAppUpdateForced = new URLSearchParams(location.search).get("appUpdate");
+  const MOCK_APP_UPDATE_STATES = ["idle", "checking", "available", "downloading", "ready", "installing", "installed", "error"];
+  const mockAppUpdate = {
+    state: MOCK_APP_UPDATE_STATES.indexOf(mockAppUpdateForced) !== -1 ? mockAppUpdateForced : "idle",
+    currentVersion: APP_CURRENT_VERSION,
+    latestVersion: null, releaseTag: null, releaseUrl: null,
+    checkedAt: new Date(Date.now() - 3 * 60000).toISOString(),
+    downloadedAt: null, installAttemptedAt: null, installedAt: null,
+    lastError: null, lastErrorAt: null,
+    deferredReason: null
+  };
+  if (mockAppUpdate.state !== "idle") {
+    mockAppUpdate.latestVersion = APP_LATEST_VERSION;
+    mockAppUpdate.releaseTag = "v" + APP_LATEST_VERSION;
+    mockAppUpdate.releaseUrl = "https://github.com/krenz444/furphy-addon-manager/releases/tag/v" + APP_LATEST_VERSION;
+  }
+  if (mockAppUpdate.state === "ready" || mockAppUpdate.state === "installing" || mockAppUpdate.state === "installed") {
+    mockAppUpdate.downloadedAt = new Date(Date.now() - 2 * 60000).toISOString();
+  }
+  if (mockAppUpdate.state === "installing") mockAppUpdate.installAttemptedAt = new Date(Date.now() - 5000).toISOString();
+  if (mockAppUpdate.state === "installed") {
+    mockAppUpdate.installAttemptedAt = new Date(Date.now() - 5000).toISOString();
+    mockAppUpdate.installedAt = new Date().toISOString();
+    mockAppUpdate.currentVersion = APP_LATEST_VERSION;
+  }
+  if (mockAppUpdate.state === "error") mockAppUpdate.lastError = "GitHub rate limit reached - try again later.";
+  // Fresh copy per response - a caller mutating the returned object (none
+  // do today, but Store.set stores it directly, unlike currentSettings()'s
+  // own always-fresh-object pattern) never corrupts this mock's own state.
+  function mockAppUpdateResponse() { return Object.assign({}, mockAppUpdate); }
 
   // Launch-perf pass (T3 testability): every request this mock answers is
   // logged here (method/path/dispatch time, BEFORE the artificial delay
@@ -1033,7 +1073,10 @@ const Mock = (function () {
         // fire-and-forget settings PUT having resolved first.
         return Object.assign({
           installedFlavours: mockInstalledFlavours, activeFlavour: requestedFlavour, flavour: requestedFlavour,
-          settings: currentSettings()
+          settings: currentSettings(),
+          // APP-UPDATE-SPEC.md section 5: machine-wide, never flavour-scoped -
+          // folded in here exactly once regardless of which flavour resolved.
+          appUpdate: mockAppUpdateResponse()
         }, body);
       }
       // E19: ?mock=1&host=webview2 previews the native-host-only ad-filter
@@ -1184,6 +1227,7 @@ const Mock = (function () {
           if (mockInstalledFlavours.some(function (f) { return f.id === candidate; })) mockSettings.activeFlavour = candidate;
         }
         if (typeof body.showTestRealms === "boolean") mockSettings.showTestRealms = body.showTestRealms;
+        if (typeof body.appUpdateAutoInstall === "boolean") mockSettings.appUpdateAutoInstall = body.appUpdateAutoInstall;
         return currentSettings();
       }
       // Round 18 (tray stage B): fake tray/startup endpoints - see mockTray above.
@@ -1412,6 +1456,40 @@ const Mock = (function () {
         // note.
         return { __status: 202, ok: true };
       }
+
+      // APP-UPDATE-SPEC.md section 5: mock mirrors of the three real routes.
+      // mockAppUpdate itself is either the forced ?appUpdate= fixture (see
+      // its own comment above) or mutated live by Check now/Install now
+      // below - either way, GET status always reads back whatever the
+      // fixture/mutation last left it at, exactly like the real
+      // app-update.json round-trip.
+      if (p === "/api/app-update/status" && method === "GET") {
+        return Object.assign({}, mockAppUpdateResponse(), {
+          autoInstall: mockSettings.appUpdateAutoInstall,
+          windowOpen: true
+        });
+      }
+      if (p === "/api/app-update/check" && method === "POST") {
+        if (new URLSearchParams(location.search).get("game") === "1") return { ok: true, skipped: "game running" };
+        if (mockAppUpdate.state === "checking" || mockAppUpdate.state === "downloading") {
+          return { __status: 200, ok: true, state: mockAppUpdate.state };
+        }
+        mockAppUpdate.state = "checking";
+        mockAppUpdate.deferredReason = null;
+        return { __status: 202, ok: true, state: "checking" };
+      }
+      if (p === "/api/app-update/install" && method === "POST") {
+        if (mockAppUpdate.state !== "ready") return { __status: 400, error: "nothing staged to install" };
+        if (currentJob && currentJob.state === "running") {
+          mockAppUpdate.deferredReason = "job-running";
+          return { __status: 409, error: "busy: a job is running" };
+        }
+        if (new URLSearchParams(location.search).get("game") === "1") return { __status: 409, error: "WoW is running" };
+        mockAppUpdate.state = "installing";
+        mockAppUpdate.installAttemptedAt = new Date().toISOString();
+        mockAppUpdate.deferredReason = null;
+        return { __status: 200, ok: true };
+      }
       return { __status: 404, error: "no mock route for " + method + " " + p };
     },
     requestLog: requestLog
@@ -1428,7 +1506,9 @@ const Mock = (function () {
       // Round 18 (tray stage B)
       backgroundUpdates: mockSettings.backgroundUpdates, backgroundIntervalMinutes: mockSettings.backgroundIntervalMinutes, runAtStartup: mockSettings.runAtStartup,
       // FLAVORS-SPEC.md CS-F4 (S3.4/S5.2)
-      activeFlavour: mockSettings.activeFlavour, showTestRealms: mockSettings.showTestRealms
+      activeFlavour: mockSettings.activeFlavour, showTestRealms: mockSettings.showTestRealms,
+      // APP-UPDATE-SPEC.md section 6
+      appUpdateAutoInstall: mockSettings.appUpdateAutoInstall
     };
   }
 })();
@@ -2013,7 +2093,15 @@ const Api = (function () {
     // no body, and the caller (Actions.uninstallApp) treats any 2xx as
     // success regardless of the literal status code (200 vs 202), exactly
     // like every other Api call already does via request()'s res.ok check.
-    uninstallApp: function () { return request("POST", "/api/uninstall"); }
+    uninstallApp: function () { return request("POST", "/api/uninstall"); },
+
+    // APP-UPDATE-SPEC.md section 5: the app-self-update trio. installAppUpdate's
+    // relaunch is "window" (Settings row / in-window banner) or "tray" (never
+    // called from the SPA itself - the tray's own silent path posts this
+    // directly against the server, not through this page).
+    getAppUpdateStatus: function () { return request("GET", "/api/app-update/status"); },
+    checkAppUpdate: function () { return request("POST", "/api/app-update/check", {}); },
+    installAppUpdate: function (relaunch) { return request("POST", "/api/app-update/install", { relaunch: relaunch }); }
   };
 })();
 
@@ -2174,7 +2262,14 @@ const Store = (function () {
     // Security-review fix: a machine-wide (not flavour-scoped) job in
     // state "awaiting_flavour" the server wants surfaced regardless of
     // which flavour is active right now - see reloadState's own comment.
-    pendingFlavourChoice: null
+    pendingFlavourChoice: null,
+
+    // APP-UPDATE-SPEC.md section 5/11: the app-self-update status object
+    // (GET /api/app-update/status's own shape), folded into every /api/state
+    // response next to gameRunning - null until the first successful
+    // reloadState (Views.settings/App.renderAppUpdateBanner both tolerate
+    // that, same as every other Store field before the first load).
+    appUpdate: null
   };
 
   // QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-foreground): the
@@ -5400,6 +5495,42 @@ const Actions = (function () {
     }
   }
 
+  // APP-UPDATE-SPEC.md section 5: "Check now" - never a hard error just
+  // because WoW happens to be open (the server answers 200 skipped:"game
+  // running", not an error, for exactly that case). No dedicated poll loop
+  // of its own (section 11's own instruction) - App.reloadState(true) picks
+  // up the freshly-written state="checking" immediately, and the normal 5s
+  // idle poll (already running) carries it the rest of the way to
+  // available/ready on its own, same as every other background job here.
+  async function checkAppUpdate() {
+    try {
+      const res = await Api.checkAppUpdate();
+      if (res && res.skipped) { Components.Toast.show("Can't check for updates right now - WoW is running.", "warning"); return; }
+      await App.reloadState(true);
+    } catch (err) {
+      Components.Toast.show("Couldn't check for updates: " + describeError(err), "error");
+    }
+  }
+
+  // APP-UPDATE-SPEC.md sections 3.1/3.2/5: "Install now", from either the
+  // Settings row or the in-window banner - both funnel through this one
+  // Action with the SAME relaunch value ("window"), matching the server's
+  // own single-handler-two-callers shape. On success the server is already
+  // tearing itself down (identical contract to Actions.uninstallApp above),
+  // so App.enterUpdatingState() takes over from here; on a 409 (WoW/a job
+  // is running - normally already prevented by the button's own
+  // disabled+title state, so reaching this is a rare race) or any other
+  // failure, stay put and let the status line/next poll explain why.
+  async function installAppUpdate(relaunch) {
+    try {
+      await Api.installAppUpdate(relaunch || "window");
+      App.enterUpdatingState();
+    } catch (err) {
+      if (err.status === 409) Components.Toast.show("Couldn't install the update right now - try again in a moment.", "warning");
+      else Components.Toast.show("Couldn't install the update: " + describeError(err), "error");
+    }
+  }
+
   return {
     startJob: startJob, resumeJobWithFlavour: resumeJobWithFlavour, setActiveFlavour: setActiveFlavour, updateAllFlavours: updateAllFlavours, checkForUpdates: checkForUpdates, autoCheckForUpdates: autoCheckForUpdates, updateAll: updateAll, updateNow: updateNow,
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, uninstallApp: uninstallApp, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
@@ -5417,7 +5548,9 @@ const Actions = (function () {
     // E19 (curseforge:// handler toggle; ad filter goes through saveSettings above)
     loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered,
     // Round 18 (tray stage B)
-    setBackgroundUpdates: setBackgroundUpdates, setRunAtStartup: setRunAtStartup, refreshTrayStatus: refreshTrayStatus
+    setBackgroundUpdates: setBackgroundUpdates, setRunAtStartup: setRunAtStartup, refreshTrayStatus: refreshTrayStatus,
+    // APP-UPDATE-SPEC.md sections 3.1/3.2/5 (app self-update)
+    checkAppUpdate: checkAppUpdate, installAppUpdate: installAppUpdate
   };
 })();
 
@@ -6749,6 +6882,7 @@ Views.settings = (function () {
     renderFlavourSettings(s);
     renderBrowsing(s);
     renderBackgroundUpdates(s);
+    renderAppUpdates(s);
     Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
     renderUntracked();
@@ -6882,6 +7016,77 @@ Views.settings = (function () {
     Utils.qs("#select-background-interval").value = String(s.backgroundIntervalMinutes || 120);
     Utils.qs("#toggle-run-at-startup").checked = !!s.runAtStartup;
     Utils.qs("#updates-background-status").textContent = backgroundStatusText(s, Store.state.trayStatus);
+  }
+
+  // APP-UPDATE-SPEC.md section 3.1's seven exact status strings - every
+  // real state maps to exactly one of them. deferredReason="job-running" is
+  // checked first and wins regardless of state, since it's only ever the
+  // echo of the last install ATTEMPT (section 5) and never recomputed live -
+  // the state itself (still "ready") hasn't changed underneath it.
+  // "checking"/"downloading" share one line (the download step is a brief,
+  // synchronous continuation of the same maintenance-child check - the spec
+  // gives this app no separate copy for it) and "installed" reads as
+  // "up to date" (nothing left to tell the user once it succeeded).
+  function appUpdateStatusText(au) {
+    if (!au) return "";
+    if (au.deferredReason === "job-running") return "Waiting for an addon job to finish before installing.";
+    const current = au.currentVersion || App.getServerVersion() || "";
+    switch (au.state) {
+      case "checking":
+      case "downloading":
+        return "Checking for updates...";
+      case "available":
+      case "ready":
+        return "Update ready: version " + (au.latestVersion || "") + ".";
+      case "installing":
+        return "Installing update...";
+      case "error":
+        // installAttemptedAt is only ever set once an install was actually
+        // attempted (section 5's Handle-AppUpdateInstall) - a plain check
+        // failure never sets it, so its presence is what distinguishes "the
+        // update itself failed and was rolled back" from "just couldn't
+        // reach GitHub this time" (section 3.1's last two status rows).
+        if (au.installAttemptedAt) return "Couldn't finish updating - kept your current version (" + current + ").";
+        return "Couldn't check for updates - try again later.";
+      case "installed":
+      case "idle":
+      default:
+        return "Furphy is up to date (version " + current + ").";
+    }
+  }
+
+  // APP-UPDATE-SPEC.md section 3.1: Check now/Install now/What's new, plus
+  // the toggle - mirrors renderBackgroundUpdates' own shape immediately
+  // above. Install now's disabled+title idiom mirrors #btn-force-reinstall/
+  // #btn-uninstall-app (App.reloadState already keeps both gameRunning and
+  // Store.state.job current on every poll, so neither needs a fetch here).
+  function renderAppUpdates(s) {
+    Utils.qs("#toggle-app-update-auto").checked = s.appUpdateAutoInstall !== false;
+    const au = Store.state.appUpdate;
+    Utils.qs("#app-update-status-text").textContent = appUpdateStatusText(au);
+
+    const gameRunning = !!Store.state.gameRunning;
+    const checkBtn = Utils.qs("#btn-app-update-check");
+    checkBtn.disabled = gameRunning;
+    if (gameRunning) checkBtn.title = "WoW is running"; else checkBtn.removeAttribute("title");
+
+    const installBtn = Utils.qs("#btn-app-update-install");
+    const ready = !!(au && au.state === "ready");
+    installBtn.hidden = !ready;
+    if (ready) {
+      const jobRunning = (au && au.deferredReason === "job-running") || Store.isBusy();
+      installBtn.disabled = gameRunning || jobRunning;
+      if (gameRunning) installBtn.title = "WoW is running";
+      else if (jobRunning) installBtn.title = "An addon job is running";
+      else installBtn.removeAttribute("title");
+    }
+
+    // "found, or the one just installed" (section 3.1) - shown for every
+    // state that carries a concrete release to point to; hidden again once
+    // a later maintenance tick settles back to idle/error with nothing left
+    // to say.
+    const whatsNewLink = Utils.qs("#link-app-update-whatsnew");
+    whatsNewLink.hidden = !(au && au.releaseUrl && au.state !== "idle" && au.state !== "error");
   }
 
   // "HH:MM" in the viewer's local time, from a lastRunAt ISO timestamp -
@@ -7404,6 +7609,22 @@ Views.settings = (function () {
       Actions.setRunAtStartup(ev.target.checked);
     });
 
+    // APP-UPDATE-SPEC.md section 3.1 (app self-update, NOT addon updates -
+    // deliberately its own toggle/handler, never folded into the three
+    // above). saveSettings' own "Settings saved." toast covers the toggle;
+    // Check now/Install now/What's new don't need one of their own - the
+    // status line/banner update is the feedback.
+    Utils.qs("#toggle-app-update-auto").addEventListener("change", function (ev) {
+      Actions.saveSettings({ appUpdateAutoInstall: ev.target.checked });
+    });
+    Utils.qs("#btn-app-update-check").addEventListener("click", function () { Actions.checkAppUpdate(); });
+    Utils.qs("#btn-app-update-install").addEventListener("click", function () { Actions.installAppUpdate("window"); });
+    Utils.qs("#link-app-update-whatsnew").addEventListener("click", function (ev) {
+      ev.preventDefault();
+      const au = Store.state.appUpdate;
+      if (au && au.releaseUrl) Actions.openWhat("url", { url: au.releaseUrl });
+    });
+
     Utils.qsa("#density-toggle .segmented-btn").forEach(function (btn) {
       btn.addEventListener("click", function () { Prefs.setDensity(btn.dataset.densityValue); renderAppearance(); });
     });
@@ -7800,6 +8021,10 @@ const App = (function () {
   // E18: first-run welcome dialog - shown at most once per browser after
   // the user dismisses it (see wireGlobal's #welcome-skip handler below).
   const WELCOME_SKIPPED_KEY = "addonSync.welcomeSkipped.v1";
+  // APP-UPDATE-SPEC.md section 3.4: the one-time "Updated to version X"
+  // toast, keyed by the version it last showed for (not a plain seen/unseen
+  // boolean like WELCOME_SKIPPED_KEY above) - see maybeShowAppUpdateToast.
+  const APP_UPDATE_SEEN_KEY = "addonSync.appUpdateSeenVersion.v1";
 
   function switchView(view) {
     if (Store.state.view === view) return;
@@ -7878,6 +8103,23 @@ const App = (function () {
     Components.Switcher.render();
     applyBusyToStaticButtons();
     Components.Drawer.refresh();
+    renderAppUpdateBanner();
+  }
+
+  // APP-UPDATE-SPEC.md section 3.2: global chrome (sibling of <main>, not
+  // scoped to one view), so it belongs here next to the sidebar/connectivity
+  // bits above rather than in Views.settings - visible on every screen, not
+  // just Settings. "Not now" sets appUpdateBannerDismissed for the life of
+  // this page load only (never settings.json, never re-checked here) - see
+  // wireGlobal's own click handler below.
+  let appUpdateBannerDismissed = false;
+  function renderAppUpdateBanner() {
+    const banner = Utils.qs("#banner-app-update");
+    if (!banner) return;
+    const au = Store.state.appUpdate;
+    const show = !!(au && au.state === "ready") && !appUpdateBannerDismissed;
+    banner.hidden = !show;
+    if (show) Utils.qs("#banner-app-update-text").textContent = "Furphy " + (au.latestVersion || "") + " is ready.";
   }
 
   // CS2 (UX-SPEC.md section 2.1): connectivity ("can the UI reach the local
@@ -8093,6 +8335,10 @@ const App = (function () {
       // flavour is active; picked up here so it renders through the
       // already-built awaiting_flavour picker (Components.JobPanel).
       const nextPendingFlavourChoice = data.pendingFlavourChoice || null;
+      // APP-UPDATE-SPEC.md section 5/11: folded into Handle-State's own
+      // response next to gameRunning - picked up on this same poll, no new
+      // poll loop of its own.
+      const nextAppUpdate = data.appUpdate || null;
 
       // Round 4 fix: the idle poll (every 5s, see scheduleIdlePoll below) used
       // to call renderCurrentView() unconditionally on every tick, even when
@@ -8117,7 +8363,8 @@ const App = (function () {
         || nextGameRunning !== Store.state.gameRunning
         || JSON.stringify(nextInstalledFlavours) !== JSON.stringify(Store.state.installedFlavours)
         || nextActiveFlavour !== Store.state.activeFlavour
-        || JSON.stringify(nextPendingFlavourChoice) !== JSON.stringify(Store.state.pendingFlavourChoice);
+        || JSON.stringify(nextPendingFlavourChoice) !== JSON.stringify(Store.state.pendingFlavourChoice)
+        || JSON.stringify(nextAppUpdate) !== JSON.stringify(Store.state.appUpdate);
 
       Store.set({
         addons: nextAddons, settings: nextSettings, lastRun: nextLastRun,
@@ -8127,6 +8374,7 @@ const App = (function () {
         gameRunning: nextGameRunning,
         installedFlavours: nextInstalledFlavours, activeFlavour: nextActiveFlavour,
         pendingFlavourChoice: nextPendingFlavourChoice,
+        appUpdate: nextAppUpdate,
         loadingState: false, stateError: null
       });
       if (!afterJob) resumeJobPollingIfNeeded();
@@ -8251,6 +8499,40 @@ const App = (function () {
     OverlayTracker.open();
   }
 
+  // APP-UPDATE-SPEC.md section 3.2: the analogous one-way state for the
+  // app-self-update "Install now" flow (Settings row or in-window banner) -
+  // stops every polling loop this module owns, exactly like
+  // enterUninstallingState above, then swaps in the "Updating..." overlay.
+  // The window is expected to close (old server exits) and a NEW window
+  // opens on its own (install.ps1 -Upgrade's own relaunch) - there is no
+  // "resume" path from this state, so unlike enterUninstallingState this
+  // one also arms a ~20s fallback: if THIS SAME page is still sitting here
+  // that long later (the new window never appeared, or this old one was
+  // never actually closed), swap the overlay's own text to the Q4-decided
+  // fallback copy in place - a plain #banner-offline fallback would never
+  // even be visible, since this overlay already covers the whole page
+  // above it (same z-index pattern as #app-closing-overlay).
+  let updating = false;
+  let appUpdateTimeoutTimer = null;
+  function enterUpdatingState() {
+    if (updating || uninstalling) return;
+    updating = true;
+    clearTimeout(idleTimer);
+    clearTimeout(jobPollTimer);
+    clearInterval(autoCheckTimer);
+    clearInterval(uptimeTimer);
+    const shell = Utils.qs("#app");
+    if (shell) shell.hidden = true;
+    const overlay = Utils.qs("#app-updating-overlay");
+    if (overlay) overlay.hidden = false;
+    OverlayTracker.open();
+    clearTimeout(appUpdateTimeoutTimer);
+    appUpdateTimeoutTimer = setTimeout(function () {
+      const p = Utils.qs("#app-updating-text");
+      if (p) p.textContent = "Furphy is finishing an update. If this does not clear in a minute, open it again from the desktop shortcut.";
+    }, 20000);
+  }
+
   function isUpdatesCheckStale() {
     const checkedAt = Store.state.updatesCheckedAt;
     if (!checkedAt) return true;
@@ -8318,6 +8600,19 @@ const App = (function () {
 
   function wireGlobal() {
     Utils.qsa(".nav-item").forEach(function (btn) { btn.addEventListener("click", function () { switchView(btn.dataset.view); }); });
+
+    // APP-UPDATE-SPEC.md section 3.2: same two actions as the Settings row
+    // (3.1), plus "Not now" - global chrome, wired once here rather than
+    // per-view, same reasoning as renderAppUpdateBanner's own comment.
+    Utils.qs("#banner-app-update-install").addEventListener("click", function () { Actions.installAppUpdate("window"); });
+    Utils.qs("#banner-app-update-whatsnew").addEventListener("click", function () {
+      const au = Store.state.appUpdate;
+      if (au && au.releaseUrl) Actions.openWhat("url", { url: au.releaseUrl });
+    });
+    Utils.qs("#banner-app-update-dismiss").addEventListener("click", function () {
+      appUpdateBannerDismissed = true;
+      renderAppUpdateBanner();
+    });
 
     Utils.qs("#drawer-backdrop").addEventListener("click", function () { Components.Drawer.close(); });
     Utils.qs("#drawer-close").addEventListener("click", function () { Components.Drawer.close(); });
@@ -8421,6 +8716,31 @@ const App = (function () {
     } catch (err) { /* best-effort only */ }
   }
 
+  // APP-UPDATE-SPEC.md section 3.4: fires once per version change, whether
+  // that update was automatic or the one manual install a 1.21.x user does.
+  // "never fire on a genuinely fresh browser profile/first-ever install -
+  // only when the stored value differs from a PRIOR real version" is why
+  // this checks `seen !== null` before comparing - a fresh profile has no
+  // stored value at all, not merely a mismatched one. Writes the new value
+  // unconditionally afterward either way, so a fresh profile is seeded
+  // silently and this can genuinely fire only once per real version change.
+  function maybeShowAppUpdateToast() {
+    const current = serverVersion;
+    if (!current) return;
+    let seen = null;
+    try { seen = localStorage.getItem(APP_UPDATE_SEEN_KEY); } catch (err) { return; }
+    if (seen !== null && seen !== current) {
+      Components.Toast.show("Updated to version " + current + ".", "success", {
+        actionLabel: "What's new",
+        onAction: function () {
+          const au = Store.state.appUpdate;
+          Actions.openWhat("url", { url: au && au.releaseUrl });
+        }
+      });
+    }
+    try { localStorage.setItem(APP_UPDATE_SEEN_KEY, current); } catch (err) { /* best-effort only */ }
+  }
+
   async function init() {
     applyInitialViewFromQuery();
     // Launch-perf pass: a ?view=settings deep link (or a future caller of
@@ -8501,6 +8821,12 @@ const App = (function () {
     // loadProtocolStatus's protocolStatusPromise guard makes whichever of
     // the two fires first the only one that actually hits the network.
     Actions.loadProtocolStatus();
+    // APP-UPDATE-SPEC.md section 3.4: "on first render after App.init()
+    // resolves the server's version" - serverVersion is already set by
+    // fetchPingInfo above, but this also waits for reloadState so
+    // Store.state.appUpdate.releaseUrl (read lazily, at click time, by the
+    // toast's own action) has a real chance of already being populated.
+    maybeShowAppUpdateToast();
     await maybeShowWelcome();
     startIdlePolling();
     scheduleAutoCheck();
@@ -8518,7 +8844,11 @@ const App = (function () {
     // can confirm polling actually stopped without timing-sensitive
     // "did another network call happen" assertions.
     enterUninstallingState: enterUninstallingState,
-    isUninstalling: function () { return uninstalling; }
+    isUninstalling: function () { return uninstalling; },
+    // APP-UPDATE-SPEC.md section 3.2 - same testability reasoning as
+    // isUninstalling/enterUninstallingState above.
+    enterUpdatingState: enterUpdatingState,
+    isUpdating: function () { return updating; }
   };
 })();
 

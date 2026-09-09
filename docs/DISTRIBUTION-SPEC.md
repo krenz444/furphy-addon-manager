@@ -730,6 +730,33 @@ not a one-time fix.
   any new landing page at "latest"**, or the button will download a
   version many releases behind.
 
+- **Round 42 (1.22.0) addition - a third release asset, the sha256
+  sidecar.** APP-UPDATE-SPEC.md's self-updater (`Invoke-AppUpdateMaintenance`,
+  addon-server.ps1) downloads a release's own versioned zip over HTTPS and
+  must verify it before it ever touches the live install - `package.ps1`
+  now also emits `FurphyAddonManager-<version>.zip.sha256` (BARE lowercase
+  hex sha256, nothing else - no filename, no trailing newline, ASCII - NOT
+  the standard two-column `sha256sum` shape) next to the two zips this
+  section already documents, and the `gh release create` reminder now
+  names all three assets. An earlier draft of this section described the
+  standard two-column format instead; that would break every real update,
+  since the self-updater's own integrity check
+  (`Invoke-AppUpdateMaintenanceCore`, addon-server.ps1) reads the sidecar
+  with `(Get-Content -Raw).Trim().ToLowerInvariant()` and compares that
+  WHOLE trimmed string directly against `Get-FileHash`'s own `.Hash` -
+  never splitting on whitespace, never taking "the first token" - so the
+  bare-hash format above is what actually ships and the only format this
+  check accepts. This is a **transport-integrity** check only - it proves
+  the downloaded zip
+  matches what the release step attached (catches a truncated download or
+  a tampered transfer), never an authorship/trust check and never a
+  substitute for the code-signing decision in section 6.7 below: anyone
+  with push/release access to the repo could still ship a bad zip+sha256
+  pair together, the same as they always could with the zip alone. Do not
+  read this sidecar as reopening the "no code signing" decision - it
+  solves a different problem (bytes arrived intact) than signing would
+  (this publisher is who they claim to be).
+
 ### 6.7 Explicitly deferred, and why (not built this round)
 
 - **No compiled installer EXE** (IExpress, 7-Zip SFX, or a hand-built

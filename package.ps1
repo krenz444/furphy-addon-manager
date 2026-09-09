@@ -149,6 +149,42 @@ Remove-Item -LiteralPath $stageRoot -Recurse -Force
 $sizeKb = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1KB)
 Write-Host "Built $zipPath ($sizeKb KB)"
 
+# APP-UPDATE-SPEC.md sections 11/13 (round 42, 1.22.0: the app updates
+# itself): a sha256 sidecar for the VERSIONED zip only - the self-updater
+# (Invoke-AppUpdateMaintenance, addon-server.ps1) always downloads a
+# release's own tag-versioned asset via its browser_download_url, never
+# the floating FurphyAddonManager-latest.zip below, so latest.zip needs
+# no sidecar of its own. Format: BARE lowercase hex sha256, nothing else
+# - no filename, no trailing newline, ASCII - matching APP-UPDATE-SPEC.md
+# section 8.3/11's own literal example exactly.
+#
+# CONFIRMED against Package A's real, landed code (addon-server.ps1's
+# Invoke-AppUpdateMaintenanceCore, the sha256-mismatch branch): it reads
+# the downloaded sidecar with
+# `(Get-Content -LiteralPath $shaPath -Raw).Trim().ToLowerInvariant()`
+# and compares that WHOLE trimmed string, directly, against
+# Get-FileHash's own .Hash - never splitting on whitespace, never taking
+# "the first token". An earlier draft of this file emitted the standard
+# two-column sha256sum shape ("<hash>  <filename>") instead - verified
+# LIVE while writing this file to be a real, total-feature-breaking bug
+# against Package A's actual comparison (every real download, however
+# correct, would read as a mismatch) - fixed here to the bare form before
+# 1.22.0 ships. Keep this in sync with
+# tests\lib\common.ps1's Start-GitHubReleaseStubServer /
+# New-GitHubReleaseFixtureShaSidecar (Package E), whose own default
+# -ShaSidecarFormat is 'bare' for the identical reason.
+$shaPath = "$zipPath.sha256"
+$zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+$zipHash | Set-Content -LiteralPath $shaPath -Encoding Ascii -NoNewline
+if (-not (Test-Path -LiteralPath $shaPath -PathType Leaf)) {
+    throw "package.ps1: FAILED - sha256 sidecar is missing after build: $shaPath"
+}
+$sidecarContent = (Get-Content -Raw -LiteralPath $shaPath).Trim().ToLowerInvariant()
+if ($sidecarContent -ne $zipHash) {
+    throw "package.ps1: FAILED - sha256 sidecar's own hash ($sidecarContent) does not match Get-FileHash of the zip ($zipHash)"
+}
+Write-Host "Built $shaPath ($zipHash)"
+
 # DISTRIBUTION-SPEC.md fix 8: a second, IDENTICALLY-NAMED-every-release
 # asset so GitHub's own stable /releases/latest/download/<name> link (the
 # landing page's and README's "Download" button) never goes stale - that
@@ -174,5 +210,5 @@ if ($versionedBytes -ne $latestBytes) {
 }
 
 Write-Host ''
-Write-Host 'Release step (manual, on demand) - ATTACH BOTH ZIPS, every release (fix 8):'
-Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`""
+Write-Host 'Release step (manual, on demand) - ATTACH ALL THREE ASSETS, every release (fix 8 + APP-UPDATE-SPEC.md section 13):'
+Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`" `"$shaPath`""

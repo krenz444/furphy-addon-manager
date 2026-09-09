@@ -37,7 +37,11 @@ param(
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 
-$Script:VirtualTimeBudgetMs = 60000
+# Round 42: 60000 was no longer enough once phaseAppUpdates added six more
+# mock-page loads (each state of the App updates section plus the two
+# first-run-toast reloads) - the page froze mid-phase with complete=false and
+# no harnessError, i.e. the budget ran out, not the code. Doubled.
+$Script:VirtualTimeBudgetMs = 120000
 $Script:MsedgeTimeoutSec = 150   # under run-all.ps1's own outer budget for
                                   # this script (see the run-all.ps1 hunk
                                   # below) so a genuine hang is caught HERE

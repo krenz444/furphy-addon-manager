@@ -1,5 +1,229 @@
 # Furphy Addon Manager - changelog
 
+## Round 42 (1.22.0: the app updates itself)
+
+Five parallel packages built against one frozen design,
+APP-UPDATE-SPEC.md (HTTP API shapes in section 5, install.ps1's
+-Upgrade/-Relaunch command line in section 8.5, the settings key in
+section 6, and app-update.json's own fields in section 4 - none
+renegotiated mid-round). This entry is written from Package E's own
+side (tests, release process, docs) - see that section's own file list
+if a future reader needs the exact change set per package.
+
+**What's new, in the player's own words:** Furphy now checks
+github.com for a newer version on its own and, by default, installs it
+the next time doing so is safe - never while WoW is running, never
+mid-addon-job, and (for the silent background path) never while a
+Furphy window is open. Settings gains a new "App updates" group,
+separate from the existing addon-update "Updates" group so the two
+concepts (Furphy updating ITSELF vs. Furphy updating your ADDONS) are
+never confused in the UI or in code: a toggle ("Install app updates
+automatically", on by default), a status line, "Check now", "Install
+now", and a "What's new" link once a newer version is known. An
+in-window banner offers the same "Install now"/"What's new" when a
+window happens to be open at the moment an update becomes ready; a
+tray balloon announces a successful silent install once, durably (a
+new tray-state.json field survives the very process restart the
+announcement is about). Integrity end to end before any file touches
+the live install: HTTPS + TLS 1.2, a new sha256 sidecar asset, a
+VERSION-vs-release-tag check, and a downgrade refusal. A failed install
+rolls back to the previously-working version automatically and says so
+plainly ("Couldn't finish updating - kept your current version").
+1.21.x users: nothing in this feature ever runs for them - this is the
+FIRST version carrying the updater, so it can only update installs
+already at 1.22.0 or newer. Install 1.22.0 the same way every version
+upgrade has always worked, once, by hand; every upgrade after that is
+automatic.
+
+**The install.ps1 correctness fix this feature exposed (not new-feature
+code - a pre-existing bug in EXISTING behavior):** `Invoke-FurphyInstallSteps`
+(the shared install/upgrade path) never stopped a running Furphy
+server/tray/window before overwriting `host\bin\FurphyHost.exe` -
+overwriting that exact file while the CURRENTLY RUNNING copy still
+holds it open throws `ERROR_SHARING_VIOLATION` and aborts the install
+mid-copy. This already silently broke a manual "download the new zip,
+run install.ps1 again" upgrade whenever a window or the tray was open;
+it is an absolute blocker for a self-updater that upgrades while its
+own server is, by definition, still running. Fixed by factoring the
+Uninstall-only stop sequence into `Invoke-InstallStopRunningApp` and
+calling it unconditionally at the top of `Invoke-FurphyInstallSteps` -
+a no-op when nothing is running, load-bearing whenever something is.
+
+**Release process:** `package.ps1` now emits a third asset,
+`FurphyAddonManager-<version>.zip.sha256` (a bare lowercase hex sha256,
+nothing else - no filename, no trailing newline, matching Package A's
+own real integrity check exactly, which compares the whole trimmed
+sidecar content directly against `Get-FileHash`), and refuses to finish
+if that hash doesn't match `Get-FileHash` of the zip it just built. The
+printed `gh release create` reminder now names all three assets.
+`deploy.ps1` mirrors `APP-UPDATE-SPEC.md` into the repo's `docs\` folder
+alongside every other spec this project already mirrors there.
+
+**Tests:** `Server.AppUpdateVersionCompare.Tests.ps1` and
+`Server.AppUpdateReleaseParse.Tests.ps1` (unit), `Server.AppUpdate.Tests.ps1`
+(integration, against a new local GitHub-Releases-API-shaped stub,
+`Start-GitHubReleaseStubServer` in `tests\lib\common.ps1` - never the
+real github.com/api.github.com, per this project's own standing rule),
+and `AppUpdate.SilentUpgrade.Tests.ps1` (fixture-acceptance, a real
+scratch install.ps1 upgrade run with `-Relaunch none` so it never opens
+a real window or starts a real tray process - see that file's own
+header for why a genuine health-check-failure rollback case is left as
+a permanent, environment-scoped skip rather than run on a live desktop).
+All four packages had landed by the time this entry's own testing
+finished, so every file above ran for real against the final tree
+rather than sitting PENDING - see TESTING.md's own "Round 42" section
+for the several real, load-bearing findings that surfaced along the
+way (a `Test-GameRunning`/`Handle-AppUpdateInstall` ordering quirk, a
+`Test-GameRunning` 30s cache staleness trap, a sha256-sidecar-format
+mismatch between an earlier draft of this round's own package.ps1
+change and Package A's real integrity check, and a real
+`Start-TestServer`-wide live-safety bug - the very first maintenance
+tick on ANY fresh scratch server now also checks the real GitHub API -
+fixed in `tests\lib\common.ps1` itself so every caller across this
+whole suite is protected, not just this round's own new files).
+
+**Final verified counts (VERIFIER pass 3, full tree, after REFIX 2
+landed):** `tests\run-all.ps1 -Only static,unit,spa` - ALL LAYERS PASSED
+on the first clean run (static 7/7, unit 360/360, spa 2/2 i.e. harness
+276/276 + theme-audit 500/500, 108s total), production Run
+value/Uninstall key/tray pid 30372 confirmed unchanged by the run's own
+hygiene sweep. Per-file `Invoke-Pester` beyond that gate (every
+`tests\integration\Server.*.Tests.ps1` that starts no window, plus
+`Server.AppUpdate.Tests.ps1` and `AppUpdate.SilentUpgrade.Tests.ps1` in
+the same combined run, plus `Server.Uninstall.Tests.ps1` run with
+`-ExcludeTag Host`): 112 passed, 1 failed, 0 skipped (113 total across
+12 files). The one failure is the SAME pre-existing, already-flagged
+`Get-OrphanAddonServerProcesses` (`Server.Uninstall.Tests.ps1` ~line
+690) issue pass 2 and REFIX 2 already recorded - confirmed still
+present, unowned by any round-42 package, still a test-helper false
+negative on a healthy outcome (`install.ps1 -Uninstall` really does
+stop the orphaned background server; port closes, process handle
+exits), not a product defect. App-update-specific counts:
+`Server.AppUpdateVersionCompare.Tests.ps1` 9/9,
+`Server.AppUpdateReleaseParse.Tests.ps1` 8/8, `Server.AppUpdate.Tests.ps1`
+12/12 (up from pass 2's 9/9 - REFIX 2 added 3 new relaunch-validation
+cases), `AppUpdate.SilentUpgrade.Tests.ps1` 7/7. Host:
+`host\build-host.ps1` 0 errors; a hidden `--tray-selftest` run on port
+47941 exited 0 and wrote its marker, no window.
+
+An independent end-to-end scratch upgrade (own scratch install under
+this pass's own `scratchpad\appupdate\verify\`, real
+`dist\FurphyAddonManager-1.22.0.zip` freshly rebuilt via `package.ps1`
+so it carries REFIX 2's own fixes, served by a hand-launched
+GitHub-release stub as `v1.22.0`): `POST /api/app-update/check` -> real
+download+sha256 verify+staged extraction -> `ready`,
+`latestVersion` 1.22.0 -> since the real HTTP `POST
+/api/app-update/install` route only ever accepts
+`relaunch:"window"|"tray"` (both forbidden actions on this shared
+desktop - a real window or a second real tray icon), the staged
+`install.ps1 -Upgrade -Relaunch none -NoShortcuts -NoProtocol
+-SkipAdopt` run directly against the STILL-RUNNING scratch server
+(matching Package E's/pass 2's own established safe technique) ->
+`Invoke-InstallStopRunningApp` correctly stopped the live scratch
+server -> VERSION becomes 1.22.0, `flavours\retail\addons.json`
+byte-identical, one rollback backup present (hash-named
+`FurphyRollback-<hash>`) holding the old 1.21.1 code, the staged
+extraction folder cleaned up (confirmed via `Invoke-InstallAppUpdateCleanup`'s
+own deliberate delayed `cmd.exe`/`rd` self-delete, `install.ps1:2158-2166` -
+gone within a few seconds of `install.ps1` exiting, not synchronously)
+-> a server restarted by hand (relaunch=none relaunches nothing)
+answers `/api/ping` with 1.22.0. `settings.json` was NOT byte-identical
+in this run (unlike pass 2's) - traced to `Get-Settings`'s own
+pre-existing migrate-on-read behavior (`addon-server.ps1:1535/1552`)
+rewriting/reformatting the file the moment the scratch server first
+started, filling in `schemaVersion` - entirely unrelated to
+`install.ps1`/the upgrade itself (confirmed: neither
+`Backup-InstallCodeForRollback`'s nor Step 3's own copy list ever
+touches `settings.json`), a pre-existing server behavior pass 2's own
+E2E run never happened to exercise because their run started no real
+server before upgrading. Negative cases (correctly reproduced only
+after waiting out the same-second startup-tick race noted below - see
+that finding): a tampered `.sha256` on a genuinely newer fake tag ->
+`state:"error"`, `lastError:"integrity check failed"`, nothing newly
+staged, VERSION stays 1.22.0; a genuinely OLDER fake tag -> `state:"idle"`,
+no error, `checkedAt` advances (confirming a real check ran, not a
+no-op).
+
+**Pass 2's "stuck checking" finding: PARTIALLY fixed by REFIX 2, one
+mechanism still open.** REFIX 2's fix to `Invoke-AppUpdateMaintenanceCore`'s
+two unforced early-return gates (`addon-server.ps1:9280-9314` current
+line numbers) is real and verified working: reproduced pass 2's own
+scenario directly against `Invoke-AppUpdateMaintenanceCore` and
+confirmed `$preLookupState` is now saved before both early returns.
+That fixes the case where the unforced 24h/rate-limit gate ITSELF is
+what a racing check hits. It does NOT fix the sibling mechanism pass 2
+also described in the same paragraph: `Invoke-AppUpdateMaintenance`'s
+own dedup lock (`Test-AppUpdateChildRunning`, `addon-server.ps1:9080-9103`,
+gated at the very top of the wrapper, `addon-server.ps1:9121`) returns
+immediately whenever ANOTHER app-update child already holds it -
+BEFORE `Invoke-AppUpdateMaintenanceCore` (and therefore REFIX 2's fix)
+is ever reached, `-Force` or not. Reproduced live, twice: started a
+fresh scratch server (whose own very-first `-MaintenanceOnly` tick
+always also fires an unforced app-update check per section 7's "always
+qualifies" rule) and POSTed `/api/app-update/check` within the same
+second - `server.log` showed the manual click's own spawned
+`-AppUpdateOnly` child start and finish with zero release-lookup work
+logged in between, both times. In this pass's specific reproduction the
+outcome still SELF-HEALED - the racing automatic tick happened to be
+the lock's winner and (thanks to REFIX 2's real fix) itself wrote a
+complete, correct final state a moment later, which is why the
+negative-case results above only became trustworthy once the script
+was changed to wait out that same-second race before asserting
+anything (an earlier, unpatched version of this pass's own script
+falsely "passed" a tampered-sha256 case with `state:"idle"` and zero
+actual GitHub calls made, simply because the manual check had lost this
+exact race and done nothing). The residual risk: this self-healing
+depends entirely on the CONCURRENT racer being a genuine, still-live
+app-update child that itself finishes and saves a fresh state; a
+`Test-AppUpdateChildRunning` false-positive (a stale lock file whose
+recorded PID happens to already belong to some unrelated, long-lived
+process - a real risk on any machine, since PIDs are reused by the OS)
+would leave `state:"checking"` stuck forever with nothing left to ever
+restore it, exactly like pass 2's original finding, just via the sibling
+gate REFIX 2's fix does not cover. `addon-server.ps1` is Package A's
+file, out of this pass's own scope to patch - flagging precisely for
+whoever owns the next round.
+
+**Spec conformance:** GET status/POST check/POST install JSON shapes,
+every `app-update.json` field, and the `install.ps1` command line
+(sections 4/5/8.5) all match verbatim, including the deliberate
+additive `rateLimitedUntil` (Eric's Q2) and the TEST-ONLY
+`testDryRunCommandLine` field; `Handle-Open`'s github.com entry, its
+400 string, and its doc comment were all updated together - no stale
+"two marketplaces" text remains anywhere. Pass 2's own flagged gap
+(`Handle-AppUpdateInstall` silently defaulting an unrecognized
+`relaunch` value to `"window"` instead of 400ing) is CONFIRMED FIXED by
+REFIX 2 (`addon-server.ps1:9645-9650`): `relaunch:"none"`, a missing
+`relaunch`, and any other value now all get a clean 400
+`{error:"relaunch must be 'window' or 'tray'"}` before anything else
+runs - verified both by reading the code and via
+`Server.AppUpdate.Tests.ps1`'s 3 new cases for exactly this (all
+passing). `Backup-InstallCodeForRollback`'s deterministic hash-named
+folder (never `<version>-<guid>`) independently re-confirmed via a real
+backup produced by this pass's own E2E run.
+
+Production Run value, Uninstall `DisplayVersion` (1.21.1), the live
+`VERSION` file, the curseforge:// handler, the real Desktop shortcut,
+and tray pid 30372 were confirmed byte-identical before and after this
+entire pass, including around the E2E scratch upgrade above (scratch
+ports 47930-47949/stub ports only, no window and no `--tray` process
+ever started). Separately, this pass observed (not caused by, and not
+touching, any round-42 file): an unrelated concurrent process actively
+rewriting several docs this round does not own (`SPEC.md`,
+`GAME-MODE-SPEC.md`, `SETUP-SPEC.md`, `REMOVAL-SPEC.md`) in the shared
+build root during this pass's own work window - every round-42 file's
+`LastWriteTime` was confirmed unchanged since REFIX 2 both before and
+after, so this round's own deliverable was not affected, but the build
+root is evidently a live, shared, concurrently-written checkout right
+now.
+
+**Full quick gate on the final tree (2026-09-09 00:35, PC idle, WoW
+closed, real windows):** static 7/7, unit 360/360, integration 132/132
+(the uninstall test helper false negative fixed in the closeout), host
+16/16, spa 276/276 - the SPA harness runner needed its virtual-time
+budget doubled (60s -> 120s) because the new App updates phase pushed the
+run past it, which showed up as an incomplete run, not a failing check.
+
 ## Round 41.1 (1.21.1: Lofi Night and Arcane Library animations finally cheap - the real driver found)
 
 Follow-up to Round 41, shipped on Eric's standing "put out a release"

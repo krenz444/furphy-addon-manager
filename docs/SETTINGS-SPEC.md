@@ -456,6 +456,39 @@ Row 19 (new, Round 33 - DISTRIBUTION-SPEC.md sections 3.2/3.4; a new final
        row all converge on the same design) and UX-SPEC.md's Round 33
        entry for the summary version of this same row.
 
+Row 20 (new, Round 42 - APP-UPDATE-SPEC.md section 3.1; a NEW, SEPARATE
+  settings-group, id="settings-app-updates", titled "App updates" -
+  placed directly after Group 1 "Updates" (Row 4's status line) and
+  before Group 2 "Appearance" (Row 5) in the actual app, per
+  APP-UPDATE-SPEC.md section 3.0's own placement decision; listed here at
+  the end of this row list rather than renumbering every row above it,
+  per this file's own no-renumbering convention for a later addition -
+  see Row 19's identical treatment for Round 33)
+  key: appUpdateAutoInstall
+  control: toggle
+  default: on (true - deliberately the OPPOSITE polarity from Row 2's
+       backgroundUpdates, which defaults off; intentional, per Eric's
+       brief for this feature)
+  label: "Install app updates automatically"
+  helper line: none
+  tooltip: "When a new version of Furphy is ready, it installs on its
+       own the next time no Furphy window is open - and never while WoW
+       is running. Turn this off to only be asked before installing. On
+       by default."
+  prior location: n/a (new)
+  see also: a second, always-visible row directly below (status text +
+       Check now / Install now / What's new controls, no settings.json
+       key of its own - APP-UPDATE-SPEC.md section 3.1's Row 2) is not
+       given its own numbered row here since it holds no persisted
+       setting; its exact copy/behavior is fully specified in
+       APP-UPDATE-SPEC.md section 3.1, not duplicated here. Do NOT share
+       any id/class prefix with #settings-updates / #updates-* / the
+       addon-update strings ("Update addons...", "Check for updates
+       now") - APP-UPDATE-SPEC.md section 3.0 calls this out explicitly:
+       two "check for updates" concepts (addons vs. the app itself) in
+       the same Settings screen is exactly the kind of collision a
+       below-average-tech-savvy player cannot parse.
+
 Footer line (About), directly below the Advanced disclosure, OUTSIDE any
 bordered box, no <h3> heading - three items separated by " . ", each its
 own small span so a tooltip icon can still attach per item:

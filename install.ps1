@@ -76,7 +76,25 @@ param(
     # addons even though nothing was actually deleted). Never needed for a
     # normal install/upgrade/repair - only to deliberately install an
     # older release on purpose.
-    [switch]$Force
+    [switch]$Force,
+    # APP-UPDATE-SPEC.md section 8.5/11 (fixed command-line shape - never
+    # renegotiate): set by the self-updater's own POST /api/app-update/
+    # install caller (addon-server.ps1), which launches a STAGED
+    # install.ps1 copy over the currently-running app. Backs up the
+    # current code before copying (section 8.6), runs a post-install
+    # health check, rolls back and relaunches the OLD version on any
+    # failure, and relaunches per -Relaunch on success (section 8.7).
+    # Never set by a normal manual install/repair.
+    [switch]$Upgrade,
+    # APP-UPDATE-SPEC.md section 8.7: which of the two run modes to bring
+    # back after a passing -Upgrade - "window" (Addon Manager.vbs),
+    # "tray" (host\bin\FurphyHost.exe --tray), or "none" (relaunch
+    # nothing and skip the post-install health check entirely - the real
+    # HTTP route only ever sends "window"/"tray"; "none" exists so a
+    # headless verification pass can exercise the file-level upgrade
+    # without starting a window or tray on the machine running it).
+    # Meaningless without -Upgrade.
+    [string]$Relaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1063,6 +1081,214 @@ function Remove-FurphyLegacyLauncherArtifacts {
 }
 
 # =====================================================================
+# APP-UPDATE-SPEC.md section 8.5: REAL GAP FOUND BY READING THE CODE, the
+# load-bearing fix the whole self-update feature depends on. Close-
+# InstallMainWindow/Invoke-InstallServerShutdown/Wait-InstallHostAndWebView2Exit/
+# Get-InstallLiveAppDestProcesses above used to be reachable ONLY from
+# inside the -Uninstall block below. Invoke-FurphyInstallSteps's own Step
+# 3b (the unguarded host\bin\FurphyHost.exe copy loop, no try/catch,
+# $ErrorActionPreference='Stop') throws ERROR_SHARING_VIOLATION and aborts
+# the whole install the moment that exact exe (or a WebView2 child) is
+# still open when the copy runs - already a latent bug in any plain
+# "run install.ps1 again to upgrade" with a window/tray open, and an
+# absolute blocker for a self-updater that upgrades while its OWN server
+# is, by definition, still running.
+#
+# Factored out of the exact code the -Uninstall block used to run inline
+# (same behavior, same messages) so Invoke-FurphyInstallSteps can call it
+# UNCONDITIONALLY at the top of every install/upgrade/repair run. A no-op
+# when nothing is running (Get-InstallLiveAppDestProcesses returns empty
+# instantly), load-bearing whenever something is.
+# =====================================================================
+
+function Invoke-InstallStopRunningApp {
+    <#
+      -SkipRunValueRemoval: the HKCU "Start with Windows" Run value is a
+      REGISTRATION, not a running process - removing it is correct only
+      when the app is actually going away (a true -Uninstall). Every
+      OTHER caller of this function (a plain repair/reinstall today, and
+      -Upgrade per APP-UPDATE-SPEC.md section 8.5's own a/b/c breakdown:
+      "(a) remove the Run value - SKIP this one under -Upgrade. The app
+      is not going away; deregistering startup would silently break
+      'Update addons in the background' at next logon.") must pass this
+      switch so existing behavior for every non-uninstall caller is kept
+      byte-identical to before this function existed (a plain reinstall
+      never touched the Run value either, since none of this code ran
+      for it at all). The TrayStop-event signal and its up-to-10s wait -
+      "(b)"/"(c)" in that same breakdown - always run regardless of this
+      switch: they are the steps that matter most for THIS feature (the
+      silent/tray relaunch path is exactly the scenario where a tray IS
+      running when the upgrade fires).
+
+      Returns a PSCustomObject:
+        TrayWasRunningIndependently - $true if any matched
+          FurphyHost.exe process, BEFORE anything here stopped it, had
+          '--tray' on its own command line (section 8.7 - tray and a
+          main window are not mutually exclusive; this lets a caller
+          restore an independently-running tray after a window-triggered
+          relaunch, rather than silently killing it and never bringing
+          it back until the user's next reboot).
+        ForceKilled - list of "<name> (pid <n>)" labels for anything that
+          had to be force-terminated after the graceful wait timed out
+          (Wait-InstallHostAndWebView2Exit's own return value, passed
+          through).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [switch]$SkipRunValueRemoval
+    )
+
+    $appDestNorm = $AppDest.TrimEnd('\').ToLowerInvariant()
+
+    # DISTRIBUTION-SPEC.md fix 9/section 5.3 step 3: best-effort ask any
+    # open Furphy MAIN WINDOW for THIS install's own port to close, before
+    # the FurphyHost-process wait loop below starts waiting - gives that
+    # loop something proactive to do besides wait and warn. The ONLY
+    # WM_CLOSE-by-window-title implementation in the whole project (do not
+    # add a second one in host\FurphyHost.cs).
+    Close-InstallMainWindow -Port (Get-InstallPort -AppDest $AppDest)
+
+    # APP-UPDATE-SPEC.md section 8.7: detect BEFORE stopping anything -
+    # tray and window are not mutually exclusive, and relaunch is keyed
+    # solely to the caller's own -Relaunch intent, never to Win32
+    # window-guessing. Read off the exact same live-process snapshot the
+    # stop sequence below builds anyway - never a second CIM query just
+    # for this.
+    $trayWasRunningIndependently = $false
+    try {
+        foreach ($p in (Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm)) {
+            if ($p.Name -eq 'FurphyHost.exe') {
+                $cmd = [string]$p.CommandLine
+                if ($cmd -and $cmd.ToLowerInvariant().Contains('--tray')) { $trayWasRunningIndependently = $true }
+            }
+        }
+    } catch {
+        # Best-effort only - a failed read here just means a later
+        # window-relaunch will not also restore an independent tray; it
+        # must never block the stop/upgrade itself.
+    }
+
+    # Round 18 (tray stage B): stop any running tray before touching files -
+    # the app files removal/copy below deletes/overwrites host\ (FurphyHost.exe
+    # included), which must not happen while that exe is still running out
+    # of the folder being deleted/replaced. Order here matters: remove the
+    # Run value FIRST when not skipped (so a logon during a slow uninstall
+    # can't relaunch the tray), then signal the running instance to exit,
+    # then wait for it before any Remove-Item/Copy-Item touches host\.
+    $trayExePath = Join-Path -Path $AppDest -ChildPath 'host\bin\FurphyHost.exe'
+    if ($SkipRunValueRemoval) {
+        Write-Info 'Leaving the "Start with Windows" registration untouched (not an uninstall).'
+    } else {
+        # Round 32 (DISTRIBUTION-SPEC.md section 0, fixes 1 and 3): both the Run
+        # value and the tray stop event are SCOPED to this install - the value
+        # name and event name derive from this install's own port, and a
+        # scratch/test root on the production port touches neither (there is
+        # nothing of its own to remove there). Before this fix an -Uninstall run
+        # against a scratch fixture removed the REAL user's "Start with Windows"
+        # entry and stopped the REAL user's tray (2026-09-06 14:45, incident
+        # during the round-32 research pass).
+        $runValueName = Get-InstallStartupValueName -AppDest $AppDest
+        if ($null -eq $runValueName) {
+            Write-Info 'Scratch/test install on the production port - the real Start-with-Windows entry is left alone.'
+        } else {
+            try {
+                $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+                if (Test-Path -LiteralPath $runKeyPath) {
+                    $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+                    if ($null -ne $existing) {
+                        Remove-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+                        Write-Info "Removed ""Start with Windows"" registration ($runValueName)."
+                    }
+                }
+            } catch {
+                Write-Warn2 "Could not remove the Start-with-Windows registry value: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $trayStopEventName = Get-InstallTrayStopEventName -AppDest $AppDest
+    $trayStopEvent = $null
+    if ($null -ne $trayStopEventName) {
+        try {
+            $trayStopEvent = [System.Threading.EventWaitHandle]::OpenExisting($trayStopEventName)
+            $trayStopEvent.Set() | Out-Null
+        } catch {
+            # No live tray holds this event - nothing to stop.
+            $trayStopEvent = $null
+        } finally {
+            if ($null -ne $trayStopEvent) { try { $trayStopEvent.Close() } catch { } }
+        }
+    }
+
+    if (Test-Path -LiteralPath $trayExePath -PathType Leaf) {
+        $waitedMs = 0
+        $stillRunning = $true
+        while ($waitedMs -lt 10000) {
+            $procs = Get-Process -Name 'FurphyHost' -ErrorAction SilentlyContinue
+            $matched = $false
+            if ($procs) {
+                foreach ($p in $procs) {
+                    try {
+                        if ($p.Path -and ([string]$p.Path).Equals($trayExePath, [System.StringComparison]::OrdinalIgnoreCase)) { $matched = $true }
+                    } catch { }
+                }
+            }
+            if (-not $matched) { $stillRunning = $false; break }
+            Start-Sleep -Milliseconds 500
+            $waitedMs += 500
+        }
+        if ($stillRunning) {
+            Write-Warn2 'The background tray (FurphyHost.exe --tray) did not exit within 10 seconds - it may still be holding files open.'
+        } else {
+            # fresh-zip:novice-uninstall-orphans-addon-server fix: this
+            # loop only ever watches the tray's OWN FurphyHost.exe process
+            # - it says nothing about the separate background
+            # addon-server.ps1 (powershell.exe) process, so deliberately
+            # does NOT claim "stopped" here. The one user-facing
+            # "stopped" confirmation for both together is printed below,
+            # after Wait-InstallHostAndWebView2Exit has actually covered
+            # (and confirmed gone) the server too.
+            Write-Info 'Background tray process exited.'
+        }
+    }
+
+    # Round 33 defect fix (item 1): the wait above only ever watched
+    # $trayExePath's OWN --tray process. A MAIN WINDOW instance of the
+    # exact same exe (opened from the app itself, or from the tray's
+    # "Open" - the two most common real uninstall paths Eric asked for)
+    # was never waited for at all, and neither was either instance's
+    # WebView2 child processes - both can still be exiting/unwinding for a
+    # short window after Close-InstallMainWindow's WM_CLOSE, which is what
+    # let the Remove-Item below hit a still-locked file under host\ and
+    # abandon the whole folder. Always runs (not gated on $trayExePath
+    # existing) and covers every FurphyHost.exe under $AppDest, tray and
+    # window alike.
+    $processWait = Wait-InstallHostAndWebView2Exit -AppDest $AppDest
+    if ($processWait.ForceKilled.Count -gt 0) {
+        Write-Warn2 "Had to force-close $($processWait.ForceKilled.Count) leftover Furphy process(es) before removing files: $($processWait.ForceKilled -join ', ')"
+    }
+
+    # fresh-zip:novice-uninstall-orphans-addon-server fix: this is the ONE
+    # user-facing "stopped" confirmation for the tray/window AND the
+    # background addon-server.ps1 process together, and it only prints
+    # once a fresh check (not just "we didn't throw") actually confirms
+    # every one of them is gone - a re-check rather than trusting
+    # $processWait alone, since a force-kill whose settle-wait above timed
+    # out could in principle still leave something alive.
+    $stillLiveAfterWait = Get-InstallLiveAppDestProcesses -AppDestNorm $appDestNorm
+    if ($stillLiveAfterWait.Count -eq 0) {
+        Write-Info 'Background tray/server stopped.'
+    } else {
+        Write-Warn2 "$($stillLiveAfterWait.Count) Furphy process(es) under $AppDest may still be running - files may still be locked."
+    }
+
+    return [PSCustomObject]@{
+        TrayWasRunningIndependently = $trayWasRunningIndependently
+        ForceKilled                 = $processWait.ForceKilled
+    }
+}
+
+# =====================================================================
 # -Uninstall path
 # =====================================================================
 
@@ -1148,123 +1374,18 @@ if ($Uninstall) {
 
     Write-Step "Uninstalling Furphy Addon Manager from $appDest"
 
-    # DISTRIBUTION-SPEC.md fix 9/section 5.3 step 3: best-effort ask any
-    # open Furphy MAIN WINDOW for THIS install's own port to close, before
-    # the FurphyHost-process wait loop below starts waiting - gives that
-    # loop something proactive to do besides wait and warn. The ONLY
-    # WM_CLOSE-by-window-title implementation in the whole project (do not
-    # add a second one in host\FurphyHost.cs).
-    Close-InstallMainWindow -Port (Get-InstallPort -AppDest $appDest)
-
-    # Round 18 (tray stage B): stop any running tray before touching files -
-    # the app files removal below deletes host\ (FurphyHost.exe included,
-    # since 'host' is not in $keepDirs further down), which must not happen
-    # while that exe is still running out of the folder being deleted. Order
-    # here matters: remove the Run value FIRST (so a logon during a slow
-    # uninstall can't relaunch the tray), then signal the running instance to
-    # exit, then wait for it before any Remove-Item touches host\.
-    $trayExePath = Join-Path -Path $appDest -ChildPath 'host\bin\FurphyHost.exe'
-    # Round 32 (DISTRIBUTION-SPEC.md section 0, fixes 1 and 3): both the Run
-    # value and the tray stop event are SCOPED to this install - the value
-    # name and event name derive from this install's own port, and a
-    # scratch/test root on the production port touches neither (there is
-    # nothing of its own to remove there). Before this fix an -Uninstall run
-    # against a scratch fixture removed the REAL user's "Start with Windows"
-    # entry and stopped the REAL user's tray (2026-09-06 14:45, incident
-    # during the round-32 research pass).
-    $runValueName = Get-InstallStartupValueName -AppDest $appDest
-    if ($null -eq $runValueName) {
-        Write-Info 'Scratch/test install on the production port - the real Start-with-Windows entry is left alone.'
-    } else {
-        try {
-            $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-            if (Test-Path -LiteralPath $runKeyPath) {
-                $existing = Get-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
-                if ($null -ne $existing) {
-                    Remove-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
-                    Write-Info "Removed ""Start with Windows"" registration ($runValueName)."
-                }
-            }
-        } catch {
-            Write-Warn2 "Could not remove the Start-with-Windows registry value: $($_.Exception.Message)"
-        }
-    }
-
-    $trayStopEventName = Get-InstallTrayStopEventName -AppDest $appDest
-    $trayStopEvent = $null
-    if ($null -ne $trayStopEventName) {
-        try {
-            $trayStopEvent = [System.Threading.EventWaitHandle]::OpenExisting($trayStopEventName)
-            $trayStopEvent.Set() | Out-Null
-        } catch {
-            # No live tray holds this event - nothing to stop.
-            $trayStopEvent = $null
-        } finally {
-            if ($null -ne $trayStopEvent) { try { $trayStopEvent.Close() } catch { } }
-        }
-    }
-
-    if (Test-Path -LiteralPath $trayExePath -PathType Leaf) {
-        $waitedMs = 0
-        $stillRunning = $true
-        while ($waitedMs -lt 10000) {
-            $procs = Get-Process -Name 'FurphyHost' -ErrorAction SilentlyContinue
-            $matched = $false
-            if ($procs) {
-                foreach ($p in $procs) {
-                    try {
-                        if ($p.Path -and ([string]$p.Path).Equals($trayExePath, [System.StringComparison]::OrdinalIgnoreCase)) { $matched = $true }
-                    } catch { }
-                }
-            }
-            if (-not $matched) { $stillRunning = $false; break }
-            Start-Sleep -Milliseconds 500
-            $waitedMs += 500
-        }
-        if ($stillRunning) {
-            Write-Warn2 'The background tray (FurphyHost.exe --tray) did not exit within 10 seconds - it may still be holding files open.'
-        } else {
-            # fresh-zip:novice-uninstall-orphans-addon-server fix: this
-            # loop only ever watches the tray's OWN FurphyHost.exe process
-            # - it says nothing about the separate background
-            # addon-server.ps1 (powershell.exe) process, so deliberately
-            # does NOT claim "stopped" here. The one user-facing
-            # "stopped" confirmation for both together is printed below,
-            # after Wait-InstallHostAndWebView2Exit has actually covered
-            # (and confirmed gone) the server too.
-            Write-Info 'Background tray process exited.'
-        }
-    }
-
-    # Round 33 defect fix (item 1): the wait above only ever watched
-    # $trayExePath's OWN --tray process. A MAIN WINDOW instance of the
-    # exact same exe (opened from the app itself, or from the tray's
-    # "Open" - the two most common real uninstall paths Eric asked for)
-    # was never waited for at all, and neither was either instance's
-    # WebView2 child processes - both can still be exiting/unwinding for a
-    # short window after Close-InstallMainWindow's WM_CLOSE, which is what
-    # let the Remove-Item below hit a still-locked file under host\ and
-    # abandon the whole folder. Always runs (not gated on $trayExePath
-    # existing) and covers every FurphyHost.exe under $appDest, tray and
-    # window alike.
-    $processWait = Wait-InstallHostAndWebView2Exit -AppDest $appDest
-    if ($processWait.ForceKilled.Count -gt 0) {
-        Write-Warn2 "Had to force-close $($processWait.ForceKilled.Count) leftover Furphy process(es) before removing files: $($processWait.ForceKilled -join ', ')"
-    }
-
-    # fresh-zip:novice-uninstall-orphans-addon-server fix: this is the ONE
-    # user-facing "stopped" confirmation for the tray/window AND the
-    # background addon-server.ps1 process together, and it only prints
-    # once a fresh check (not just "we didn't throw") actually confirms
-    # every one of them is gone - a re-check rather than trusting
-    # $processWait alone, since a force-kill whose settle-wait above timed
-    # out could in principle still leave something alive.
-    $stillLiveAfterWait = Get-InstallLiveAppDestProcesses -AppDestNorm $appDest.TrimEnd('\').ToLowerInvariant()
-    if ($stillLiveAfterWait.Count -eq 0) {
-        Write-Info 'Background tray/server stopped.'
-    } else {
-        Write-Warn2 "$($stillLiveAfterWait.Count) Furphy process(es) under $appDest may still be running - files may still be locked."
-    }
+    # APP-UPDATE-SPEC.md section 8.5/11: this exact sequence (close any
+    # open main window, remove the Run value, signal+wait for the tray,
+    # wait for every FurphyHost.exe/WebView2 child/addon-server.ps1 under
+    # $appDest) is now shared with Invoke-FurphyInstallSteps (called
+    # there UNCONDITIONALLY, on every install/upgrade/repair, to fix the
+    # ERROR_SHARING_VIOLATION Step 3b's unguarded host\bin\ copy hits
+    # whenever the app is still running) - factored into
+    # Invoke-InstallStopRunningApp, defined above this block, so both
+    # callers share one implementation rather than two copies that could
+    # drift apart. -Uninstall is a true removal, so the Run value IS
+    # removed here (the default - no -SkipRunValueRemoval passed).
+    Invoke-InstallStopRunningApp -AppDest $appDest | Out-Null
 
     if (-not $NoProtocol) {
         $regScript = Join-Path -Path $appDest -ChildPath 'register-protocol.ps1'
@@ -1518,60 +1639,20 @@ if ($Uninstall) {
     exit 0
 }
 
-function Invoke-FurphyInstallSteps {
+function Invoke-InstallCopyAndBuildSteps {
     <#
-      DISTRIBUTION-SPEC.md section 6.2/6.3: steps 3-8 of the installer,
-      unchanged from before this round - wrapped in a function purely so
-      BOTH the plain console flow and Show-InstallWizard's Install-button
-      click handler can call the exact same code (the spec's own promise:
-      "only how progress/success is presented changes; the underlying
-      file-system steps are unchanged"). Every Write-Step/Write-Info/
-      Write-Warn2 call inside already doubles as the wizard's progress-pump
-      (Update-WizardProgress, defined near the top of this file) with zero
-      changes needed here. Reads $wowRoot/$appDest/$homeFlavour/etc from
-      script scope (set by Set-InstallPathsFromWowRoot before this is ever
-      called) rather than taking parameters, since a console run and a
-      wizard run both already share that same script-scoped state.
+      DISTRIBUTION-SPEC.md section 6.2/6.3 steps 3/3b/4 (copy the code
+      files + ui\, copy/build host\, parse-check the deployed copy) -
+      extracted verbatim, unchanged, out of Invoke-FurphyInstallSteps so
+      that function can run it either bare (a plain install/repair - the
+      existing, unchanged error behavior: a throw here propagates
+      straight out) or inside its own try/catch under -Upgrade
+      (APP-UPDATE-SPEC.md section 8.6 - a throw here is caught and
+      triggers rollback-and-relaunch-the-old-version) without the two
+      call sites ever duplicating this code. Reads $wowRoot/$appDest/
+      $homeFlavour/$multiFlavour/$SourceRoot from script scope exactly as
+      before extraction - nothing here changed, only where it lives.
     #>
-
-# =====================================================================
-# 2b. Downgrade guard (upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons):
-#     refuse to copy an OLDER installer's code over a NEWER on-disk
-#     install. An old install.ps1 (e.g. a stale cached zip or shortcut)
-#     copied over a current, already-migrated install leaves
-#     settings.json's schemaVersion untouched (old code has no idea
-#     flavours\<id>\addons.json exists) but overwrites addon-sync.ps1/
-#     addon-server.ps1/ui\ with pre-flavour code that hardcodes a
-#     top-level addons.json path - the app then reports the user has ZERO
-#     tracked addons, even though nothing was actually deleted on disk.
-#     Compared as [version] objects (major.minor.patch as integers), never
-#     as strings, so "1.9.0" does not sort ahead of "1.10.0". Bypassed
-#     only by an explicit -Force switch; a same-version repair or a
-#     genuinely newer installer (the normal upgrade path) is unaffected.
-# =====================================================================
-
-$Script:DowngradeSkipped = $false
-try {
-    $destVersionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
-    $srcVersionFile = Join-Path -Path $SourceRoot -ChildPath 'VERSION'
-    if ((-not $Force) -and (Test-Path -LiteralPath $destVersionFile -PathType Leaf) -and (Test-Path -LiteralPath $srcVersionFile -PathType Leaf)) {
-        $destVersionRaw = ([System.IO.File]::ReadAllText($destVersionFile)).Trim()
-        $srcVersionRaw = ([System.IO.File]::ReadAllText($srcVersionFile)).Trim()
-        $destVersionParsed = $null
-        $srcVersionParsed = $null
-        if ([System.Version]::TryParse($destVersionRaw, [ref]$destVersionParsed) -and [System.Version]::TryParse($srcVersionRaw, [ref]$srcVersionParsed)) {
-            if ($destVersionParsed -gt $srcVersionParsed) {
-                Write-Warn2 "This copy of Furphy Addon Manager ($srcVersionRaw) is older than what's already installed ($destVersionRaw) at $appDest. Installing it would replace the newer app with an older one, and your addon list could look empty until you reinstall the newer version instead. Nothing was changed."
-                $Script:DowngradeSkipped = $true
-            }
-        }
-    }
-} catch {
-    # Best-effort only - if the VERSION files can't be read/parsed, fall
-    # through to the normal install rather than blocking a real install
-    # over a comparison failure.
-}
-if ($Script:DowngradeSkipped) { return }
 
 # =====================================================================
 # 3. Copy the app into <home-flavour>\AddonSync (never overwrite user state)
@@ -1704,6 +1785,543 @@ foreach ($f in 'addon-sync.ps1', 'addon-server.ps1') {
     }
 }
 Write-Info 'Parse check ok.'
+}
+
+# =====================================================================
+# APP-UPDATE-SPEC.md section 8.6/8.7/8.8: backup/rollback, relaunch by
+# caller intent, and post-success cleanup for -Upgrade. Used only from
+# Invoke-FurphyInstallSteps below, under -Upgrade.
+# =====================================================================
+
+function Get-InstallUtcNowIso {
+    <# ISO 8601 UTC, matching every other timestamp APP-UPDATE-SPEC.md
+       section 4 describes for app-update.json. #>
+    return (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+
+function Set-InstallAppUpdateJsonFields {
+    <#
+      APP-UPDATE-SPEC.md section 4/8.6: app-update.json
+      (<AppDest>\app-update.json, sibling of settings.json/state.json) is
+      operational state owned primarily by addon-server.ps1 (its own
+      Save-AppUpdateState/Get-AppUpdateState helpers) - install.ps1
+      writes to it DIRECTLY via plain file I/O (section 8.6's own words:
+      "it's just JSON; the server always re-reads it fresh on its next
+      access - no new IPC needed"), and ONLY for the specific result
+      fields sections 8.6/8.8 assign to the installer. This is a
+      READ-MERGE-WRITE, never a full overwrite: fields like
+      currentVersion/latestVersion/checkedAt/releaseUrl are the server's
+      own and must survive an installer write untouched. A missing or
+      unreadable existing file starts from an empty object (section 4:
+      "No migration needed"). Same atomic tmp+Move-Item pattern
+      Save-Settings already uses (addon-server.ps1:1390-1397) - never
+      partially-written JSON, even if this process is killed mid-write.
+      Best-effort: a failure to write is logged, never thrown - this must
+      never turn an otherwise-successful (or already-failed) install into
+      a harder failure just because a status file couldn't be updated.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][hashtable]$Fields
+    )
+    $path = Join-Path -Path $AppDest -ChildPath 'app-update.json'
+    $obj = [ordered]@{}
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($path)
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $parsed = $raw | ConvertFrom-Json
+                if ($parsed) {
+                    foreach ($prop in $parsed.PSObject.Properties) { $obj[$prop.Name] = $prop.Value }
+                }
+            }
+        } catch {
+            # Corrupt/unreadable existing file - start fresh rather than
+            # fail the install over a status-file read.
+            $obj = [ordered]@{}
+        }
+    }
+    foreach ($key in $Fields.Keys) { $obj[$key] = $Fields[$key] }
+
+    try {
+        $json = ConvertTo-Json -InputObject $obj -Depth 5
+        $tmpPath = "$path.tmp"
+        [System.IO.File]::WriteAllText($tmpPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmpPath -Destination $path -Force
+    } catch {
+        Write-Warn2 "Could not write app-update.json: $($_.Exception.Message)"
+    }
+}
+
+function Backup-InstallCodeForRollback {
+    <#
+      APP-UPDATE-SPEC.md section 8.6: copies the CURRENT $AppDest's exact
+      code-file set (the same $codeFiles allow-list Step 3 copies FROM)
+      plus ui\ and host\ recursively into a folder OUTSIDE $AppDest, so a
+      mid-copy failure during the upgrade itself can never corrupt the
+      backup. The folder name is a deterministic SHA256 hash of
+      $AppDest's own normalized path (never a fresh guid) - open
+      question 3's decision, "keep exactly one prior-version backup":
+      the NEXT call for this SAME install lands on the SAME folder name,
+      so it is naturally overwritten rather than accumulated, and a
+      different install (a different $AppDest, e.g. a scratch port vs
+      production) never collides with this one's backup. Throws on
+      failure - the caller decides what an unbackupable upgrade means
+      (currently: abort before copying anything, per Invoke-
+      FurphyInstallSteps below).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest
+    )
+    $tempDir = [System.IO.Path]::GetTempPath()
+    $appDestNorm = $AppDest.TrimEnd('\').ToLowerInvariant()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($appDestNorm))
+    } finally {
+        $sha256.Dispose()
+    }
+    $hashHex = -join ($hashBytes | ForEach-Object { $_.ToString('x2') })
+    $backupPath = Join-Path -Path $tempDir -ChildPath ('FurphyRollback-' + $hashHex.Substring(0, 16))
+
+    if (Test-Path -LiteralPath $backupPath) {
+        Remove-Item -LiteralPath $backupPath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $backupPath | Out-Null
+
+    $codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
+    foreach ($f in $codeFiles) {
+        $s = Join-Path -Path $AppDest -ChildPath $f
+        if (Test-Path -LiteralPath $s) {
+            Copy-Item -LiteralPath $s -Destination (Join-Path -Path $backupPath -ChildPath $f) -Force
+        }
+    }
+    foreach ($dirName in 'ui', 'host') {
+        $srcDir = Join-Path -Path $AppDest -ChildPath $dirName
+        if (Test-Path -LiteralPath $srcDir -PathType Container) {
+            $dstDir = Join-Path -Path $backupPath -ChildPath $dirName
+            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+            Copy-Item -Path (Join-Path -Path $srcDir -ChildPath '*') -Destination $dstDir -Recurse -Force
+        }
+    }
+    return $backupPath
+}
+
+function Restore-InstallCodeFromRollback {
+    <# The inverse of Backup-InstallCodeForRollback - copies every file
+       back from the backup folder over $AppDest. Throws if the backup
+       folder itself is missing/unreadable (the caller's own catch is
+       what produces the failure-modes table's "Rollback restore itself
+       FAILED" case). #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][string]$BackupPath
+    )
+    if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) {
+        throw "Rollback backup not found at $BackupPath"
+    }
+    $codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
+    foreach ($f in $codeFiles) {
+        $s = Join-Path -Path $BackupPath -ChildPath $f
+        if (Test-Path -LiteralPath $s) {
+            Copy-Item -LiteralPath $s -Destination (Join-Path -Path $AppDest -ChildPath $f) -Force
+        }
+    }
+    foreach ($dirName in 'ui', 'host') {
+        $srcDir = Join-Path -Path $BackupPath -ChildPath $dirName
+        if (Test-Path -LiteralPath $srcDir -PathType Container) {
+            $dstDir = Join-Path -Path $AppDest -ChildPath $dirName
+            if (Test-Path -LiteralPath $dstDir) {
+                Get-ChildItem -LiteralPath $dstDir -File -Recurse | Remove-Item -Force
+            } else {
+                New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+            }
+            Copy-Item -Path (Join-Path -Path $srcDir -ChildPath '*') -Destination $dstDir -Recurse -Force
+        }
+    }
+}
+
+function Test-InstallHealthCheck {
+    <#
+      APP-UPDATE-SPEC.md section 8.6: poll GET /api/ping for up to
+      $TimeoutMs (default 20s, mirroring host\FurphyHost.cs's own
+      ping-wait pattern), requiring the response's "version" field to
+      equal $ExpectedVersion. Never throws - any request failure (not
+      up yet, wrong port, network hiccup) is treated as "not healthy
+      yet" and the loop just keeps polling until the timeout.
+
+      Tracks REAL elapsed wall-clock time via a Stopwatch, not a naive
+      counter incremented by $PollMs per iteration - found and fixed
+      during this round's own headless verification: against an
+      unreachable port, a single failed Invoke-RestMethod call can
+      itself take close to its own -TimeoutSec before throwing, and a
+      counter that only ever adds $PollMs per loop (ignoring how long
+      the request itself actually took) can let this function run for
+      several times its intended $TimeoutMs before giving up - directly
+      undermining the "up to 20s" contract section 8.6 promises callers
+      (a real caller waiting on this before deciding whether to roll
+      back). -TimeoutSec 2 per attempt (not 3) bounds the worst-case
+      overrun past $TimeoutMs to about one attempt's own timeout, mirroring
+      the existing 2-second "fire and forget" idiom Invoke-InstallServerShutdown
+      already uses for the same kind of best-effort localhost call.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+        [int]$TimeoutMs = 20000,
+        [int]$PollMs = 500
+    )
+    $uri = "http://localhost:$Port/api/ping"
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMs) {
+        try {
+            $resp = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 2 -ErrorAction Stop
+            if ($resp -and ([string]$resp.version) -eq $ExpectedVersion) { return $true }
+        } catch {
+            # Not up yet, or answering with something unexpected - keep polling.
+        }
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMs) { break }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    return $false
+}
+
+function Invoke-InstallStartTray {
+    <# Starts host\bin\FurphyHost.exe --tray directly - the exact
+       command line StartupRegistry.BuildRunValue already builds
+       (host\FurphyHost.cs:4440-4442) - so no window is ever opened by
+       the updater itself on this path. Best-effort: logs and returns
+       rather than throwing, since a caller mid-rollback must not have
+       ITS OWN error swallowed by a relaunch failure here. #>
+    param([Parameter(Mandatory = $true)][string]$AppDest)
+    try {
+        $trayExe = Join-Path -Path $AppDest -ChildPath 'host\bin\FurphyHost.exe'
+        if (Test-Path -LiteralPath $trayExe -PathType Leaf) {
+            Start-Process -FilePath $trayExe -ArgumentList @('--tray') | Out-Null
+            Write-Info 'Relaunched the background tray.'
+        } else {
+            Write-Warn2 'Could not relaunch the tray - host\bin\FurphyHost.exe was not found.'
+        }
+    } catch {
+        Write-Warn2 "Could not relaunch the tray: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-InstallRelaunch {
+    <#
+      APP-UPDATE-SPEC.md section 8.7: relaunch by CALLER INTENT, never by
+      window-guessing - $Relaunch is decided server-side by who called
+      POST /api/app-update/install, baked straight into this command
+      line. "window" reuses the EXACT idiom the wizard's own post-install
+      "Open Furphy Addon Manager" button already uses
+      (Start-Process wscript.exe against Addon Manager.vbs). "tray"
+      starts host\bin\FurphyHost.exe --tray directly. "none" is the
+      test-only value (section 11/param block) - relaunches nothing.
+
+      TRAY AND WINDOW ARE NOT MUTUALLY EXCLUSIVE (section 8.7): when
+      $Relaunch is "window" and $TrayWasRunningIndependently was true (an
+      independent tray was running BEFORE this upgrade stopped
+      everything - detected by Invoke-InstallStopRunningApp before it
+      stopped anything), ALSO start the tray, so a window-triggered
+      install never silently kills an independently-running tray and
+      leaves it dead until the user's next reboot. The reverse needs no
+      code: -Relaunch tray is only ever chosen while no window is open
+      (section 2's silent-install gate), so there is never an
+      independent window instance for that branch to restore.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][string]$Relaunch,
+        [bool]$TrayWasRunningIndependently
+    )
+    if ($Relaunch -eq 'window') {
+        try {
+            $vbs = Join-Path -Path $AppDest -ChildPath 'Addon Manager.vbs'
+            if (Test-Path -LiteralPath $vbs) {
+                Start-Process -FilePath 'wscript.exe' -ArgumentList @('"' + $vbs + '"') | Out-Null
+                Write-Info 'Relaunched Furphy Addon Manager.'
+            } else {
+                Write-Warn2 'Could not relaunch - Addon Manager.vbs was not found.'
+            }
+        } catch {
+            Write-Warn2 "Could not relaunch Furphy Addon Manager: $($_.Exception.Message)"
+        }
+        if ($TrayWasRunningIndependently) {
+            Invoke-InstallStartTray -AppDest $AppDest
+        }
+    } elseif ($Relaunch -eq 'tray') {
+        Invoke-InstallStartTray -AppDest $AppDest
+    } elseif ($Relaunch -eq 'none') {
+        Write-Info 'Relaunch skipped (-Relaunch none).'
+    } else {
+        Write-Warn2 "Unrecognized -Relaunch value '$Relaunch' - nothing relaunched."
+    }
+}
+
+function Invoke-InstallRollbackAndRelaunchOld {
+    <#
+      APP-UPDATE-SPEC.md section 8.6: shared by BOTH rollback triggers -
+      a failing post-install health check, and an exception thrown
+      during the copy/backup itself (the "gap" section 8.6 calls out by
+      name: "the -Upgrade try/catch and the health-check-failure branch
+      should converge on one shared internal helper"). Restores the old
+      code from $BackupPath (skipped, as a no-op, when $BackupPath is
+      $null/missing - i.e. the backup step itself never got far enough to
+      produce one, in which case $AppDest was never touched and there is
+      nothing to restore), relaunches the OLD version per the same
+      $Relaunch intent, and records the outcome in app-update.json. If
+      the restore ITSELF fails, per the failure-modes table this is
+      "server left down; nothing further attempted automatically" - no
+      relaunch is attempted in that case, since the code on disk is now
+      in an unknown state.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [string]$BackupPath,
+        [Parameter(Mandatory = $true)][string]$Relaunch,
+        [Parameter(Mandatory = $true)][string]$LastErrorMessage,
+        [Parameter(Mandatory = $true)][string]$OldVersion,
+        [bool]$TrayWasRunningIndependently
+    )
+    Write-Warn2 "$LastErrorMessage"
+
+    $restoreAttempted = ($BackupPath -and (Test-Path -LiteralPath $BackupPath -PathType Container))
+    $restoreOk = $true
+    if ($restoreAttempted) {
+        try {
+            Restore-InstallCodeFromRollback -AppDest $AppDest -BackupPath $BackupPath
+            Write-Info "Restored the previous version ($OldVersion)."
+        } catch {
+            $restoreOk = $false
+            Write-Warn2 "Rollback restore itself failed: $($_.Exception.Message)"
+        }
+    }
+
+    $nowIso = Get-InstallUtcNowIso
+    if (-not $restoreOk) {
+        Set-InstallAppUpdateJsonFields -AppDest $AppDest -Fields @{
+            state       = 'error'
+            lastError   = "rollback FAILED after $LastErrorMessage - manual reinstall required (backup at $BackupPath)"
+            lastErrorAt = $nowIso
+        }
+        Write-InstallLogLine "App-update rollback FAILED - manual reinstall required, backup at $BackupPath"
+        return [PSCustomObject]@{ Restored = $false }
+    }
+
+    Set-InstallAppUpdateJsonFields -AppDest $AppDest -Fields @{
+        state       = 'error'
+        lastError   = $LastErrorMessage
+        lastErrorAt = $nowIso
+    }
+    Write-InstallLogLine "App-update: $LastErrorMessage"
+
+    Invoke-InstallRelaunch -AppDest $AppDest -Relaunch $Relaunch -TrayWasRunningIndependently $TrayWasRunningIndependently
+
+    return [PSCustomObject]@{ Restored = $true }
+}
+
+function Invoke-InstallAppUpdateCleanup {
+    <#
+      APP-UPDATE-SPEC.md section 8.8, success path only: deletes the
+      downloaded cache\app-update\*.zip/*.sha256 (best-effort - never
+      fails an otherwise-successful upgrade over this), marks
+      app-update.json state="installed" with a fresh installedAt and a
+      cleared stagedPath, and schedules a DELAYED, DETACHED removal of
+      $StagedRoot (the staged extraction folder this install.ps1 process
+      is itself running FROM under -Upgrade - it has done its job, per
+      section 8.8) - never synchronous, since this running process's own
+      script file lives inside that folder, mirroring the existing
+      delayed self-delete idiom this file already uses for the temp
+      -Uninstall script copy. $StagedRoot is expected to be $SourceRoot
+      and ONLY ever passed when $Upgrade is set - a normal manual install
+      must never have its source folder (wherever the user unzipped it)
+      scheduled for deletion.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [string]$StagedRoot
+    )
+    try {
+        $cacheDir = Join-Path -Path $AppDest -ChildPath 'cache\app-update'
+        if (Test-Path -LiteralPath $cacheDir -PathType Container) {
+            Get-ChildItem -LiteralPath $cacheDir -File -Filter '*.zip' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $cacheDir -File -Filter '*.sha256' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # Best-effort only - never fail an otherwise-successful upgrade over cache cleanup.
+    }
+
+    Set-InstallAppUpdateJsonFields -AppDest $AppDest -Fields @{
+        state       = 'installed'
+        installedAt = (Get-InstallUtcNowIso)
+        stagedPath  = $null
+        lastError   = $null
+    }
+
+    if ($StagedRoot -and (Test-Path -LiteralPath $StagedRoot -PathType Container)) {
+        try {
+            $stagedRootEsc = $StagedRoot.Replace('"', '')
+            $selfDeleteCmd = 'ping -n 3 127.0.0.1 >nul & rd /s /q "' + $stagedRootEsc + '"'
+            Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c ' + $selfDeleteCmd) -WindowStyle Hidden | Out-Null
+        } catch {
+            # Best-effort - a leftover staged folder is disk clutter, not a failed upgrade.
+        }
+    }
+}
+
+function Invoke-FurphyInstallSteps {
+    <#
+      DISTRIBUTION-SPEC.md section 6.2/6.3: steps 3-8 of the installer,
+      unchanged from before this round - wrapped in a function purely so
+      BOTH the plain console flow and Show-InstallWizard's Install-button
+      click handler can call the exact same code (the spec's own promise:
+      "only how progress/success is presented changes; the underlying
+      file-system steps are unchanged"). Every Write-Step/Write-Info/
+      Write-Warn2 call inside already doubles as the wizard's progress-pump
+      (Update-WizardProgress, defined near the top of this file) with zero
+      changes needed here. Reads $wowRoot/$appDest/$homeFlavour/etc from
+      script scope (set by Set-InstallPathsFromWowRoot before this is ever
+      called) rather than taking parameters, since a console run and a
+      wizard run both already share that same script-scoped state.
+
+      APP-UPDATE-SPEC.md section 8.5: also now unconditionally stops any
+      running Furphy process (window or tray) under $appDest before Step
+      3 ever copies/overwrites a file - the load-bearing fix a
+      self-updater's own upgrade absolutely requires (Step 3b's
+      unguarded host\bin\FurphyHost.exe copy throws
+      ERROR_SHARING_VIOLATION if that exe is still open) and a
+      correctness fix for the EXISTING plain reinstall/repair path too
+      (this bug pre-dates this feature). Sections 8.6/8.7/8.8 add
+      backup/rollback/relaunch/cleanup, but only when $Upgrade is set.
+    #>
+
+$Script:StopRunningAppResult = Invoke-InstallStopRunningApp -AppDest $appDest -SkipRunValueRemoval
+$trayWasRunningIndependently = [bool]$Script:StopRunningAppResult.TrayWasRunningIndependently
+
+$oldVersionRaw = 'unknown'
+try {
+    $existingVersionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
+    if (Test-Path -LiteralPath $existingVersionFile -PathType Leaf) {
+        $oldVersionRaw = ([System.IO.File]::ReadAllText($existingVersionFile)).Trim()
+    }
+} catch {
+    # Best-effort only - used solely for rollback log/status messages
+    # below; a read failure here must never block the install itself.
+}
+
+# =====================================================================
+# 2b. Downgrade guard (upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons):
+#     refuse to copy an OLDER installer's code over a NEWER on-disk
+#     install. An old install.ps1 (e.g. a stale cached zip or shortcut)
+#     copied over a current, already-migrated install leaves
+#     settings.json's schemaVersion untouched (old code has no idea
+#     flavours\<id>\addons.json exists) but overwrites addon-sync.ps1/
+#     addon-server.ps1/ui\ with pre-flavour code that hardcodes a
+#     top-level addons.json path - the app then reports the user has ZERO
+#     tracked addons, even though nothing was actually deleted on disk.
+#     Compared as [version] objects (major.minor.patch as integers), never
+#     as strings, so "1.9.0" does not sort ahead of "1.10.0". Bypassed
+#     only by an explicit -Force switch; a same-version repair or a
+#     genuinely newer installer (the normal upgrade path) is unaffected.
+# =====================================================================
+
+$Script:DowngradeSkipped = $false
+try {
+    $destVersionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
+    $srcVersionFile = Join-Path -Path $SourceRoot -ChildPath 'VERSION'
+    if ((-not $Force) -and (Test-Path -LiteralPath $destVersionFile -PathType Leaf) -and (Test-Path -LiteralPath $srcVersionFile -PathType Leaf)) {
+        $destVersionRaw = ([System.IO.File]::ReadAllText($destVersionFile)).Trim()
+        $srcVersionRaw = ([System.IO.File]::ReadAllText($srcVersionFile)).Trim()
+        $destVersionParsed = $null
+        $srcVersionParsed = $null
+        if ([System.Version]::TryParse($destVersionRaw, [ref]$destVersionParsed) -and [System.Version]::TryParse($srcVersionRaw, [ref]$srcVersionParsed)) {
+            if ($destVersionParsed -gt $srcVersionParsed) {
+                Write-Warn2 "This copy of Furphy Addon Manager ($srcVersionRaw) is older than what's already installed ($destVersionRaw) at $appDest. Installing it would replace the newer app with an older one, and your addon list could look empty until you reinstall the newer version instead. Nothing was changed."
+                $Script:DowngradeSkipped = $true
+            }
+        }
+    }
+} catch {
+    # Best-effort only - if the VERSION files can't be read/parsed, fall
+    # through to the normal install rather than blocking a real install
+    # over a comparison failure.
+}
+if ($Script:DowngradeSkipped) { return }
+
+# =====================================================================
+# 3/3b/4. Copy the app + host\ + parse-check (Invoke-InstallCopyAndBuild
+#         Steps, defined above - extracted unchanged so both this plain
+#         path and the -Upgrade path below share one implementation).
+#         APP-UPDATE-SPEC.md sections 8.6/8.7/8.8: under -Upgrade only,
+#         wraps that same copy in backup/rollback and adds the
+#         post-success relaunch + health check + cleanup. A plain
+#         install/repair (no -Upgrade) runs Invoke-InstallCopyAndBuild
+#         Steps bare, exactly as before this feature - a throw there
+#         still propagates straight out, unchanged error behavior.
+# =====================================================================
+
+if ($Upgrade) {
+    $upgradeRelaunch = $Relaunch
+    if ($upgradeRelaunch -notin @('window', 'tray', 'none')) {
+        Write-Warn2 "Unrecognized -Relaunch value '$Relaunch' - treating as 'none' (nothing will be relaunched)."
+        $upgradeRelaunch = 'none'
+    }
+
+    Write-Step 'Backing up the current version before upgrading'
+    $backupPath = $null
+    try {
+        $backupPath = Backup-InstallCodeForRollback -AppDest $appDest
+    } catch {
+        Write-Warn2 "Could not create a rollback backup before upgrading - nothing was changed: $($_.Exception.Message)"
+        Set-InstallAppUpdateJsonFields -AppDest $appDest -Fields @{
+            state       = 'error'
+            lastError   = "could not create a rollback backup before upgrading - nothing was changed: $($_.Exception.Message)"
+            lastErrorAt = (Get-InstallUtcNowIso)
+        }
+        Invoke-InstallRelaunch -AppDest $appDest -Relaunch $upgradeRelaunch -TrayWasRunningIndependently $trayWasRunningIndependently
+        return
+    }
+
+    # APP-UPDATE-SPEC.md section 8.6 (the gap fix): everything from the
+    # backup above through the end of the copy + parse-check block runs
+    # inside ONE try/catch, under -Upgrade only - a disk-full/locked-file
+    # exception during the copy itself is caught here and rolls back
+    # exactly like a failed post-install health check does, converging on
+    # the same Invoke-InstallRollbackAndRelaunchOld helper.
+    try {
+        Invoke-InstallCopyAndBuildSteps
+
+        $newVersionRaw = 'unknown'
+        try {
+            $newVersionFile = Join-Path -Path $appDest -ChildPath 'VERSION'
+            if (Test-Path -LiteralPath $newVersionFile -PathType Leaf) {
+                $newVersionRaw = ([System.IO.File]::ReadAllText($newVersionFile)).Trim()
+            }
+        } catch { }
+
+        Write-Step 'Relaunching Furphy'
+        Invoke-InstallRelaunch -AppDest $appDest -Relaunch $upgradeRelaunch -TrayWasRunningIndependently $trayWasRunningIndependently
+
+        if ($upgradeRelaunch -ne 'none') {
+            Write-Step 'Waiting for the upgraded app to answer a health check'
+            $installPort = Get-InstallPort -AppDest $appDest
+            $healthOk = Test-InstallHealthCheck -Port $installPort -ExpectedVersion $newVersionRaw
+            if (-not $healthOk) {
+                Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -LastErrorMessage "post-install health check failed - rolled back to $oldVersionRaw" -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently
+                return
+            }
+            Write-Info 'Health check passed.'
+        }
+
+        Invoke-InstallAppUpdateCleanup -AppDest $appDest -StagedRoot $SourceRoot
+        Write-Info "Upgrade to $newVersionRaw complete."
+    } catch {
+        Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -LastErrorMessage "install failed while copying files - rolled back to $oldVersionRaw" -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently
+        return
+    }
+} else {
+    Invoke-InstallCopyAndBuildSteps
+}
 
 # =====================================================================
 # 5. Legacy launcher cleanup (Round 34, REMOVAL-SPEC.md CS-R12)
@@ -1729,7 +2347,20 @@ $cliPath = Join-Path -Path $appDest -ChildPath 'addon-sync.ps1'
 #    launcher shortcut(s) along with WoW-launching itself.
 # =====================================================================
 
-if (-not $NoShortcuts) {
+# Round 42 defense-in-depth: this step writes to the REAL Windows Desktop.
+# -NoShortcuts is the authoritative opt-out, but it is pure caller
+# discipline - until now a scratch/test run that forgot the flag created
+# a real "Furphy Addon Manager.lnk" pointing at a temp folder. Mirror the
+# exact two-layer guard Remove-FurphyLegacyLauncherArtifacts and the
+# -Uninstall block's shortcut removal already use: Test-LooksLikeScratchRun
+# (a $wowRoot/$appDest under %TEMP%, a \scratch\ folder, or
+# fixtures\wowroot) skips with a warning even when -NoShortcuts was
+# forgotten. Changes nothing for a genuine production install, which
+# never sits under any of those paths.
+$looksScratchStep6 = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScratchRun $appDest)
+if ($looksScratchStep6 -and (-not $NoShortcuts)) {
+    Write-Warn2 'Target path looks like a scratch/test root but -NoShortcuts was not passed - skipping Desktop shortcut creation for safety. Pass -NoShortcuts explicitly for scratch runs; a production install never lives under a temp or scratch path.'
+} elseif (-not $NoShortcuts) {
     Write-Step 'Creating desktop shortcut'
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
@@ -1756,7 +2387,16 @@ if (-not $NoShortcuts) {
 #    one port, one registration regardless of flavour count.
 # =====================================================================
 
-if (-not $NoProtocol) {
+# Round 42 defense-in-depth (same reasoning as Step 6 above):
+# register-protocol.ps1 -Register writes the REAL
+# HKCU:\Software\Classes\curseforge key (its -KeyPath override is a
+# test hook this call site never passes), so a scratch/test run that
+# forgot -NoProtocol repointed the user's real install-link handler at a
+# temp folder. Same Test-LooksLikeScratchRun warn-and-skip guard.
+$looksScratchStep7 = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScratchRun $appDest)
+if ($looksScratchStep7 -and (-not $NoProtocol)) {
+    Write-Warn2 'Target path looks like a scratch/test root but -NoProtocol was not passed - skipping curseforge:// protocol registration for safety (it would rewrite the real HKCU\Software\Classes\curseforge key). Pass -NoProtocol explicitly for scratch runs.'
+} elseif (-not $NoProtocol) {
     Write-Step 'Registering the curseforge:// install-link handler'
     $regScript = Join-Path -Path $appDest -ChildPath 'register-protocol.ps1'
     if (Test-Path -LiteralPath $regScript) {

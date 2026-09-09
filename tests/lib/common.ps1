@@ -547,6 +547,320 @@ function Start-CfCatalogueStubServer {
 }
 
 # ---------------------------------------------------------------------
+# GitHub Releases API stub (Round 42 / APP-UPDATE-SPEC.md sections 12/13):
+# a real, local stand-in for https://api.github.com's own
+# /repos/krenz444/furphy-addon-manager/releases/latest, plus each
+# release asset's own browser_download_url, now that $Script:GitHubBaseUrl/
+# FURPHY_TEST_GITHUB_BASEURL gives that fetch a real override seam (mirrors
+# $Script:WagoBaseUrl/FURPHY_TEST_WAGO_BASEURL exactly). The actual
+# HttpListener lives in a separate real subprocess,
+# tests\fixtures\github-release-stub\GitHubReleaseStubServer.ps1 (same
+# shape as tests\fixtures\wago-stub\WagoStubServer.ps1) - this section is
+# just the wrapper that builds the fixture files a scenario needs, writes
+# the manifest that process reads, and starts/stops it.
+#
+# SHA256 SIDECAR FORMAT, CONFIRMED against Package A's real, landed code
+# (addon-server.ps1's Invoke-AppUpdateMaintenanceCore): the integrity
+# check reads the downloaded sidecar with
+# `(Get-Content -Raw $shaPath).Trim().ToLowerInvariant()` and compares
+# that WHOLE trimmed string directly against Get-FileHash's own .Hash -
+# never splitting on whitespace, never taking "the first token". This
+# stub therefore defaults to the BARE format (-ShaSidecarFormat 'bare')
+# - a lone lowercase hex hash, nothing else - matching both
+# APP-UPDATE-SPEC.md section 8.3/11's own literal example AND
+# package.ps1's own Round 42 output exactly. An earlier draft of both
+# this stub and package.ps1 used the two-column "sha256sum" shape
+# instead; verified LIVE while writing this file to be a real,
+# total-feature-breaking mismatch against Package A's actual comparison
+# and fixed in both places before 1.22.0 shipped. Pass
+# -ShaSidecarFormat 'sha256sum' only if Invoke-AppUpdateMaintenance's own
+# comparison is ever changed to tolerate that shape - do not flip this
+# default without re-checking that function's real code first.
+# ---------------------------------------------------------------------
+
+function New-GitHubReleaseFixtureZip {
+    <#
+      Builds a zip at -DestinationZipPath. Either -SourceDir (a folder
+      whose CONTENTS are zipped - e.g. a complete scratch app tree built
+      the same way Install.Downgrade.Tests.ps1's own
+      New-StaleInstallerSource / Copy-FurphyAppFiles do, for a
+      fixture-acceptance-grade "real app zip") or -Entries (a hashtable
+      of relative-path -> string content, for a lightweight unit/
+      integration-level zip that just needs a VERSION file and nothing
+      else) - never both. -VersionOverride, if given, writes/overwrites
+      a top-level VERSION file with that exact content AFTER staging
+      -SourceDir's own copy (so a caller can start from a real app tree
+      and still force a specific, possibly-wrong VERSION for a negative
+      test) - for -Entries callers, just put the desired content directly
+      in $Entries['VERSION'] instead.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$DestinationZipPath,
+        [string]$SourceDir,
+        [hashtable]$Entries,
+        [string]$VersionOverride
+    )
+
+    if ($SourceDir -and $Entries) {
+        throw 'New-GitHubReleaseFixtureZip: pass -SourceDir or -Entries, never both'
+    }
+
+    $stageDir = New-TempRoot -Name 'github-release-zip-stage'
+    if ($SourceDir) {
+        if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
+            throw "New-GitHubReleaseFixtureZip: -SourceDir not found: $SourceDir"
+        }
+        Get-ChildItem -LiteralPath $SourceDir -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $stageDir -Recurse -Force
+        }
+    } elseif ($Entries) {
+        foreach ($rel in $Entries.Keys) {
+            $dest = Join-Path -Path $stageDir -ChildPath $rel
+            $destParent = Split-Path -Path $dest -Parent
+            if ($destParent -and -not (Test-Path -LiteralPath $destParent)) {
+                New-Item -ItemType Directory -Path $destParent -Force | Out-Null
+            }
+            [System.IO.File]::WriteAllText($dest, [string]$Entries[$rel], (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } else {
+        # Bare minimum default: a zip that is just a VERSION file - enough
+        # for every unit/integration case that only cares whether the
+        # downloaded package's VERSION matches the release tag, without
+        # needing a caller to spell out -Entries every time.
+        [System.IO.File]::WriteAllText((Join-Path $stageDir 'VERSION'), '0.0.0', (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    if ($VersionOverride) {
+        [System.IO.File]::WriteAllText((Join-Path $stageDir 'VERSION'), $VersionOverride, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    if (Test-Path -LiteralPath $DestinationZipPath) { Remove-Item -LiteralPath $DestinationZipPath -Force }
+    $destDir = Split-Path -Path $DestinationZipPath -Parent
+    if ($destDir -and -not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    Push-Location $stageDir
+    try {
+        Compress-Archive -Path '.\*' -DestinationPath $DestinationZipPath -Force
+    } finally {
+        Pop-Location
+    }
+    return $DestinationZipPath
+}
+
+function New-GitHubReleaseFixtureShaSidecar {
+    <#
+      Writes -DestinationShaPath from the REAL sha256 of -ZipPath (never
+      the caller's own claim of what it should be), in either 'bare'
+      (default - just the lowercase hex, no filename, no newline -
+      matches APP-UPDATE-SPEC.md section 8.3/11's own literal example
+      AND package.ps1's own Round 42 output AND Package A's real,
+      landed whole-trimmed-string comparison in
+      Invoke-AppUpdateMaintenanceCore) or the 'sha256sum' format
+      ("<lowercasehex>  <zip file name>", two spaces, no trailing
+      newline - the standard shape, NOT what this codebase's own
+      integrity check actually parses; kept only for a future caller
+      whose comparison logic is changed to tolerate it). -Tamper flips
+      the sidecar's last hex character so the
+      file it describes no longer matches - deliberately still a
+      same-length, hex-looking string (a "the bytes changed in transit"
+      shape), not a garbage string, since that is the realistic failure
+      this knob exists to simulate (APP-UPDATE-SPEC.md section 12's
+      "a TAMPERED sha256 (fixture with a deliberately wrong hash)").
+      Returns the REAL hash (even when -Tamper is set) so a caller can
+      assert against it directly.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string]$DestinationShaPath,
+        [ValidateSet('sha256sum', 'bare')][string]$Format = 'bare',
+        [switch]$Tamper
+    )
+
+    $realHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash.ToLowerInvariant()
+    $writtenHash = $realHash
+    if ($Tamper) {
+        $lastChar = $writtenHash.Substring($writtenHash.Length - 1, 1)
+        $flipped = if ($lastChar -eq '0') { '1' } else { '0' }
+        $writtenHash = $writtenHash.Substring(0, $writtenHash.Length - 1) + $flipped
+    }
+    $content = $writtenHash
+    if ($Format -eq 'sha256sum') {
+        $content = '{0}  {1}' -f $writtenHash, (Split-Path -Path $ZipPath -Leaf)
+    }
+    [System.IO.File]::WriteAllText($DestinationShaPath, $content, (New-Object System.Text.UTF8Encoding($false)))
+    return $realHash
+}
+
+function Start-GitHubReleaseStubServer {
+    <#
+      Starts the real GitHubReleaseStubServer.ps1 subprocess, after
+      building whatever fixture zip/.sha256/extra-asset files this
+      scenario needs. Set $env:FURPHY_TEST_GITHUB_BASEURL = $stub.BaseUrl
+      before spawning the real addon-server.ps1 child under test (exactly
+      how existing tests already point FURPHY_TEST_WAGO_BASEURL at the
+      Wago stub) - Start-Process inherits the current process's
+      environment, so this reaches a spawned -AppUpdateOnly/
+      -MaintenanceOnly child the same way.
+
+      -TagName: the release's tag_name (e.g. 'v1.23.0'; keep the leading
+        'v', matching a real GitHub tag - the zip/sha asset names below
+        always strip it, per APP-UPDATE-SPEC.md section 8.2).
+      -ReleaseStatus / -RetryAfterSeconds / -RateLimitResetEpochSeconds:
+        the rate-limit knob (section 8.1/16 Q2) - set -ReleaseStatus 403
+        (or 429) plus one or both of the other two to exercise the
+        Retry-After/X-RateLimit-Reset backoff path; 0 (the default) omits
+        that header entirely.
+      -RequireUserAgent: defaults $true (matches the real API - section
+        8.1's "the GitHub API rejects requests with none"); the
+        /releases/latest route 403s any request with no User-Agent
+        header at all when this is set.
+      -ZipSourceDir / -ZipEntries / -ZipVersionOverride: forwarded to
+        New-GitHubReleaseFixtureZip (see that function's own doc comment)
+        - the "wrong VERSION inside the zip" knob is just
+        -ZipVersionOverride set to something other than the tag.
+      -ShaSidecarFormat / -TamperSha256: forwarded to
+        New-GitHubReleaseFixtureShaSidecar - the "TAMPERED sha256" knob.
+      -OmitZipAsset / -OmitShaAsset: the release JSON's own assets[]
+        array simply omits that entry (the "release missing the zip or
+        .sha256 asset" case, section 12) - the underlying file is still
+        built and still downloadable by its real name, since nothing
+        under test should ever request an asset it was never told about.
+      -ExtraAssets: array of @{name; content} hashtables - extra,
+        unrelated assets listed (and downloadable) alongside the real
+        pair, for the "release with EXTRA unrelated assets present" case
+        (section 12's "must still pick the right two by exact name").
+
+      Returns {Process; Port; BaseUrl; ManifestPath; TagName; ZipPath;
+      ShaPath; ZipAssetName; ShaAssetName; ZipHash} - stop with
+      Stop-GitHubReleaseStubServer. Every file this creates lives under a
+      New-TempRoot folder, so plain Remove-TempRoots at the end of a test
+      file cleans it up same as everything else.
+    #>
+    param(
+        [int]$Port,
+        [string]$TagName = 'v1.23.0',
+        [string]$HtmlUrl,
+        [int]$ReleaseStatus = 200,
+        [int]$RetryAfterSeconds = 0,
+        [long]$RateLimitResetEpochSeconds = 0,
+        [bool]$RequireUserAgent = $true,
+        [string]$ZipSourceDir,
+        [hashtable]$ZipEntries,
+        [string]$ZipVersionOverride,
+        [ValidateSet('sha256sum', 'bare')][string]$ShaSidecarFormat = 'bare',
+        [switch]$TamperSha256,
+        [switch]$OmitZipAsset,
+        [switch]$OmitShaAsset,
+        [array]$ExtraAssets = @()
+    )
+
+    if (-not $Port) { $Port = Get-FreeStaticPort }
+    if (-not $HtmlUrl) { $HtmlUrl = "https://github.com/krenz444/furphy-addon-manager/releases/tag/$TagName" }
+
+    $tagNoV = $TagName.TrimStart('v', 'V')
+    $zipName = "FurphyAddonManager-$tagNoV.zip"
+    $shaName = "$zipName.sha256"
+
+    $assetsDir = New-TempRoot -Name 'github-release-assets'
+    $zipPath = Join-Path -Path $assetsDir -ChildPath $zipName
+    $shaPath = Join-Path -Path $assetsDir -ChildPath $shaName
+
+    New-GitHubReleaseFixtureZip -DestinationZipPath $zipPath -SourceDir $ZipSourceDir -Entries $ZipEntries -VersionOverride $ZipVersionOverride | Out-Null
+    $realHash = New-GitHubReleaseFixtureShaSidecar -ZipPath $zipPath -DestinationShaPath $shaPath -Format $ShaSidecarFormat -Tamper:$TamperSha256
+
+    $releaseAssets = New-Object 'System.Collections.Generic.List[object]'
+    $downloadableAssets = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $OmitZipAsset) { $releaseAssets.Add([PSCustomObject]@{ name = $zipName }) }
+    if (-not $OmitShaAsset) { $releaseAssets.Add([PSCustomObject]@{ name = $shaName }) }
+    $downloadableAssets.Add([PSCustomObject]@{ name = $zipName; filePath = $zipPath })
+    $downloadableAssets.Add([PSCustomObject]@{ name = $shaName; filePath = $shaPath })
+
+    foreach ($extra in @($ExtraAssets)) {
+        $extraName = [string]$extra.name
+        $extraPath = Join-Path -Path $assetsDir -ChildPath $extraName
+        [System.IO.File]::WriteAllText($extraPath, [string]$extra.content, (New-Object System.Text.UTF8Encoding($false)))
+        $releaseAssets.Add([PSCustomObject]@{ name = $extraName })
+        $downloadableAssets.Add([PSCustomObject]@{ name = $extraName; filePath = $extraPath })
+    }
+
+    $manifest = [PSCustomObject]@{
+        tagName                    = $TagName
+        htmlUrl                    = $HtmlUrl
+        releaseStatus              = $ReleaseStatus
+        retryAfterSeconds          = $(if ($RetryAfterSeconds -gt 0) { $RetryAfterSeconds } else { $null })
+        rateLimitResetEpochSeconds = $(if ($RateLimitResetEpochSeconds -gt 0) { $RateLimitResetEpochSeconds } else { $null })
+        requireUserAgent           = $RequireUserAgent
+        releaseAssets              = @($releaseAssets.ToArray())
+        downloadableAssets         = @($downloadableAssets.ToArray())
+    }
+    $manifestDir = New-TempRoot -Name 'github-release-manifest'
+    $manifestPath = Join-Path -Path $manifestDir -ChildPath 'manifest.json'
+    ($manifest | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+    $scriptPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'tests\fixtures\github-release-stub\GitHubReleaseStubServer.ps1'
+    $argList = New-Object 'System.Collections.Generic.List[string]'
+    $argList.Add('-NoProfile')
+    $argList.Add('-ExecutionPolicy')
+    $argList.Add('Bypass')
+    $argList.Add('-File')
+    $argList.Add($scriptPath)
+    $argList.Add('-Port'); $argList.Add([string]$Port)
+    $argList.Add('-ManifestPath'); $argList.Add($manifestPath)
+
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
+
+    if (-not (Wait-Port -Port $Port -TimeoutSec 15)) {
+        try { if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } } catch { }
+        throw "Start-GitHubReleaseStubServer: stub did not come up on port $Port within 15s"
+    }
+
+    return [PSCustomObject]@{
+        Process      = $proc
+        Port         = $Port
+        BaseUrl      = "http://127.0.0.1:$Port"
+        ManifestPath = $manifestPath
+        TagName      = $TagName
+        ZipPath      = $zipPath
+        ShaPath      = $shaPath
+        ZipAssetName = $zipName
+        ShaAssetName = $shaName
+        ZipHash      = $realHash
+    }
+}
+
+function Stop-GitHubReleaseStubServer {
+    <# Graceful POST /__control/shutdown, falls back to Stop-Process -Force. Always safe on a $Stub that never started. #>
+    param($Stub)
+    if (-not $Stub) { return }
+    try {
+        $req = [System.Net.HttpWebRequest]::Create("$($Stub.BaseUrl)/__control/shutdown")
+        $req.Method = 'POST'
+        $req.Timeout = 2000
+        $req.ContentLength = 0
+        $req.GetRequestStream().Close()
+        $req.GetResponse().Close()
+    } catch {
+    }
+    Start-Sleep -Milliseconds 150
+    try {
+        if ($Stub.Process -and -not $Stub.Process.HasExited) {
+            Stop-Process -Id $Stub.Process.Id -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+}
+
+function Get-GitHubReleaseStubRequests {
+    <# The stub's own request log (array of {method,path,timeUtc,hasUserAgent}), oldest first - always a real array, same `,@()` unwrap-guard as Get-WagoStubRequests. #>
+    param($Stub)
+    try {
+        $resp = Invoke-RestMethod -Uri "$($Stub.BaseUrl)/__control/requests" -Method Get -TimeoutSec 5
+        return , @($resp)
+    } catch {
+        throw "Get-GitHubReleaseStubRequests: could not reach stub control endpoint: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------
 # Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
 # connection and never reads or responds - used to prove addon-sync.ps1's
 # FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL override actually reaches
@@ -800,6 +1114,40 @@ function Start-TestServer {
         $env:FURPHY_TEST_SKIP_CF_CATALOGUE = '1'
         $skipCfCatalogueEnvChanged = $true
     }
+
+    # Round 42 (APP-UPDATE-SPEC.md, Package E): the EXACT same live-safety/
+    # politeness gap as the two guards above, for the new self-updater's
+    # own GitHub Releases check - confirmed LIVE while writing this
+    # round's own integration tests: Invoke-MaintenanceTick's very first
+    # "-MaintenanceOnly" tick after startup "always qualifies" (its own
+    # doc comment), and now unconditionally also runs
+    # Invoke-AppUpdateMaintenance - so EVERY caller of Start-TestServer,
+    # not just this round's own new tests, was making one real,
+    # unauthenticated GET to the real api.github.com
+    # (/repos/krenz444/furphy-addon-manager/releases/latest) on every
+    # single fresh server startup, well before a caller's own
+    # $env:FURPHY_TEST_GITHUB_BASEURL = $stub.BaseUrl assignment (made
+    # AFTER Start-TestServer returns, in every existing call-site
+    # convention this file documents) has any chance to take effect -
+    # a direct violation of this build's own standing "never touch the
+    # real GitHub from any script or test" rule, hit by this suite's
+    # OWN tooling rather than by any test's authored intent. Unlike the
+    # Wago/CF cases, Package A's app-update pipeline exposes no
+    # dedicated FURPHY_TEST_SKIP_* flag of its own to gate on (there is
+    # nothing to "skip" independently of the base-URL seam itself) - so
+    # the fix here defaults $env:FURPHY_TEST_GITHUB_BASEURL itself to a
+    # guaranteed-closed loopback port (an immediate, fast connection
+    # refusal, never a slow timeout) UNLESS the caller has already
+    # pointed it at a real local stub before calling this function -
+    # same opt-out contract, same inherit-then-restore-exact-prior-value
+    # handling, so it can never leak into a later Start-Process call in
+    # this same session.
+    $originalGitHubBaseUrlEnv = $env:FURPHY_TEST_GITHUB_BASEURL
+    $githubBaseUrlEnvChanged = $false
+    if ([string]::IsNullOrWhiteSpace($env:FURPHY_TEST_GITHUB_BASEURL)) {
+        $env:FURPHY_TEST_GITHUB_BASEURL = 'http://127.0.0.1:1'
+        $githubBaseUrlEnvChanged = $true
+    }
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
     } finally {
@@ -815,6 +1163,13 @@ function Start-TestServer {
                 Remove-Item Env:\FURPHY_TEST_SKIP_CF_CATALOGUE -ErrorAction SilentlyContinue
             } else {
                 $env:FURPHY_TEST_SKIP_CF_CATALOGUE = $originalSkipCfCatalogueEnv
+            }
+        }
+        if ($githubBaseUrlEnvChanged) {
+            if ($null -eq $originalGitHubBaseUrlEnv) {
+                Remove-Item Env:\FURPHY_TEST_GITHUB_BASEURL -ErrorAction SilentlyContinue
+            } else {
+                $env:FURPHY_TEST_GITHUB_BASEURL = $originalGitHubBaseUrlEnv
             }
         }
     }

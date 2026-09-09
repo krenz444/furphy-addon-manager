@@ -785,6 +785,18 @@
       <span>Server not reachable &mdash; restart from the desktop shortcut.</span>
     </div>
 
+    <!-- APP-UPDATE-SPEC.md section 3.2: shown only while
+         Store.state.appUpdate.state === "ready" (App.renderAppUpdateBanner,
+         called from App.renderChrome so it stays current on every view).
+         "Not now" hides it for this browser session only, via an in-memory
+         flag - never settings.json, and never delays the silent path. -->
+    <div id="banner-app-update" class="banner" hidden role="alert">
+      <span id="banner-app-update-text"></span>
+      <button type="button" class="link-btn" id="banner-app-update-install">Install now</button>
+      <button type="button" class="link-btn" id="banner-app-update-whatsnew">What's new</button>
+      <button type="button" class="link-btn" id="banner-app-update-dismiss">Not now</button>
+    </div>
+
     <main id="main" class="main">
 
       <!-- ===================== My Addons ===================== -->
@@ -1128,6 +1140,34 @@
               </label>
             </div>
             <p class="muted-text" id="updates-background-status"></p>
+          </section>
+
+          <!-- APP-UPDATE-SPEC.md section 3.0/3.1: a separate, own-namespaced
+               group for FURPHY ITSELF updating - deliberately not folded into
+               #settings-updates above (that group, and the tray's own "Check
+               for updates now" menu item, both mean ADDON updates only). No
+               id/class prefix shared with #settings-updates/#updates-*/the
+               addon-update strings, so the two concepts never collide in a
+               below-average-tech-savvy player's head. -->
+          <section class="settings-group" id="settings-app-updates">
+            <h3>App updates</h3>
+            <div class="settings-row" id="app-update-auto-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Install app updates automatically<button type="button" class="info-tip" tabindex="0" aria-label="More about Install app updates automatically" aria-describedby="app-tooltip" data-tooltip="When a new version of Furphy is ready, it installs on its own the next time no Furphy window is open - and never while WoW is running. Turn this off to only be asked before installing. On by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-app-update-auto">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+            <div class="settings-row settings-row-col" id="app-update-status-row">
+              <p class="muted-text" id="app-update-status-text"></p>
+              <div class="settings-row-actions">
+                <button type="button" class="btn btn-outline" id="btn-app-update-check">Check now</button>
+                <button type="button" class="btn" id="btn-app-update-install" hidden>Install now</button>
+                <a href="#" class="link-btn" id="link-app-update-whatsnew" hidden>What's new</a>
+              </div>
+            </div>
           </section>
 
           <section class="settings-group" id="settings-appearance">
@@ -1525,6 +1565,23 @@
   <div class="app-closing-card">
     <svg class="icon"><use href="#icon-check-circle"></use></svg>
     <p>Furphy is being removed. You can close this window.</p>
+  </div>
+</div>
+
+<!-- APP-UPDATE-SPEC.md section 3.2: App.enterUpdatingState() shows this and
+     hides #app once POST /api/app-update/install succeeds ("Install now",
+     Settings row or in-window banner). This window is expected to close
+     (old server exits) and a new one opens on its own - there is no
+     "resume" from this state. If the new window never appears within ~20s,
+     this same card's text swaps to the Q4-decided fallback copy in place
+     (a plain #banner-offline fallback would never be visible - this overlay
+     already covers the whole page above it). Reuses .app-closing-overlay/
+     .app-closing-card's box styling (a different id, same shared classes) -
+     no new CSS needed for the container. -->
+<div class="app-closing-overlay" id="app-updating-overlay" hidden role="alert">
+  <div class="app-closing-card">
+    <svg class="icon job-spinner"><use href="#icon-refresh"></use></svg>
+    <p id="app-updating-text">Furphy is updating. This only takes a few seconds.</p>
   </div>
 </div>
 

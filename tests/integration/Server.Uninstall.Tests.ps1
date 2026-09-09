@@ -680,17 +680,63 @@ Describe 'install.ps1 -Uninstall run DIRECTLY (not via a live server''s own POST
            independent proof the fix's own claim holds, mirroring how
            Get-FurphyWebView2ChildrenUnder above independently re-checks
            the webview2 case rather than trusting the fix's own internals
-           alone. #>
+           alone.
+
+           Excludes Invoke-MaintenanceTick's own hidden -MaintenanceOnly
+           child (addon-server.ps1 ~5597-5679): a short-lived,
+           self-terminating helper the real server spawns on its own
+           schedule - including "the very first tick after startup", per
+           that function's own doc comment, so one is reliably alive
+           right when Start-TestServer above returns too - with its own
+           command line also naming addon-server.ps1 and this same
+           AppDest. It is a completely separate process from the
+           persistent background server this Describe is testing, exits
+           on its own regardless of the uninstall, and has already done
+           its own work and exited by the time Test-MaintenanceChildRunning
+           would next look for it; counting it here turns its own
+           unrelated exit timing into a false failure, exactly like
+           Get-LiveFurphyTrayPids above already excludes an unrelated
+           test-scoped tray for the same reason.
+
+           Also note the leading comma on both `return` statements below:
+           `return @(...)` alone does NOT protect a caller from
+           PowerShell's own single-element pipeline unwrapping - Write-
+           Output enumerates an array before handing it to the caller, so
+           when the filtered result has EXACTLY ONE match, the call sites
+           below receive that ONE CimInstance bare, not wrapped in an
+           array. Unlike a plain scalar (PowerShell gives those a
+           synthetic .Count of 1), a bare CimInstance has no .Count
+           member at all, so .Count silently evaluates to $null instead
+           of 1, and `$null | Should Be 0` / `$null | Should
+           BeGreaterThan 0` both fail even though the real process count
+           was correct - reproduced live outside Pester (-is [array] was
+           $false on the unprotected single-match return). A 0-match or
+           2-plus-match result was never affected (an empty array
+           enumerates to nothing and $null.Count is a real 0; 2+ matches
+           enumerate to 2+ separate pipeline objects, which the caller
+           correctly recollects as an array), which is exactly why this
+           only ever broke intermittently - on whichever side of the
+           Describe happened to have exactly one real match at that
+           instant (before the -MaintenanceOnly exclusion above, that was
+           usually the lone leftover maintenance child on the "after"
+           side; the "after" side's now-common true zero is unaffected,
+           but the "before" side's now-single real match needs the same
+           protection). `return ,@(...)` makes the function's own output
+           ONE pipeline object (an array wrapping the real array), so the
+           caller's single-object unwrap peels off only that outer
+           wrapper and hands back the real array intact, whatever its own
+           element count. #>
         param([string]$AppDestNorm)
         try {
             $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue
         } catch {
-            return @()
+            return ,@()
         }
-        return @($procs | Where-Object {
+        return ,@($procs | Where-Object {
                 $_.CommandLine -and
                 $_.CommandLine.ToLowerInvariant().Contains('addon-server.ps1') -and
-                $_.CommandLine.ToLowerInvariant().Contains($AppDestNorm)
+                $_.CommandLine.ToLowerInvariant().Contains($AppDestNorm) -and
+                ($_.CommandLine -notmatch '(?i)(^|\s)-maintenanceonly(\s|$)')
             })
     }
 

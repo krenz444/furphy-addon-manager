@@ -156,14 +156,14 @@ if (-not $SkipServerCheck) {
 
 # 6. Mirror into the git repo and push (keeps github.com/krenz444/furphy-addon-manager current).
 if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
-    foreach ($f in @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'deploy.ps1', 'iterate.workflow.js', 'icon.ico', 'make-icon.ps1', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'package.ps1', 'VERSION', 'Install Furphy.cmd', 'README.md', 'NEXT-FIXES.md')) {
+    foreach ($f in @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'README.txt', 'CHANGELOG.md', 'deploy.ps1', 'icon.ico', 'make-icon.ps1', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'package.ps1', 'VERSION', 'Install Furphy.cmd', 'README.md', 'NEXT-FIXES.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath $f) -Force }
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs') | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
     Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
-    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
+    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'APP-UPDATE-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
     }
@@ -196,6 +196,13 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         $testsExclude = @('.tmp', 'last-report.json', 'last-report.md', 'theme-screenshots')
         Get-ChildItem -LiteralPath $testsSrc -Force | Where-Object { $testsExclude -notcontains $_.Name } | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $testsDst -Recurse -Force
+        }
+        # Measurement OUTPUT folders are build artefacts, not sources: every
+        # bench/soak JSON records this machine's scratch paths and process
+        # tables. Keep them local; the repo carries the scripts that make them.
+        foreach ($artefactDir in @('perf\bench', 'perf\soak')) {
+            $ad = Join-Path $testsDst $artefactDir
+            if (Test-Path -LiteralPath $ad) { Remove-Item -LiteralPath $ad -Recurse -Force }
         }
         "copied tests\ ($((Get-ChildItem -LiteralPath $testsDst -File -Recurse | Measure-Object).Count) files, sources only)"
     }

@@ -1146,6 +1146,10 @@
       "More about Include beta versions",
       "More about Update addons in the background",
       "More about How often",
+      // APP-UPDATE-SPEC.md section 3.1 (app self-update - a separate,
+      // never-shared-namespace group from "Update addons in the background"
+      // above, per section 3.0's own decision).
+      "More about Install app updates automatically",
       "More about Start with Windows",
       "More about Spacing",
       "More about Theme",
@@ -2117,6 +2121,129 @@
   }
 
   // ------------------------------------------------------------------
+  // Phase (APP-UPDATE-SPEC.md sections 3.1-3.5): the app-self-update
+  // Settings section, in-window banner, and first-run toast. Each of the
+  // mock's seven forced states (?mock=1&appUpdate=<state>, ui\app.js's own
+  // Mock module) gets a fresh frame - the state machine's real transitions
+  // are Package A's own server-side tests to cover, not this SPA-only
+  // harness's job; here we only need every state to PAINT correctly.
+  // ------------------------------------------------------------------
+  async function phaseAppUpdates() {
+    beginPhase("app self-update (APP-UPDATE-SPEC.md sections 3.1-3.5)");
+
+    // ---- Section renders correctly in every state; banner and "Install
+    // now" are gated on state==="ready" alone (section 3.1/3.2 - "available"
+    // shares ready's STATUS TEXT but never shows the button or the banner).
+    const EXPECTED = {
+      idle: { text: "Furphy is up to date (version 1.22.0).", installVisible: false, bannerVisible: false, whatsNewVisible: false },
+      checking: { text: "Checking for updates...", installVisible: false, bannerVisible: false, whatsNewVisible: true },
+      available: { text: "Update ready: version 1.23.0.", installVisible: false, bannerVisible: false, whatsNewVisible: true },
+      downloading: { text: "Checking for updates...", installVisible: false, bannerVisible: false, whatsNewVisible: true },
+      ready: { text: "Update ready: version 1.23.0.", installVisible: true, bannerVisible: true, whatsNewVisible: true },
+      installing: { text: "Installing update...", installVisible: false, bannerVisible: false, whatsNewVisible: true },
+      installed: { text: "Furphy is up to date (version 1.23.0).", installVisible: false, bannerVisible: false, whatsNewVisible: true },
+      error: { text: "Couldn't check for updates - try again later.", installVisible: false, bannerVisible: false, whatsNewVisible: false }
+    };
+    for (const state of Object.keys(EXPECTED)) {
+      const exp = EXPECTED[state];
+      const win = await loadFrame("?mock=1&test=1&view=settings&appUpdate=" + state);
+      await waitForReady(win, 8000);
+      checkTry("state=" + state + ": status text reads \"" + exp.text + "\"", function () {
+        return text(q(win, "#app-update-status-text")) === exp.text;
+      });
+      checkTry("state=" + state + ": Install now is " + (exp.installVisible ? "shown" : "hidden"), function () {
+        return visible(q(win, "#btn-app-update-install")) === exp.installVisible;
+      });
+      checkTry("state=" + state + ": the in-window banner is " + (exp.bannerVisible ? "shown" : "hidden") + " (never shown for any state but \"ready\", even \"available\")", function () {
+        return visible(q(win, "#banner-app-update")) === exp.bannerVisible;
+      });
+      checkTry("state=" + state + ": What's new link is " + (exp.whatsNewVisible ? "shown" : "hidden"), function () {
+        return visible(q(win, "#link-app-update-whatsnew")) === exp.whatsNewVisible;
+      });
+    }
+
+    // ---- Toggle round-trips through the existing saveSettings()/Actions
+    // pattern - on by default, saved through the real PUT path on click.
+    const toggleWin = await loadFrame("?mock=1&test=1&view=settings");
+    await waitForReady(toggleWin, 8000);
+    const autoToggle = q(toggleWin, "#toggle-app-update-auto");
+    checkTry("Install app updates automatically is ON by default", function () {
+      return !!autoToggle && autoToggle.checked === true;
+    });
+    if (autoToggle) {
+      await clickAndSettle(toggleWin, autoToggle, 400);
+      checkTry("toggling it off round-trips through Actions.saveSettings (Store.state.settings reflects the save, no bespoke plumbing)", function () {
+        return toggleWin.__furphyTest.Store.state.settings.appUpdateAutoInstall === false && autoToggle.checked === false;
+      });
+    } else {
+      check("toggling it off round-trips through Actions.saveSettings", false, "#toggle-app-update-auto not found");
+    }
+
+    // ---- Install now stays disabled while a game is active (server-
+    // authoritative gameRunning) or while a job is running (client-known,
+    // via Store.state.job - section 3.1's own disabled+title idiom).
+    const gameWin = await loadFrame("?mock=1&test=1&view=settings&appUpdate=ready&game=1");
+    await waitForReady(gameWin, 8000);
+    checkTry("Install now is disabled with title \"WoW is running\" while a game is active", function () {
+      const btn = q(gameWin, "#btn-app-update-install");
+      return !!btn && btn.disabled === true && btn.title === "WoW is running";
+    });
+
+    const jobWin = await loadFrame("?mock=1&test=1&view=settings&appUpdate=ready");
+    await waitForReady(jobWin, 8000);
+    checkTry("Install now is enabled with no title on a plain ready frame (sanity check before forcing a job below)", function () {
+      const btn = q(jobWin, "#btn-app-update-install");
+      return !!btn && btn.disabled === false && !btn.hasAttribute("title");
+    });
+    jobWin.__furphyTest.Store.set({ job: { id: "1", kind: "sync", state: "running", startedAt: new Date().toISOString(), finishedAt: null, exitCode: null, log: [], results: [], error: null } });
+    jobWin.__furphyTest.Views.settings.render();
+    checkTry("Install now is disabled with title \"An addon job is running\" while a job runs", function () {
+      const btn = q(jobWin, "#btn-app-update-install");
+      return !!btn && btn.disabled === true && btn.title === "An addon job is running";
+    });
+
+    // ---- First-run toast (section 3.4): fires once per version change,
+    // never on a genuinely fresh profile. localStorage is shared with this
+    // harness page itself (same origin, per this file's own header comment)
+    // so the seed value can be written before the frame's own App.init()
+    // ever runs, with no load-order race to fight.
+    const APP_UPDATE_SEEN_KEY = "addonSync.appUpdateSeenVersion.v1";
+    window.localStorage.setItem(APP_UPDATE_SEEN_KEY, "1.0.0-old");
+    const toastWin1 = await loadFrame("?mock=1&test=1");
+    await waitForReady(toastWin1, 8000);
+    await wait(200);
+    checkTry("first-run toast shows 'Updated to version mock-1.0.' with a What's new action, when the stored seen-version differs from the current one", function () {
+      const toasts = qa(toastWin1, "#toast-container .toast");
+      return toasts.some(function (t) {
+        return text(t.querySelector(".toast-body")) === "Updated to version mock-1.0." && !!t.querySelector(".toast-action");
+      });
+    });
+    checkTry("the seen-version key is now updated to the current version (so the toast can't refire this same page's own next reload)", function () {
+      return window.localStorage.getItem(APP_UPDATE_SEEN_KEY) === "mock-1.0";
+    });
+    const toastWin2 = await loadFrame("?mock=1&test=1");
+    await waitForReady(toastWin2, 8000);
+    await wait(200);
+    checkTry("the toast does NOT reappear on a second load once the seen-version already matches (shows once)", function () {
+      const toasts = qa(toastWin2, "#toast-container .toast");
+      return !toasts.some(function (t) { return text(t.querySelector(".toast-body")) === "Updated to version mock-1.0."; });
+    });
+
+    checkTry("no banned UX-SPEC.md section 11 term appears anywhere in the App updates section or banner", function () {
+      const hits = [];
+      [gameWin].forEach(function (w) {
+        const combined = (text(q(w, "#settings-app-updates")) + " " + text(q(w, "#banner-app-update"))).toLowerCase();
+        BANNED_PHRASES.forEach(function (p) { if (combined.indexOf(p) !== -1) hits.push(p); });
+        BANNED_WORDS.forEach(function (word) { if (new RegExp("\\b" + word + "\\b", "i").test(combined)) hits.push(word); });
+      });
+      if (hits.length) check("App updates banned-term hits (detail)", false, hits.join(", "));
+      return hits.length === 0;
+    });
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
   // Phase: novice:NOVICE-1 (QA findings round, UX-SPEC.md 2.4) - a brand-new/
   // zero-addon account must never show a freshness headline (any enum
   // value) directly above "No addons yet" on the My Addons screen - the two
@@ -2173,6 +2300,7 @@
     await phaseA11yTabsArrowKeys();
     await phaseEmptyStateFreshness();
     await phaseUninstall();
+    await phaseAppUpdates();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

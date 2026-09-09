@@ -1893,6 +1893,11 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
 .settings-row-label { font-size: 13px; color: var(--text); }
 .settings-row-value { font-size: 12.5px; color: var(--text-faint); word-break: break-all; margin-top: 2px; }
 
+/* APP-UPDATE-SPEC.md section 3.1: groups "Check now"/"Install now"/"What's
+   new" under a status-line row (settings-row-col's own column layout gives
+   this its top margin against the p.muted-text above it). */
+.settings-row-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+
 .radio-group { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .radio-option { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
 .radio-option input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }

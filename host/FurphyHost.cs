@@ -4681,6 +4681,12 @@ boot();
         public bool BackgroundUpdates;
         public int IntervalMinutes;
         public bool RunAtStartup;
+        // APP-UPDATE-SPEC.md section 6/7 - settings.json's
+        // "appUpdateAutoInstall" key, default true (opposite polarity from
+        // BackgroundUpdates' own OFF default - intentional, per section 6).
+        // RunCycle's own tray-cycle step (section 7) gates its silent
+        // install POST on this field.
+        public bool AppUpdateAutoInstall;
     }
 
     // DISTRIBUTION-SPEC.md section 5.3 - result of one call to
@@ -4729,6 +4735,14 @@ boot();
             result.RunAtStartup = (settings.TryGetValue("runAtStartup", out v) && v != null)
                 ? JsonUtil.ToBool(v, false)
                 : false;
+
+            // APP-UPDATE-SPEC.md section 6 - default true (a missing key,
+            // same "$null -ne" tolerance every other boolean setting in
+            // this codebase already gets, reads as the Get-DefaultSettings
+            // value on the server side too).
+            result.AppUpdateAutoInstall = (settings.TryGetValue("appUpdateAutoInstall", out v) && v != null)
+                ? JsonUtil.ToBool(v, true)
+                : true;
 
             return result;
         }
@@ -5042,6 +5056,27 @@ boot();
         public List<string> Failed = new List<string>();
     }
 
+    // APP-UPDATE-SPEC.md section 5 - the subset of GET /api/app-update/
+    // status's JSON body RunCycle's own tray-cycle step (section 7) and
+    // the durable balloon marker (section 3.3/8.7) actually need. State/
+    // WindowOpen/InstalledAt/CurrentVersion/LatestVersion mirror that
+    // route's response fields byte-for-byte; every other field in the
+    // real response (releaseTag, releaseUrl, checkedAt, downloadedAt,
+    // lastError, autoInstall, deferredReason) is intentionally not parsed
+    // here - the tray never reads any of them (autoInstall in particular
+    // is deliberately NOT read from this response; the tray gates its own
+    // install decision on the SAME TrayBackgroundSettings.
+    // AppUpdateAutoInstall it already re-reads from settings.json every
+    // cycle, exactly like BackgroundUpdates/IntervalMinutes above).
+    internal class AppUpdateStatusInfo
+    {
+        public string State;
+        public bool WindowOpen;
+        public string InstalledAt;
+        public string CurrentVersion;
+        public string LatestVersion;
+    }
+
     // FLAVORS-SPEC.md S2.1's fixed label table, duplicated here the same
     // way install.ps1 keeps its own small copy of $Script:FlavourDefs -
     // the tray only ever needs a flavour's player-facing label for the
@@ -5164,6 +5199,16 @@ boot();
         private bool _balloonShown;
         private string _balloonText;
 
+        // APP-UPDATE-SPEC.md section 3.3/8.7 - the durable "already
+        // announced this install" marker. Guarded by _stateLock like every
+        // other field in this block; seeded from the ON-DISK tray-state.
+        // json in the constructor (BEFORE the first WriteStateFile call
+        // below wipes the file down to just this run's snapshot) so the
+        // value survives the very process restart -Relaunch tray causes,
+        // and re-persisted through WriteStateFile's existing snapshot
+        // every cycle - never a second file, never a second write path.
+        private string _lastAppUpdateAnnouncedInstalledAt;
+
         public int ExitCode;
 
         public TrayForm(HostOptions options, bool dpiAware, int resolvedPort)
@@ -5239,6 +5284,13 @@ boot();
             LogHost("[tray] starting pid=" + _pid.ToString(CultureInfo.InvariantCulture) +
                 " port=" + _port.ToString(CultureInfo.InvariantCulture) +
                 " selftest=" + _options.TraySelftestActive.ToString());
+
+            // APP-UPDATE-SPEC.md section 3.3/8.7 - read BEFORE the first
+            // WriteStateFile call below, which (per that method's own
+            // "full snapshot, never a merge" contract) would otherwise
+            // silently drop whatever a PRIOR process instance already
+            // persisted here.
+            _lastAppUpdateAnnouncedInstalledAt = ReadLastAppUpdateAnnouncedInstalledAt();
 
             // Round 28 (section B, "idle") - shown from process start
             // through the end of the first ~90s pre-cycle wait; ~90s
@@ -5951,7 +6003,150 @@ boot();
             }
 
             CompleteMultiFlavourCycle(flavourJobs, settings);
+
+            // APP-UPDATE-SPEC.md section 7/8.7 - ONE more post-cycle step,
+            // added right after the addon-sync work above. Deliberately
+            // placed here, after the addon-sync cycle actually finished,
+            // rather than as a second top-level check in this method:
+            // every OTHER return in this function above (WoW running at
+            // (a); server unreachable at (b); a job already busy - 409 -
+            // or any other POST /api/jobs error at (c); no flavour jobs
+            // returned; a stop signal mid-poll at (d)) already exits
+            // RunCycle before this line - which is exactly "never while
+            // WoW is running" and "never while a job is running" for free,
+            // by construction, with no second explicit gate needed for
+            // either. (RunAppUpdateStep still re-checks WoW itself, purely
+            // as defense-in-depth against WoW having been launched mid-
+            // cycle - the addon-sync poll above can run for up to 15
+            // minutes - matching this file's own "enforced twice" idiom
+            // for every other mutating call it makes.)
+            RunAppUpdateStep(settings);
             return outcome;
+        }
+
+        // APP-UPDATE-SPEC.md section 7 - GET /api/app-update/status once;
+        // announce a not-yet-announced completed install via the durable
+        // tray-state.json marker (section 3.3/8.7) regardless of the
+        // eligibility check below; then, only when state=="ready" AND no
+        // window is open AND settings.appUpdateAutoInstall is true AND
+        // (defense-in-depth) WoW is not running right now, POST /api/
+        // app-update/install {relaunch:"tray"}. Never throws - a failure
+        // anywhere in here (network error, malformed JSON, a 4xx/5xx) is
+        // logged and swallowed; this is a best-effort extra step on top of
+        // the addon-sync cycle that just finished, never something that
+        // should make an otherwise-successful cycle look like a failure.
+        private void RunAppUpdateStep(TrayBackgroundSettings settings)
+        {
+            try
+            {
+                if (WowDetector.IsRunning(_options.WowFakeProcessName))
+                {
+                    return;
+                }
+
+                string body = Http.GetString(AppUpdateStatusUrl(), 5000);
+                if (string.IsNullOrEmpty(body))
+                {
+                    // Server unreachable, slow, or (today, before Package
+                    // A's routes exist) a 404 - Http.GetString already
+                    // folds every one of those into a null return. Never
+                    // worth retrying mid-cycle; the next cycle tries again.
+                    return;
+                }
+
+                AppUpdateStatusInfo status = ParseAppUpdateStatus(body);
+                if (status == null)
+                {
+                    LogHost("[tray] app-update status: could not parse response");
+                    return;
+                }
+
+                AnnounceInstalledIfNew(status);
+
+                if (status.State != "ready") return;
+                if (status.WindowOpen) return;
+                if (!settings.AppUpdateAutoInstall) return;
+
+                LogHost("[tray] app update ready (" + (status.LatestVersion ?? "?") +
+                    ") - installing silently");
+                HttpResult installResult = Http.PostJson(AppUpdateInstallUrl(), "{\"relaunch\":\"tray\"}", 10000);
+                if (installResult.NetworkError || installResult.StatusCode != 200)
+                {
+                    LogHost("[tray] app-update install request failed: status=" +
+                        installResult.StatusCode.ToString(CultureInfo.InvariantCulture));
+                }
+                // On a 200, the server has already set $Script:ShuttingDown
+                // and install.ps1 -Upgrade will shortly Set() this very
+                // process's own TrayStop event (APP-UPDATE-SPEC.md section
+                // 8.5's (b)/(c)) - nothing further to do here; WorkerLoop's
+                // own WaitForNextCycle notices that stop signal on its own,
+                // exactly like any other stop.
+            }
+            catch (Exception ex)
+            {
+                LogHost("[tray] app-update step failed: " + ex.Message);
+            }
+        }
+
+        // APP-UPDATE-SPEC.md section 3.3/8.7 - fires the "Furphy updated
+        // itself..." balloon exactly once per distinct installedAt value,
+        // durably (tray-state.json, not an in-memory flag - see this
+        // class's _lastAppUpdateAnnouncedInstalledAt field comment for why
+        // an in-memory flag cannot work here). Never fires on a genuinely
+        // fresh/never-updated install (installedAt null) and never re-
+        // fires for the SAME install across a plain reboot with no new
+        // update involved (the comparison is against installedAt, which
+        // only changes on the NEXT successful install - never against
+        // state, which can sit at "installed" for up to an hour).
+        private void AnnounceInstalledIfNew(AppUpdateStatusInfo status)
+        {
+            if (string.IsNullOrEmpty(status.InstalledAt)) return;
+
+            bool alreadyAnnounced;
+            lock (_stateLock)
+            {
+                alreadyAnnounced = string.Equals(_lastAppUpdateAnnouncedInstalledAt, status.InstalledAt, StringComparison.Ordinal);
+            }
+            if (alreadyAnnounced) return;
+
+            LogHost("[tray] app update installed (" + (status.CurrentVersion ?? "?") + ") - showing balloon");
+            ShowBalloonText("Furphy updated itself to version " + (status.CurrentVersion ?? "?") + ".", ToolTipIcon.Info);
+
+            lock (_stateLock)
+            {
+                _lastAppUpdateAnnouncedInstalledAt = status.InstalledAt;
+            }
+            // Persists the marker right away via the SAME WriteStateFile
+            // write path every other status change in this file already
+            // uses - no new file, no new write path (section 3.3's own
+            // requirement) - rather than waiting for whatever the next
+            // unrelated status change happens to trigger.
+            WriteStateFile(true);
+        }
+
+        // APP-UPDATE-SPEC.md section 5 - parses the subset of GET
+        // /api/app-update/status's JSON body this class needs (see
+        // AppUpdateStatusInfo's own doc comment for exactly which fields
+        // and why). Returns null only when the body itself is not a JSON
+        // object at all; a missing/malformed individual field falls back
+        // to a SAFE value rather than throwing - "windowOpen" in
+        // particular defaults to true (assume a window IS open, i.e.
+        // never auto-install) on anything but an explicit false, since an
+        // ambiguous read here must never be the reason a silent install
+        // fires while a window could still be open.
+        private static AppUpdateStatusInfo ParseAppUpdateStatus(string body)
+        {
+            Dictionary<string, object> obj = MiniJson.Parse(body) as Dictionary<string, object>;
+            if (obj == null) return null;
+
+            AppUpdateStatusInfo info = new AppUpdateStatusInfo();
+            object v;
+            info.State = obj.TryGetValue("state", out v) ? v as string : null;
+            info.WindowOpen = !(obj.TryGetValue("windowOpen", out v) && v is bool && (bool)v == false);
+            info.InstalledAt = obj.TryGetValue("installedAt", out v) ? v as string : null;
+            info.CurrentVersion = obj.TryGetValue("currentVersion", out v) ? v as string : null;
+            info.LatestVersion = obj.TryGetValue("latestVersion", out v) ? v as string : null;
+            return info;
         }
 
         // Parses {kind:"update-all-flavours", jobs:[{flavour,jobId}|
@@ -6511,6 +6706,10 @@ boot();
         private string PingUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/ping"; }
         private string JobsUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs"; }
         private string JobUrl(string id) { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/jobs/" + id; }
+        // APP-UPDATE-SPEC.md section 7 - same shape as the three helpers
+        // above, for the tray-cycle app-update step (RunAppUpdateStep).
+        private string AppUpdateStatusUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/app-update/status"; }
+        private string AppUpdateInstallUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/app-update/install"; }
         private string UninstallUrl() { return "http://localhost:" + _port.ToString(CultureInfo.InvariantCulture) + "/api/uninstall"; }
 
         // DISTRIBUTION-SPEC.md section 3.2/5.3 - the same folder both
@@ -6826,6 +7025,7 @@ boot();
             string message;
             DateTime? lastRunAtUtc;
             DateTime? nextRunAtUtc;
+            string lastAppUpdateAnnouncedInstalledAt;
             lock (_stateLock)
             {
                 status = _status;
@@ -6839,6 +7039,7 @@ boot();
                 message = _message;
                 lastRunAtUtc = _lastRunAtUtc;
                 nextRunAtUtc = _nextRunAtUtc;
+                lastAppUpdateAnnouncedInstalledAt = _lastAppUpdateAnnouncedInstalledAt;
             }
 
             Dictionary<string, object> snapshot = new Dictionary<string, object>();
@@ -6859,6 +7060,11 @@ boot();
             snapshot["failedNames"] = failedNamesList;
             snapshot["message"] = message;
             snapshot["nextRunAt"] = nextRunAtUtc.HasValue ? (object)ToIso(nextRunAtUtc.Value) : null;
+            // APP-UPDATE-SPEC.md section 3.3/8.7 - carried through this
+            // SAME full-snapshot write every cycle (never a second write
+            // path) so it survives both an ordinary next cycle and the
+            // brand-new-OS-process restart -Relaunch tray causes.
+            snapshot["lastAppUpdateAnnouncedInstalledAt"] = lastAppUpdateAnnouncedInstalledAt;
 
             HostFiles.UpdateJsonObject(_trayStatePath, delegate(Dictionary<string, object> d)
             {
@@ -6869,6 +7075,28 @@ boot();
                 }
             });
             _stateFileWritten = true;
+        }
+
+        // APP-UPDATE-SPEC.md section 3.3/8.7 - reads whatever the LAST
+        // process instance (which may be the process this -Relaunch tray
+        // just replaced) already recorded, straight off disk, before this
+        // instance's own first WriteStateFile call overwrites the file
+        // with a fresh snapshot. Best-effort/tolerant like every other
+        // tray-state.json read in this file - a missing/corrupt file or
+        // field reads as "never announced" (null), never a crash.
+        private string ReadLastAppUpdateAnnouncedInstalledAt()
+        {
+            try
+            {
+                Dictionary<string, object> existing = HostFiles.LoadJsonObject(_trayStatePath);
+                object v;
+                if (existing.TryGetValue("lastAppUpdateAnnouncedInstalledAt", out v))
+                {
+                    return v as string;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private static string ToIso(DateTime utc)

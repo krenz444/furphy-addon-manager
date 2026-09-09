@@ -51,6 +51,14 @@ Any of the three removes the app files, the Start with Windows setting, the `cur
 
 You can also run `install.ps1 -Uninstall` (or `Install Furphy.cmd -Uninstall` from a console) directly from an unzipped copy of the app - the same mechanism the three paths above use.
 
+## Updates itself
+
+Starting with version 1.22.0, Furphy checks for a newer version of itself (never your addons - that's the separate "Update addons in the background" feature above) and installs it automatically, the next time doing so is safe: never while WoW is running, never in the middle of an addon update, and - for the fully automatic path - never while a Furphy window is open. If a window happens to be open when an update is ready, you'll see a small banner instead, with an **Install now** button; either way, the update itself takes only a few seconds and your addon list, settings and logs are never touched. A tray balloon lets you know once, after a silent update finishes.
+
+Settings has its own **App updates** section (separate from the addon-update section above it) with a toggle - **Install app updates automatically** (on by default) - plus **Check now** and **Install now** buttons and a status line telling you what's going on. Turning the toggle off does not stop Furphy from *checking*; it only stops it from installing on its own - you'll still see "Install now" whenever a new version is ready, and can install it with one click whenever you're ready. Every downloaded update is verified (a cryptographic checksum, over a secure connection) before anything touches your installed copy, and a failed update automatically restores the version you had, so you're never left with a broken app.
+
+If you're coming from a version older than 1.22.0, this feature doesn't run for you yet - update to 1.22.0 the same way you always have (download the zip, run `Install Furphy.cmd` once). Every version from 1.22.0 onward updates itself automatically after that.
+
 ## Performance
 
 Furphy is built to have zero impact on gameplay. Whenever a supported WoW client is running, the local server and the background updater slow their own polling and skip everything but a check you asked for yourself (no catalogue refresh, no metadata lookups, no auto-update-check timer), and both run at a lower OS scheduling priority the whole time. The app window does the same: leave it open in the background (or just minimize it) while you play and it drops into a low-priority background mode within a few seconds - the CurseForge pane and the page itself stop polling almost entirely, and everything picks back up on its own the moment you alt-tab back or close the game. `tests\perf\Perf.Tests.ps1` (part of a full `tests\run-all.ps1` run) asserts this automatically against a real game-running simulation on every test pass, not just by hand.
