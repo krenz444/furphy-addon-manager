@@ -238,6 +238,84 @@ function Assert-FixturePristine {
     return $true
 }
 
+function Get-TreeFingerprint {
+    <#
+      ADOPT-SPEC.md section 6.1/6.2: a deterministic, order-independent
+      "did anything under -Path change" snapshot - one "<relative
+      path>|<sha256 of file content>" string per file, sorted by relative
+      path, plus the literal marker '<absent>' when -Path does not exist at
+      all (so a caller comparing before/after also catches "the whole
+      folder got deleted", not only "a file inside it changed"). Recurse +
+      -File only (never records directory entries themselves - a folder
+      being created/removed with no files in it would otherwise be
+      invisible either way, which is fine: Furphy never creates an EMPTY
+      folder as a meaningful side effect of anything this suite tests
+      against this helper). Used by the tree-hash invariant test
+      (installer-level, Install.NoAddonDataChange.Tests.ps1) and the
+      CLI-level zero-filesystem-writes checks in Cli.Adopt.Tests.ps1 /
+      Cli.AdoptFreshness.Tests.ps1 - the exact same fingerprint shape so a
+      caller can diff two calls' output directly with Compare-Object or a
+      plain array equality check.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return , @('<absent>')
+    }
+    $lines = Get-ChildItem -LiteralPath $Path -Recurse -File -Force |
+        Sort-Object -Property FullName |
+        ForEach-Object {
+            $rel = $_.FullName.Substring($Path.Length).TrimStart('\')
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            "$rel|$hash"
+        }
+    return , @($lines)
+}
+
+function Read-JsonRecordsFile {
+    <#
+      Reads a JSON array file (addons.json, a -Json results/addons array,
+      etc.) back as a real, flat PowerShell array - safe to index, filter,
+      and (unlike a value straight out of ConvertFrom-Json) safe to
+      PROPERTY-ASSIGN into an element of.
+
+      The trap this works around, found live while writing
+      Cli.AdoptFreshness.Tests.ps1: `ConvertFrom-Json` always writes its
+      parsed result to the pipeline as ONE atomic object (never enumerated
+      element-by-element), even when that result is itself an array. So
+      `@(Get-Content ... -Raw | ConvertFrom-Json)` in a SINGLE statement
+      does not do what it looks like it does for a JSON array with more
+      than zero elements - `@()` wraps that one atomic array-shaped object
+      into an OUTER one-element array, leaving a genuinely NESTED array
+      ($result[0] is itself an array, not the first record) whenever the
+      source JSON has one or more top-level elements. Confirmed live:
+      member GET still silently "works" on the nested shape (PowerShell's
+      member-enumeration reads a property across every element of an
+      array), which is exactly why this can pass every read-only
+      assertion in one test file and then throw "The property 'x' cannot
+      be found on this object" the moment another file tries to
+      PROPERTY-SET on what it assumed was a single record (array
+      member-set is not supported the way member-get is).
+
+      The fix is to let ConvertFrom-Json's result land in a plain
+      variable FIRST (a separate statement - the value is then already
+      realized, not an in-flight pipeline object) and wrap THAT in `@()`
+      - never chain `@(... | ConvertFrom-Json)` as one expression again
+      anywhere in this suite.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return , @()
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return , @()
+    }
+    $parsed = $raw | ConvertFrom-Json
+    return , @($parsed)
+}
+
 # ---------------------------------------------------------------------
 # Ports
 # ---------------------------------------------------------------------

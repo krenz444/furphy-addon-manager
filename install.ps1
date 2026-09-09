@@ -141,45 +141,101 @@ function Write-InstallLogLine {
 }
 
 function Write-Step {
-    param([string]$Message)
+    param([string]$Message, [int]$Percent = -1)
     Write-Host ''
     Write-Host "== $Message ==" -ForegroundColor Cyan
-    Update-WizardProgress -Message $Message
+    Update-WizardProgress -Title $Message -Percent $Percent
     Write-InstallLogLine "== $Message =="
 }
 function Write-Info {
     param([string]$Message)
     Write-Host "  $Message"
-    Update-WizardProgress -Message $Message
+    Update-WizardProgress -Detail $Message
     Write-InstallLogLine "  $Message"
 }
 function Write-Warn2 {
     param([string]$Message)
     Write-Host "  WARNING: $Message" -ForegroundColor Yellow
-    Update-WizardProgress -Message "WARNING: $Message"
+    Update-WizardProgress -Detail "WARNING: $Message"
     Write-InstallLogLine "  WARNING: $Message"
+}
+
+# ADOPT-SPEC.md 3.1: cumulative PERCENT-COMPLETE-BEFORE-THIS-STEP-BEGINS
+# for every step Invoke-FurphyInstallSteps/Invoke-InstallCopyAndBuildSteps
+# can reach on the ONE path the interactive wizard ever actually runs (a
+# plain, non -Upgrade install - -Upgrade is only ever set by the
+# self-updater's own silent -Console relaunch, never by a human clicking
+# Install; see install.ps1's own -Upgrade param doc comment). Weights are
+# relative wall-clock share, not a promise of exact timing - tuned so the
+# bar visibly moves at every real step boundary and spends most of its
+# span on the two genuinely slow steps (copying+building host\, and the
+# app+ui\ file copy), never on the near-instant registry/shortcut steps.
+$Script:WizardStepStart = [ordered]@{
+    'stop-running'   = 0
+    'copy-app'       = 5
+    'copy-host'      = 20
+    'legacy-cleanup' = 60
+    'shortcut'       = 65
+    'protocol'       = 70
+    'adopt'          = 75
+    'installed-apps' = 90
+    'done'           = 95
 }
 
 # DISTRIBUTION-SPEC.md section 6.2, fix 6 (chosen progress mechanism):
 # every Write-Step/Write-Info/Write-Warn2 call above already runs
 # unconditionally throughout the unchanged install steps - piggybacking the
-# wizard's progress label + DoEvents() pump onto those exact same call
+# wizard's progress labels + DoEvents() pump onto those exact same call
 # sites means the install logic itself needs zero changes to report
-# progress into the Form. $Script:WizardActive/$Script:WizardProgressLabel
-# are $false/$null for the whole life of a console-only run (this function
+# progress into the Form. $Script:WizardActive/$Script:WizardProgress* are
+# $false/$null for the whole life of a console-only run (this function
 # then does nothing beyond the immediate early return), and are set only
 # from inside Show-InstallWizard's own Install-button click handler.
 $Script:WizardActive = $false
-$Script:WizardProgressLabel = $null
+$Script:WizardProgressTitleLabel = $null
+$Script:WizardProgressDetailLabel = $null
+$Script:WizardProgressBar = $null
+$Script:WizardLastPercent = 0
 function Update-WizardProgress {
-    param([string]$Message)
+    param(
+        [string]$Title,
+        [string]$Detail,
+        # -1 (default) = do not move the bar - used by a plain Write-Info/
+        # Write-Warn2 call that only updates the detail line.
+        [int]$Percent = -1
+    )
     if (-not $Script:WizardActive) { return }
     try {
-        if ($Script:WizardProgressLabel) { $Script:WizardProgressLabel.Text = $Message }
+        if ($Title -and $Script:WizardProgressTitleLabel) { $Script:WizardProgressTitleLabel.Text = $Title }
+        if ($Detail -and $Script:WizardProgressDetailLabel) { $Script:WizardProgressDetailLabel.Text = $Detail }
+        if ($Percent -ge 0 -and $Script:WizardProgressBar) {
+            # Never a backwards jump, even if a caller passes a stale/lower
+            # value by mistake - the bar only ever holds or advances.
+            $clamped = [Math]::Max($Script:WizardProgressBar.Value, [Math]::Min(100, $Percent))
+            $Script:WizardProgressBar.Value = $clamped
+            $Script:WizardLastPercent = $clamped
+        }
         [System.Windows.Forms.Application]::DoEvents()
     } catch {
         # Must never block/abort the install itself.
     }
+}
+# Sub-progress within one step's own band, for a step with countable work
+# (files copied, folders looked at) - Start/End are that step's own
+# entries from $Script:WizardStepStart (End = the NEXT step's Start, or
+# 100 for the last step).
+function Update-WizardSubProgress {
+    param(
+        [Parameter(Mandatory = $true)][int]$Start,
+        [Parameter(Mandatory = $true)][int]$End,
+        [Parameter(Mandatory = $true)][int]$Current,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [string]$Detail
+    )
+    if ($Total -le 0) { return }
+    $frac = [Math]::Min(1.0, [double]$Current / [double]$Total)
+    $pct = $Start + [int][Math]::Round(($End - $Start) * $frac)
+    Update-WizardProgress -Detail $Detail -Percent $pct
 }
 
 # Round 20: independent, code-level heuristic (not caller discipline alone)
@@ -1674,9 +1730,9 @@ function Invoke-InstallCopyAndBuildSteps {
 # =====================================================================
 
 if ($multiFlavour) {
-    Write-Step "Installing Furphy Addon Manager into $appDest (home flavour: $($homeFlavour.Label))"
+    Write-Step "Installing Furphy Addon Manager into $appDest (home flavour: $($homeFlavour.Label))" -Percent $Script:WizardStepStart['copy-app']
 } else {
-    Write-Step "Installing Furphy Addon Manager into $appDest"
+    Write-Step "Installing Furphy Addon Manager into $appDest" -Percent $Script:WizardStepStart['copy-app']
 }
 
 New-Item -ItemType Directory -Force -Path $appDest | Out-Null
@@ -1684,13 +1740,16 @@ New-Item -ItemType Directory -Force -Path $appDest | Out-Null
 # so the installed copy can uninstall itself (tray menu / Settings /
 # Installed apps all run "<appDest>\install.ps1 -Uninstall").
 $codeFiles = @('addon-sync.ps1', 'addon-server.ps1', 'Addon Manager.vbs', 'curseforge-handler.vbs', 'register-protocol.ps1', 'install.ps1', 'README.txt', 'CHANGELOG.md', 'icon.ico', 'VERSION')
+$codeFileIndex = 0
 foreach ($f in $codeFiles) {
+    $codeFileIndex++
     $s = Join-Path -Path $SourceRoot -ChildPath $f
     if (Test-Path -LiteralPath $s) {
         Copy-Item -LiteralPath $s -Destination (Join-Path -Path $appDest -ChildPath $f) -Force
     } else {
         Write-Warn2 "Source file missing, skipped: $f"
     }
+    Update-WizardSubProgress -Start $Script:WizardStepStart['copy-app'] -End $Script:WizardStepStart['copy-host'] -Current $codeFileIndex -Total $codeFiles.Count -Detail "Copying $f..."
 }
 $uiSrc = Join-Path -Path $SourceRoot -ChildPath 'ui'
 $uiDst = Join-Path -Path $appDest -ChildPath 'ui'
@@ -1716,6 +1775,7 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path -Path $appDest -ChildPath 'jobs') | Out-Null
+Update-WizardProgress -Percent $Script:WizardStepStart['copy-host']
 
 # =====================================================================
 # 3b. host\ - the E19 native WebView2 host (Furphy + CurseForge tabs in
@@ -1730,21 +1790,37 @@ New-Item -ItemType Directory -Force -Path (Join-Path -Path $appDest -ChildPath '
 
 $hostSrc = Join-Path -Path $SourceRoot -ChildPath 'host'
 if (Test-Path -LiteralPath $hostSrc -PathType Container) {
-    Write-Step 'Copying the native host (host\)'
+    Write-Step 'Copying and building the native host' -Percent $Script:WizardStepStart['copy-host']
+
+    # ADOPT-SPEC.md 3.4 (item 5): three FIXED, non-overlapping sub-bands
+    # inside copy-host's own 20-60% band for the three structurally
+    # different copy operations below, rather than one shared -Total that
+    # cannot honestly describe all three - offsets from this step's own
+    # Start so the table above stays the single source of truth.
+    $hostCopyStart = $Script:WizardStepStart['copy-host']
+    $hostCopyFixedEnd = $hostCopyStart + 4
+    $hostCopyLibEnd = $hostCopyStart + 7
+    $hostCopyBinEnd = $hostCopyStart + 10
+
     $hostDst = Join-Path -Path $appDest -ChildPath 'host'
     New-Item -ItemType Directory -Force -Path $hostDst | Out-Null
 
+    $hostFileIndex = 0
     foreach ($f in 'adfilter-hosts.txt', 'build-host.ps1', 'FurphyHost.cs') {
+        $hostFileIndex++
         $s = Join-Path -Path $hostSrc -ChildPath $f
         if (Test-Path -LiteralPath $s) {
             Copy-Item -LiteralPath $s -Destination (Join-Path -Path $hostDst -ChildPath $f) -Force
         } else {
             Write-Warn2 "host\$f missing, skipped."
         }
+        Update-WizardSubProgress -Start $hostCopyStart -End $hostCopyFixedEnd -Current $hostFileIndex -Total 3 -Detail "Copying host\$f..."
     }
 
     $libSrc = Join-Path -Path $hostSrc -ChildPath 'lib'
     if (Test-Path -LiteralPath $libSrc -PathType Container) {
+        Write-Info 'Copying required files...'
+        Update-WizardProgress -Percent $hostCopyLibEnd
         $libDst = Join-Path -Path $hostDst -ChildPath 'lib'
         New-Item -ItemType Directory -Force -Path $libDst | Out-Null
         Copy-Item -Path (Join-Path -Path $libSrc -ChildPath '*') -Destination $libDst -Recurse -Force
@@ -1760,17 +1836,27 @@ if (Test-Path -LiteralPath $hostSrc -PathType Container) {
     if (Test-Path -LiteralPath $binSrc -PathType Container) {
         $binDst = Join-Path -Path $hostDst -ChildPath 'bin'
         New-Item -ItemType Directory -Force -Path $binDst | Out-Null
-        Get-ChildItem -LiteralPath $binSrc -File | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path -Path $binDst -ChildPath $_.Name) -Force
+        $binFiles = @(Get-ChildItem -LiteralPath $binSrc -File)
+        $binFileIndex = 0
+        foreach ($bf in $binFiles) {
+            $binFileIndex++
+            Copy-Item -LiteralPath $bf.FullName -Destination (Join-Path -Path $binDst -ChildPath $bf.Name) -Force
+            Update-WizardSubProgress -Start $hostCopyLibEnd -End $hostCopyBinEnd -Current $binFileIndex -Total $binFiles.Count -Detail "Copying host\bin\$($bf.Name)..."
         }
     }
+    # host\bin\ can legitimately be empty/absent (a fallback, not a
+    # required source) - Update-WizardSubProgress no-ops when -Total is 0,
+    # so this band must always be closed out here unconditionally, or the
+    # bar would stall at $hostCopyLibEnd on the common case.
+    Update-WizardProgress -Percent $hostCopyBinEnd
 
     $cscPath = Join-Path -Path $env:WINDIR -ChildPath 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     if (-not (Test-Path -LiteralPath $cscPath)) {
         $cscPath = Join-Path -Path $env:WINDIR -ChildPath 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
     }
     if (Test-Path -LiteralPath $cscPath) {
-        Write-Info 'C# compiler found - building the native host (host\build-host.ps1)...'
+        Write-Info 'Building the native host - this can take a few seconds...'
+        Update-WizardProgress -Percent $hostCopyBinEnd
         try {
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path -Path $hostDst -ChildPath 'build-host.ps1') | Out-Null
             $exeOut = Join-Path -Path $hostDst -ChildPath 'bin\FurphyHost.exe'
@@ -2419,6 +2505,13 @@ function Invoke-FurphyInstallSteps {
       backup/rollback/relaunch/cleanup, but only when $Upgrade is set.
     #>
 
+# ADOPT-SPEC.md 3.6: running total of addons found already on disk and
+# adopted (recorded as-is, never downloaded) this run - reset at the top
+# of every call so a re-run/upgrade never carries a stale count from a
+# previous install into this one's success screen.
+$Script:LastAdoptedCount = 0
+
+Write-Step 'Checking for a running copy of Furphy' -Percent $Script:WizardStepStart['stop-running']
 $Script:StopRunningAppResult = Invoke-InstallStopRunningApp -AppDest $appDest -SkipRunValueRemoval
 $trayWasRunningIndependently = [bool]$Script:StopRunningAppResult.TrayWasRunningIndependently
 
@@ -2563,7 +2656,7 @@ if ($Upgrade) {
 #    machine the moment its install is upgraded to this version.
 # =====================================================================
 
-Write-Step 'Cleaning up legacy launcher files'
+Write-Step 'Cleaning up old files from a previous version' -Percent $Script:WizardStepStart['legacy-cleanup']
 Remove-FurphyLegacyLauncherArtifacts -WowRootPath $wowRoot -AppDestPath $appDest | Out-Null
 
 $cliPath = Join-Path -Path $appDest -ChildPath 'addon-sync.ps1'
@@ -2589,7 +2682,7 @@ $looksScratchStep6 = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScra
 if ($looksScratchStep6 -and (-not $NoShortcuts)) {
     Write-Warn2 'Target path looks like a scratch/test root but -NoShortcuts was not passed - skipping Desktop shortcut creation for safety. Pass -NoShortcuts explicitly for scratch runs; a production install never lives under a temp or scratch path.'
 } elseif (-not $NoShortcuts) {
-    Write-Step 'Creating desktop shortcut'
+    Write-Step 'Creating your desktop shortcut' -Percent $Script:WizardStepStart['shortcut']
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $wsh = New-Object -ComObject WScript.Shell
@@ -2625,7 +2718,7 @@ $looksScratchStep7 = (Test-LooksLikeScratchRun $wowRoot) -or (Test-LooksLikeScra
 if ($looksScratchStep7 -and (-not $NoProtocol)) {
     Write-Warn2 'Target path looks like a scratch/test root but -NoProtocol was not passed - skipping curseforge:// protocol registration for safety (it would rewrite the real HKCU\Software\Classes\curseforge key). Pass -NoProtocol explicitly for scratch runs.'
 } elseif (-not $NoProtocol) {
-    Write-Step 'Registering the curseforge:// install-link handler'
+    Write-Step 'Setting up CurseForge install links' -Percent $Script:WizardStepStart['protocol']
     $regScript = Join-Path -Path $appDest -ChildPath 'register-protocol.ps1'
     if (Test-Path -LiteralPath $regScript) {
         try {
@@ -2658,7 +2751,7 @@ if ($looksScratchStep7 -and (-not $NoProtocol)) {
 # =====================================================================
 
 if (-not $SkipAdopt) {
-    Write-Step 'Looking for existing addons to take over'
+    Write-Step 'Looking for addons you already have' -Percent $Script:WizardStepStart['adopt']
     # multi-client:install-adopt-loop-includes-hidden-ptr-flavour fix:
     # FLAVORS-SPEC.md S2.5 says PTR/XPTR/Beta stay "detected but excluded
     # from the switcher and from tray background sync by default" until
@@ -2675,65 +2768,93 @@ if (-not $SkipAdopt) {
     # seeing/managing PTR anywhere else in the app.
     $showFlavourHeader = ($script:firstClassInstalled.Count -gt 1)
 
+    # ADOPT-SPEC.md 3.4 (adopt row): sub-progress is per FLAVOUR processed
+    # (per-addon granularity isn't observable here - both -Scan/-Adopt are
+    # separate child processes that only report JSON at exit). $flavourIndex
+    # counts EVERY iteration, including one that hits a `continue` below,
+    # via the try/finally wrapper - a skipped flavour still counts as one
+    # unit of "looked at", so the band always reaches exactly this step's
+    # own End on the LAST iteration, on every machine.
+    $flavourIndex = 0
     foreach ($def in $script:firstClassInstalled) {
-        $flavourAddonsPath = Join-Path -Path (Join-Path -Path $wowRoot -ChildPath $def.Folder) -ChildPath 'Interface\AddOns'
-        if (-not (Test-Path -LiteralPath $flavourAddonsPath -PathType Container)) { continue }
-        if ($showFlavourHeader) { Write-Info "-- $($def.Label) --" }
+        $flavourIndex++
+        try {
+            $flavourAddonsPath = Join-Path -Path (Join-Path -Path $wowRoot -ChildPath $def.Folder) -ChildPath 'Interface\AddOns'
+            if (-not (Test-Path -LiteralPath $flavourAddonsPath -PathType Container)) { continue }
+            if ($showFlavourHeader) { Write-Info "-- $($def.Label) --" }
 
-        $scanJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cliPath -AddonsPath $flavourAddonsPath -Flavor $def.Id -Scan -Json
-        $scan = $null
-        try { $scan = $scanJson | ConvertFrom-Json } catch { $scan = $null }
+            $scanJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cliPath -AddonsPath $flavourAddonsPath -Flavor $def.Id -Scan -Json
+            $scan = $null
+            try { $scan = $scanJson | ConvertFrom-Json } catch { $scan = $null }
 
-        # Bug fix found during CS-F5 verification (pre-existing, not
-        # introduced by flavours): "-not $scan.untracked" is also true for
-        # a genuinely-empty (but successfully parsed) untracked array -
-        # PowerShell treats an empty collection as falsy - which wrongly
-        # printed "Could not read scan results" for any flavour whose
-        # AddOns folder has nothing untracked in it (exercised live by the
-        # S8 fixture's empty _ptr_\Interface\AddOns). Check $scan itself
-        # (did ConvertFrom-Json actually produce an object) instead.
-        if (-not $scan) {
-            Write-Info 'Could not read scan results - skipped taking over.'
-            continue
-        }
-
-        $untracked = @($scan.untracked)
-        $targets = New-Object 'System.Collections.Generic.List[string]'
-        $unmanaged = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($u in $untracked) {
-            if ($u.curseId) {
-                $targets.Add([string]$u.curseId)
-            } elseif ($u.wagoId) {
-                $targets.Add('wago:' + [string]$u.wagoId)
-            } else {
-                $unmanaged.Add([string]$u.folder)
+            # Bug fix found during CS-F5 verification (pre-existing, not
+            # introduced by flavours): "-not $scan.untracked" is also true
+            # for a genuinely-empty (but successfully parsed) untracked
+            # array - PowerShell treats an empty collection as falsy -
+            # which wrongly printed a read-failure message for any flavour
+            # whose AddOns folder has nothing untracked in it (exercised
+            # live by the S8 fixture's empty _ptr_\Interface\AddOns).
+            # Check $scan itself (did ConvertFrom-Json actually produce an
+            # object) instead.
+            if (-not $scan) {
+                Write-Info 'Could not check this folder for existing addons - skipped.'
+                continue
             }
-        }
 
-        if ($targets.Count -eq 0) {
-            Write-Info 'No untracked folders with a recognizable CurseForge or Wago id - nothing to take over.'
-        } else {
-            $idArg = [string]::Join(',', $targets.ToArray())
-            Write-Info "Taking over $($targets.Count) addon(s) (reinstalling each from its source)..."
-            $addJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cliPath -AddonsPath $flavourAddonsPath -Flavor $def.Id -Add $idArg -Json
-            $addResult = $null
-            try { $addResult = $addJson | ConvertFrom-Json } catch { $addResult = $null }
-            if ($addResult -and $addResult.results) {
-                foreach ($r in @($addResult.results)) {
-                    Write-Info ("  " + $r.status + ": " + $r.name)
+            $untracked = @($scan.untracked)
+            $recognizable = New-Object 'System.Collections.Generic.List[string]'
+            $unmanaged = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($u in $untracked) {
+                if ($u.curseId -or $u.wagoId) { $recognizable.Add([string]$u.folder) }
+                else { $unmanaged.Add([string]$u.folder) }
+            }
+
+            if ($recognizable.Count -eq 0) {
+                Write-Info 'No existing addons found here to add.'
+            } else {
+                # ADOPT-SPEC.md section 0/1: -Adopt records these folders
+                # exactly as they sit on disk right now - no download, no
+                # file write under Interface\AddOns. This is NOT the
+                # old -Add-based "reinstall from source" behavior.
+                $folderArg = [string]::Join(',', $recognizable.ToArray())
+                $adoptJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cliPath -AddonsPath $flavourAddonsPath -Flavor $def.Id -Adopt $folderArg -Json
+                $adoptResult = $null
+                try { $adoptResult = $adoptJson | ConvertFrom-Json } catch { $adoptResult = $null }
+                if ($adoptResult -and $adoptResult.results) {
+                    $adoptedNames = @($adoptResult.results | Where-Object { $_.status -eq 'Adopted' } | ForEach-Object { $_.name })
+                    if ($adoptedNames.Count -gt 0) {
+                        Write-Info "Found $($adoptedNames.Count) addon(s) already in your AddOns folder - Furphy is now keeping track of them."
+                        foreach ($name in $adoptedNames) { Write-Info "  $name" }
+                        $Script:LastAdoptedCount += $adoptedNames.Count
+                    } else {
+                        Write-Info 'No existing addons found here to add.'
+                    }
+                    # ADOPT-SPEC.md 3.5: a folder classified as $recognizable
+                    # (curseId/wagoId present) can still come back Skipped
+                    # from -Adopt itself (e.g. an id that isn't actually
+                    # usable) - fold any such row (other than "already
+                    # tracked", not worth a player-facing line) into the
+                    # SAME "left alone" list the truly-unrecognizable
+                    # folders use, so nothing a player's own eyes could
+                    # count on disk goes unexplained.
+                    foreach ($skipped in @($adoptResult.results | Where-Object { $_.status -eq 'Skipped' -and $_.reason -notlike '*already tracked*' })) {
+                        foreach ($f in @($skipped.folders)) { $unmanaged.Add([string]$f) }
+                    }
+                } else {
+                    Write-Warn2 'Could not read the results of adding your existing addons - check sync.log.'
                 }
-            } else {
-                Write-Warn2 'Could not parse the take-over step''s results - check sync.log.'
             }
-        }
 
-        if ($unmanaged.Count -gt 0) {
-            Write-Info 'Left unmanaged (no CurseForge or Wago id found):'
-            foreach ($name in $unmanaged) { Write-Info ("  - " + $name) }
+            if ($unmanaged.Count -gt 0) {
+                Write-Info "Furphy could not tell what $($unmanaged.Count) folder(s) are, so it left them alone:"
+                foreach ($name in $unmanaged) { Write-Info "  $name" }
+            }
+        } finally {
+            Update-WizardSubProgress -Start $Script:WizardStepStart['adopt'] -End $Script:WizardStepStart['installed-apps'] -Current $flavourIndex -Total $script:firstClassInstalled.Count
         }
     }
 } else {
-    Write-Info 'Skipped taking over existing addons (-SkipAdopt).'
+    Write-Info 'Skipped adding your existing addons (-SkipAdopt).'
 }
 
 # =====================================================================
@@ -2747,7 +2868,7 @@ if (-not $SkipAdopt) {
 #    every other registry write this file already makes.
 # =====================================================================
 
-Write-Step 'Registering with Windows Settings > Apps'
+Write-Step 'Registering with Windows Settings > Apps' -Percent $Script:WizardStepStart['installed-apps']
 $installAppsKeyName = Get-InstallAppsKeyName -AppDest $appDest
 if ($null -eq $installAppsKeyName) {
     Write-Info 'Scratch/test install on the production port - skipped (nothing of its own to register).'
@@ -2884,31 +3005,49 @@ function Show-InstallWizard {
     $btnBrowse.Size = New-Object System.Drawing.Size(90, 26)
     $form.Controls.Add($btnBrowse)
 
-    # installer-dpi:installer-no-progress-bar-control fix: a real,
-    # always-visible ProgressBar (Marquee - the install steps aren't
-    # counted/weighted anywhere today, so a determinate bar has nothing
-    # accurate to report) so every step, including the multi-second
-    # csc.exe compile DISTRIBUTION-SPEC.md's fix-6 text already accepts
-    # as "a brief, few-second UI freeze", shows visible motion instead of
-    # a static label that can read as "did this hang?" to a
-    # below-average-tech user (DISTRIBUTION-SPEC.md line 597 step 7 /
-    # SPEC.md E19). No extra wiring needed: Update-WizardProgress's
-    # existing Application.DoEvents() pump (called from every
-    # Write-Step/Write-Info/Write-Warn2 during Invoke-FurphyInstallSteps)
-    # already animates it between steps.
+    # installer-dpi:installer-no-progress-bar-control fix, ADOPT-SPEC.md
+    # 3.3: a real DETERMINATE ProgressBar (hidden until Install is clicked,
+    # parked at 100 when done - Round 45.1) - $Script:
+    # WizardStepStart (near the top of this file) now gives every step a
+    # real weighted percentage, so a Continuous bar has something honest
+    # to report instead of the old Marquee's "is this even moving?"
+    # ambiguity. Update-WizardProgress's existing Application.DoEvents()
+    # pump (called from every Write-Step/Write-Info/Write-Warn2 during
+    # Invoke-FurphyInstallSteps) still animates it between steps.
     $progressBar = New-Object System.Windows.Forms.ProgressBar
     $progressBar.Size = New-Object System.Drawing.Size(340, 16)
     $progressBar.Location = New-Object System.Drawing.Point(20, 100)
-    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $progressBar.MarqueeAnimationSpeed = 30
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = 100
+    # Round 45.1 (Eric: "there is still a progress bar not doing anything
+    # until you click install, that is a bad ux/ui"): the bar and its two
+    # labels stay hidden until Install is clicked, and appear the moment
+    # the install actually starts - an empty bar sitting under the path
+    # box before anything is happening read as broken.
+    $progressBar.Visible = $false
     $form.Controls.Add($progressBar)
 
-    $progressLabel = New-Object System.Windows.Forms.Label
-    $progressLabel.AutoSize = $false
-    $progressLabel.Size = New-Object System.Drawing.Size(340, 60)
-    $progressLabel.Location = New-Object System.Drawing.Point(20, 122)
-    $progressLabel.Text = ''
-    $form.Controls.Add($progressLabel)
+    # ADOPT-SPEC.md 3.3: two labels stacked in the same footprint the old
+    # single $progressLabel used - a title line (the current step's own
+    # name) directly under the bar, and a detail line (the latest info/
+    # warning text) beneath it.
+    $progressTitleLabel = New-Object System.Windows.Forms.Label
+    $progressTitleLabel.AutoSize = $false
+    $progressTitleLabel.Size = New-Object System.Drawing.Size(340, 18)
+    $progressTitleLabel.Location = New-Object System.Drawing.Point(20, 120)
+    $progressTitleLabel.Font = New-Object System.Drawing.Font($progressTitleLabel.Font, [System.Drawing.FontStyle]::Bold)
+    $progressTitleLabel.Text = ''
+    $progressTitleLabel.Visible = $false
+    $form.Controls.Add($progressTitleLabel)
+
+    $progressDetailLabel = New-Object System.Windows.Forms.Label
+    $progressDetailLabel.AutoSize = $false
+    $progressDetailLabel.Size = New-Object System.Drawing.Size(340, 42)
+    $progressDetailLabel.Location = New-Object System.Drawing.Point(20, 140)
+    $progressDetailLabel.Text = ''
+    $progressDetailLabel.Visible = $false
+    $form.Controls.Add($progressDetailLabel)
 
     $btnInstall = New-Object System.Windows.Forms.Button
     $btnInstall.Text = 'Install'
@@ -2951,7 +3090,16 @@ function Show-InstallWizard {
         $btnInstall.Enabled = $false
         $btnBrowse.Enabled = $false
         $Script:WizardActive = $true
-        $Script:WizardProgressLabel = $progressLabel
+        $Script:WizardProgressTitleLabel = $progressTitleLabel
+        $Script:WizardProgressDetailLabel = $progressDetailLabel
+        $Script:WizardProgressBar = $progressBar
+        $progressBar.Value = 0
+        # Round 45.1: the progress controls only appear once the install
+        # is really under way (see the Visible = $false notes above).
+        $progressBar.Visible = $true
+        $progressTitleLabel.Visible = $true
+        $progressDetailLabel.Visible = $true
+        [System.Windows.Forms.Application]::DoEvents()
         try {
             $Script:DowngradeSkipped = $false
             Invoke-FurphyInstallSteps
@@ -2961,12 +3109,43 @@ function Show-InstallWizard {
             # early (nothing copied) rather than throwing, so this success
             # branch runs either way - show an honest, distinct message
             # instead of claiming an install happened when it didn't.
+            # ADOPT-SPEC.md 3.6: state the never-touched-your-addons
+            # invariant plainly, and surface the adopted count when
+            # non-zero. $progressDetailLabel here plays the same role the
+            # old single $progressLabel did (the multi-line body text) -
+            # it stops being read by Update-WizardProgress once this
+            # branch runs (no more Write-Step/Write-Info calls happen
+            # after Invoke-FurphyInstallSteps returns), so it is safe to
+            # write directly here.
             if ($Script:DowngradeSkipped) {
                 $lblStatus.Text = 'Nothing was changed - a newer version is already installed there.'
-                $progressLabel.Text = "App: $($script:appDest)`r`nThis copy is older than what's already installed, so it was left alone."
+                $progressDetailLabel.Text = "App: $($script:appDest)`r`nThis copy is older than what's already installed, so it was left alone."
             } else {
-                $lblStatus.Text = 'Furphy Addon Manager is installed.'
-                $progressLabel.Text = "App: $($script:appDest)`r`nNothing in your AddOns folder was touched."
+                $lblStatus.Text = 'Furphy Addon Manager is ready to use.'
+                $summaryLines = New-Object 'System.Collections.Generic.List[string]'
+                $summaryLines.Add("Installed to: $($script:appDest)")
+                $summaryLines.Add('Your addons and WoW settings were not changed - Furphy only manages the copy it keeps track of.')
+                if ($Script:LastAdoptedCount -gt 0) {
+                    $summaryLines.Add("Found $($Script:LastAdoptedCount) addon(s) you already had - nothing was downloaded or changed.")
+                }
+                $progressDetailLabel.Text = [string]::Join("`r`n", $summaryLines.ToArray())
+            }
+            # ADOPT-SPEC.md 3.3: the bar only reaches 100 on a genuine
+            # install/upgrade that ran the real steps - a downgrade-skipped
+            # run returns after only the stop-running (0%) step ever ran,
+            # so jumping straight to 100 there would visually claim a
+            # completed install for a run that copied nothing.
+            if (-not $Script:DowngradeSkipped) {
+                $progressBar.Value = 100
+                # Round 45.1 (Eric: the old Marquee "is still moving when the
+                # install completes"): a Continuous bar parked at 100 does not
+                # animate, and the title line says so in words as well.
+                $progressTitleLabel.Text = 'All done'
+            } else {
+                # Nothing ran, so show no progress at all rather than a bar
+                # stuck near the start.
+                $progressBar.Visible = $false
+                $progressTitleLabel.Visible = $false
             }
             $btnInstall.Visible = $false
             $btnClose = New-Object System.Windows.Forms.Button
@@ -2998,8 +3177,11 @@ function Show-InstallWizard {
             $form.AcceptButton = $btnOpen
         } catch {
             $Script:WizardActive = $false
+            # ADOPT-SPEC.md 3.3: the bar is never reset backwards on error
+            # - it stays exactly where it stopped, which is itself
+            # informative ("it got this far") next to the error message.
             $lblStatus.Text = 'Something went wrong during install:'
-            $progressLabel.Text = $_.Exception.Message
+            $progressDetailLabel.Text = $_.Exception.Message
             $btnInstall.Text = 'Close'
             $btnInstall.Enabled = $true
             $btnInstall.Add_Click({ $form.Close() })

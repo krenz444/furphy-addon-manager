@@ -69,7 +69,12 @@ Describe 'install.ps1 adopt loop excludes PTR by default (multi-client:install-a
         try {
             $result = Invoke-CliProcess -ScriptPath $Script:InstallScript -ArgumentList @('-WowPath', $rootPath, '-NoShortcuts', '-NoProtocol', '-Console') -TimeoutSec 120
             $result.ExitCode | Should Be 0
-            $result.StdOut | Should Match 'Looking for existing addons to take over'
+            # ADOPT-SPEC.md 3.4/3.5: "Looking for existing addons to take
+            # over" (re-download-and-overwrite wording) was replaced with
+            # "Looking for addons you already have" (no-download, honest
+            # wording) - see Install.AdoptWording.Tests.ps1 for the full
+            # wording regression suite.
+            $result.StdOut | Should Match 'Looking for addons you already have'
             $result.StdOut | Should Not Match 'Could not read scan results'
         } finally {
             if (Test-Path -LiteralPath $rootPath) { Remove-Item -LiteralPath $rootPath -Recurse -Force -ErrorAction SilentlyContinue }

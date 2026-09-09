@@ -42,7 +42,7 @@ Either way, the installer:
    - creates a desktop shortcut: **Furphy Addon Manager**
    - registers `curseforge://` install links (from CurseForge.com's own Install buttons) to open here instead of the CurseForge desktop app, unless you pass `-NoProtocol`
    - registers Furphy in Windows' own **Settings > Apps** list, with a working Uninstall entry
-   - scans your existing `AddOns` folder and adopts anything it recognizes (CurseForge or Wago), so addons you already had become managed - reinstalling each from its source, so give it a minute; skip with `-SkipAdopt`
+   - finds addons you already have in your `AddOns` folder and starts keeping track of them, exactly as they are - nothing is downloaded or changed; skip with `-SkipAdopt`
 
 Re-running the installer is safe: it upgrades the app in place and adopts anything new, without touching your addon list, settings, or an addon it already manages.
 

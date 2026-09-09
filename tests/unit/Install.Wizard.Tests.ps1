@@ -77,20 +77,34 @@ Describe 'install.ps1 Show-InstallWizard - static source checks (installer-dpi f
         $renderingIdx | Should BeLessThan $firstFormIdx
     }
 
-    It 'installer-no-progress-bar-control: a real ProgressBar is constructed, added to the form, and set to Marquee style' {
+    It 'ADOPT-SPEC.md 3.3: a real ProgressBar is constructed, added to the form, and set to Continuous style (0-100), not Marquee' {
         $Script:WizardFuncBody | Should Match 'New-Object System\.Windows\.Forms\.ProgressBar'
-        $Script:WizardFuncBody | Should Match '\$progressBar\.Style\s*=\s*\[System\.Windows\.Forms\.ProgressBarStyle\]::Marquee'
+        $Script:WizardFuncBody | Should Match '\$progressBar\.Style\s*=\s*\[System\.Windows\.Forms\.ProgressBarStyle\]::Continuous'
+        $Script:WizardFuncBody | Should Not Match '\[System\.Windows\.Forms\.ProgressBarStyle\]::Marquee'
+        $Script:WizardFuncBody | Should Match '\$progressBar\.Minimum\s*=\s*0'
+        $Script:WizardFuncBody | Should Match '\$progressBar\.Maximum\s*=\s*100'
         $Script:WizardFuncBody | Should Match '\$form\.Controls\.Add\(\$progressBar\)'
     }
 
-    It 'installer-no-progress-bar-control: the ProgressBar is added before the progress label, and both are added before the Install button (draw order / tab order sanity)' {
+    It 'ADOPT-SPEC.md 3.3: MarqueeAnimationSpeed is gone (meaningless on a Continuous bar)' {
+        $Script:WizardFuncBody | Should Not Match 'MarqueeAnimationSpeed'
+    }
+
+    It 'ADOPT-SPEC.md 3.3: the single progressLabel is replaced by a title label and a detail label, both real WinForms Labels' {
+        $Script:WizardFuncBody | Should Match '\$progressTitleLabel\s*=\s*New-Object System\.Windows\.Forms\.Label'
+        $Script:WizardFuncBody | Should Match '\$progressDetailLabel\s*=\s*New-Object System\.Windows\.Forms\.Label'
+    }
+
+    It 'the ProgressBar is added before the title/detail labels, and all three are added before the Install button (draw order / tab order sanity)' {
         $barAddIdx = $Script:WizardFuncBody.IndexOf('$form.Controls.Add($progressBar)')
-        $labelAddIdx = $Script:WizardFuncBody.IndexOf('$form.Controls.Add($progressLabel)')
+        $titleAddIdx = $Script:WizardFuncBody.IndexOf('$form.Controls.Add($progressTitleLabel)')
+        $detailAddIdx = $Script:WizardFuncBody.IndexOf('$form.Controls.Add($progressDetailLabel)')
         $installAddIdx = $Script:WizardFuncBody.IndexOf('$form.Controls.Add($btnInstall)')
 
         $barAddIdx | Should BeGreaterThan -1
-        $labelAddIdx | Should BeGreaterThan $barAddIdx
-        $installAddIdx | Should BeGreaterThan $labelAddIdx
+        $titleAddIdx | Should BeGreaterThan $barAddIdx
+        $detailAddIdx | Should BeGreaterThan $titleAddIdx
+        $installAddIdx | Should BeGreaterThan $detailAddIdx
     }
 
     It 'installer-wizard-no-acceptbutton-initial-focus: AcceptButton is set to the Install button, after it exists, before any click handler runs' {
@@ -131,6 +145,60 @@ Describe 'install.ps1 Show-InstallWizard - static source checks (installer-dpi f
     }
 }
 
+Describe 'install.ps1 progress bar - weighted step table and clamp (ADOPT-SPEC.md 3.1/3.2)' {
+    # $Script:WizardStepStart / Update-WizardProgress live at script scope,
+    # next to Update-WizardProgress (ADOPT-SPEC.md 3.1) - OUTSIDE
+    # Show-InstallWizard, so these checks run against the whole file, not
+    # $Script:WizardFuncBody.
+
+    It '$Script:WizardStepStart exists and lists every step in the documented, non-decreasing order' {
+        $tableMatch = [regex]::Match($Script:InstallSource, '\$Script:WizardStepStart\s*=\s*\[ordered\]@\{(?<body>[^}]*)\}', 'Singleline')
+        $tableMatch.Success | Should Be $true
+
+        $body = $tableMatch.Groups['body'].Value
+        $expectedKeysInOrder = @('stop-running', 'copy-app', 'copy-host', 'legacy-cleanup', 'shortcut', 'protocol', 'adopt', 'installed-apps', 'done')
+
+        $entryMatches = [regex]::Matches($body, "'(?<key>[a-z-]+)'\s*=\s*(?<val>\d+)")
+        $entryMatches.Count | Should Be $expectedKeysInOrder.Count
+
+        $lastValue = -1
+        for ($i = 0; $i -lt $entryMatches.Count; $i++) {
+            $entryMatches[$i].Groups['key'].Value | Should Be $expectedKeysInOrder[$i]
+            $value = [int]$entryMatches[$i].Groups['val'].Value
+            ($value -ge $lastValue) | Should Be $true
+            ($value -ge 0 -and $value -le 100) | Should Be $true
+            $lastValue = $value
+        }
+    }
+
+    It 'Update-WizardProgress never lowers the bar''s value (Math.Max clamp is present, not a bare assignment)' {
+        $funcMatch = [regex]::Match($Script:InstallSource, 'function Update-WizardProgress \{(?<body>.*?)\n\}', 'Singleline')
+        $funcMatch.Success | Should Be $true
+        $body = $funcMatch.Groups['body'].Value
+
+        $body | Should Match '\[Math\]::Max\(\s*\$Script:WizardProgressBar\.Value\s*,'
+        # A stray direct assignment (bypassing the clamp entirely) would
+        # silently regress this - the only assignment to .Value in this
+        # function must be the one right after the Math.Max computation.
+        ([regex]::Matches($body, '\$Script:WizardProgressBar\.Value\s*=')).Count | Should Be 1
+    }
+
+    It 'Update-WizardSubProgress exists and maps Current/Total onto the Start..End band via Update-WizardProgress' {
+        $Script:InstallSource | Should Match 'function Update-WizardSubProgress \{'
+        $subFuncMatch = [regex]::Match($Script:InstallSource, 'function Update-WizardSubProgress \{(?<body>.*?)\n\}', 'Singleline')
+        $subFuncMatch.Success | Should Be $true
+        $subFuncMatch.Groups['body'].Value | Should Match 'Update-WizardProgress'
+    }
+
+    It 'Write-Step accepts a -Percent argument and forwards it to Update-WizardProgress''s -Title/-Percent' {
+        $funcMatch = [regex]::Match($Script:InstallSource, 'function Write-Step \{(?<body>.*?)\n\}', 'Singleline')
+        $funcMatch.Success | Should Be $true
+        $body = $funcMatch.Groups['body'].Value
+        $body | Should Match '\[int\]\$Percent\s*=\s*-1'
+        $body | Should Match 'Update-WizardProgress\s+-Title\s+\$Message\s+-Percent\s+\$Percent'
+    }
+}
+
 Describe 'install.ps1 Show-InstallWizard - real control construction (never shown, never ShowDialog''d)' {
     # Everything from "param([string]$InitialWowRoot)" up to (not including)
     # the first Add_Click wiring is pure control construction with no side
@@ -161,13 +229,14 @@ Describe 'install.ps1 Show-InstallWizard - real control construction (never show
 
         $Script:WizardForm = $form
         $Script:WizardControls = [ordered]@{
-            CancelHidden  = $btnCancelHidden
-            Status        = $lblStatus
-            Path          = $txtPath
-            Browse        = $btnBrowse
-            ProgressBar   = $progressBar
-            ProgressLabel = $progressLabel
-            Install       = $btnInstall
+            CancelHidden       = $btnCancelHidden
+            Status             = $lblStatus
+            Path               = $txtPath
+            Browse             = $btnBrowse
+            ProgressBar        = $progressBar
+            ProgressTitleLabel  = $progressTitleLabel
+            ProgressDetailLabel = $progressDetailLabel
+            Install            = $btnInstall
         }
         $Script:WizardConstructionOk = $true
     } catch {
@@ -189,10 +258,11 @@ Describe 'install.ps1 Show-InstallWizard - real control construction (never show
         $Script:WizardConstructionOk | Should Be $true
     }
 
-    It 'installer-no-progress-bar-control: the constructed ProgressBar is really Marquee-styled and animating' {
+    It 'ADOPT-SPEC.md 3.3: the constructed ProgressBar is really Continuous-styled, 0-100, not Marquee' {
         $Script:WizardControls.ProgressBar | Should Not BeNullOrEmpty
-        $Script:WizardControls.ProgressBar.Style | Should Be ([System.Windows.Forms.ProgressBarStyle]::Marquee)
-        $Script:WizardControls.ProgressBar.MarqueeAnimationSpeed | Should BeGreaterThan 0
+        $Script:WizardControls.ProgressBar.Style | Should Be ([System.Windows.Forms.ProgressBarStyle]::Continuous)
+        $Script:WizardControls.ProgressBar.Minimum | Should Be 0
+        $Script:WizardControls.ProgressBar.Maximum | Should Be 100
     }
 
     It 'installer-wizard-no-acceptbutton-initial-focus: AcceptButton/CancelButton are really wired to the right controls' {

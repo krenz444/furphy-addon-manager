@@ -2310,6 +2310,110 @@
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
+  // ------------------------------------------------------------------
+  // Phase (ADOPT-SPEC.md section 4 / section 8): the new adopted-record
+  // pill (4.1) and the new "you're already covered" Welcome dialog mode
+  // (4.2). Neither surface has a natural trigger in this harness's mock
+  // server yet (Chip.forStatus only ever sees the fixed mock roster, which
+  // carries no adopted:true row; Welcome's "adopted" mode only ever opens
+  // from App.maybeShowAdoptedNotice, which needs a real adopted record in
+  // Store.state.addons) - driven directly through the same
+  // window.__furphyTest.Components hook the dialog-focus phase above
+  // already uses for Components.Welcome.open (see its own comment).
+  // ------------------------------------------------------------------
+  async function phaseAdoptSpaCoverage() {
+    beginPhase("ADOPT-SPEC.md section 4: adopted-record pill + Welcome adopted-notice mode");
+    const win = await loadFrame("?mock=1&test=1&view=my-addons");
+    await waitForReady(win, 8000);
+    const Components = win.__furphyTest && win.__furphyTest.Components;
+
+    // 4.1: Components.Chip.forStatus on a mock addon that is adopted and
+    // still unverified (fileId null, no updateAvailable entry yet) must
+    // show the new "Not checked yet" pill rather than falling through to
+    // the default "Up to date" one.
+    if (Components && Components.Chip) {
+      const mockAdoptedUnverified = { name: "MockAdoptedAddon", adopted: true, fileId: null, updateAvailable: null, folders: ["MockAdoptedAddon"] };
+      const chip = Components.Chip.forStatus(mockAdoptedUnverified);
+      checkTry("Chip.forStatus: an adopted, unverified addon shows 'Not checked yet'", function () {
+        return !!chip && chip.textContent.indexOf("Not checked yet") !== -1;
+      });
+      checkTry("Chip.forStatus: the 'Not checked yet' pill is chip-muted (low-weight, not a warning/danger)", function () {
+        return !!chip && (" " + chip.className + " ").indexOf(" chip-muted ") !== -1;
+      });
+      // ADOPT-SPEC.md 4.1's exact ordinal placement: a pin (Priority 6) or an
+      // ignored-updates choice (Priority 7) must still win over the new,
+      // lower-priority "Not checked yet" pill even on an adopted+unverified
+      // record - neither existing signal may be silently overridden by it.
+      checkTry("Chip.forStatus: a pinned addon still shows 'Pinned' even when also adopted+unverified", function () {
+        const c = Components.Chip.forStatus({ name: "MockAdoptedPinnedAddon", adopted: true, fileId: null, updateAvailable: null, pinnedFileId: 42, version: "1.0.0" });
+        return !!c && c.textContent.indexOf("Pinned") !== -1;
+      });
+      checkTry("Chip.forStatus: an ignored-updates addon still shows 'Ignoring updates' even when also adopted+unverified", function () {
+        const c = Components.Chip.forStatus({ name: "MockAdoptedIgnoredAddon", adopted: true, fileId: null, updateAvailable: null, ignoreUpdates: true });
+        return !!c && c.textContent.indexOf("Ignoring updates") !== -1;
+      });
+      // Once the freshness check backfills a real fileId, an adopted record
+      // must render exactly like any other up-to-date row - Priority 7.5
+      // must never fire once verified.
+      checkTry("Chip.forStatus: an adopted addon with a real fileId falls through to the normal default pill", function () {
+        const c = Components.Chip.forStatus({ name: "MockAdoptedVerifiedAddon", adopted: true, fileId: 111, updateAvailable: null });
+        return !!c && c.textContent.indexOf("Up to date") !== -1;
+      });
+    } else {
+      check("Chip.forStatus: an adopted, unverified addon shows 'Not checked yet'", false, "window.__furphyTest.Components.Chip not found");
+    }
+
+    // 4.2: Components.Welcome.open(items, {mode:"adopted"}) - the new,
+    // additive notice text, kept separate from the original download-mode
+    // copy sharing the same dialog markup.
+    if (Components && Components.Welcome && Components.Dialogs) {
+      const mockAdoptedItems = [
+        { curseId: 68304, wagoId: null, title: "Auctionator", folder: "Auctionator" },
+        { curseId: null, wagoId: "simple-damage-meter", title: "Simple Damage Meter", folder: "SimpleDamageMeter" }
+      ];
+      Components.Welcome.open(mockAdoptedItems, { mode: "adopted" });
+      const titleEl = q(win, "#dialog-welcome-title");
+      const bodyEl = q(win, "#welcome-body");
+      const adoptBtn = q(win, "#welcome-adopt");
+      checkTry("Welcome (adopted mode): title reads 'Furphy found 2 addon(s) you already had', no leftover download-mode text", function () {
+        const t = titleEl && titleEl.textContent;
+        return !!t && t.indexOf("Furphy found 2 addon(s) you already had") !== -1 && t.indexOf("AddOns folder") === -1;
+      });
+      checkTry("Welcome (adopted mode): body explains the files were left alone, not re-downloaded", function () {
+        const t = bodyEl && bodyEl.textContent;
+        return !!t && t.indexOf("left the files alone") !== -1 && t.indexOf("re-downloads") === -1;
+      });
+      checkTry("Welcome (adopted mode): the button reads 'Got it', not 'Take over all (...)'", function () {
+        return !!adoptBtn && adoptBtn.textContent === "Got it";
+      });
+      checkTry("Welcome (adopted mode): the dialog is open", function () {
+        return q(win, "#dialog-welcome").hidden === false;
+      });
+
+      // Re-open in the ORIGINAL "download" mode straight after - proves the
+      // title-node rebuild (ADOPT-SPEC.md 4.2's own titleEl.lastChild fix)
+      // is idempotent across a mode switch and never leaves adopted-mode
+      // text (or a stale count span) behind, the exact bug the fix targets.
+      Components.Welcome.open([{ curseId: "999999", title: "Test Untracked Addon", folder: "TestUntrackedAddon" }]);
+      checkTry("Welcome (download mode, re-opened after adopted mode): title reverts cleanly with no leftover adopted-mode text", function () {
+        const t = titleEl && titleEl.textContent;
+        return !!t && t.indexOf("Found 1 addons in your AddOns folder") !== -1 && t.indexOf("you already had") === -1;
+      });
+      checkTry("Welcome (download mode, re-opened after adopted mode): body reverts to the re-download explanation", function () {
+        const t = bodyEl && bodyEl.textContent;
+        return !!t && t.indexOf("re-downloads") !== -1;
+      });
+      checkTry("Welcome (download mode, re-opened after adopted mode): the button reverts to 'Take over all (1)'", function () {
+        return !!adoptBtn && adoptBtn.textContent === "Take over all (1)";
+      });
+      Components.Dialogs.closeWelcome();
+    } else {
+      check("Welcome (adopted mode): title reads 'Furphy found 2 addon(s) you already had', no leftover download-mode text", false, "window.__furphyTest.Components.Welcome/Dialogs not found");
+    }
+
+    checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
   async function main() {
     await phaseDefault();
     await phaseLaunchPerf();
@@ -2333,6 +2437,7 @@
     await phaseEmptyStateFreshness();
     await phaseUninstall();
     await phaseAppUpdates();
+    await phaseAdoptSpaCoverage();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

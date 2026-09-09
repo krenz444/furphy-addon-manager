@@ -163,7 +163,7 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
     New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs') | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
     Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
-    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'APP-UPDATE-SPEC.md', 'GAME-MODE-SPEC.md', 'SETUP-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
+    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'APP-UPDATE-SPEC.md', 'GAME-MODE-SPEC.md', 'SETUP-SPEC.md', 'ADOPT-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
     }

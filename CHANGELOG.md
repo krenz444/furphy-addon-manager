@@ -1,5 +1,133 @@
 # Furphy Addon Manager - changelog
 
+## Round 45 (1.25.0: a clean switch-over - your addons are never touched during install; honest installer progress)
+
+Eric's two requests, verbatim: (1) "make a more friendly message in the
+installer than : taking over x addons etc, and provide progress during
+the installer, the progress bar currently doesnt really make any sense
+in the installer"; (2) "make sure that when furphy addon manager
+installs, none of the users existing addon data is corrupted, removed,
+or anything, it needs to be a clean switch over." ADOPT-SPEC.md is the
+full design; this entry is the condensed summary. Request 2 was the
+load-bearing one: the old first-run step silently re-downloaded and
+overwrote every addon folder it recognized to establish a record for it
+- not a byte-identical copy of what the player already had, just
+whatever CurseForge/Wago currently served for that project id. Request
+1's complaints were a symptom of that: the wording was scary because the
+step genuinely did something invasive, and the progress bar had nothing
+honest to show because it was bundling an unbounded number of downloads
+into one label. This round fixes the behavior first; the friendlier
+wording and a real progress bar follow from there.
+
+**The new invariant:** installing, upgrading, or uninstalling Furphy
+Addon Manager itself never creates, modifies, or deletes anything under
+any `Interface\AddOns` or `WTF` folder. "Adopting" an addon now means
+recording it as managed exactly as it already sits on disk - its
+folders, its source id, and the version string its own `.toc` declares
+- with no download and no file write. The first time Furphy's normal
+freshness check later finds a newer version available, it is offered
+like any other pending update, through the same one-click Update flow
+every managed addon already uses - never silently, never automatically.
+Folders Furphy cannot identify are listed and left alone, same as
+before. This governs only `install.ps1`'s own unattended first-run/
+upgrade step; the SPA's separate, opt-in "Take over" flow (Settings >
+"Folders Furphy doesn't manage yet," and the first-run Welcome dialog
+reached when nothing is tracked yet) is a different feature the player
+deliberately triggers, and is unchanged - it still re-downloads and
+overwrites, and still says so plainly.
+
+**CLI (addon-sync.ps1):** new `-Adopt <folder[]>` parameter records the
+named top-level `AddOns` folders as managed with no network call and no
+write under `AddOns` - config-only, same class as `-Remove`. Folders
+sharing one CurseForge or Wago id become a single record; a folder
+that's already tracked, unidentifiable, or carries an unparseable id is
+skipped with a reason instead, without aborting the rest of the batch.
+New `adopted`/`adoptedAt` fields on every addon record. An adopted
+record's freshness check compares its recorded `.toc` version against
+the source's latest, loosely but never optimistically - an
+undeterminable comparison always falls through to "update available,"
+never to a false "up to date." An adopted addon's very first real update
+now backs its existing folders up first (`adopted-original.zip` under
+that flavour's `backups\`), so the first time Furphy ever writes to
+files the player installed themselves, there is a local copy of what
+they had to fall back to; a fix to `Save-BackupZip`'s own pruning keeps
+that snapshot from being deleted by the next routine update.
+
+**Installer wizard, two follow-ups from Eric trying 1.24.0 (Round 45.1):**
+"there is still a progress bar not doing anything until you click
+install" and "it also is still moving when the install completes". The
+bar and its two labels now stay hidden until Install is clicked and
+appear the moment the install starts; on success the (Continuous, so
+never animating) bar parks at 100 with the title "All done"; a
+downgrade-skipped run hides it again since nothing ran. The old Marquee
+bar, which animated forever after completion, is gone with Round 45.
+
+**Installer (install.ps1):** the first-run step is renamed "Looking for
+addons you already have" and its wording rewritten in plain terms - no
+"taking over," no "reinstalling," no "untracked," no raw CurseForge/Wago
+ids anywhere in its output. It now reports "Found N addon(s) already in
+your AddOns folder - Furphy is now keeping track of them," and lists
+anything it couldn't recognize as left alone, unchanged. The progress
+bar changes from an indeterminate Marquee to a real, weighted Continuous
+bar driven by a fixed step table (stop-running, copy-app, copy-host,
+legacy-cleanup, shortcut, protocol, adopt, installed-apps, done), with a
+title line for the current step and a detail line for the latest
+message underneath it - both lines print identically in the `-Console`
+flow, so there is only one set of strings to get right. Steps with
+countable work (files copied while installing the app, files copied
+while building the native host) get real sub-progress inside their own
+band; the native host's actual compile step holds at a flat percentage
+for its real duration rather than faking movement it has no signal for.
+The bar never moves backward, including on a mid-run failure (it stops
+wherever it got to, which is itself informative), and only reaches 100%
+on a genuine completed run - not on the downgrade-skipped path, which
+does no real work. The success screen states the invariant plainly:
+"Your addons and WoW settings were not changed," plus the found-addon
+count when non-zero.
+
+**SPA (ui/app.js, ui/index.html):** an adopted addon that hasn't been
+checked for updates yet shows a "Not checked yet" pill instead of
+falsely defaulting to "Up to date," ranked below every real status
+(pinned, ignoring updates, pending update) so it never overrides a
+choice the player actually made. A new, additive, one-time Welcome
+notice tells the player plainly that Furphy found addons they already
+had and left the files alone - separate from, and never shown alongside,
+the existing download-based Welcome dialog the opt-in "Take over" flow
+still uses.
+
+**Tests:** a new tree-hash invariant test snapshots `Interface\AddOns`
+and a hand-seeded `WTF\` folder before and after a fresh install, a
+re-run (upgrade) over the same install, and an uninstall - all three
+must leave both trees byte-for-byte unchanged. This is the standing
+regression guard for request 2, alongside new CLI unit/integration
+coverage for `-Adopt`, adopted-record freshness, the first-update
+backup, and console-flow wording that greps for the banned phrases
+("taking over," "reinstalling," "untracked") outside historical
+CHANGELOG entries.
+
+**Verification (independent verifier pass - see "Gates are manual
+now"):** <!-- ROUND45-COUNTS --> `tests\run-all.ps1 -Only @('static','unit')`:
+static 7/7, unit 391/391. Every touched `Cli.*`/`Install.*`/`Server.*`/
+fixture-acceptance test file run individually via `Invoke-Pester`
+(-ExcludeTag Host): 288/288 assertions passed, 0 failed. The verifier's
+own independent scratch-WoW-root check (3 hand-seeded addon folders plus
+a hand-seeded `WTF\`, fresh install then a second upgrade run then
+`-Uninstall`) found `Interface\AddOns` and `WTF` byte-for-byte unchanged
+at every step, exactly 2 addons adopted and 1 left alone as unmanaged
+(plus the fixture's own pre-existing unmanaged addon), no banned wording
+anywhere in the console output: 30/30 checks passed. A separate check
+against a real CurseForge project confirmed an adopted record with a
+matching recorded version reports Up-to-date with zero folder writes,
+`DryRun` reports `Would-update` for a mismatched one, a real update
+installs normally, and `adopted-original.zip` is written before the
+folder swap and is byte-for-byte identical to the pre-update files
+(312/312 files matched): 15/15 checks passed. The SPA's adopted pill and
+Welcome-dialog copy were confirmed live in a browser against `?mock=1
+&test=1`, exact string match, including the idempotent re-open regression
+guard. Live-safety: tray pid 28076 and the production `Run`/`Uninstall`
+values were unchanged before and after every check above; no scratch run
+ever touched the real `Interface\AddOns`, `WTF`, or WoW install.
+
 ## Round 44 (1.24.0: one-file installer)
 
 Eric's request, verbatim: "the install experience needs to be better,

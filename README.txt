@@ -15,8 +15,8 @@ NEW INSTALL
   picker if it can't find WoW). It finds your WoW folder, copies the app
   into <WoW>\_retail_\AddonSync, creates the desktop shortcut, registers
   curseforge:// install links, registers Furphy in Windows' own Settings >
-  Apps list, and adopts any addons already in your AddOns folder. Safe to
-  re-run any time.
+  Apps list, and starts keeping track of any addons already in your AddOns
+  folder - nothing is downloaded or changed. Safe to re-run any time.
 
   Scripted/silent install: FurphyAddonManager-Setup.exe /S (optionally
   followed by any install.ps1 flag, e.g. -WowPath "<path>").

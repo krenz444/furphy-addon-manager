@@ -2754,14 +2754,43 @@ Components.Welcome = (function () {
     ]);
   }
 
-  function open(items) {
+  // ADOPT-SPEC.md 4.2: a second, optional mode ("adopted") reuses this same
+  // dialog for the new, additive "you're already covered" notice shown
+  // after an install adopted N addons - never at the same moment as the
+  // original "download" mode (App.maybeShowWelcome only fires on an empty
+  // roster; App.maybeShowAdoptedNotice only fires when at least one adopted
+  // record exists, so the two conditions are mutually exclusive).
+  //
+  // Correctness note: the title's static markup (index.html) has FOUR child
+  // nodes in order - an <svg> icon, a text node " Found ", the (now inert)
+  // #welcome-count span, then a trailing text node. Never assign through
+  // titleEl.lastChild alone (that leaves the leading text/span in place and
+  // garbles the sentence on the very next open() call, in either mode) -
+  // strip every child after the icon first, then rebuild from scratch, so
+  // repeated opens in either mode stay idempotent.
+  function open(items, options) {
+    const mode = (options && options.mode) || "download";
     const list = Utils.qs("#welcome-list");
     list.innerHTML = "";
     items.forEach(function (u) { list.appendChild(itemRow(u)); });
-    Utils.qs("#welcome-count").textContent = items.length;
+    const titleEl = Utils.qs("#dialog-welcome-title");
+    const iconEl = titleEl.querySelector("svg");
+    while (titleEl.lastChild && titleEl.lastChild !== iconEl) {
+      titleEl.removeChild(titleEl.lastChild);
+    }
+    const bodyEl = Utils.qs("#welcome-body");
     const adoptBtn = Utils.qs("#welcome-adopt");
-    adoptBtn.textContent = "Take over all (" + items.length + ")";
-    adoptBtn.onclick = function () { Actions.adoptAll(items.map(targetFor)); };
+    if (mode === "adopted") {
+      titleEl.appendChild(document.createTextNode(" Furphy found " + items.length + " addon(s) you already had"));
+      bodyEl.textContent = "They're already the way you like them, so Furphy left the files alone and is just keeping track of them from here. You'll see an Update badge here if a newer version ever comes out.";
+      adoptBtn.textContent = "Got it";
+      adoptBtn.onclick = function () { Components.Dialogs.closeWelcome(); Actions.acknowledgeAdopted(items); };
+    } else {
+      titleEl.appendChild(document.createTextNode(" Found " + items.length + " addons in your AddOns folder"));
+      bodyEl.textContent = "Furphy can start managing these - it re-downloads each one so it can keep them updated from now on.";
+      adoptBtn.textContent = "Take over all (" + items.length + ")";
+      adoptBtn.onclick = function () { Actions.adoptAll(items.map(targetFor)); };
+    }
     Components.Dialogs.openWelcome();
   }
 
@@ -3061,6 +3090,14 @@ Components.Chip = (function () {
     // Priority 7: update exists (implicitly none here, or ignored regardless)
     // but the player chose to skip it.
     if (addon.ignoreUpdates) return build("Ignoring updates", "chip-muted");
+    // Priority 7.5 (ADOPT-SPEC.md 4.1): adopted, still on fileId=null, and no
+    // updateAvailable entry has ever been computed for it yet (the periodic
+    // background check hasn't run since it was adopted) - must not fall
+    // through to the default "Up to date" pill below without ever having
+    // actually verified that.
+    if (addon.adopted && !addon.fileId && !addon.updateAvailable) {
+      return build("Not checked yet", "chip-muted", "Furphy hasn't checked this addon for updates yet.");
+    }
     // Priority 8 (default): nothing to do - low-weight, not a fully blank
     // cell (a truly empty cell reads as a rendering bug per the spec).
     return build("Up to date", "chip-muted");
@@ -5170,6 +5207,13 @@ const Actions = (function () {
     return startJob("add", { projectIds: targets }, label);
   }
 
+  // ADOPT-SPEC.md 4.2: "Got it" on the adopted-notice Welcome dialog. A
+  // no-op - App.maybeShowAdoptedNotice already wrote every currently-
+  // adopted record to ADOPTED_NOTICE_SEEN_KEY the moment the dialog opened,
+  // so there is nothing left to do here beyond closing it (already handled
+  // by the dialog's own onclick before this runs).
+  function acknowledgeAdopted() { /* no-op - see comment above */ }
+
   function openOnWago(slug) { return openWhat("url", { url: "https://addons.wago.io/addons/" + encodeURIComponent(slug) }); }
 
   // E12: "Also on CurseForge/Wago" cross-link, shown in the drawer header
@@ -5591,6 +5635,8 @@ const Actions = (function () {
     openOnWago: openOnWago, switchSource: switchSource, switchSourceButton: switchSourceButton,
     // E18 (first-run welcome)
     adoptAll: adoptAll,
+    // ADOPT-SPEC.md 4.2 (adopted-notice welcome dialog)
+    acknowledgeAdopted: acknowledgeAdopted,
     // E19 (curseforge:// handler toggle; ad filter goes through saveSettings above)
     loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered,
     // Round 18 (tray stage B)
@@ -8760,6 +8806,33 @@ const App = (function () {
     } catch (err) { /* best-effort only */ }
   }
 
+  // ADOPT-SPEC.md 4.2: a one-time, additive "you're already covered" notice
+  // for records install.ps1's own -Adopt step created (section 2) - never
+  // shown at the same moment as maybeShowWelcome above (that one only fires
+  // on a fully empty roster; this one only fires once at least one adopted
+  // record exists, so the two are mutually exclusive by construction). Marks
+  // every currently-adopted record "seen" as soon as the dialog opens, not
+  // only the ones just shown - dismissing without reading should not bring
+  // the same notice back on the next launch, matching WELCOME_SKIPPED_KEY's
+  // own "skip means skip" precedent above.
+  const ADOPTED_NOTICE_SEEN_KEY = "addonSync.adoptedNoticeSeen.v1";
+  async function maybeShowAdoptedNotice() {
+    const adopted = Store.state.addons.filter(function (a) { return a.adopted; });
+    if (adopted.length === 0) return;
+    let seen = [];
+    try { seen = JSON.parse(localStorage.getItem(ADOPTED_NOTICE_SEEN_KEY) || "[]"); } catch (err) { seen = []; }
+    const seenSet = new Set(seen);
+    const keyFor = function (a) { return a.projectId ? ("cf:" + a.projectId) : ("wago:" + a.slug); };
+    const unseen = adopted.filter(function (a) { return !seenSet.has(keyFor(a)); });
+    if (unseen.length === 0) return;
+    const items = unseen.map(function (a) { return { curseId: a.projectId || null, wagoId: a.projectId ? null : a.slug, title: a.name, folder: (a.folders && a.folders[0]) || a.name }; });
+    Components.Welcome.open(items, { mode: "adopted" });
+    try {
+      const merged = adopted.map(keyFor);
+      localStorage.setItem(ADOPTED_NOTICE_SEEN_KEY, JSON.stringify(merged));
+    } catch (err) { /* best-effort only */ }
+  }
+
   // APP-UPDATE-SPEC.md section 3.4: fires once per version change, whether
   // that update was automatic or the one manual install a 1.21.x user does.
   // "never fire on a genuinely fresh browser profile/first-ever install -
@@ -8872,6 +8945,7 @@ const App = (function () {
     // toast's own action) has a real chance of already being populated.
     maybeShowAppUpdateToast();
     await maybeShowWelcome();
+    await maybeShowAdoptedNotice();
     startIdlePolling();
     scheduleAutoCheck();
     startUptimeTicker();

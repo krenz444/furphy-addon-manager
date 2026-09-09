@@ -57,6 +57,15 @@
                             No install, no config change.
    -Scan                   List top-level AddOns folders not owned by any
                             record. No config change.
+   -Adopt <folder[]>       Record the named top-level AddOns folder(s) as
+                            managed exactly as they sit on disk right now -
+                            no download, no file write under -AddonsPath.
+                            Folders sharing one recognizable CurseForge/Wago
+                            id become a single record. A folder with no
+                            recognizable id, already tracked, or with an id
+                            that can't be read is skipped (see -Json
+                            "reason"). The record's fileId stays unset until
+                            a later real update; see ADOPT-SPEC.md section 2.
    -Json                   Machine-readable mode: print exactly one JSON
                             document to stdout and nothing else.
    -LowPriority             Lowers this process's own scheduling priority
@@ -126,6 +135,7 @@
    addon-sync.ps1 -Ignore 12345
    addon-sync.ps1 -Files 12345 -Json
    addon-sync.ps1 -Scan -Json
+   addon-sync.ps1 -Adopt Auctionator,DBM-Core -Flavor retail -Json
    addon-sync.ps1 -Rollback 12345 -Json
    addon-sync.ps1 -Status -Json -BuildInfoPath C:\Scratch\.build.info
 
@@ -152,6 +162,11 @@ param(
     [string[]]$Unignore,
     [string]$Files,
     [switch]$Scan,
+    # ADOPT-SPEC.md 2.1: top-level AddOns folder NAMES (not project ids, not
+    # -Scan JSON) to record as managed exactly as they sit on disk right now
+    # - no download, no file write under -AddonsPath. Comma-joined like every
+    # other multi-value parameter here (ConvertTo-ExpandedStringArray).
+    [string[]]$Adopt,
     [switch]$Json,
     [switch]$LowPriority,
     [string[]]$Rollback,
@@ -1697,9 +1712,89 @@ function Get-VersionFromDisplayName {
     return ($DisplayName -replace '\.zip$', '')
 }
 
+function Get-NormalizedVersionString {
+    <#
+      ADOPT-SPEC.md 2.5: loose, source-agnostic version-string comparison for
+      adopted-record freshness - addon version strings are arbitrary free
+      text (toc authors write "10.2.1", "v1.5", "Classic-1.15.2b", a date
+      stamp, ...), not semver, so this only strips what varies for
+      genuinely-cosmetic reasons (surrounding whitespace, a single leading
+      v/V) and lowercases for a case-insensitive compare. Two strings that
+      mean the same release but differ in any other way (e.g. "1.2" vs
+      "1.2.0") are NOT treated as equal - an unmatched comparison always
+      falls through to "update available", never to a false "up to date".
+    #>
+    param([string]$Version)
+    if ([string]::IsNullOrWhiteSpace($Version)) { return $null }
+    $v = $Version.Trim()
+    $v = $v -replace '^[vV](?=[0-9])', ''
+    return $v.Trim().ToLowerInvariant()
+}
+
 # =====================================================================
 # Rollback / version history (E1)
 # =====================================================================
+
+function Save-PreAdoptBackupZip {
+    <#
+      ADOPT-SPEC.md 2.6: first-update safety net for an adopted record.
+      Save-BackupZip archives the PACKAGE JUST INSTALLED (moved from staging
+      after a successful swap) - useless as a fallback the very first time
+      Furphy ever installs anything for a record whose folders were never
+      Furphy's own download. Called once, immediately before
+      Install-AddonPackage's destructive per-folder swap, only when
+      $Record.adopted -and $isNewInstall are both true (i.e. fileId is about
+      to go from null to non-null for the first time ever) - zips every one
+      of $Folders (the record's OWN folders, exactly as -Adopt recorded
+      them; still genuinely on disk here, untouched, since nothing has
+      written to them since adoption) into
+      ROOT\backups\<key>\adopted-original.zip. A fixed name, not a fileId -
+      this is a snapshot of what the PLAYER had, not a CurseForge/Wago file,
+      and Save-BackupZip's own pruning must never delete it (see the
+      keepIds.Add('adopted-original') fix there). Idempotent: does nothing
+      if that file already exists (a retried run must not silently overwrite
+      the player's real original with whatever is on disk NOW, which could
+      already be Furphy's own first attempt) or if none of $Folders exist on
+      disk at all (nothing to back up). Best-effort throughout - a backup
+      failure must never block an update the player asked for; logged and
+      swallowed, same contract as Save-BackupZip.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AddonsPath,
+        [Parameter(Mandatory = $true)]$Folders,
+        [Parameter(Mandatory = $true)][string]$BackupsRoot,
+        [Parameter(Mandatory = $true)]$ProjectId
+    )
+    try {
+        $existingFolders = @($Folders | Where-Object { Test-Path -LiteralPath (Join-Path -Path $AddonsPath -ChildPath $_) -PathType Container })
+        if ($existingFolders.Count -eq 0) { return }
+        $projectDir = Join-Path -Path $BackupsRoot -ChildPath ([string]$ProjectId)
+        if (-not (Test-Path -LiteralPath $projectDir)) { New-Item -ItemType Directory -Path $projectDir -Force | Out-Null }
+        $destPath = Join-Path -Path $projectDir -ChildPath 'adopted-original.zip'
+        if (Test-Path -LiteralPath $destPath) { return }
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $tmpZip = $destPath + '.tmp'
+        if (Test-Path -LiteralPath $tmpZip) { Remove-Item -LiteralPath $tmpZip -Force -ErrorAction SilentlyContinue }
+        $fs = [System.IO.File]::Open($tmpZip, [System.IO.FileMode]::Create)
+        $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($folderName in $existingFolders) {
+                $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
+                foreach ($f in (Get-ChildItem -LiteralPath $folderPath -Recurse -File -Force)) {
+                    $entryName = ($folderName + '/' + $f.FullName.Substring($folderPath.Length + 1)) -replace '\\', '/'
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entryName) | Out-Null
+                }
+            }
+        } finally {
+            $archive.Dispose()
+            $fs.Dispose()
+        }
+        Move-Item -LiteralPath $tmpZip -Destination $destPath -Force
+    } catch {
+        Write-Log -Level 'WARN' -Message "Could not back up pre-adopt folders for $ProjectId before its first update: $($_.Exception.Message)"
+    }
+}
 
 function Save-BackupZip {
     <#
@@ -1752,6 +1847,14 @@ function Save-BackupZip {
 
         $keepIds = New-Object 'System.Collections.Generic.HashSet[string]'
         [void]$keepIds.Add([string]$FileId)
+        # ADOPT-SPEC.md 2.6.1: never prune Save-PreAdoptBackupZip's own
+        # fixed-name snapshot of what the player had before Furphy's first
+        # ever install for an adopted record - the very next real update of
+        # a just-adopted record would otherwise delete it moments after it
+        # was created, since "adopted-original" matches no fileId. Harmless
+        # (a no-op Contains check) for every non-adopted record's backup
+        # folder, which never has a file by that name.
+        [void]$keepIds.Add('adopted-original')
         if ($PreviousFileId) {
             # E12: was [string][int64]$PreviousFileId - a Wago release id
             # string isn't int64-parseable, and plain [string] round-trips a
@@ -2796,6 +2899,12 @@ function New-AddonRecord {
         curseId           = $null
         latestGameVersions = @()
         latestFileDate     = $null
+        # ADOPT-SPEC.md 2.4: $true only for a record created by -Adopt
+        # (recorded exactly as it sat on disk, no download). adoptedAt is
+        # the UTC ISO-8601 timestamp of that adoption. A record created by
+        # -Add (an explicit, real install) never sets either.
+        adopted            = $false
+        adoptedAt          = $null
     }
 }
 
@@ -2909,6 +3018,16 @@ function Initialize-AddonRecordFields {
     }
     if (-not (Get-Member -InputObject $Record -Name 'installedAt' -MemberType NoteProperty)) {
         Add-Member -InputObject $Record -NotePropertyName 'installedAt' -NotePropertyValue $null
+    }
+    # ADOPT-SPEC.md 2.4: a record saved before -Adopt existed predates the
+    # feature entirely, so it was necessarily a real (-Add-sourced) install -
+    # default $false/$null is correct for it, same "never overwrite an
+    # existing value" pattern as every other field above.
+    if (-not (Get-Member -InputObject $Record -Name 'adopted' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'adopted' -NotePropertyValue $false
+    }
+    if (-not (Get-Member -InputObject $Record -Name 'adoptedAt' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'adoptedAt' -NotePropertyValue $null
     }
 }
 
@@ -3370,6 +3489,52 @@ function Sync-SingleAddon {
 
         $selectedFileId = [int64]$selected.id
 
+        # ADOPT-SPEC.md 2.5: an adopted record still on fileId=null (never
+        # actually synced yet) is compared by its recorded .toc VERSION
+        # STRING against the latest available file's own version string,
+        # rather than by fileId (there is no installed fileId to compare).
+        # Equal -> genuinely up to date, no install; different or
+        # undeterminable -> falls through to the normal $needsInstall=$true
+        # path below, exactly like any other pending update.
+        if ($Record.adopted -and (-not $currentFileId) -and (-not $Force) -and (-not $usingPin)) {
+            $normRecorded = Get-NormalizedVersionString -Version $Record.version
+            $latestVersionText = Get-VersionFromDisplayName -DisplayName $selected.displayName
+            $normLatest = Get-NormalizedVersionString -Version $latestVersionText
+
+            if ($normRecorded -and $normLatest -and ($normRecorded -eq $normLatest)) {
+                # Equal -> up to date. Backfill fileId/metadata so every
+                # future run treats this exactly like a normal
+                # already-installed record - NO install, NO folder touched.
+                # Same DryRun gate as every other metadata-only backfill in
+                # this function (CHANGELOG Round 4).
+                if (-not $DryRun) {
+                    $Record.fileId = $selectedFileId
+                    $Record.fileName = $selected.fileName
+                    if ($selected.user -and $selected.user.username) { $Record.author = $selected.user.username }
+                    if ($selected.gameVersions) { $Record.latestGameVersions = $selected.gameVersions } else { $Record.latestGameVersions = @() }
+                    if ($selected.dateCreated) { $Record.latestFileDate = $selected.dateCreated }
+                    if ($AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
+                        $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders -Flavor $Flavor -InstalledInterface $InstalledInterface
+                        if ((-not $Record.curseId) -and $backfillTocIds.curseId) { $Record.curseId = $backfillTocIds.curseId }
+                        if ((-not $Record.wagoId) -and $backfillTocIds.wagoId) { $Record.wagoId = $backfillTocIds.wagoId }
+                    }
+                }
+                Write-Log -Level 'INFO' -Message "Adopted addon confirmed up to date: project $projectId ($displayLabel) matches recorded version '$($Record.version)'"
+                return [PSCustomObject]@{ Status = 'Up-to-date'; Name = $displayLabel; Version = $Record.version }
+            }
+
+            # Different, or undeterminable (either version string missing/
+            # blank) -> falls through to the existing $needsInstall logic
+            # below, which already computes $needsInstall = $true here
+            # (currentFileId is still null) - no change needed to that block
+            # itself. Logged with the exact reason so sync.log/a test can
+            # tell "genuinely newer" apart from "couldn't tell".
+            $reason = 'recorded version does not match the latest available version'
+            if (-not $normRecorded) { $reason = 'no recorded .toc version to compare' }
+            elseif (-not $normLatest) { $reason = "could not determine the latest version's own version string" }
+            Write-Log -Level 'INFO' -Message "Adopted addon has an update available: project $projectId ($displayLabel) - $reason"
+        }
+
         $needsInstall = $false
         if ($Force) {
             $needsInstall = $true
@@ -3451,6 +3616,14 @@ function Sync-SingleAddon {
 
         $currentPhase = 'installing'
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
+        # ADOPT-SPEC.md 2.6: an adopted record's very first real install ever
+        # touches folders the player installed themselves, with no prior
+        # Furphy-made backup to fall back to - snapshot them before the
+        # destructive swap below. No-op for a non-adopted record, or for an
+        # adopted record's SECOND-and-later update (isNewInstall false then).
+        if ($isNewInstall -and $Record.adopted) {
+            Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $projectId
+        }
         $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $projectId -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
 
         if ($newFolders.Count -eq 0) {
@@ -3683,6 +3856,39 @@ function Sync-SingleWagoAddon {
 
         $selectedFileId = [string]$selected.id
 
+        # ADOPT-SPEC.md 2.5: Wago mirror of Sync-SingleAddon's identical
+        # adopted-record freshness check above - see its comment for the
+        # full rationale. $versionText here matches this function's own
+        # existing derivation (Version = $selected.label, below) rather than
+        # Get-VersionFromDisplayName, which is CurseForge-specific.
+        if ($Record.adopted -and (-not $currentFileId) -and (-not $Force) -and (-not $usingPin)) {
+            $normRecorded = Get-NormalizedVersionString -Version $Record.version
+            $latestVersionText = $selected.label
+            $normLatest = Get-NormalizedVersionString -Version $latestVersionText
+
+            if ($normRecorded -and $normLatest -and ($normRecorded -eq $normLatest)) {
+                if (-not $DryRun) {
+                    $Record.fileId = $selectedFileId
+                    $Record.fileName = '{0}-{1}.zip' -f $slug, $selectedFileId
+                    $selectedPatches = $selected.('supported_{0}_patches' -f $cfMapping.WagoField)
+                    if ($selectedPatches) { $Record.latestGameVersions = $selectedPatches } else { $Record.latestGameVersions = @() }
+                    if ($selected.created_at) { $Record.latestFileDate = $selected.created_at }
+                    if ($AddonsPath -and ((-not $Record.wagoId) -or (-not $Record.curseId))) {
+                        $backfillTocIds = Get-TocCrossSourceIds -AddonsPath $AddonsPath -Folders $Record.folders -Flavor $Flavor -InstalledInterface $InstalledInterface
+                        if ((-not $Record.curseId) -and $backfillTocIds.curseId) { $Record.curseId = $backfillTocIds.curseId }
+                        if ((-not $Record.wagoId) -and $backfillTocIds.wagoId) { $Record.wagoId = $backfillTocIds.wagoId }
+                    }
+                }
+                Write-Log -Level 'INFO' -Message "Adopted addon confirmed up to date: wago:$slug ($displayLabel) matches recorded version '$($Record.version)'"
+                return [PSCustomObject]@{ Status = 'Up-to-date'; Name = $displayLabel; Version = $Record.version }
+            }
+
+            $reason = 'recorded version does not match the latest available version'
+            if (-not $normRecorded) { $reason = 'no recorded .toc version to compare' }
+            elseif (-not $normLatest) { $reason = "could not determine the latest version's own version string" }
+            Write-Log -Level 'INFO' -Message "Adopted addon has an update available: wago:$slug ($displayLabel) - $reason"
+        }
+
         $needsInstall = $false
         if ($Force) {
             $needsInstall = $true
@@ -3743,6 +3949,10 @@ function Sync-SingleWagoAddon {
         $currentPhase = 'installing'
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
         $backupKey = Get-RecordBackupKey -Record $Record
+        # ADOPT-SPEC.md 2.6: see Sync-SingleAddon's identical call for why.
+        if ($isNewInstall -and $Record.adopted) {
+            Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $backupKey
+        }
         $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
 
         if ($newFolders.Count -eq 0) {
@@ -4676,6 +4886,9 @@ try {
     try {
         $AddTargets = ConvertTo-ExpandedTargetArray -RawValues $Add -ParamName 'Add'
         $Remove = ConvertTo-ExpandedStringArray -RawValues $Remove
+        # ADOPT-SPEC.md 2.1: -Adopt takes plain folder NAMES, not project ids
+        # - reuses ConvertTo-ExpandedStringArray verbatim, same as -Remove.
+        $AdoptTargets = ConvertTo-ExpandedStringArray -RawValues $Adopt
         $OnlyTargets = ConvertTo-ExpandedTargetArray -RawValues $Only -ParamName 'Only'
         $UnpinTargets = ConvertTo-ExpandedTargetArray -RawValues $Unpin -ParamName 'Unpin'
         $IgnoreTargets = ConvertTo-ExpandedTargetArray -RawValues $Ignore -ParamName 'Ignore'
@@ -4701,6 +4914,7 @@ try {
     $hasIgnore = $IgnoreTargets -and ($IgnoreTargets.Count -gt 0)
     $hasUnignore = $UnignoreTargets -and ($UnignoreTargets.Count -gt 0)
     $hasRollback = $RollbackTargets -and ($RollbackTargets.Count -gt 0)
+    $hasAdopt = $AdoptTargets -and ($AdoptTargets.Count -gt 0)
     $hasFlagsOnly = $hasUnpin -or $hasIgnore -or $hasUnignore
 
     # ---- Validate -FileId usage: requires exactly one target in -Only or -Add ----
@@ -4788,6 +5002,144 @@ try {
             $config.Add($newRecord)
             $addedRecords.Add($newRecord)
             Write-Log -Level 'INFO' -Message "Added $(Get-TargetLabel $target) to addons.json"
+        }
+    }
+
+    # ---- -Adopt: config-only, no network, no file write under -AddonsPath ----
+    # ADOPT-SPEC.md 2.3: records each named, already-recognizable, not-
+    # already-tracked folder (or group of folders sharing one recognizable
+    # CurseForge/Wago id) as managed EXACTLY as it sits on disk right now.
+    if ($hasAdopt) {
+        $ownedFoldersForAdopt = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($item in $config) {
+            if ($item.folders) {
+                foreach ($f in $item.folders) {
+                    if ($f) {
+                        [void]$ownedFoldersForAdopt.Add(([string]$f).ToLowerInvariant())
+                    }
+                }
+            }
+        }
+
+        # Case-insensitive de-dup, first-seen order preserved.
+        $seenAdoptFolders = New-Object 'System.Collections.Generic.HashSet[string]'
+        $adoptFolderNames = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($rawFolder in $AdoptTargets) {
+            $folderKey = $rawFolder.ToLowerInvariant()
+            if ($seenAdoptFolders.Contains($folderKey)) { continue }
+            [void]$seenAdoptFolders.Add($folderKey)
+            $adoptFolderNames.Add($rawFolder)
+        }
+
+        # Bucket every folder that passes its own checks by the source id its
+        # own .toc declares - a curseId present but not int64-parseable is
+        # skipped WITHOUT throwing and WITHOUT aborting the rest of the batch
+        # (Get-FolderTocInfo's curseId is an unvalidated raw regex match
+        # straight off the player's own, possibly hand-edited, .toc - unlike
+        # -Add's ids, which are already validated by the time this code path
+        # is reached). curseId wins if a folder somehow has both.
+        $adoptGroupOrder = New-Object 'System.Collections.Generic.List[string]'
+        $adoptGroups = @{}
+        foreach ($folderName in $adoptFolderNames) {
+            $folderPath = Join-Path -Path $effectiveAddonsPath -ChildPath $folderName
+            if (-not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'folder not found' })
+                continue
+            }
+            if ($ownedFoldersForAdopt.Contains($folderName.ToLowerInvariant())) {
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'already tracked' })
+                continue
+            }
+            $adoptTocInfo = Get-FolderTocInfo -FolderPath $folderPath -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
+            if ((-not $adoptTocInfo.curseId) -and (-not $adoptTocInfo.wagoId)) {
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'no recognizable id' })
+                continue
+            }
+
+            $adoptGroupKey = $null
+            $adoptIsWago = $false
+            if ($adoptTocInfo.curseId) {
+                $adoptParsedCurseId = [int64]0
+                if (-not [int64]::TryParse($adoptTocInfo.curseId, [ref]$adoptParsedCurseId)) {
+                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'id not usable' })
+                    continue
+                }
+                $adoptGroupKey = "cf:$adoptParsedCurseId"
+            } else {
+                $adoptIsWago = $true
+                $adoptGroupKey = "wago:$($adoptTocInfo.wagoId.ToLowerInvariant())"
+            }
+
+            if (-not $adoptGroups.ContainsKey($adoptGroupKey)) {
+                $adoptGroups[$adoptGroupKey] = [PSCustomObject]@{
+                    IsWago    = $adoptIsWago
+                    ProjectId = $(if (-not $adoptIsWago) { $adoptParsedCurseId } else { $null })
+                    WagoId    = $(if ($adoptIsWago) { $adoptTocInfo.wagoId } else { $null })
+                    Folders   = New-Object 'System.Collections.Generic.List[string]'
+                    TocInfos  = New-Object 'System.Collections.Generic.List[object]'
+                }
+                $adoptGroupOrder.Add($adoptGroupKey)
+            }
+            $adoptGroups[$adoptGroupKey].Folders.Add($folderName)
+            $adoptGroups[$adoptGroupKey].TocInfos.Add($adoptTocInfo)
+        }
+
+        foreach ($adoptGroupKey in $adoptGroupOrder) {
+            $adoptGroup = $adoptGroups[$adoptGroupKey]
+            $adoptGroupFolders = $adoptGroup.Folders.ToArray()
+
+            # The same target descriptor Test-RecordMatchesTarget already
+            # understands, so an id already tracked (under a different
+            # folder name, or a stale record) is caught the same way -Add
+            # catches it.
+            if ($adoptGroup.IsWago) {
+                $adoptGroupTarget = [PSCustomObject]@{ IsWago = $true; ProjectId = $null; WagoRef = $adoptGroup.WagoId }
+            } else {
+                $adoptGroupTarget = [PSCustomObject]@{ IsWago = $false; ProjectId = $adoptGroup.ProjectId; WagoRef = $null }
+            }
+
+            $adoptExisting = $null
+            foreach ($item in $config) {
+                if (Test-RecordMatchesTarget -Record $item -Target $adoptGroupTarget) {
+                    $adoptExisting = $item
+                    break
+                }
+            }
+            if ($adoptExisting) {
+                $adoptExistingLabel = $adoptExisting.name
+                if (-not $adoptExistingLabel) { $adoptExistingLabel = Get-TargetLabel $adoptGroupTarget }
+                foreach ($f in $adoptGroupFolders) {
+                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $f; Version = ''; ProjectId = $adoptExisting.projectId; FileId = $adoptExisting.fileId; WagoSlug = $adoptExisting.slug; Folders = @($f); Reason = "id already tracked as $adoptExistingLabel" })
+                }
+                continue
+            }
+
+            # NEVER call either constructor with a placeholder/default value -
+            # this argument is the ONLY thing that populates .projectId
+            # (CurseForge) / .slug (Wago), the IDENTITY fields every
+            # freshness check, sync function, and backup-key lookup keys on.
+            $adoptFirstToc = $adoptGroup.TocInfos[0]
+            $adoptName = $adoptFirstToc.title
+            if (-not $adoptName) { $adoptName = $adoptGroupFolders[0] }
+
+            if ($adoptGroup.IsWago) {
+                $newAdoptRecord = New-WagoAddonRecord -Slug $adoptGroup.WagoId
+                $newAdoptRecord.wagoId = $adoptFirstToc.wagoId
+            } else {
+                $newAdoptRecord = New-AddonRecord -ProjectId $adoptGroup.ProjectId
+                $newAdoptRecord.curseId = $adoptFirstToc.curseId
+            }
+            $newAdoptRecord.name = $adoptName
+            $newAdoptRecord.version = $adoptFirstToc.version
+            $newAdoptRecord.folders = $adoptGroupFolders
+            $newAdoptRecord.adopted = $true
+            $newAdoptRecord.adoptedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            # .fileId stays $null (New-AddonRecord's own default) - Furphy
+            # has not installed anything for this record yet.
+
+            $config.Add($newAdoptRecord)
+            Write-Log -Level 'INFO' -Message "Adopted $(Get-TargetLabel $adoptGroupTarget) ($adoptName) folders: $($adoptGroupFolders -join ', ')"
+            $resultsRows.Add([PSCustomObject]@{ Status = 'Adopted'; Name = $adoptName; Version = $newAdoptRecord.version; ProjectId = $newAdoptRecord.projectId; FileId = $newAdoptRecord.fileId; WagoSlug = $newAdoptRecord.slug; Folders = $adoptGroupFolders; Reason = $null })
         }
     }
 
@@ -4925,9 +5277,12 @@ try {
         foreach ($r in $onlyRecords) {
             $toSync.Add($r)
         }
-    } elseif ($hasRemove -or $hasFlagsOnly -or $hasRollback) {
-        # Nothing to add here: remove-only, flags-only and/or rollback-only
-        # runs stay network-free.
+    } elseif ($hasRemove -or $hasFlagsOnly -or $hasRollback -or $hasAdopt) {
+        # Nothing to add here: remove-only, flags-only, rollback-only and/or
+        # adopt-only runs stay network-free. This is the entire mechanism
+        # that keeps -Adopt from ever touching Interface\AddOns - a record
+        # it just created is never handed to Sync-SingleAddon/
+        # Sync-SingleWagoAddon in the same run that created it.
     } else {
         foreach ($item in $config) {
             $toSync.Add($item)
@@ -5053,6 +5408,8 @@ try {
         $actionLabel = 'check'
     } elseif ($hasAdd) {
         $actionLabel = 'add'
+    } elseif ($hasAdopt) {
+        $actionLabel = 'adopt'
     } elseif ($hasRemove) {
         $actionLabel = 'remove'
     } elseif ($hasRollback) {
@@ -5089,6 +5446,11 @@ try {
                     projectId = $r.ProjectId
                     fileId    = $r.FileId
                     wagoSlug  = $r.WagoSlug
+                    # ADOPT-SPEC.md 2.8: additive - null/empty on every
+                    # non-adopt row, same as the existing WagoSlug field is
+                    # null on a CurseForge row.
+                    folders   = $r.Folders
+                    reason    = $r.Reason
                 })
         }
         # E13 (compatibility audit): "every sync/check result" (not just
