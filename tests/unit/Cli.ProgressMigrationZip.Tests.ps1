@@ -511,6 +511,78 @@ Describe 'Install-AddonPackage - folder swap failure integrity (failure-modes:si
         (Get-Content -LiteralPath (Join-Path $addons 'FolderA\FolderA.toc') -Raw) | Should Be 'FolderA-NEW'
         (Get-Content -LiteralPath $lockedFile -Raw) | Should Be 'B-OLD'
     }
+
+    It 'a TRANSIENTLY locked file is retried and the swap succeeds once the lock is released within the retry budget (RETRY-ON-LOCK, GAME-MODE-SPEC.md section 7.4)' {
+        <#
+          GAME-MODE-SPEC.md section 8, new-coverage item 6 (conditional on
+          Package A's own decision, tagged `# RETRY-ON-LOCK: added` above
+          Install-AddonPackage's swap loop in addon-sync.ps1 - confirmed
+          present, so this test is required, not skipped). The two Its
+          above already prove the "locked for the whole call -> still
+          throws after exhausting the retry budget" side (unaffected by
+          adding retries, since their lock is held across the entire
+          Install-AddonPackage call). This one proves the OTHER half: a
+          lock that clears mid-swap - the exact "another process happened
+          to be touching the file" scenario the retry exists for - lets
+          the swap recover and succeed instead of failing outright.
+
+          The lock is held on a REAL BACKGROUND THREAD ([PowerShell]::
+          Create(), not a separate powershell.exe process - a whole
+          process's own startup latency could by itself eat the ~300ms
+          total retry budget below and make this test racy rather than
+          deterministic) so it can run concurrently with THIS thread's
+          own blocking Install-AddonPackage call. A marker file (polled,
+          not a fixed guess-sleep) proves the lock is genuinely held
+          before the race starts; the lock is then released well inside
+          the 3-attempt/~150ms-apart retry window.
+        #>
+        $root = New-TempRoot -Name 'swap-locked-transient'
+        $staging = Join-Path $root 'staging'
+        $addons = Join-Path $root 'addons'
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        $existingDir = Join-Path $addons 'BigWigs'
+        New-Item -ItemType Directory -Path $existingDir -Force | Out-Null
+        $existingFile = Join-Path $existingDir 'BigWigs.toc'
+        Set-Content -LiteralPath $existingFile -Value 'OLD-VERSION' -Encoding ASCII -NoNewline
+
+        $zipPath = Join-Path $root 'BigWigs-new.zip'
+        New-OneFolderZip -ZipPath $zipPath -FolderName 'BigWigs' -Content 'NEW-VERSION'
+
+        $lockAcquiredMarker = Join-Path $root 'lock-acquired.marker'
+        $ps = [PowerShell]::Create()
+        $ps.AddScript({
+            param($Path, $Marker)
+            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            [System.IO.File]::WriteAllText($Marker, 'locked')
+            Start-Sleep -Milliseconds 100
+            $fs.Close()
+            $fs.Dispose()
+        }).AddArgument($existingFile).AddArgument($lockAcquiredMarker) | Out-Null
+        $handle = $ps.BeginInvoke()
+
+        try {
+            # Wait for the background thread to actually hold the lock
+            # before racing it with Install-AddonPackage's own first
+            # attempt - never a fixed guess-sleep for this half.
+            $deadline = (Get-Date).AddSeconds(5)
+            while (-not (Test-Path -LiteralPath $lockAcquiredMarker) -and (Get-Date) -lt $deadline) {
+                Start-Sleep -Milliseconds 10
+            }
+            (Test-Path -LiteralPath $lockAcquiredMarker) | Should Be $true
+
+            # Attempt 1 (immediate) hits the still-held lock and fails;
+            # attempt 2 (~150ms later) lands after the background thread's
+            # own 100ms hold has released it.
+            $installed = Install-AddonPackage -ZipPath $zipPath -ProjectId 925038 -StagingPath $staging -AddonsPath $addons -PreviousFolders @('BigWigs')
+            $installed.Count | Should Be 1
+            $installed[0] | Should Be 'BigWigs'
+        } finally {
+            $ps.EndInvoke($handle) | Out-Null
+            $ps.Dispose()
+        }
+
+        (Get-Content -LiteralPath $existingFile -Raw) | Should Be 'NEW-VERSION'
+    }
 }
 
 Describe 'Invoke-HttpDownloadWithProgress' {

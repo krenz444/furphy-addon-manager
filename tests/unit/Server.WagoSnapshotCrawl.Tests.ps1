@@ -121,7 +121,18 @@ Describe 'Initialize-WagoGrowthSnapshots - crawl, de-dup, and disk round-trip' {
         $afterContent | Should Be $beforeContent
     }
 
-    It 'Test-GameRunning at the very top skips the entire crawl - zero live calls, no file written' {
+    It 'the crawl proceeds normally while GameRunning is true - live calls happen, snapshot file is written (no game-state gate any more)' {
+        <#
+          GAME-MODE-SPEC.md (2026-09-08), section 8: INVERTED from
+          "Test-GameRunning at the very top skips the entire crawl - zero
+          live calls, no file written". Initialize-WagoGrowthSnapshots'
+          own game-running gate (and the per-flavour/per-page TOCTOU abort
+          that used to re-check it mid-crawl) is gone - Wago's daily
+          growth crawl now runs on its normal per-game_version 20h
+          freshness cadence (the OTHER, UNCHANGED It just above this one)
+          regardless of WoW's process state, same as everything else this
+          round.
+        #>
         Initialize-WagoCrawlTestState
         $Script:WowFakeProcessNameOverride = (Get-Process -Id $PID).ProcessName
         $Script:GameRunningCache = $false
@@ -130,12 +141,20 @@ Describe 'Initialize-WagoGrowthSnapshots - crawl, de-dup, and disk round-trip' {
         function Get-WagoCached {
             param([Parameter(Mandatory = $true)][string]$PageUri, [switch]$AllowLiveFetch = $true)
             $Script:WagoCachedCallCount++
-            throw 'Get-WagoCached must not be called while WoW is running'
+            $clone = $Script:WagoCrawlFixtureProps | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $clone.addons.current_page = 1
+            $clone.addons.last_page = 1
+            return $clone
         }
 
         { Initialize-WagoGrowthSnapshots } | Should Not Throw
-        $Script:WagoCachedCallCount | Should Be 0
-        (Test-Path -LiteralPath (Get-WagoGrowthSnapshotPath -GameVersion 'retail')) | Should Be $false
+        $Script:WagoCachedCallCount | Should BeGreaterThan 0
+
+        $snapPath = Get-WagoGrowthSnapshotPath -GameVersion 'retail'
+        (Test-Path -LiteralPath $snapPath) | Should Be $true
+        $onDisk = Read-WagoGrowthSnapshotFile -Path $snapPath
+        $onDisk.gameVersion | Should Be 'retail'
+        $onDisk.snapshots[0].items.Count | Should Be 14
     }
 
     It 'PARTIAL rule: a page-fetch failure mid-crawl still saves whatever was already captured (never discards a partial success)' {

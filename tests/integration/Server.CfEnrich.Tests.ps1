@@ -179,3 +179,70 @@ Describe 'GET /api/cf/enrich - Wago auto-match resolves game_version from the CU
         Stop-WagoStubServer -Stub $stub
     }
 }
+
+Describe 'GET /api/cf/enrich - Wago auto-match live-fetch proceeds while a fake WoW process is running (GAME-MODE-SPEC.md 2026-09-08)' {
+    <#
+      New coverage (section 8 new-coverage item 3) - Get-CfEnrichmentNoKey
+      never had a Test-GameRunning test either way before this round
+      (confirmed: grepped this file, Server.CfCatalogueGuard.Tests.ps1 and
+      Server.WagoParser.Tests.ps1 - the only other GameRunning-aware
+      Wago/CF coverage in this suite - none exercised THIS function). The
+      removed gate used to skip both live-network branches (Wago-match,
+      addon-radar) while WoW ran, falling straight through to the
+      catalogue-only fallback; this proves the Wago-match branch still
+      genuinely reaches the stub instead, with the fake WoW process alive
+      for the whole request.
+    #>
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'cf-enrich-automatch-gamerunning'
+    $stub = $null
+    $server = $null
+    $fakeWow = $null
+    try {
+        $flavourDir = Join-Path $root 'flavours\retail'
+        New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+        $record = New-BareAddonRecord -ProjectId 900000031 -Name 'StubMatchAddonGameRunning' -Author 'StubAuthor'
+        (ConvertTo-Json -InputObject @($record) -Depth 10) | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
+
+        $stub = Start-WagoStubServer -Routes @(
+            @{ gameVersion = 'retail'; page = '1'; search = 'StubMatchAddonGameRunning'; file = 'empty-retail.json' }
+        ) -DefaultFile 'empty-retail.json'
+
+        $fakeProcName = 'WowFakeCfEnrichRunning' + (Get-Random -Maximum 99999)
+        $fakeExePath = Join-Path $root ($fakeProcName + '.exe')
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
+        $fakeWow = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '120', '/nobreak') -WindowStyle Hidden -PassThru
+        Start-Sleep -Milliseconds 500
+
+        $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        try {
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeProcName)
+        } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+
+        It 'the Wago auto-match search still reaches the stub with the fake WoW process alive the whole time' {
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/cf/enrich/900000031?flavour=retail'
+            $r.Ok | Should Be $true
+
+            # Same isolation technique (assign THEN filter, never pipe
+            # Get-WagoStubRequests straight into a filter) as the sibling
+            # Describe above - see its own comment for the PowerShell
+            # array-vectorization gotcha this avoids.
+            $getMatchCount = {
+                $all = Get-WagoStubRequests -Stub $stub
+                $n = 0
+                foreach ($x in $all) { if ($x.query.search -eq 'StubMatchAddonGameRunning') { $n++ } }
+                return $n
+            }
+            Wait-ForWagoStubRequest -Condition $getMatchCount -ExpectedCount 1 -TimeoutSec 20 | Out-Null
+
+            $allReqs = Get-WagoStubRequests -Stub $stub
+            $reqs = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($x in $allReqs) { if ($x.query.search -eq 'StubMatchAddonGameRunning') { $reqs.Add($x) } }
+            $reqs.Count | Should Be 1
+        }
+    } finally {
+        if ($fakeWow -and -not $fakeWow.HasExited) { try { Stop-Process -Id $fakeWow.Id -Force -ErrorAction SilentlyContinue } catch { } }
+        Stop-TestServer -Server $server
+        Stop-WagoStubServer -Stub $stub
+    }
+}

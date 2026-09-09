@@ -123,8 +123,8 @@ const Prefs = (function () {
    WindowActivity - QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-
    foreground), the second (courtesy, not gameplay-safety) half of that
    finding's fix. Store's applyGameActiveAttr above stamps data-game-active
-   for as long as a WoW client is running - the documented "zero impact on
-   gameplay" case this finding actually measured. This module stamps a
+   for as long as a WoW client is running - the documented "light touch
+   while you play" case this finding actually measured. This module stamps a
    second, independent attribute, data-window-inactive, for as long as
    nobody is actually looking at this window at all - document.hidden (the
    host minimized it - though FurphyHost.cs's own EnterBackgroundMode
@@ -536,6 +536,10 @@ const Mock = (function () {
       { status: "Failed", name: "BonusRollConfirm", version: "1.0.2" }
     ]
   };
+  // GAME-MODE-SPEC.md section 3.2: the persistent Freshness note is
+  // demoable immediately under ?mock=1&game=1 (no need to run a job first)
+  // since this fixture already has an "Updated" row.
+  lastRun.reloadNeeded = computeReloadNeeded(mockGameRunningNow(), lastRun.rows);
   let updatesCheckedAt = new Date(Date.now() - 5 * 60e3).toISOString();
   // CS1 (UX-SPEC.md sections 2.1/4.2): mirrors addon-server.ps1's
   // $Script:LastCheckFailed/$Script:LastCheckError - in-memory-only mock
@@ -598,6 +602,25 @@ const Mock = (function () {
   }
 
   function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+
+  // GAME-MODE-SPEC.md section 3/4.1: ?mock=1&game=1 previews
+  // gameRunningAtStart/reloadNeeded the same way it already previews
+  // Store.state.gameRunning (P2's mockGameRunning above) - one shared
+  // reader so /api/state and runJob agree on the same query flag.
+  function mockGameRunningNow() { return new URLSearchParams(location.search).get("game") === "1"; }
+
+  // GAME-MODE-SPEC.md section 4.1: mirrors Get-JobStatusView's reloadNeeded
+  // predicate exactly - true only when the job started while WoW was
+  // running AND it actually wrote something to disk (Installed/Updated/
+  // Rolled-back). A check-only job's rows are always Would-update/Up-to-
+  // date/Failed/Skipped, so it naturally evaluates false without special-
+  // casing kind; Removed/Pinned/Ignored/Unignored/Unpinned are deliberately
+  // excluded too (section 4.1's honesty note, section 7.5).
+  function computeReloadNeeded(gameRunningAtStart, rows) {
+    return !!(gameRunningAtStart && (rows || []).some(function (r) {
+      return r.status === "Installed" || r.status === "Updated" || r.status === "Rolled-back";
+    }));
+  }
 
   // E12: an addon's Mock-side key, matching Store.addonKey exactly - a
   // "sync"/"install"/"rollback" job's params always carry this form (never
@@ -794,7 +817,15 @@ const Mock = (function () {
     job.state = "done";
     job.finishedAt = new Date().toISOString();
     job.exitCode = 0;
+    const lastRunBefore = lastRun;
     finalizeJobResults(job, kind, params, forcedFailMockKey);
+    // GAME-MODE-SPEC.md section 4.1/4.2: mirrors Get-JobStatusView's
+    // reloadNeeded (on the job) and Apply-JobCompletionSideEffects'
+    // matching field on $Script:LastRunByFlavour (on lastRun) - only when
+    // finalizeJobResults actually replaced lastRun above (sync/switch-
+    // source/rollback/import), never for a kind that leaves it untouched.
+    job.reloadNeeded = computeReloadNeeded(job.gameRunningAtStart, job.results);
+    if (lastRun !== lastRunBefore) lastRun.reloadNeeded = job.reloadNeeded;
   }
 
   // CS1 (UX-SPEC.md section 4.1): builds the ordered list of addons a
@@ -976,7 +1007,10 @@ const Mock = (function () {
       // way the real server's job.flavour defaults for anything pre-CS-F2.
       id: id, kind: kind, flavour: flavourId || "retail", params: params || {}, state: "running",
       startedAt: new Date().toISOString(), finishedAt: null, exitCode: null,
-      log: [], results: [], error: null, progress: null
+      log: [], results: [], error: null, progress: null,
+      // GAME-MODE-SPEC.md section 4.1: captured once, at job-creation time
+      // - mirrors Start-Job's own `gameRunningAtStart = (Test-GameRunning)`.
+      gameRunningAtStart: mockGameRunningNow()
     };
     currentJob = job;
     jobs.unshift(job);
@@ -1362,13 +1396,12 @@ const Mock = (function () {
           };
         }
 
-        // Round 32/3.5: no live Wago request (real or mocked) while a WoW
-        // client is running - the three live-fetch sorts answer 200 with
-        // nothing rather than a blank hang, same as the real corrected gate.
-        if (new URLSearchParams(location.search).get("game") === "1") {
-          return { items: [], page: 1, lastPage: 1, total: 0, sortApplied: sort, categories: [], gameActive: true };
-        }
-
+        // GAME-MODE-SPEC.md section 2 (2026-09-08): Wago browsing now works
+        // fully while a WoW client is running - the real server always
+        // live-fetches regardless of game state, so this mock's ?game=1
+        // no longer short-circuits the live-fetch sorts. gameActive is
+        // never sent by the real server any more either (removed from the
+        // response shape, not just always-false), so nothing here reads it.
         const wq = (q.get("q") || "").trim().toLowerCase();
         const catParam = q.get("categoryId");
         const categoryId = /^[0-9]+$/.test(catParam || "") ? parseInt(catParam, 10) : null;
@@ -1470,7 +1503,8 @@ const Mock = (function () {
         });
       }
       if (p === "/api/app-update/check" && method === "POST") {
-        if (new URLSearchParams(location.search).get("game") === "1") return { ok: true, skipped: "game running" };
+        // GAME-MODE-SPEC.md section 6: the "game running" soft-skip is gone
+        // - check now always spawns/runs regardless of game state.
         if (mockAppUpdate.state === "checking" || mockAppUpdate.state === "downloading") {
           return { __status: 200, ok: true, state: mockAppUpdate.state };
         }
@@ -1484,7 +1518,8 @@ const Mock = (function () {
           mockAppUpdate.deferredReason = "job-running";
           return { __status: 409, error: "busy: a job is running" };
         }
-        if (new URLSearchParams(location.search).get("game") === "1") return { __status: 409, error: "WoW is running" };
+        // GAME-MODE-SPEC.md section 6: install no longer gates on game
+        // state - only the job-running 409 above survives.
         mockAppUpdate.state = "installing";
         mockAppUpdate.installAttemptedAt = new Date().toISOString();
         mockAppUpdate.deferredReason = null;
@@ -2159,10 +2194,13 @@ const Store = (function () {
     lastCheckError: null,
     // P2 perf pass: whether any WoW client is currently running, from
     // /api/state's gameRunning field (also pushed early by the native host's
-    // own {type:"game"} message - see Host.onGame) - read by the idle poll/
-    // auto-check schedulers to back off, and by Components.Freshness to show
-    // the one muted "background checks paused" line. QA-round-3 fix
-    // (perf-remeasure:webview2-gpu-cpu-open-foreground): every write to this
+    // own {type:"game"} message - see Host.onGame) - read by the idle poll
+    // to back off (POLL_GAME_MS, a CPU-only measure kept under GAME-MODE-
+    // SPEC.md section 1.2), and by Components.Freshness together with
+    // lastRun.reloadNeeded to show the muted reload-reminder line (section
+    // 3.2 - no longer a "background checks paused" line; checks no longer
+    // pause). QA-round-3 fix (perf-remeasure:webview2-gpu-cpu-open-foreground):
+    // every write to this
     // field (both below, via set(), and Host.onGame's callback near App.init)
     // now also stamps/clears a data-game-active attribute on <html> - see
     // applyGameActiveAttr below - so ui/style.css can gate every theme's
@@ -2192,9 +2230,11 @@ const Store = (function () {
       // persisted (same as query - resets to the default every time this
       // view is freshly loaded, matching the app's existing "Browse state
       // is a session, not a saved preference" behavior). categories/
-      // sortApplied/gameActive/gain* mirror the LAST successful
-      // /api/wago/browse response so a re-render between fetches (a theme
-      // change, say) has real data to paint instead of a blank frame.
+      // sortApplied/gain* mirror the LAST successful /api/wago/browse
+      // response so a re-render between fetches (a theme change, say) has
+      // real data to paint instead of a blank frame. GAME-MODE-SPEC.md
+      // section 2: gameActive dropped - the server no longer sends it
+      // (Wago browsing works fully while WoW runs).
       wago: {
         loading: false, loaded: false, error: null, results: [],
         sort: "popular",        // 'popular' | 'updated' | 'name' | 'gaining'
@@ -2202,7 +2242,6 @@ const Store = (function () {
         categories: [],         // [{id, displayName}] - arrives inline on every /api/wago/browse response
         page: 1, lastPage: 1, total: 0,
         sortApplied: "popular",
-        gameActive: false,
         // Gaining this week only (meaningful when sortApplied==='gaining'):
         gainReady: false, gainSince: null, gainAsOf: null, gainBaselineAsOf: null, gainSnapshotCount: 0
       }
@@ -3132,13 +3171,17 @@ Components.Freshness = (function () {
     }
     if (d.clause) parts.push(Utils.el("span", { class: "freshness-clause" }, [" · " + d.clause]));
     box.appendChild(Utils.el("div", { class: "freshness-row" }, parts));
-    // P2 perf pass: one muted line, removed the instant the game closes -
-    // the only on-screen sign that the idle poll/auto-check backed off
-    // while a WoW client is running. Never replaces the headline above (the
-    // last real freshness fact stays visible), just adds this note under it.
-    if (Store.state.gameRunning) {
-      box.appendChild(Utils.el("div", { class: "freshness-row freshness-game-note" }, [
-        Utils.el("span", { class: "freshness-clause" }, ["WoW is running - background checks paused"])
+    // GAME-MODE-SPEC.md section 3.2: one muted line, removed the instant
+    // either condition below stops holding - the game closes, or a newer
+    // job overwrites lastRun with a fresh (possibly reloadNeeded:false) one.
+    // Never replaces the headline above (the last real freshness fact stays
+    // visible), just adds this note under it. This slot used to hold a
+    // "WoW is running - background checks paused" line - repurposed, not
+    // just removed, since background checks no longer pause (GAME-MODE-
+    // SPEC.md section 1.1).
+    if (Store.state.gameRunning && Store.state.lastRun && Store.state.lastRun.reloadNeeded) {
+      box.appendChild(Utils.el("div", { class: "freshness-row freshness-reload-note" }, [
+        Utils.el("span", { class: "freshness-clause" }, ["WoW will use it once you type /reload in your chat window, or log out and back in."])
       ]));
     }
   }
@@ -5504,8 +5547,11 @@ const Actions = (function () {
   // available/ready on its own, same as every other background job here.
   async function checkAppUpdate() {
     try {
-      const res = await Api.checkAppUpdate();
-      if (res && res.skipped) { Components.Toast.show("Can't check for updates right now - WoW is running.", "warning"); return; }
+      // GAME-MODE-SPEC.md section 6: the "game running" soft-skip
+      // (res.skipped === "game running") can no longer occur - the server
+      // always spawns/runs this check regardless of game state now, so
+      // there is no skipped branch to show a toast for any more.
+      await Api.checkAppUpdate();
       await App.reloadState(true);
     } catch (err) {
       Components.Toast.show("Couldn't check for updates: " + describeError(err), "error");
@@ -5517,8 +5563,8 @@ const Actions = (function () {
   // Action with the SAME relaunch value ("window"), matching the server's
   // own single-handler-two-callers shape. On success the server is already
   // tearing itself down (identical contract to Actions.uninstallApp above),
-  // so App.enterUpdatingState() takes over from here; on a 409 (WoW/a job
-  // is running - normally already prevented by the button's own
+  // so App.enterUpdatingState() takes over from here; on a 409 (an addon
+  // job is running - normally already prevented by the button's own
   // disabled+title state, so reaching this is a rare race) or any other
   // failure, stay put and let the status line/next poll explain why.
   async function installAppUpdate(relaunch) {
@@ -6150,7 +6196,6 @@ Views.browse = (function () {
       w.lastPage = res.lastPage || 1;
       w.total = res.total || 0;
       w.sortApplied = res.sortApplied || sort;
-      w.gameActive = !!res.gameActive;
       if (res.categories && res.categories.length) w.categories = res.categories;
       if (w.sortApplied === "gaining") {
         w.gainReady = !!res.ready;
@@ -6303,14 +6348,13 @@ Views.browse = (function () {
     const skeleton = Utils.qs("#browse-skeleton");
     const empty = Utils.qs("#browse-empty");
     const errorBox = Utils.qs("#browse-error");
-    const gameActiveBox = Utils.qs("#browse-gameactive");
     const notReadyBox = Utils.qs("#wago-gain-notready");
     const loadMoreWrap = Utils.qs("#wago-loadmore");
     const summary = Utils.qs("#browse-summary");
 
     function hideAllBodies() {
       grid.hidden = true; skeleton.hidden = true; empty.hidden = true;
-      errorBox.hidden = true; gameActiveBox.hidden = true; notReadyBox.hidden = true;
+      errorBox.hidden = true; notReadyBox.hidden = true;
       loadMoreWrap.hidden = true;
     }
 
@@ -6346,15 +6390,10 @@ Views.browse = (function () {
       return;
     }
 
-    // Round 32 (WAGO-BROWSE-SPEC.md section 3.5's corrected game-mode
-    // gate): never applies to Gaining, which is a pure disk read.
-    if (!gaining && w.sortApplied !== "gaining" && w.gameActive) {
-      hideAllBodies();
-      gameActiveBox.hidden = false;
-      summary.textContent = "";
-      return;
-    }
-
+    // GAME-MODE-SPEC.md section 2 (2026-09-08): the game-mode blocked-state
+    // gate is gone - Wago browsing works fully while a WoW client is
+    // running, matching Handle-WagoSearch's original ungated behavior
+    // (WAGO-BROWSE-SPEC.md section 3.5, inverted).
     if (w.sortApplied === "gaining" && !w.gainReady) {
       hideAllBodies();
       notReadyBox.hidden = false;
@@ -7065,19 +7104,19 @@ Views.settings = (function () {
     const au = Store.state.appUpdate;
     Utils.qs("#app-update-status-text").textContent = appUpdateStatusText(au);
 
-    const gameRunning = !!Store.state.gameRunning;
+    // GAME-MODE-SPEC.md section 2/6: neither button disables for game
+    // state any more - Check now and Install now both work while WoW runs.
     const checkBtn = Utils.qs("#btn-app-update-check");
-    checkBtn.disabled = gameRunning;
-    if (gameRunning) checkBtn.title = "WoW is running"; else checkBtn.removeAttribute("title");
+    checkBtn.disabled = false;
+    checkBtn.removeAttribute("title");
 
     const installBtn = Utils.qs("#btn-app-update-install");
     const ready = !!(au && au.state === "ready");
     installBtn.hidden = !ready;
     if (ready) {
       const jobRunning = (au && au.deferredReason === "job-running") || Store.isBusy();
-      installBtn.disabled = gameRunning || jobRunning;
-      if (gameRunning) installBtn.title = "WoW is running";
-      else if (jobRunning) installBtn.title = "An addon job is running";
+      installBtn.disabled = jobRunning;
+      if (jobRunning) installBtn.title = "An addon job is running";
       else installBtn.removeAttribute("title");
     }
 
@@ -7185,8 +7224,6 @@ Views.settings = (function () {
         return "Updated " + updated + " addon" + (updated === 1 ? "" : "s") + " at " + doneStamp + ": " + joinNamesTruncated(updatedNames, 4);
       case "done_failed":
         return failed + " addon" + (failed === 1 ? "" : "s") + " couldn't update at " + doneStamp + " - open Furphy for details";
-      case "waiting_game":
-        return "Waiting for WoW to close - next check after";
       case "waiting_busy":
         return "Waiting for the current task - retrying in 5 min";
       case "unreachable":
@@ -7217,7 +7254,6 @@ Views.settings = (function () {
       case "up_to_date": return "Running - last check " + time + ": everything up to date";
       case "updated": return "Running - updated " + ((state.updatedNames || []).length) + " at " + time;
       case "failed": return "Running - " + ((state.failedNames || []).length) + " failed at " + time;
-      case "skipped_wow_running": return "Waiting - WoW is running";
       case "skipped_busy": return "Waiting - another task is running";
       default: return "Running - check failed at " + time;
     }
@@ -8280,9 +8316,19 @@ const App = (function () {
         // job panel (Components.JobPanel.wholeJobFailureReason), and the
         // toast itself is just a transient nudge to look at the panel - the
         // raw text stays reachable only behind that panel's own Details.
-        const summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job)
+        let summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job)
           : Components.JobPanel.summarize(job.results);
-        Components.Toast.show(summary, job.state === "failed" ? "error" : "success");
+        // GAME-MODE-SPEC.md section 3.1: the server already knows whether
+        // the game was running when this job STARTED (job.reloadNeeded,
+        // section 4.1) - trust that, never re-derive it client-side against
+        // the CURRENT Store.state.gameRunning (a race a client-side re-
+        // check would get wrong if the player quit WoW mid-job).
+        const toastOpts = {};
+        if (job.state !== "failed" && job.reloadNeeded) {
+          summary += " - WoW will use it once you type /reload in your chat window, or log out and back in.";
+          toastOpts.duration = 7000;
+        }
+        Components.Toast.show(summary, job.state === "failed" ? "error" : "success", toastOpts);
         notifyIfUpdatesFound(job);
       } catch (err) {
         markOnline(err);
@@ -8441,10 +8487,11 @@ const App = (function () {
   // 10s while it's unreachable (banner-offline shown by markOnline) so a
   // server that exited on idle isn't hammered, then dropping straight back
   // to 5s on the first successful response once it's back. P2 perf pass:
-  // while a WoW client is running, 60s regardless of connectivity - this is
-  // the "zero impact on gameplay" contract's one on-screen concession
-  // (Components.Freshness's muted note), so it stays slow even once the
-  // host reports the server back online.
+  // while a WoW client is running, 60s regardless of connectivity - a
+  // light-touch-while-you-play CPU saving on this passive idle poll only
+  // (GAME-MODE-SPEC.md 1.2 - unrelated to whether Components.Freshness's
+  // muted reload-reminder note happens to be showing), so it stays slow
+  // even once the host reports the server back online.
   const POLL_ONLINE_MS = 5000;
   const POLL_OFFLINE_MS = 10000;
   const POLL_GAME_MS = 60000;
@@ -8545,15 +8592,12 @@ const App = (function () {
   // or older than 10 minutes and nothing else is running), then arms a
   // 30-minute repeat for as long as this page stays open.
   function scheduleAutoCheck() {
-    // P2 perf pass: a WoW client running means this is a fresh page load
-    // that raced the very first /api/state fetch - Store.state.gameRunning
-    // is already known by the time init() gets here (reloadState awaited
-    // first), so this also covers "opened the window while the game is
-    // already up" cleanly, not just "the game started while it was open".
-    if (!Store.state.gameRunning && !Store.isBusy() && isUpdatesCheckStale()) Actions.autoCheckForUpdates();
+    // GAME-MODE-SPEC.md section 2: auto-check no longer pauses for game
+    // state - only an in-flight job (Store.isBusy()) defers it now.
+    if (!Store.isBusy() && isUpdatesCheckStale()) Actions.autoCheckForUpdates();
     clearInterval(autoCheckTimer);
     autoCheckTimer = setInterval(function () {
-      if (Store.state.gameRunning || Store.isBusy()) return;
+      if (Store.isBusy()) return;
       Actions.autoCheckForUpdates();
     }, AUTO_CHECK_INTERVAL_MS);
   }

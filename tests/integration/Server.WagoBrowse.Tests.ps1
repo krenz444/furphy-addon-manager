@@ -5,8 +5,11 @@
  Integration coverage for WAGO-BROWSE-SPEC.md's new GET /api/wago/browse
  endpoint (Handle-WagoBrowse, the SERVER-1..5 change set) - default
  listing/Popular, categories, categoryId filtering, the four-way sort,
- pagination, the 5-minute cache, the 300ms pacing, the game-running gate,
- the "Gaining this week" snapshot mechanism, the category+gaining
+ pagination, the 5-minute cache, the 300ms pacing, browsing while a WoW
+ client is running (GAME-MODE-SPEC.md 2026-09-08: no gate any more - see
+ the "browsing while a fake WoW process is running" Describe, inverted
+ from this file's original "game mode: gameActive, zero stub requests"
+ one), the "Gaining this week" snapshot mechanism, the category+gaining
  permanent incompatibility, and CSRF (GET is exempt).
 
  CAPABILITY-GATED, ON PURPOSE: this file was started while NONE of
@@ -214,18 +217,25 @@ function Block-WagoGrowthCrawl {
       live: retail, classic, mop - the rolling Classic client's current
       era per FLAVORS-SPEC.md S2.4 - plus bc/wotlk/cata defensively), so
       Initialize-WagoGrowthSnapshots' own 20-hour staleness gate
-      (WAGO-BROWSE-SPEC.md section 4.1 gate 2) skips every flavour at this
-      server's startup. Without this, the startup crawl runs for real
-      (SERVER-5 already lands unconditionally whenever WoW isn't
-      "running" and no fresh snapshot exists) and silently both (a) adds
-      extra, unplanned requests to this Describe's own stub - corrupting
-      any exact stub-request-COUNT assertion (cache/pacing/pagination) -
-      and (b) can pre-warm Get-WagoCached's shared in-memory cache for the
-      exact retail/page1/no-filter URI a Describe's own "first call is a
-      genuine cache miss" assertion depends on. Not used by the three
-      Describes that either want the crawl itself under test (9c) or
-      already keep a fake WoW process running for their entire duration
-      (9a/9b/10/game-mode), which already skips the crawl via gate 1.
+      (WAGO-BROWSE-SPEC.md section 4.1 gate 2, unrelated to WoW's process
+      state and NOT removed by GAME-MODE-SPEC.md - see that spec's section
+      1.3/2) skips every flavour at this server's startup. Without this,
+      the startup crawl runs for real (SERVER-5 lands unconditionally
+      whenever no fresh snapshot exists - GAME-MODE-SPEC.md 2026-09-08
+      removed the crawl's own game-running gate entirely, so unlike
+      before, keeping a fake WoW process running no longer skips this on
+      its own either) and silently both (a) adds extra, unplanned
+      requests to this Describe's own stub - corrupting any exact
+      stub-request-COUNT assertion (cache/pacing/pagination) - and (b) can
+      pre-warm Get-WagoCached's shared in-memory cache for the exact
+      retail/page1/no-filter URI a Describe's own "first call is a
+      genuine cache miss" assertion depends on. Not used by the ONE
+      Describe that wants the crawl itself under test (9c, no seeded
+      snapshot on purpose) or by Describes that instead set
+      FURPHY_TEST_SKIP_WAGO_GROWTH directly because they seed (or must
+      NOT have) their own exact retail snapshot content (9a/9b/10) - see
+      each of those Describes' own comments. The game-mode Describe DOES
+      use this helper (it has no snapshot content of its own to protect).
     #>
     param([Parameter(Mandatory = $true)][string]$Root)
     $cacheDir = Join-Path $Root 'cache'
@@ -642,19 +652,33 @@ Describe 'Wago browse: pacing' {
 }
 
 # =====================================================================
-# 8) Game mode: gameActive, zero stub requests
+# 8) GAME-MODE-SPEC.md (2026-09-08): browsing while WoW runs is real,
+#    never blocked. INVERTED from the old "game mode: gameActive, zero
+#    stub requests" Describe - Handle-WagoBrowse's game-mode gate
+#    (Get-WagoCached -AllowLiveFetch:(-not $gameIsRunning), the
+#    gameActive:true/items:[] short-circuit) is gone; -AllowLiveFetch is
+#    now always $true and the gameActive field is dropped from the
+#    response entirely (never sent as always-false).
 # =====================================================================
 
-Describe 'Wago browse: game mode (no cache warm yet)' {
+Describe 'Wago browse: browsing while a fake WoW process is running (real results, no game-mode gate)' {
     if (-not ($Script:CapCore -and $Script:CapAllowLiveFetch)) {
-        It 'with a fake WoW process running and no prior cache entry, browse returns gameActive:true, items:[], and the stub sees zero requests' {
-            Write-PendingSkip 'needs SERVER-1/SERVER-2 (route) and SERVER-4 (Get-WagoCached -AllowLiveFetch / the game-mode gate)'
+        It 'with a fake WoW process running, browse reaches the stub and returns real items - gameActive is absent, never a blocked-state response' {
+            Write-PendingSkip 'needs SERVER-1/SERVER-2 (route) and SERVER-4 (Get-WagoCached -AllowLiveFetch, now unconditional)'
         }
         return
     }
 
     $wowRoot = Copy-Fixture
     $root = New-TempRoot -Name 'wago-browse-gamemode'
+    # Block-WagoGrowthCrawl: with gate 1 (Test-GameRunning) gone from
+    # Initialize-WagoGrowthSnapshots, keeping $fakeWow alive no longer
+    # guarantees the daily growth crawl stays quiet on its own (that
+    # guarantee died with gate 1) - pre-seed a fresh snapshot per
+    # game_version so the UNCHANGED 20h freshness gate (gate 2) keeps this
+    # Describe's own stub-request-count assertion deterministic instead of
+    # racing an async maintenance-child crawl.
+    Block-WagoGrowthCrawl -Root $root
     $stub = $null
     $server = $null
     $fakeWow = $null
@@ -666,7 +690,10 @@ Describe 'Wago browse: game mode (no cache warm yet)' {
         # Fake WoW BEFORE the server, same ordering rationale
         # tests\perf\Perf.Tests.ps1 documents for its own steady-state
         # test - Test-GameRunning's own startup probe/cache should see it
-        # running from the server's very first read.
+        # running from the server's very first read. Kept alive for the
+        # WHOLE Describe (not just started then stopped) - proving there is
+        # no gate left anywhere in this path to trip, not just that one
+        # happened not to fire.
         $fakeWow = New-FakeWowProcess -Root $root
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
@@ -674,16 +701,18 @@ Describe 'Wago browse: game mode (no cache warm yet)' {
             $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
         } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
-        It 'with a fake WoW process running and no prior cache entry, browse returns gameActive:true, items:[], and the stub sees zero requests' {
+        It 'with a fake WoW process running, browse reaches the stub and returns real items - gameActive is absent, never a blocked-state response' {
             $r = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse')
             $r.Ok | Should Be $true
-            $r.Body.gameActive | Should Be $true
-            @($r.Body.items).Count | Should Be 0
-            $r.Body.total | Should Be 0
+            ($r.Body.PSObject.Properties.Name -contains 'gameActive') | Should Be $false
+            $r.Body.sortApplied | Should Be 'popular'
+            $r.Body.total | Should Be 1000
             $r.Body.page | Should Be 1
-            $r.Body.lastPage | Should Be 1
+            $r.Body.lastPage | Should Be 67
+            @($r.Body.items).Count | Should BeGreaterThan 0
+            $r.Body.items[0].slug | Should Be 'details-damage-meter-standalone'
 
-            (Get-WagoStubRequests -Stub $stub).Count | Should Be 0
+            (Get-WagoStubRequests -Stub $stub).Count | Should BeGreaterThan 0
         }
     } finally {
         Stop-TestServer -Server $server
@@ -694,9 +723,13 @@ Describe 'Wago browse: game mode (no cache warm yet)' {
 
 # =====================================================================
 # 9a) Gaining this week: not-ready before any snapshot exists
-#     (fake WoW running so gate 1 guarantees zero snapshot file - a
-#     deterministic way to reach the "no file yet" state without racing
-#     the crawl's own startup timing.)
+#     (GAME-MODE-SPEC.md 2026-09-08: gate 1, Test-GameRunning, is gone
+#     from Initialize-WagoGrowthSnapshots - keeping a fake WoW process
+#     running no longer guarantees zero snapshot file the way it used to.
+#     FURPHY_TEST_SKIP_WAGO_GROWTH restores the same determinism directly
+#     - the whole point of this Describe is the "no file yet" DISK-READ
+#     state, not crawl timing, so the crawl is disabled outright rather
+#     than raced against.)
 # =====================================================================
 
 Describe 'Wago browse: Gaining this week - not ready (no snapshot file yet)' {
@@ -712,14 +745,20 @@ Describe 'Wago browse: Gaining this week - not ready (no snapshot file yet)' {
     $stub = $null
     $server = $null
     $fakeWow = $null
+    $originalSkipGrowth = $env:FURPHY_TEST_SKIP_WAGO_GROWTH
     try {
         $stub = Start-WagoStubServer -Routes @() -DefaultFile 'empty-retail.json'
         $fakeWow = New-FakeWowProcess -Root $root
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        $env:FURPHY_TEST_SKIP_WAGO_GROWTH = '1'
         try {
             $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
-        } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+        } finally {
+            Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue
+            if ($null -eq $originalSkipGrowth) { Remove-Item Env:\FURPHY_TEST_SKIP_WAGO_GROWTH -ErrorAction SilentlyContinue }
+            else { $env:FURPHY_TEST_SKIP_WAGO_GROWTH = $originalSkipGrowth }
+        }
 
         It 'sort=gaining before any snapshot file exists returns ready:false, items:[], since:null, snapshotCount:0 - and answers even while WoW is running (pure disk read)' {
             (Test-Path -LiteralPath (Join-Path $root 'cache\wago-growth-retail.json')) | Should Be $false
@@ -759,11 +798,16 @@ Describe 'Wago browse: Gaining this week - ready (2 snapshots, 7 days apart)' {
     $stub = $null
     $server = $null
     $fakeWow = $null
+    $originalSkipGrowth = $env:FURPHY_TEST_SKIP_WAGO_GROWTH
     try {
         # Pre-seed the snapshot file directly, in the exact format
-        # WAGO-BROWSE-SPEC.md section 4.6 documents - no crawl needed
-        # (and fake WoW below guarantees the real startup crawl, if it
-        # ran, could never overwrite/append to this seeded file).
+        # WAGO-BROWSE-SPEC.md section 4.6 documents - no crawl needed.
+        # GAME-MODE-SPEC.md (2026-09-08): gate 1 (Test-GameRunning) is gone
+        # from Initialize-WagoGrowthSnapshots, so the fake WoW process
+        # below no longer guarantees a real crawl could never overwrite
+        # this seeded file the way it used to - FURPHY_TEST_SKIP_WAGO_GROWTH
+        # (set alongside FURPHY_TEST_WAGO_BASEURL further down) restores
+        # that guarantee directly instead.
         $now = (Get-Date).ToUniversalTime()
         $baselineAt = $now.AddDays(-7)
         $cacheDir = Join-Path $root 'cache'
@@ -798,9 +842,14 @@ Describe 'Wago browse: Gaining this week - ready (2 snapshots, 7 days apart)' {
         $fakeWow = New-FakeWowProcess -Root $root
 
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        $env:FURPHY_TEST_SKIP_WAGO_GROWTH = '1'
         try {
             $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
-        } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+        } finally {
+            Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue
+            if ($null -eq $originalSkipGrowth) { Remove-Item Env:\FURPHY_TEST_SKIP_WAGO_GROWTH -ErrorAction SilentlyContinue }
+            else { $env:FURPHY_TEST_SKIP_WAGO_GROWTH = $originalSkipGrowth }
+        }
 
         It 'ready:true, snapshotCount:2, since/asOf/baselineAsOf match the seeded timestamps, items ranked delta-desc/downloads-desc/slug-asc, flat and baseline-absent entries excluded' {
             $r = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?sort=gaining')
@@ -954,6 +1003,7 @@ Describe 'Wago browse: category + gaining incompatibility' {
     $stub = $null
     $server = $null
     $fakeWow = $null
+    $originalSkipGrowth = $env:FURPHY_TEST_SKIP_WAGO_GROWTH
     try {
         $now = (Get-Date).ToUniversalTime()
         $baselineAt = $now.AddDays(-7)
@@ -972,10 +1022,20 @@ Describe 'Wago browse: category + gaining incompatibility' {
         $stub = Start-WagoStubServer -Routes @() -DefaultFile 'empty-retail.json'
         $fakeWow = New-FakeWowProcess -Root $root
 
+        # GAME-MODE-SPEC.md (2026-09-08): gate 1 is gone from Initialize-
+        # WagoGrowthSnapshots, so $fakeWow alone no longer guarantees "never
+        # touches the stub" the way it used to - FURPHY_TEST_SKIP_WAGO_GROWTH
+        # keeps that guarantee (and the manually-seeded retail snapshot
+        # above intact) deterministically instead.
         $env:FURPHY_TEST_WAGO_BASEURL = $stub.BaseUrl
+        $env:FURPHY_TEST_SKIP_WAGO_GROWTH = '1'
         try {
             $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
-        } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
+        } finally {
+            Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue
+            if ($null -eq $originalSkipGrowth) { Remove-Item Env:\FURPHY_TEST_SKIP_WAGO_GROWTH -ErrorAction SilentlyContinue }
+            else { $env:FURPHY_TEST_SKIP_WAGO_GROWTH = $originalSkipGrowth }
+        }
 
         It 'sort=gaining&categoryId=<n> returns identical items/order to sort=gaining alone, and never touches the stub' {
             # Round 42.1: count only requests made DURING the two browse

@@ -26,11 +26,23 @@
  used by a live production uninstall - every fixture here is a disposable
  scratch WoW root under tests\.tmp\, and the "temp copy" this test itself
  creates is deleted in a finally block regardless of outcome.
+
+ GAME-MODE-SPEC.md-round test hygiene fix: %TEMP%\FurphyUninstall-*.ps1/
+ .log cleanup used to be inline, after each It's own last assertion -
+ skipped entirely (leaving the file behind) the instant an EARLIER
+ assertion in that same It threw first, which is exactly how ~260
+ leftover copies were found accumulated on the dev machine this round.
+ Replaced with the scoped-cleanup helper pattern Server.AppUpdate.Tests.ps1
+ already established for its own %TEMP% litter (Get-/Remove-AppUpdateTempLitter):
+ record $Script:LitterCutoffUtc once at the top of the file, sweep
+ everything newer than it with Remove-UninstallTempLitterFiles in a
+ file-wide AfterAll that always runs.
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 
 $Script:InstallScript = Join-Path $Script:FurphyBuildRoot 'install.ps1'
+$Script:LitterCutoffUtc = (Get-Date).ToUniversalTime()
 
 function New-CleanupTestWowRoot {
     $rootPath = Join-Path $env:TEMP ('furphy-tempcleanup-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -40,16 +52,20 @@ function New-CleanupTestWowRoot {
 
 Describe 'install.ps1 -Uninstall temp-copy self-delete (novice:NOVICE-3)' {
 
+    AfterAll {
+        # Sweeps every %TEMP%\FurphyUninstall-*.ps1/.log this file's own
+        # Its created (both of the below, and any %TEMP% copy that a mid-
+        # It assertion failure left an inline cleanup unable to reach) -
+        # see this file's own header comment and Remove-UninstallTempLitterFiles'
+        # doc comment (tests\lib\common.ps1) for the "260 leftover copies"
+        # reasoning this replaces.
+        Remove-UninstallTempLitterFiles -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+
     It 'a %TEMP%\FurphyUninstall-<guid>.ps1 copy deletes itself after a real uninstall completes' {
         $wowRoot = New-CleanupTestWowRoot
         $appDest = Join-Path $wowRoot '_retail_\AddonSync'
         $tempCopy = $null
-        # The uninstall log is deliberately NOT auto-deleted by the fix
-        # under test (see install.ps1's own comment at the self-delete
-        # site) - track what exists before so this test can clean up the
-        # ONE new log it itself causes, keeping %TEMP% tidy across repeat
-        # runs without asserting anything about the log's own lifetime.
-        $logsBefore = @(Get-ChildItem -Path $env:TEMP -Filter 'FurphyUninstall-*.log' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
         try {
             $install = Invoke-CliProcess -ScriptPath $Script:InstallScript -ArgumentList @('-WowPath', $wowRoot, '-NoShortcuts', '-NoProtocol', '-SkipAdopt', '-Console') -TimeoutSec 120
             $install.ExitCode | Should Be 0
@@ -80,14 +96,11 @@ Describe 'install.ps1 -Uninstall temp-copy self-delete (novice:NOVICE-3)' {
         } finally {
             if ($tempCopy -and (Test-Path -LiteralPath $tempCopy)) { Remove-Item -LiteralPath $tempCopy -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath $wowRoot) { Remove-Item -LiteralPath $wowRoot -Recurse -Force -ErrorAction SilentlyContinue }
-            $newLogs = @(Get-ChildItem -Path $env:TEMP -Filter 'FurphyUninstall-*.log' -ErrorAction SilentlyContinue | Where-Object { $logsBefore -notcontains $_.FullName })
-            foreach ($nl in $newLogs) { Remove-Item -LiteralPath $nl.FullName -Force -ErrorAction SilentlyContinue }
         }
     }
 
     It 'never self-deletes when run directly from the source/app folder (the build root''s own install.ps1 survives byte-identical)' {
         $wowRoot = New-CleanupTestWowRoot
-        $logsBefore = @(Get-ChildItem -Path $env:TEMP -Filter 'FurphyUninstall-*.log' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
         try {
             New-Item -ItemType Directory -Force -Path (Join-Path $wowRoot '_retail_\AddonSync') | Out-Null
             $sizeBefore = (Get-Item -LiteralPath $Script:InstallScript).Length
@@ -105,8 +118,6 @@ Describe 'install.ps1 -Uninstall temp-copy self-delete (novice:NOVICE-3)' {
             (Get-Item -LiteralPath $Script:InstallScript).Length | Should Be $sizeBefore
         } finally {
             if (Test-Path -LiteralPath $wowRoot) { Remove-Item -LiteralPath $wowRoot -Recurse -Force -ErrorAction SilentlyContinue }
-            $newLogs = @(Get-ChildItem -Path $env:TEMP -Filter 'FurphyUninstall-*.log' -ErrorAction SilentlyContinue | Where-Object { $logsBefore -notcontains $_.FullName })
-            foreach ($nl in $newLogs) { Remove-Item -LiteralPath $nl.FullName -Force -ErrorAction SilentlyContinue }
         }
     }
 }

@@ -53,20 +53,33 @@ Eric (product owner), verbatim, 2026-09-06:
 
 ### 1.2 KEEP (explicit, with reason)
 
-**Reason for all of these: the background service must never update
-addons while the game is running - that contract is unrelated to, and
-survives, the launch-feature removal.**
+**(SUPERSEDED 2026-09-08, GAME-MODE-SPEC.md: the sentence "the
+background service must never update addons while the game is running"
+below was, at the time this document was written, a currently-asserted
+architectural invariant - it no longer is. Eric's policy is now "addon
+browsing, updates and stuff need to happen while wow is running." See
+the split KEEP / NO LONGER KEEP lists just below, which replace the
+single reason-and-list pair that used to follow this note.)**
 
-- Game-mode detection end to end: `Test-GameRunning` (addon-server.ps1),
-  the shared known-process-name list, the `--wow-fake`/`-WowFakeProcessName`
-  test-substitution hooks, `gameRunning` on `GET /api/ping` and
-  `GET /api/state`, the server-side network gates while playing
-  (catalogue-refresh skip, enrichment skip), idle-window widening,
-  `WowDetector` in `host\FurphyHost.cs` and its ~30s poll pushing
-  `{type:"game"}` to the SPA, the tray's skip-while-playing dedup
-  (`CompleteCycleSkippedWow`), and the SPA's `Store.state.gameRunning`,
-  its render gate, its `POLL_GAME_MS` backoff, and the "WoW is running -
-  background checks paused" line.
+**KEEP (detection/signal infra) - still true, unrelated to the
+game-mode-update policy either way, and unaffected by the launch-feature
+removal:** `Test-GameRunning` (addon-server.ps1), the shared
+known-process-name list, the `--wow-fake`/`-WowFakeProcessName`
+test-substitution hooks, `gameRunning` on `GET /api/ping` and
+`GET /api/state`, `WowDetector` in `host\FurphyHost.cs` and its ~30s
+poll pushing `{type:"game"}` to the SPA, and the SPA's
+`Store.state.gameRunning` (its CSS render gate and `POLL_GAME_MS`
+backoff stay too - both are CPU-only measures, GAME-MODE-SPEC.md
+section 1.2).
+
+**NO LONGER KEEP (removed per GAME-MODE-SPEC.md, not by this document -
+these were network/functional gates, not detection signal):** the
+server-side network gates while playing (catalogue-refresh skip,
+enrichment skip), the shortened idle-exit window while WoW runs, the
+tray's skip-while-playing dedup (`CompleteCycleSkippedWow`), and the
+"WoW is running - background checks paused" line. All four refused or
+delayed real work based on game state; none survives the 2026-09-08
+policy change regardless of whether this launch-removal round ships.
 - `updatesCheckedAt` itself (state.json persistence, `/api/state` field,
   the SPA's freshness-line/staleness/auto-check-on-load feature). Only
   the CLI's launcher-only writer (`Save-LauncherUpdatesCheckedAt`) and
@@ -674,8 +687,12 @@ silently); `612` (update the Settings-row anchor reference once "Update
 addons before WoW starts" is gone); `628` (drop the "...launcher/
 installer changes..." clause); `666, 668` (drop "launch-chain budget"/
 "launch-chain time cap" from the E28 title/intro, keep the gameRunning-
-gating and process-priority parts); `670-696` (keep verbatim - this is
-the game-mode/background-mode machinery required by section 1.2); `687-
+gating and process-priority parts); `670-696` (SUPERSEDED 2026-09-08,
+GAME-MODE-SPEC.md - was "keep verbatim - this is the game-mode/
+background-mode machinery required by section 1.2": keep only the
+CPU/priority/decorative-gating parts of `670-696`; remove the
+network-skip-while-playing and tray-cycle-skip content per the
+2026-09-08 policy, GAME-MODE-SPEC.md); `687-
 690` (remove the entire "Launch-chain cap" subsection); `698` (remove
 just the launcher-budget perf scenario, keep the steady-state/WoW-
 closed-resume scenarios in the same paragraph); `704` (remove the
@@ -773,8 +790,13 @@ files the installer used to write into each WoW client folder, the
 matching Desktop shortcut(s), the server's launch job kind, and the
 CLI's -Launcher mode (including its Battle.net product-code table and
 45-second launch budget). The background update service already updates
-addons on its own schedule, so a launch-time update path is redundant;
-game-mode detection (never updating while WoW is running) is unchanged.
+addons on its own schedule, so a launch-time update path is redundant.
+(SUPERSEDED 2026-09-08, GAME-MODE-SPEC.md - this template line used to
+read "game-mode detection (never updating while WoW is running) is
+unchanged": detection itself (Test-GameRunning/WowDetector/gameRunning)
+stays, but addons now DO update while WoW is running - drop the
+"never updating while WoW is running" claim if this entry is still
+unadded to CHANGELOG.md when the game-mode round ships.)
 Existing installs have their stale launcher files and shortcut removed
 automatically the next time the installer runs, and a stale
 autoUpdateOnLaunch key is dropped from settings.json automatically the
@@ -821,10 +843,15 @@ Do this once, in this order, never via an automated test:
    correctly - do not touch it.
 5. **Smoke-test.** Open Furphy from its shortcut, confirm Settings no
    longer shows an "Update addons before WoW starts" row, confirm the
-   sidebar bottom shows only the status dot (no buttons), confirm a
-   normal sync/update still works, and confirm the background service
-   still skips updates while WoW is actually running (start WoW, confirm
-   the tray/status line says so).
+   sidebar bottom shows only the status dot (no buttons), and confirm a
+   normal sync/update still works. (SUPERSEDED 2026-09-08,
+   GAME-MODE-SPEC.md - this step used to also say "confirm the
+   background service still skips updates while WoW is actually running
+   (start WoW, confirm the tray/status line says so)": the background
+   service no longer skips updates while WoW runs, so confirm the
+   opposite instead - start WoW, run a sync/update, and confirm it
+   completes normally with the reload/relog reminder shown per
+   GAME-MODE-SPEC.md section 3.)
 
 ---
 
@@ -854,9 +881,14 @@ Do this once, in this order, never via an automated test:
       has it dropped, and the drop logged, on the server's very next
       read - verified with a fixture file, not by hand-editing Eric's
       live one.
-- [ ] Starting WoW (or the `--wow-fake`/`-WowFakeProcessName`
-      substitute) still prevents the background service from updating,
-      exactly as before this round - game-mode detection is unchanged.
+- [ ] (SUPERSEDED 2026-09-08, GAME-MODE-SPEC.md - this item used to
+      require that starting WoW, or the `--wow-fake`/
+      `-WowFakeProcessName` substitute, still prevents the background
+      service from updating: it no longer does. Detection itself
+      (`Test-GameRunning`/`WowDetector`/`gameRunning`) is unchanged, but
+      the background service now updates addons normally while WoW
+      runs; confirm a job started with the fake-WoW substitute active
+      completes and reports `reloadNeeded` instead.)
 - [ ] `tests\static\Test-BannedTerms.ps1` fails if "Update & Play",
       "Launch WoW", "update-addons-and-launch", or "Update & Open
       Battle.net" ever reappears in `index.html`/`app.js`/`style.css`.
@@ -903,7 +935,10 @@ setting, the CLI's -Launcher mode (Battle.net codes, 45s budget, 10-min
 skip), the server's launch job kind, install.ps1's per-flavour launcher
 files and WoW shortcut, and every doc line about launching. Keep game-
 mode detection (Test-GameRunning/WowDetector/gameRunning) verbatim -
-the background service must never update while WoW runs - and keep
+(SUPERSEDED 2026-09-08, GAME-MODE-SPEC.md - this summary line used to
+end "the background service must never update while WoW runs": that
+trailing clause is wrong now, the background service DOES update while
+WoW runs; only the detection signal itself is kept verbatim) - and keep
 updatesCheckedAt (the SPA's freshness feature still reads it). Sidebar
 bottom keeps only the status dot/freshness line, no replacement CTA;
 Arcane Library/Snow Day's hero art auto-grows into the freed flex space

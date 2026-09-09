@@ -619,7 +619,16 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
     $root = New-TempRoot -Name 'host-tray-selftest'
     $wowFakeProc = $null
 
-    It 'skips the cycle with skipped_wow_running when --wow-fake matches a real running process' {
+    It 'runs the cycle normally (never skipped_wow_running) when --wow-fake matches a real running process' {
+        # GAME-MODE-SPEC.md section 8 / Host.Tests.ps1:622-665: inverted
+        # from the old "skips the cycle with skipped_wow_running" It.
+        # RunCycle (host\FurphyHost.cs) no longer gates on
+        # WowDetector.IsRunning at all - a background cycle now runs fully
+        # while WoW is running, same as when it is not. Kept as its own
+        # regression guard (distinct from the "runs a real cycle" It below)
+        # specifically because this one deliberately keeps a fake WoW
+        # process alive for the WHOLE cycle, proving there is no gate left
+        # to trip - not just that one happens not to fire.
         if (-not (Ensure-HostBuilt)) {
             Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
             return
@@ -647,12 +656,16 @@ Describe 'Host --tray-selftest (tray)' -Tags 'Host' {
             $psi.WorkingDirectory = Split-Path -Path $exePath -Parent
             $hostProc = [System.Diagnostics.Process]::Start($psi)
 
-            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 40
+            # Generous budget: unlike the old skip path (which returned
+            # almost instantly), a real cycle self-starts addon-server.ps1
+            # and fans out a sync job per installed flavour, exactly like
+            # the "runs a real cycle" It below.
+            $marker = Wait-MarkerFile -Path $markerPath -TimeoutSec 60
             $marker | Should Not Be $null
 
-            $marker.lastResult | Should Be 'skipped_wow_running'
-            $marker.serverStarted | Should Be $false
-            @($marker.flavourJobs).Count | Should Be 0
+            $marker.lastResult | Should Not Be 'skipped_wow_running'
+            $marker.serverStarted | Should Be $true
+            @($marker.flavourJobs).Count | Should BeGreaterThan 0
             [int]$marker.exitCode | Should Be 0
             $marker.mutexHeld | Should Be $true
 

@@ -84,4 +84,53 @@ Describe 'Initialize-CfCatalogueIndex - $Script:AcceptingRequests guard' {
         # live-fetch branch never ran.
         (Test-Path -LiteralPath $cachePath) | Should Be $false
     }
+
+    It 'GAME-MODE-SPEC.md (2026-09-08): still refreshes from a stale/missing cache while GameRunning is true - no game-state gate any more (new coverage, section 8 item 3)' {
+        <#
+          New coverage - Initialize-CfCatalogueIndex never had a
+          Test-GameRunning test either way before this round (confirmed:
+          it never gated the live fetch itself, so there was nothing to
+          invert; the OLD gate this closes was `if ($stale -and
+          (Test-GameRunning)) { ...skip... }`, removed per GAME-MODE-
+          SPEC.md section 2). Uses the same real local stub
+          (Start-CfCatalogueStubServer, tests\lib\common.ps1) the sibling
+          Server.CfCatalogueBaseUrl.Tests.ps1 file already uses for
+          Save-CfCatalogueIndex directly - never real GitHub.
+        #>
+        $Script:AcceptingRequests = $false
+        $Script:SkipCfCatalogueFetch = $false
+        $Script:WowFakeProcessNameOverride = (Get-Process -Id $PID).ProcessName
+        $Script:GameRunningCache = $false
+        $Script:GameRunningCacheAt = [DateTime]::MinValue
+
+        $root = New-TempRoot -Name 'cf-guard-gamerunning-refresh'
+        $cacheDir = Join-Path $root 'cache'
+        $cachePath = Join-Path $cacheDir 'cf-catalogue.json'
+        $Script:Root = $root
+        $Script:CacheDir = $cacheDir
+        $Script:CfCatalogueCachePath = $cachePath
+        $Script:CfCatalogueIndex = @()
+        $Script:CfCatalogueById = @{}
+        $Script:CfCatalogueFetchedAt = $null
+        $Script:CfCatalogueSource = $null
+
+        $stub = $null
+        try {
+            $stub = Start-CfCatalogueStubServer -InstawowEntries @(
+                @{ id = '1'; name = 'GameRunningRefresh'; slug = 'game-running-refresh'; url = 'https://www.curseforge.com/wow/addons/game-running-refresh'; source = 'curse'; download_count = 10; last_updated = '2026-01-01T00:00:00Z' }
+            ) -StrongboxEntries @()
+            $Script:CfCatalogueBaseUrl = $stub.BaseUrl
+
+            { Initialize-CfCatalogueIndex } | Should Not Throw
+
+            $Script:CfCatalogueIndex.Count | Should Be 1
+            (Test-Path -LiteralPath $cachePath) | Should Be $true
+        } finally {
+            Remove-Item Env:\FURPHY_TEST_CF_CATALOGUE_BASEURL -ErrorAction SilentlyContinue
+            if ($stub) {
+                Stop-StaticServer -Server $stub
+                try { Remove-Item -LiteralPath $stub.Directory -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    }
 }

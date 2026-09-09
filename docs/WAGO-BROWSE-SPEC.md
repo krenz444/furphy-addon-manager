@@ -70,10 +70,6 @@ ships):
   covers the search box too, not only category chips): "Gaining this
   week shows Furphy's own top movers across Wago's popular list - it
   isn't split by category or search yet."
-- Game-running blocked state (NEW - found during this synthesis pass,
-  not in any of the four inputs; see section 3's "game mode" subsection
-  for why it is required): "Wago browsing pauses while a WoW client is
-  running. It'll pick back up once you close the game."
 
 Nothing in this build ever uses the words "new," "rising," "trending,"
 or "this season" as a label, a tooltip, or a tab name. "Gaining this
@@ -90,11 +86,17 @@ Base design: A, "Store front" (judge's winner, total 8.5 vs B's 5.3).
 Grafted from B per the judge's instructions: (1) context-aware search
 placeholder, (2) inline tooltip on Recently-updated, (3) "See Popular
 instead" escape hatch, (4) leading rank number on Gaining rows. Two
-required fixes applied per the judge's data review, plus two additional
-fixes found during this synthesis pass (the game-running state; widening
-the category-disable note to also cover search). One inaccurate citation
-dropped (the "Versions-tab Load more precedent" - verified false, see
-below).
+required fixes applied per the judge's data review, plus one additional
+fix found during this synthesis pass (widening the category-disable note
+to also cover search). One inaccurate citation dropped (the "Versions-tab
+Load more precedent" - verified false, see below).
+
+(Superseded 2026-09-08: an earlier revision of this document also listed
+a "game-running blocked state" as a second additional fix here. Per
+GAME-MODE-SPEC.md, Wago browsing now works fully while a WoW client is
+running - that state never existed as shipped behavior for long and is
+removed from this document; see section 2's states/copy and section 3.5
+below.)
 
 Everything below is scoped to `#browse-wago-panel` inside the existing
 `[Wago | CurseForge]` `.source-switch` (`ui\index.html` L651-701). That
@@ -220,7 +222,7 @@ triggers the same skeleton-then-results sequence a fresh search already
 does today.
 
 --------------------------------------------------------------------------------
-2.4 States (loading / empty / error / not-ready / game-blocked)
+2.4 States (loading / empty / error / not-ready)
 --------------------------------------------------------------------------------
 
 Loading - existing `#browse-skeleton`, now also triggered by a sort or
@@ -234,14 +236,12 @@ Error - existing `#browse-error`/`#browse-error-msg` ("Couldn't reach
 Wago right now."), unchanged; a failed sort/category change fails
 through this same surface.
 
-Game-running (NEW - not in any of the four inputs; found during this
-synthesis pass, see section 3 for why it is required): reuses
-`#browse-empty`'s container/icon treatment with distinct copy: "Wago
-browsing pauses while a WoW client is running. It'll pick back up once
-you close the game." No retry button (nothing to retry until the game
-state actually changes; the app already re-polls game state elsewhere).
-Applies to Popular/Recently-updated/Name only - Gaining this week is
-never blocked by game state (pure disk read, see section 3).
+(Superseded 2026-09-08: this used to list a fifth "Game-running" state
+reusing `#browse-empty` with "Wago browsing pauses while a WoW client is
+running" copy, blocking Popular/Recently-updated/Name while WoW ran. Per
+GAME-MODE-SPEC.md, Wago browsing works fully while a WoW client is
+running - live and cached fetches are always allowed and that state can
+no longer occur. Only the four states above remain.)
 
 Gaining this week - non-scoping note (REQUIRED FIX 6, widened): whenever
 this tab is active, ONE line appears above the result-count line (reuses
@@ -438,7 +438,7 @@ callers keep working.
       "since": "<ISO8601 UTC>"|null,
       "asOf": "<ISO8601 UTC>"|null,
       "baselineAsOf": "<ISO8601 UTC>"|null,
-      "snapshotCount": <int>,          // NEW - added in this synthesis,
+      "snapshotCount": <int>           // NEW - added in this synthesis,
                                         // not in the original data design;
                                         // powers the honest not-ready copy
                                         // in section 2.4 without implying
@@ -446,10 +446,10 @@ callers keep working.
                                         // whenever sortApplied=="gaining",
                                         // both ready and not-ready.
 
-      // popular / name / updated only, present ONLY when the live fetch
-      // was skipped because WoW is running - see 3.5. NEW in this
-      // synthesis, not in the original data design.
-      "gameActive": true
+      // "gameActive" (popular/name/updated only, present when the live
+      // fetch was skipped because WoW was running) is SUPERSEDED
+      // 2026-09-08 and no longer sent - see 3.5. Live fetches are never
+      // skipped for game state any more.
     }
 
 `author`/`summary`/`downloads`/`updatedAt` are omitted (not
@@ -497,70 +497,56 @@ ordering across all matching addons; the UI tooltip (section 1/2.3) is
 written to be true under this limitation.
 
 --------------------------------------------------------------------------------
-3.5 Game-mode rule - CORRECTION to the original data design
+3.5 Game-mode rule - SUPERSEDED 2026-09-08 by GAME-MODE-SPEC.md
 --------------------------------------------------------------------------------
 
-The original data design stated: "this endpoint does not add a new
-Test-GameRunning gate on individual requests... unchanged for the three
-live-fetch sort modes," on the stated assumption that "today's
+Historical context, kept because it explains where the (now-removed)
+`gameActive` field and `Get-WagoCached`'s `-AllowLiveFetch` parameter
+came from: the original data design stated "this endpoint does not add
+a new Test-GameRunning gate on individual requests... unchanged for the
+three live-fetch sort modes," on the stated assumption that "today's
 Handle-WagoSearch live-fetch path is already exempt from the no-network-
 while-WoW-runs rule." The judge's own adversarial review (finding 10)
 flagged this as an unverified assumption and asked for it to be checked
 rather than taken on faith.
 
-VERIFIED DURING THIS SYNTHESIS PASS: the assumption is FALSE.
-`Handle-WagoSearch` (L4273-4334) calls `Test-GameRunning` nowhere at all
-- it always attempts a live/cached fetch regardless of game state. This
-is not a documented exception to the "no network while WoW runs" rule;
-it is a live, ungated hole in it. The rule IS actively enforced
-elsewhere in this same file for a different Wago-touching code path -
-the keyless-enrichment prefetch (`addon-server.ps1` L5141-5158) reads:
+VERIFIED AT THE TIME: `Handle-WagoSearch` (L4273-4334) called
+`Test-GameRunning` nowhere at all - it always attempted a live/cached
+fetch regardless of game state. The design at the time read this as a
+live, ungated hole in the "no network while WoW runs" rule and had
+`Handle-WagoBrowse` add a matching `Test-GameRunning` gate
+(`-AllowLiveFetch:(-not (Test-GameRunning))`) so the new endpoint would
+not "inherit and amplify" the gap.
 
-    # P1 perf pass (item 2): "no enrichment prefetch" while a WoW client
-    # is running - both live-network branches below (Wago-match,
-    # addon-radar) are skipped entirely... a stray request must never
-    # itself trigger a live fetch during gameplay.
-    $gameIsRunning = Test-GameRunning
-    if ((-not $gameIsRunning) -and $rec -and $rec.wagoId) { ... }
+CORRECTED 2026-09-08 (GAME-MODE-SPEC.md): Eric's policy is now "addon
+browsing, updates and stuff need to happen while wow is running" - the
+"no network while WoW runs" rule itself is gone, everywhere, not just
+for Wago browse. In hindsight, `Handle-WagoSearch`'s original ungated
+behavior was the CORRECT one and always had been; the "hole" this
+section used to describe closing was actually the one part of the Wago
+surface that was already right. `Handle-WagoBrowse` now matches
+`Handle-WagoSearch` by dropping its own gate, not the other way around:
+`Get-WagoCached` is always called with `-AllowLiveFetch:$true` (or the
+switch is simply omitted) for all four sort modes, the `$gameIsRunning`
+variable is removed from `Handle-WagoBrowse` entirely, and the
+`gameActive` response field (previously documented here as returned on
+a gated cold miss) is dropped from the response rather than kept as
+always-`$false` - there is no reason for a client to ask "was this
+empty because the game was running" when that can no longer happen. See
+GAME-MODE-SPEC.md section 2 (the `addon-server.ps1` `Handle-WagoBrowse`
+row) for the exact diff.
 
-That gate skips even a would-be cache hit, not just a live fetch. This
-build round's new/renamed endpoint (`Handle-WagoBrowse`) must not
-inherit and amplify the same ungated hole across four sort modes instead
-of one - this is fixed here, not deferred:
+The enrichment prefetch's own `Test-GameRunning` gate
+(`Get-CfEnrichmentNoKey`, `addon-server.ps1`) is removed by the same
+policy change - see GAME-MODE-SPEC.md section 2 for that site.
 
-FIX: `Get-WagoCached` (L4209-4241) gains one new, optional, backward-
-compatible parameter: `-AllowLiveFetch` (switch, default `$true`). Every
-existing call site (`Handle-WagoCategories`, `Handle-WagoAddonDetails`,
-etc.) omits it and is byte-for-byte unchanged. `Handle-WagoBrowse` calls
-it with `-AllowLiveFetch:(-not (Test-GameRunning))` for the three
-live-fetch sort modes (`popular`/`name`/`updated`) only. When
-`-AllowLiveFetch:$false` and no fresh (within-TTL) cache entry already
-exists for that exact URI, `Get-WagoCached` returns `$null` instead of
-calling `Invoke-WagoHttpRequest` - the letter of the rule is "no
-network," so an already-warm cache hit is still served (zero network
-I/O), matching this endpoint's own realistic use (a direct result of a
-user's click, unlike the automatic background prefetch at L5141 which
-is stricter out of extra caution for something the user didn't
-explicitly ask for).
+`sort=gaining` was always unaffected by any of this - it is a pure disk
+read with zero network/cache interaction, answerable regardless of game
+state, unchanged by this correction.
 
-When `Get-WagoCached` returns `$null` for this reason, `Handle-WagoBrowse`
-returns 200 (never an error) with `items: []`, `total: 0`, `page: 1`,
-`lastPage: 1`, `sortApplied: <resolved>`, `categories: []`, and
-`gameActive: true` (new field, section 3.2) - never a 502, matching this
-file's never-throw style; "no data because the game is running" is an
-expected, common state, not a failure.
-
-`sort=gaining` is UNAFFECTED by any of this - it is a pure disk read
-with zero network/cache interaction, always answerable regardless of
-game state, exactly as the original data design specified.
-
-`/api/wago/categories` (`Handle-WagoCategories`) is left with the SAME
-pre-existing gap (no gate) per the data design's explicit instruction to
-keep it untouched. Flagged as a known, pre-existing, out-of-scope issue
-for a future round - the new browse endpoint's inline `categories` field
-(3.2) is what the redesigned UI actually uses day to day, so this
-endpoint's own gap matters far less in practice than it did before this
-round, but it is not fixed here.
+`/api/wago/categories` (`Handle-WagoCategories`) never had a
+`Test-GameRunning` gate in the first place, so this policy change is a
+non-event for that endpoint.
 
 --------------------------------------------------------------------------------
 3.6 Cache, pacing, flavours
@@ -656,46 +642,53 @@ file (there is no other timer); "daily" means "checked once whenever
 this long-lived process happens to (re)start."
 
 Gates, checked cheaply before any network call:
-1. `Test-GameRunning` -> `$true`: skip entirely, log (mirrors
-   `Initialize-CfCatalogueIndex`'s own log line/reasoning verbatim),
-   leave disk untouched. RE-CHECKED before every page inside the crawl
-   too - see 4.2 (FIX for data-review finding 1, widened past the
-   judge's own "per flavour" suggestion to "per page," since a page
-   fetch plus its 300ms pacing tax is the real per-request cost this
-   rule is protecting against).
-2. Per resolved game_version, look at that file's LAST entry's
+1. Per resolved game_version, look at that file's LAST entry's
    `capturedAt`: if `(Get-Date).ToUniversalTime() - lastCapturedAt < 20
    hours`, skip just that game_version (log once) - per-file, not
    global, so one flavour's freshness never blocks a newly-installed
    sibling flavour.
 
+(Superseded 2026-09-08: this list used to open with a `Test-GameRunning`
+gate - skip the whole crawl whenever WoW was running (mirroring
+`Initialize-CfCatalogueIndex`'s own log line/reasoning), re-checked
+before every page inside the crawl per 4.2 below. Per GAME-MODE-SPEC.md,
+the "no network while WoW runs" invariant this gate enforced is gone;
+the crawl now runs purely on the 20-hour freshness gate above,
+regardless of game state. See GAME-MODE-SPEC.md section 2, the
+`Initialize-WagoGrowthSnapshots` row.)
+
 --------------------------------------------------------------------------------
-4.2 Crawl - FIX for data-review finding 1 (game-mode TOCTOU)
+4.2 Crawl - historical: FIX for data-review finding 1 (game-mode TOCTOU),
+    SUPERSEDED 2026-09-08 by GAME-MODE-SPEC.md
 --------------------------------------------------------------------------------
 
-Per game_version that passes both gates: fetch
+Per game_version that passes the freshness gate: fetch
 `$Script:WagoBaseUrl + '/?game_version=<gv>&page=<n>'` for `n = 1..10`
-via the SAME `Get-WagoCached`/`Invoke-WagoHttpRequest` path (this crawl
-always passes `-AllowLiveFetch:$true` explicitly at the START of each
-page iteration only after re-checking game state that same iteration -
-see below). Stop early at `current_page >= last_page`, or the first
-request/parse failure (PARTIAL rule below).
+via the SAME `Get-WagoCached`/`Invoke-WagoHttpRequest` path (always
+`-AllowLiveFetch:$true`). Stop early at `current_page >= last_page`, or
+the first request/parse failure (PARTIAL rule below).
 
-REQUIRED FIX (judge's data-review finding 1, TOCTOU): the ORIGINAL
-design checked `Test-GameRunning` exactly once before the entire
-multi-flavour run - a worst case of up to 6 flavours x 10 pages could
-keep firing live requests for ~20-30 seconds after WoW actually
+Kept for history: the judge's data-review finding 1 (TOCTOU) noted the
+ORIGINAL design checked `Test-GameRunning` exactly once before the
+entire multi-flavour run - a worst case of up to 6 flavours x 10 pages
+could keep firing live requests for ~20-30 seconds after WoW actually
 launched mid-crawl, a direct violation of the "no network while any WoW
-client runs" invariant. FIXED: `Test-GameRunning` is re-checked
-IMMEDIATELY BEFORE EVERY SINGLE PAGE FETCH, not once per run and not
-once per flavour. The instant it returns `$true` mid-crawl: stop the
-ENTIRE `Initialize-WagoGrowthSnapshots` run immediately (not just the
-current flavour - the invariant is whole-app, not per-flavour), keep
-whatever pages were already captured for the CURRENT flavour under the
-PARTIAL rule (4.3), and skip every remaining not-yet-crawled flavour
-entirely for this startup (they get another chance at the next
-20h-gated opportunity). Log once: "Wago growth snapshot crawl aborted
+client runs" invariant that stood at the time. The fix re-checked
+`Test-GameRunning` immediately before every single page fetch (widened
+past the judge's own "per flavour" suggestion to "per page," since a
+page fetch plus its 300ms pacing tax is the real per-request cost the
+rule was protecting against) and aborted the ENTIRE run the instant it
+went true mid-crawl, logging "Wago growth snapshot crawl aborted
 mid-run: WoW started."
+
+SUPERSEDED 2026-09-08 (GAME-MODE-SPEC.md): the invariant this TOCTOU fix
+protected no longer exists. All three `Test-GameRunning` checks (the
+top-of-run gate in 4.1, the per-flavour re-check, and the per-page
+re-check described above) and the `$abortAll` machinery are removed -
+there is nothing left to re-check per page and no mid-run abort case.
+The crawl simply runs every page of every stale flavour to completion,
+gated only by the 20-hour per-`game_version` freshness check (4.1) and
+the `$Script:AcceptingRequests` startup-ordering guard (4.4).
 
 Defensive de-dup by slug (keep first/lowest-rank occurrence) - observed
 live single-digit download-count drift between near-simultaneous
@@ -710,8 +703,10 @@ rule.
 If zero pages succeeded for a game_version: write nothing today (log,
 retry at the next gated opportunity) - never persist an empty-items
 snapshot (would corrupt "closest snapshot" math and the readiness rule).
-If 1+ pages succeeded before a later page failed or the game-running
-abort fired: still write the snapshot with whatever was captured.
+If 1+ pages succeeded before a later page failed: still write the
+snapshot with whatever was captured. (The "or the game-running abort
+fired" clause this line used to carry is gone along with the abort case
+itself - see 4.2.)
 
 REQUIRED FIX (judge's data-review finding 3, no exception safety): the
 ORIGINAL design had no stated try/catch per flavour iteration and no
@@ -1060,10 +1055,11 @@ SPA-3 - Gaining-this-week tab: not-ready/ready states, non-scoping
   Anchors: new render function alongside renderWagoResults (L5327-5362),
   new .wago-gain-card/.wago-gain-progress/.wago-gain-delta rules.
 
-SPA-4 - Game-running blocked state
-  Files: ui\app.js
-  Anchors: renderWagoResults (L5327-5362) - branch on the new
-  `gameActive` response field before the existing empty/error branches.
+SPA-4 - SUPERSEDED 2026-09-08 (GAME-MODE-SPEC.md): was "Game-running
+  blocked state," branching renderWagoResults (L5327-5362) on a
+  `gameActive` response field. That field no longer exists (3.5) and
+  Wago browsing never blocks on game state, so this work item is
+  dropped - there is nothing left for the SPA to branch on.
 
 TESTS-1 - Server-side WagoBaseUrl override test (mirrors
   Cli.BaseUrlOverride.Tests.ps1)
@@ -1095,9 +1091,10 @@ DOCS-3 - CHANGELOG.md Round 32 entry (standard practice for every round
 
 COORDINATION NOTE (carried from the data design, still true): this
 round's server-side test fixtures and any UI-side mock JSON for
-`/api/wago/search|browse` will need updating once SPA-1..4 land, to the
+`/api/wago/search|browse` will need updating once SPA-1..3 land, to the
 new response shape (author/summary/downloads/updatedAt/categories/
-sortApplied/ready/since/asOf/baselineAsOf/snapshotCount/gameActive).
+sortApplied/ready/since/asOf/baselineAsOf/snapshotCount - `gameActive`
+dropped per 3.5, SUPERSEDED 2026-09-08).
 `tests\spa\harness.js`'s `?mock=1&view=get-new-addons&tab=wago` fixture
 is the specific file to check. Out of scope for the server-only change
 sets above.
@@ -1174,26 +1171,26 @@ sent upstream.
   `categories` array on `/api/wago/browse`'s response for the same
   request (data-review finding 8 - the two representations must never
   silently drift).
-- GAME-MODE GATE (rewritten for the corrected design, section 3.5):
-  start the test server with `-WowFakeProcessName` set to a name that IS
-  running -> `GET /api/wago/browse?sort=popular` with NO prior cache
-  entry for that URI -> 200, `items:[]`, `total:0`, `gameActive:true`,
-  stub received ZERO requests. Then, still with the game "running,"
-  issue the SAME request a second time after priming a cache hit via a
-  separate non-game-running call first -> the cache-hit path DOES answer
-  with real items and `gameActive` absent, stub request count unchanged
-  (proves a warm cache still serves during gameplay, per 3.5's "letter
-  of the rule is no network" reasoning).
-- SNAPSHOT GAME-MODE GATE (data-review finding 1, corrected to
-  per-page): start the test server with `-WowFakeProcessName` set to a
-  fake process that IS running -> restart the server (fresh process,
-  same -Root) -> assert no `wago-growth-*.json` appears even after
-  restart, stub received zero requests. Then, mid-way through a crawl
-  against a stub that serves pages slowly enough to interleave a flip,
-  flip the fake-process state to "running" after page 3 of 10 lands ->
-  assert the crawl stopped immediately (no page 4+ request reached the
-  stub) and, if 3 pages is enough to be non-empty, a partial snapshot
-  with those 3 pages' items was still written (PARTIAL rule, 4.3).
+- GAME-RUNNING, BROWSE STILL WORKS (SUPERSEDED 2026-09-08, GAME-MODE-
+  SPEC.md - was "GAME-MODE GATE"; inverted per section 8's
+  Server.WagoBrowse.Tests.ps1 rewrite): start the test server with
+  `-WowFakeProcessName` set to a name that IS running -> `GET
+  /api/wago/browse?sort=popular` with NO prior cache entry for that URI
+  -> the request reaches the stub and returns 200 with real items (not
+  `items:[]`), `gameActive` absent from the response, stub received
+  request count > 0. WoW running never suppresses a live fetch any more
+  - there is no cache-priming precondition left to set up first.
+- SNAPSHOT CRAWL RUNS WHILE GAME IS RUNNING (SUPERSEDED 2026-09-08,
+  GAME-MODE-SPEC.md - was "SNAPSHOT GAME-MODE GATE"; inverted per
+  section 8's Server.WagoSnapshotCrawl.Tests.ps1 rewrite, matching the
+  unrelated 20h-freshness gate test which stays unchanged): start the
+  test server with `-WowFakeProcessName` set to a fake process that IS
+  running -> the crawl proceeds normally (`WagoCachedCallCount` > 0,
+  `wago-growth-*.json` written) for every stale flavour, exactly as it
+  would with no fake process running at all. There is no mid-crawl abort
+  case left to exercise - a stub serving pages slowly no longer needs to
+  interleave a "WoW started" flip, because that flip no longer stops
+  anything.
 - 20h STALENESS GATE: pre-seed `<Root>\cache\wago-growth-retail.json`
   with a single snapshot 2 hours old -> restart -> snapshots array
   unchanged length, stub received zero requests for this run.
@@ -1237,8 +1234,11 @@ unblocked)
 - "Gaining this week" ready state (mocked) renders rank + delta badge +
   currency/scope line; category chips are visually disabled and the
   search field is disabled with the non-scoping note visible.
-- Game-running blocked state renders when the mock response carries
-  `gameActive:true`.
+- (Superseded 2026-09-08: this used to check that a game-running blocked
+  state rendered when the mock response carried `gameActive:true`. Per
+  GAME-MODE-SPEC.md, Wago browsing works fully while WoW runs - that
+  state and its mock branch are removed; the Wago grid renders normally
+  under `?game=1` instead, per section 8's harness.js inversion.)
 - Banned-term grep (UX-SPEC.md section 11) returns zero matches across
   every new string in this round - `?mock=1&view=get-new-addons&tab=wago`
   loaded, full text read via `get_page_text`, checked against the
@@ -1283,13 +1283,17 @@ unblocked)
 - [ ] `sort=gaining&categoryId=<n>` returns identical results to
       `sort=gaining` alone (automated test, 7.2).
 - [ ] A user who opens Get New Addons -> Wago while a WoW client is
-      running sees the honest game-running message, never a blank list,
-      never a live network request (verified via the stub's
-      zero-received-requests assertion, 7.2).
-- [ ] The multi-flavour snapshot crawl aborts immediately (no further
-      stub requests) the instant game state flips true mid-crawl, and
-      whatever was already captured for the in-progress flavour is still
-      written (PARTIAL rule).
+      running sees real, live Wago results, never a blocked-state
+      message (SUPERSEDED 2026-09-08, GAME-MODE-SPEC.md - inverted from
+      the original "honest game-running message, never a live network
+      request" checklist item; verified via the stub's
+      requests-received-count-greater-than-zero assertion, 7.2).
+- [ ] (Superseded 2026-09-08: this used to require the multi-flavour
+      snapshot crawl to abort immediately when game state flipped true
+      mid-crawl. Per GAME-MODE-SPEC.md the crawl is never gated on game
+      state, so there is no abort case left to verify - the crawl simply
+      runs every page of every stale flavour to completion regardless of
+      WoW state.)
 - [ ] `$Script:CurrentFlavour` is provably restored to the real default
       after `Initialize-WagoGrowthSnapshots` runs, even when a
       mid-crawl exception is injected for one flavour.
@@ -1336,7 +1340,8 @@ noted "one size is enough")
    size is enough.
 9. Error state (unchanged) - one size is enough, included only to
    confirm it still renders correctly alongside the new chrome above it.
-10. Game-running blocked state (new) - one size is enough.
+10. (Superseded 2026-09-08: "Game-running blocked state" screenshot
+    dropped - that state no longer exists per GAME-MODE-SPEC.md.)
 11. Loading skeleton triggered by a category or sort click (not just a
     fresh search) - one size is enough.
 12. "Load more" before/after click, showing 15 additional rows appended

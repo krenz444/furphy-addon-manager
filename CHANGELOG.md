@@ -1,5 +1,140 @@
 # Furphy Addon Manager - changelog
 
+## Round 43 (1.23.0: everything works while WoW is running)
+
+Eric's rule, verbatim (2026-09-08 evening): "addon browsing, updates and
+stuff need to happen while wow is running." This overturns the OLD rule
+the app was built around ("zero impact on gameplay... refuse to do
+network I/O while the game is up") - GAME-MODE-SPEC.md is the full
+contract; this entry is the condensed summary, written from Package E's
+own side (docs) - see that spec's section 10 for the exact per-package
+change set.
+
+**What's new, in the player's own words:** addon checks, updates,
+installs, removals and rollbacks; Wago and CurseForge browsing; the
+hourly maintenance tick (catalogue refresh, Wago's daily growth
+snapshot); and Furphy's own self-update check/download - all of it now
+works the same whether WoW is open or not, exactly like it already did
+when WoW was closed. When a job updates, installs or rolls back an addon
+while WoW is running, Furphy says so plainly in three places: a toast
+right after the job finishes, a muted "Last run" line that survives
+until you act on it or the game closes, and a tray balloon after a
+background cycle - all three read " - WoW will use it once you type
+/reload in your chat window, or log out and back in." A handful of CPU
+measures stay exactly as before, since they cost no function: decorative
+theme animations still pause while WoW runs or the window isn't in
+front, the app and background updater still run at a lower OS scheduling
+priority, and the CurseForge pane still suspends itself when the window
+isn't foreground.
+
+**Server + CLI (addon-server.ps1, addon-sync.ps1):** every
+`Test-GameRunning` call site that used to refuse or defer network/job
+work is gone - Wago browse/search, the CurseForge catalogue refresh, the
+keyless-enrichment lookup, the Wago growth-snapshot crawl, the hourly
+maintenance tick (`Invoke-MaintenanceTick` dropped its `-GameRunning`
+param entirely), and both the app-update check and install routes.
+Two new job fields, `gameRunningAtStart` (captured once, at job
+creation) and the derived `reloadNeeded` (true only when the job started
+while WoW was running AND actually wrote to disk - an Installed, Updated
+or Rolled-back row; never for a check-only job or a Removed/Pinned-only
+one), feed the toast/note/balloon above and round-trip through a server
+restart (`Load-CheckState` gained the one line it was missing - every
+job that survived a restart used to silently report `reloadNeeded:false`
+even when it should have said otherwise). The idle-exit window no longer
+shortens to 5 minutes while WoW runs (legitimate work now happens
+throughout a play session, so a quiet gap between requests no longer
+means "tear the server down"); the 15-second `WaitOne` widening stays,
+since it only reduces idle wake-ups and a real request still returns
+instantly. `addon-sync.ps1`'s `Install-AddonPackage` per-folder swap now
+retries up to 3 times, ~150ms apart, before it lets a locked-folder
+failure stand - installs happening throughout a session raise (slightly)
+the odds of colliding with Windows Search, an AV scanner, or a sync
+client; WoW itself was never a locking risk (it reads addon files once,
+at login/`/reload`, and never holds them open - see GAME-MODE-SPEC.md
+section 7.1).
+
+**Host (host\FurphyHost.cs):** `RunCycle` no longer checks
+`WowDetector.IsRunning` at all - a background tray cycle always runs.
+`CompleteCycleSkippedWow` and its `waiting_game`/`skipped_wow_running`
+status pair are gone (nothing produces them any more); `RunAppUpdateStep`
+dropped its own WoW check too, so the silent-install status poll and
+balloon-announce path run unconditionally (the install itself keeps its
+two real preconditions: no addon job running, and - for the fully
+automatic path only - no Furphy window open). `ShowBalloon` gained the
+reload-notice append for a `done_updated` cycle, via a fresh
+`WowDetector` check made once at balloon time (a sync can take minutes,
+so the check at `RunCycle`'s start would be stale).
+
+**SPA (ui\app.js, ui\index.html, ui\style.css):** the Wago browse grid no
+longer hides behind a "browsing pauses while WoW is running" banner: the
+server stopped sending `gameActive` and the client-side gate is gone.
+The self-update Check now / Install now buttons are no longer disabled
+for game state (install now enabled unless a job is running). The
+auto-check-for-updates timer no longer skips while `gameRunning`. The
+Freshness panel's old "WoW is running - background checks paused" line
+is repurposed, not just deleted, into the reload/relog note described
+above (`freshness-game-note` renamed to `freshness-reload-note` in
+ui\style.css to match). Three Settings tooltips (background-updates,
+its interval, and auto-install) dropped their "pauses while WoW is
+running" / "never while WoW is running" language. The kept CPU-only
+measures - decorative animation gating on `data-game-active`, the idle
+poll backing off to 60s while `gameRunning`, the CurseForge pane
+suspending when the window isn't foreground - are unchanged.
+
+**Tests:** every Describe/It that used to assert a skip/block/disable
+for game state now asserts the opposite (Host.Tests.ps1's fake-WoW
+cycle, Server.AppUpdate/WagoBrowse/WagoParser/WagoSnapshotCrawl
+integration and unit coverage); Perf.Tests.ps1's steady-state Describe
+is renamed "Perf: light touch while you play" and re-anchored to wait
+out the tray's first real (now unconditionally-running) cycle instead
+of a "first skip transition," with a new scenario proving a
+`--tray-selftest` cycle completes normally while the fake WoW process is
+still running. New coverage closes real gaps: the maintenance tick, the
+app-update check route, the catalogue/enrichment live-fetch paths all
+proceed while GameRunning is true; `job.reloadNeeded` is asserted true
+only for the Installed/Updated/Rolled-back-while-running case and false
+otherwise; and a server-restart round-trip proves `reloadNeeded` survives
+a reload for a job created this round, and reads `false` (not an error)
+for a pre-this-round `state.json` fixture with no `gameRunningAtStart`
+key at all.
+
+**Docs:** README.md, README.txt, SPEC.md, UX-SPEC.md, SETTINGS-SPEC.md,
+TESTING.md, and APP-UPDATE-SPEC.md all dropped their "never while WoW is
+running" / "pauses while WoW is running" / "no network while WoW runs"
+promises; the "zero impact on gameplay" framing is replaced everywhere
+living docs make it with "light touch while you play," naming the CPU
+measures that actually survive instead of implying a network/functional
+block that no longer exists. THEMES-SPEC.md needed no change - its own
+"WoW is running" references are to the still-kept decorative-animation
+gate and an unrelated agent/test live-safety rule, not the removed
+network gating. Historical records (NIGHT-REPORT-2026-09-05.md,
+OVERNIGHT-REPORT.md, ROADMAP.md's "DONE" entries, this file's own past
+rounds, and dist\write-release-notes.ps1's per-version release notes)
+keep their old wording on purpose, same as always - they describe what a
+past round shipped, not what the app does today.
+
+**Verification (independent verifier pass, 2026-09-09, after all five
+packages and the REFIX pass landed; Eric still runs the full gate
+himself per the "gates are manual now" standing note - this is not
+that):** `tests\run-all.ps1 -Only @('static','unit','spa')` - static
+7/7, unit 362/362, spa harness 278/278 + theme-audit 500/500, all green
+(the 4 failures noted in this entry's first draft were exactly the
+section 8 test inversions still pending at doc-pass time - they landed
+before this verification pass ran). Every `tests\integration\Server.*`
+and `Cli.*` file plus both `tests\fixture-acceptance\*` files that start
+no window were run one at a time against port 47899 (`Server.Uninstall.
+Tests.ps1` with `-ExcludeTag Host`; two real, scratch-scoped `--tray`
+processes exercised with WoW closed and the desktop idle past 120s, per
+the contract): 160/160 across 19 files, 0 failed. A headless
+`--tray-selftest` cycle on a fresh scratch install (port 47960, fake WoW
+alive throughout) completed with `lastResult:"up_to_date"` and never
+`skipped_wow_running`/`waiting_game`. A hand-driven scratch server
+(port 47958) confirmed `/api/ping` -> `gameRunning:true`, a job's
+`gameRunningAtStart`/`reloadNeeded` fields, and the maintenance child
+spawning/finishing with no "skipped" line in server.log. The SPA under
+`?mock=1&game=1` showed the exact canonical reload clause and nothing
+else disabled or blocked. Total across every layer: 1307/1307 passed.
+
 ## Round 42.1 (1.22.1: the silent self-update no longer undoes itself)
 
 Found by the one deliberate real-GitHub upgrade the orchestrator ran

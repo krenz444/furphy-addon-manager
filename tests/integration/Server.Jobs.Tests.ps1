@@ -186,3 +186,231 @@ Describe 'per-flavour job concurrency: other shapes' {
         Stop-TestServer -Server $server
     }
 }
+
+# =====================================================================
+# GAME-MODE-SPEC.md (2026-09-08) section 8, new-coverage item 4: the
+# net-new job.reloadNeeded/gameRunningAtStart pair (section 4.1). No
+# existing test covered this either way - net-new coverage, not an
+# inversion. gameRunningAtStart is captured once, at job-creation time,
+# from Test-GameRunning; reloadNeeded (Get-JobStatusView) is true only
+# when gameRunningAtStart was true AND at least one result row is
+# Installed/Updated/Rolled-back (never Pinned/Unpinned/Ignored/
+# Unignored/Removed/Would-update/Up-to-date/Failed/Skipped).
+# =====================================================================
+
+Describe 'job.reloadNeeded / gameRunningAtStart' -Tags 'Network' {
+    <#
+      A real network -Add against a real CurseForge project (id 2382,
+      BigWigs - retail-compatible, already used elsewhere in this suite
+      for the same reason, e.g. tests\host\Host.Tests.ps1's single-
+      flavour tooltip Describes) is the simplest way to reach a genuine
+      'Installed' result row without a live-network-unsafe fixture hack.
+    #>
+    function New-FakeWowProcessForJobsReloadTest {
+        param([Parameter(Mandatory = $true)][string]$Root)
+        $fakeProcName = 'WowFakeJobsReload' + (Get-Random -Maximum 99999)
+        $fakeExePath = Join-Path $Root ($fakeProcName + '.exe')
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
+        $proc = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '120', '/nobreak') -WindowStyle Hidden -PassThru
+        Start-Sleep -Milliseconds 500
+        return [PSCustomObject]@{ Process = $proc; ProcessName = $fakeProcName }
+    }
+    function Stop-FakeWowProcessForJobsReloadTest {
+        param($FakeWow)
+        if (-not $FakeWow -or -not $FakeWow.Process) { return }
+        try { if (-not $FakeWow.Process.HasExited) { Stop-Process -Id $FakeWow.Process.Id -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+
+    $projectId = 2382 # BigWigs
+
+    It 'an add job that genuinely installs, started while GameRunning is true, reports reloadNeeded:true' {
+        $wowRoot = Copy-Fixture
+        $root = New-TempRoot -Name 'jobs-reload-installed-gamerunning'
+        $server = $null
+        $fakeWow = $null
+        try {
+            $fakeWow = New-FakeWowProcessForJobsReloadTest -Root $root
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
+
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'add'; projectId = $projectId }
+            $r.Ok | Should Be $true
+            $done = Wait-JobDone -Port 47899 -JobId $r.Body.jobId -TimeoutSec 90
+            $done.Ok | Should Be $true
+            $done.Body.state | Should Be 'done'
+            $installedRow = @($done.Body.results) | Where-Object { [string]$_.projectId -eq [string]$projectId }
+            @($installedRow).Count | Should Be 1
+            $installedRow[0].status | Should Be 'Installed'
+
+            $done.Body.reloadNeeded | Should Be $true
+        } finally {
+            Stop-FakeWowProcessForJobsReloadTest -FakeWow $fakeWow
+            Stop-TestServer -Server $server
+        }
+    }
+
+    It 'a check-only job started while GameRunning is true reports reloadNeeded:false (no Installed/Updated/Rolled-back rows to trigger it)' {
+        $wowRoot = Copy-Fixture
+        $root = New-TempRoot -Name 'jobs-reload-checkonly-gamerunning'
+        $server = $null
+        $fakeWow = $null
+        try {
+            $fakeWow = New-FakeWowProcessForJobsReloadTest -Root $root
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
+
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'check' }
+            $r.Ok | Should Be $true
+            $done = Wait-JobDone -Port 47899 -JobId $r.Body.jobId -TimeoutSec 30
+            $done.Ok | Should Be $true
+            $done.Body.reloadNeeded | Should Be $false
+        } finally {
+            Stop-FakeWowProcessForJobsReloadTest -FakeWow $fakeWow
+            Stop-TestServer -Server $server
+        }
+    }
+
+    It 'an add job that genuinely installs, started while GameRunning is FALSE, reports reloadNeeded:false even though a file was written' {
+        $wowRoot = Copy-Fixture
+        $root = New-TempRoot -Name 'jobs-reload-installed-notrunning'
+        $server = $null
+        try {
+            $notRunningName = 'WowFakeJobsReloadNotRunning' + (Get-Random -Maximum 99999)
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $notRunningName)
+
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'add'; projectId = $projectId }
+            $r.Ok | Should Be $true
+            $done = Wait-JobDone -Port 47899 -JobId $r.Body.jobId -TimeoutSec 90
+            $done.Ok | Should Be $true
+            $installedRow = @($done.Body.results) | Where-Object { [string]$_.projectId -eq [string]$projectId }
+            @($installedRow).Count | Should Be 1
+            $installedRow[0].status | Should Be 'Installed'
+
+            $done.Body.reloadNeeded | Should Be $false
+        } finally {
+            Stop-TestServer -Server $server
+        }
+    }
+}
+
+# =====================================================================
+# GAME-MODE-SPEC.md (2026-09-08) section 8, new-coverage item 7 - a real
+# bug closed by the same spec's section 4.1: Load-CheckState's job-
+# reconstruction loop never restored gameRunningAtStart, so EVERY job
+# that survived a server restart silently reported reloadNeeded:false
+# from then on via GET /api/jobs*, /api/state.job, and every later
+# Save-CheckState re-derivation - even one that genuinely updated an
+# addon while WoW was running.
+# =====================================================================
+
+Describe 'gameRunningAtStart / reloadNeeded survive a server restart (Load-CheckState round-trip)' -Tags 'Network' {
+    function New-FakeWowProcessForRestartTest {
+        param([Parameter(Mandatory = $true)][string]$Root)
+        $fakeProcName = 'WowFakeRestartReload' + (Get-Random -Maximum 99999)
+        $fakeExePath = Join-Path $Root ($fakeProcName + '.exe')
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
+        $proc = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '180', '/nobreak') -WindowStyle Hidden -PassThru
+        Start-Sleep -Milliseconds 500
+        return [PSCustomObject]@{ Process = $proc; ProcessName = $fakeProcName }
+    }
+    function Stop-FakeWowProcessForRestartTest {
+        param($FakeWow)
+        if (-not $FakeWow -or -not $FakeWow.Process) { return }
+        try { if (-not $FakeWow.Process.HasExited) { Stop-Process -Id $FakeWow.Process.Id -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+
+    $projectId = 2382 # BigWigs
+
+    It 'a job that reported reloadNeeded:true still reports it after the server restarts against the same state.json' {
+        $wowRoot = Copy-Fixture
+        $root = New-TempRoot -Name 'jobs-reload-restart'
+        $server1 = $null
+        $server2 = $null
+        $fakeWow = $null
+        try {
+            $fakeWow = New-FakeWowProcessForRestartTest -Root $root
+            $server1 = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
+
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs?flavour=retail' -Body @{ kind = 'add'; projectId = $projectId }
+            $r.Ok | Should Be $true
+            $jobId = $r.Body.jobId
+            $done = Wait-JobDone -Port 47899 -JobId $jobId -TimeoutSec 90
+            $done.Ok | Should Be $true
+            $done.Body.reloadNeeded | Should Be $true
+
+            # Apply-JobCompletionSideEffects' own Save-CheckState call runs
+            # synchronously as part of completing the job, so state.json
+            # should already carry it - belt-and-suspenders poll rather
+            # than assume zero latency before stopping this server.
+            $statePath = Join-Path $root 'state.json'
+            $deadline = (Get-Date).AddSeconds(10)
+            $sawJob = $false
+            while ((Get-Date) -lt $deadline) {
+                if (Test-Path -LiteralPath $statePath) {
+                    $onDisk = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    if (@($onDisk.jobs | Where-Object { [string]$_.id -eq [string]$jobId }).Count -gt 0) { $sawJob = $true; break }
+                }
+                Start-Sleep -Milliseconds 200
+            }
+            $sawJob | Should Be $true
+
+            Stop-TestServer -Server $server1
+            $server1 = $null
+
+            # Restart against the SAME root/state.json - the fake WoW
+            # process is still alive (irrelevant to this job's own
+            # ALREADY-CAPTURED gameRunningAtStart, which must not be
+            # re-derived from the current moment on reload).
+            $server2 = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $fakeWow.ProcessName)
+            $g = Invoke-Api -Port 47899 -Method Get -Path "/api/jobs/$jobId"
+            $g.Ok | Should Be $true
+            $g.Body.reloadNeeded | Should Be $true
+        } finally {
+            Stop-FakeWowProcessForRestartTest -FakeWow $fakeWow
+            if ($server1) { Stop-TestServer -Server $server1 }
+            if ($server2) { Stop-TestServer -Server $server2 }
+        }
+    }
+
+    It 'a job persisted by code from before this round (no gameRunningAtStart key in state.json) reloads with reloadNeeded:false, not an error' {
+        $wowRoot = Copy-Fixture
+        $root = New-TempRoot -Name 'jobs-reload-restart-precompat'
+        $server = $null
+        try {
+            # Hand-craft a pre-this-round state.json: a job whose row
+            # WOULD trigger reloadNeeded:true (an Installed result) IF
+            # gameRunningAtStart were present - it deliberately is not,
+            # simulating a job persisted by the server build that shipped
+            # before this field existed ([bool]$null is $false, never an
+            # error - the exact back-compat behavior section 4.1 names).
+            $stateFixture = [PSCustomObject]@{
+                updatesCheckedAt = @{}
+                updateAvailable  = @{}
+                lastRun          = @{}
+                jobs             = @(
+                    [PSCustomObject]@{
+                        id         = '1'
+                        kind       = 'add'
+                        params     = $null
+                        state      = 'done'
+                        startedAt  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        finishedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        exitCode   = 0
+                        log        = @()
+                        results    = @([PSCustomObject]@{ projectId = 999; name = 'Old Addon'; status = 'Installed' })
+                        error      = $null
+                        flavour    = 'retail'
+                        # gameRunningAtStart deliberately absent.
+                    }
+                )
+            }
+            ($stateFixture | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath (Join-Path $root 'state.json') -Encoding UTF8
+
+            $notRunningName = 'WowFakeRestartReloadNotRunning' + (Get-Random -Maximum 99999)
+            $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -ExtraArgs @('-WowFakeProcessName', $notRunningName)
+            $g = Invoke-Api -Port 47899 -Method Get -Path '/api/jobs/1'
+            $g.Ok | Should Be $true
+            $g.Body.reloadNeeded | Should Be $false
+        } finally {
+            Stop-TestServer -Server $server
+        }
+    }
+}

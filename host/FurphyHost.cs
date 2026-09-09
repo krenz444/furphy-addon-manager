@@ -143,8 +143,10 @@ namespace Furphy
         // NotifyIcon (TrayProgram.Run), never MainForm. --tray-selftest
         // <markerPath>: like --selftest but for the tray - runs one cycle
         // then writes a JSON marker and exits. --wow-fake <processName>
-        // lets --tray-selftest prove the WoW-running skip without the
-        // real game by treating a process of that name as WoW.
+        // lets --tray-selftest simulate WoW running/not-running without
+        // the real game, by treating a process of that name as WoW (used
+        // by the decorative-gating/reload-notice tests now that GAME-MODE-
+        // SPEC.md, 2026-09-08, removed the functional WoW-running gates).
         public bool Tray;
         public bool TraySelftestActive;
         public string TraySelftestMarkerPath;
@@ -2162,7 +2164,8 @@ namespace Furphy
         }
 
         // ------------------------------------------------ P2 perf pass ----
-        // Expansion E29 (SPEC.md): "zero impact on gameplay" for the native
+        // Expansion E29 (SPEC.md), reworded per GAME-MODE-SPEC.md
+        // (2026-09-08): a light touch while you play, for the native
         // window. Two independent mechanisms:
         //  (1) foreground tracking (Activated/Deactivate/Resize below) -
         //      after 10s of not being the foreground window (including
@@ -4563,15 +4566,18 @@ boot();
     }
 
     // "any process named 'Wow' is running" (contract step 5a). --wow-fake
-    // lets --tray-selftest substitute a harmless process name so the skip
-    // path can be proven without launching the real game.
+    // lets --tray-selftest substitute a harmless process name so this
+    // detection can be exercised without launching the real game. GAME-
+    // MODE-SPEC.md (2026-09-08): this signal no longer gates any addon/
+    // browse/update work - it only feeds the SPA's decorative CSS gating
+    // and the reload/relog balloon note (see ShowBalloon).
     internal static class WowDetector
     {
         // Process.GetProcessesByName does an exact, whole-name match (no
         // substring/wildcard), so retail-only "Wow" misses Classic/PTR/Beta
         // clients, which ship under their own exe names. Check every known
-        // client name so the "never touch addon files while the game is
-        // running" guarantee holds regardless of which client is open.
+        // client name so detection is accurate regardless of which client
+        // is open.
         private static readonly string[] KnownWowNames = new string[]
         {
             "Wow",
@@ -5817,16 +5823,12 @@ boot();
             TrayCycleOutcome outcome = new TrayCycleOutcome();
             LogHost("[tray] cycle start");
 
-            // (a) WoW running check - deliberately BEFORE the "Checking..."
-            // tooltip/any disk access below, so a WoW session that runs for
-            // the whole 10-minute recheck window produces no tooltip
-            // flicker and (via CompleteCycleSkippedWow) no tray-state.json
-            // write once the first skip has already recorded the fact.
-            if (WowDetector.IsRunning(_options.WowFakeProcessName))
-            {
-                CompleteCycleSkippedWow();
-                return outcome;
-            }
+            // GAME-MODE-SPEC.md (2026-09-08): the WoW-running gate that used
+            // to sit here is gone - addon browsing, updates and the app's
+            // own self-update check/download now run while WoW is running,
+            // per Eric's policy. The cycle always proceeds straight to
+            // "Checking..." below, exactly as it already did when WoW
+            // was not running.
 
             // Round 28 (section B, "checking - starting the server") -
             // the fixed "Starting the updater..." text for the gap before
@@ -6008,18 +6010,16 @@ boot();
             // added right after the addon-sync work above. Deliberately
             // placed here, after the addon-sync cycle actually finished,
             // rather than as a second top-level check in this method:
-            // every OTHER return in this function above (WoW running at
-            // (a); server unreachable at (b); a job already busy - 409 -
-            // or any other POST /api/jobs error at (c); no flavour jobs
-            // returned; a stop signal mid-poll at (d)) already exits
-            // RunCycle before this line - which is exactly "never while
-            // WoW is running" and "never while a job is running" for free,
-            // by construction, with no second explicit gate needed for
-            // either. (RunAppUpdateStep still re-checks WoW itself, purely
-            // as defense-in-depth against WoW having been launched mid-
-            // cycle - the addon-sync poll above can run for up to 15
-            // minutes - matching this file's own "enforced twice" idiom
-            // for every other mutating call it makes.)
+            // every OTHER return in this function above (server unreachable
+            // at (b); a job already busy - 409 - or any other POST
+            // /api/jobs error at (c); no flavour jobs returned; a stop
+            // signal mid-poll at (d)) already exits RunCycle before this
+            // line - which is exactly "never while a job is running" for
+            // free, by construction, with no second explicit gate needed.
+            // GAME-MODE-SPEC.md (2026-09-08): RunAppUpdateStep no longer
+            // re-checks WoW at all - the app's own self-update check and
+            // download now run while WoW is running, same as every other
+            // step in this cycle.
             RunAppUpdateStep(settings);
             return outcome;
         }
@@ -6028,22 +6028,17 @@ boot();
         // announce a not-yet-announced completed install via the durable
         // tray-state.json marker (section 3.3/8.7) regardless of the
         // eligibility check below; then, only when state=="ready" AND no
-        // window is open AND settings.appUpdateAutoInstall is true AND
-        // (defense-in-depth) WoW is not running right now, POST /api/
-        // app-update/install {relaunch:"tray"}. Never throws - a failure
-        // anywhere in here (network error, malformed JSON, a 4xx/5xx) is
-        // logged and swallowed; this is a best-effort extra step on top of
-        // the addon-sync cycle that just finished, never something that
-        // should make an otherwise-successful cycle look like a failure.
+        // window is open AND settings.appUpdateAutoInstall is true, POST
+        // /api/app-update/install {relaunch:"tray"}. Never throws - a
+        // failure anywhere in here (network error, malformed JSON, a
+        // 4xx/5xx) is logged and swallowed; this is a best-effort extra
+        // step on top of the addon-sync cycle that just finished, never
+        // something that should make an otherwise-successful cycle look
+        // like a failure.
         private void RunAppUpdateStep(TrayBackgroundSettings settings)
         {
             try
             {
-                if (WowDetector.IsRunning(_options.WowFakeProcessName))
-                {
-                    return;
-                }
-
                 string body = Http.GetString(AppUpdateStatusUrl(), 5000);
                 if (string.IsNullOrEmpty(body))
                 {
@@ -6408,35 +6403,6 @@ boot();
                 DateTime.UtcNow.AddMinutes(settings.IntervalMinutes), true);
         }
 
-        // P2 perf pass (item 4): "never touch tray-state.json unless
-        // something changed, no balloon" while WoW runs. The FIRST cycle
-        // that finds WoW running still goes through the normal CompleteCycle
-        // path (a real transition worth recording - a not-running ->
-        // running icon/tooltip/state-file update). Every REPEAT skip while
-        // the same WoW session keeps running is otherwise byte-identical
-        // (same result/message/empty updated/failed lists) except the
-        // timestamps, so it only advances the in-memory next-run clock
-        // WaitForNextCycle reads - no WriteStateFile, no SetTooltip, no
-        // balloon, matching "zero impact" for a WoW session that runs for
-        // hours.
-        private void CompleteCycleSkippedWow()
-        {
-            bool alreadySkipped;
-            lock (_stateLock) { alreadySkipped = _lastResult == "skipped_wow_running"; }
-            DateTime nextRun = DateTime.UtcNow.AddMinutes(10);
-            if (alreadySkipped)
-            {
-                lock (_stateLock)
-                {
-                    _lastRunAtUtc = DateTime.UtcNow;
-                    _nextRunAtUtc = nextRun;
-                }
-                return;
-            }
-            LogHost("[tray] cycle skipped: WoW is running");
-            CompleteCycle("waiting_game", "skipped_wow_running", new List<string>(), new List<string>(), nextRun, true);
-        }
-
         // Round 28 (section A/B) - the ONE place a terminal (cycle-ending
         // or cycle-cannot-proceed) status transition happens: computes the
         // core sentence once via ComputeCore, updates every status field,
@@ -6634,9 +6600,6 @@ boot();
                         return failed.ToString(CultureInfo.InvariantCulture) + " addon" + plural +
                             " couldn't update at " + doneStamp + " - open Furphy for details";
                     }
-
-                case "waiting_game":
-                    return "Waiting for WoW to close - next check after";
 
                 case "waiting_busy":
                     return "Waiting for the current task - retrying in 5 min";
@@ -6968,6 +6931,21 @@ boot();
             List<string> names = (status == "done_failed") ? failedNames : updatedNames;
             string text = JoinNamesTruncated(names, 4);
             ToolTipIcon icon = (status == "done_failed") ? ToolTipIcon.Warning : ToolTipIcon.Info;
+
+            // GAME-MODE-SPEC.md section 3.3 - a FRESH WowDetector check right
+            // here (not whatever RunCycle saw minutes ago at the start of a
+            // sync that can run up to 15 minutes), and only for
+            // done_updated - never done_failed, since nothing was actually
+            // installed on that path. This is the only WowDetector call left
+            // anywhere in the cycle with any bearing on functional behavior:
+            // it only decides whether to append a sentence to a balloon that
+            // is showing regardless, never whether the cycle or the balloon
+            // itself happens.
+            if (status == "done_updated" && WowDetector.IsRunning(_options.WowFakeProcessName))
+            {
+                text += " - WoW will use it once you type /reload in your chat window, or log out and back in.";
+            }
+
             ShowBalloonText(text, icon);
         }
 

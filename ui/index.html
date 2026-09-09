@@ -995,16 +995,12 @@
             <p id="browse-empty-body">Try a different search term.</p>
           </div>
 
-          <!-- Round 32: the game-running gate (WAGO-BROWSE-SPEC.md section
-               3.5) - shown instead of the grid/empty/error states whenever
-               the server skipped a live Wago fetch because a WoW client is
-               running. Never used for the Gaining tab, which is a pure
-               disk read and is never blocked by game state. -->
-          <div class="empty-state" id="browse-gameactive" hidden>
-            <svg class="icon empty-icon"><use href="#icon-search"></use></svg>
-            <h3>Paused</h3>
-            <p>Wago browsing pauses while a WoW client is running. It'll pick back up once you close the game.</p>
-          </div>
+          <!-- GAME-MODE-SPEC.md section 2 (2026-09-08): the game-running
+               gate this used to feed (#browse-gameactive, WAGO-BROWSE-
+               SPEC.md section 3.5) is removed - Wago browsing now works
+               fully while a WoW client is running, so this element is
+               unreachable and has been dropped rather than left hidden
+               forever. -->
 
           <!-- Round 32: Gaining this week's not-ready state (WAGO-BROWSE-
                SPEC.md section 2.4) - replaces the grid entirely until Furphy
@@ -1113,7 +1109,7 @@
                  logon otherwise, which is not what the toggle promises. -->
             <div class="settings-row" id="updates-background-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Update addons in the background<button type="button" class="info-tip" tabindex="0" aria-label="More about Update addons in the background" aria-describedby="app-tooltip" data-tooltip="Checks for updates on a schedule and installs them automatically - using a separate process that keeps running even after you close Furphy. It pauses while WoW is running. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+                <div class="settings-row-label">Update addons in the background<button type="button" class="info-tip" tabindex="0" aria-label="More about Update addons in the background" aria-describedby="app-tooltip" data-tooltip="Checks for updates on a schedule and installs them automatically - using a separate process that keeps running even after you close Furphy. Off by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-background-updates">
@@ -1121,7 +1117,7 @@
               </label>
             </div>
             <div class="settings-row settings-row-col" id="updates-interval-row" hidden>
-              <div class="settings-row-label">How often<button type="button" class="info-tip" tabindex="0" aria-label="More about How often" aria-describedby="app-tooltip" data-tooltip="How often Furphy checks for updates in the background. If WoW is already running, it skips that check and tries again once you close the game."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+              <div class="settings-row-label">How often<button type="button" class="info-tip" tabindex="0" aria-label="More about How often" aria-describedby="app-tooltip" data-tooltip="How often Furphy checks for updates in the background."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               <select class="select" id="select-background-interval">
                 <option value="60">Every hour</option>
                 <option value="120">Every 2 hours</option>
@@ -1153,7 +1149,7 @@
             <h3>App updates</h3>
             <div class="settings-row" id="app-update-auto-row">
               <div class="settings-row-text">
-                <div class="settings-row-label">Install app updates automatically<button type="button" class="info-tip" tabindex="0" aria-label="More about Install app updates automatically" aria-describedby="app-tooltip" data-tooltip="When a new version of Furphy is ready, it installs on its own the next time no Furphy window is open - and never while WoW is running. Turn this off to only be asked before installing. On by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+                <div class="settings-row-label">Install app updates automatically<button type="button" class="info-tip" tabindex="0" aria-label="More about Install app updates automatically" aria-describedby="app-tooltip" data-tooltip="When a new version of Furphy is ready, it installs on its own the next time no Furphy window is open and no addon job is running. Turn this off to only be asked before installing. On by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
               </div>
               <label class="switch">
                 <input type="checkbox" id="toggle-app-update-auto">

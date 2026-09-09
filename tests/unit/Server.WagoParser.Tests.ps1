@@ -238,7 +238,25 @@ Describe 'Handle-WagoBrowse (smoke, against tests\fixtures\wago\browse_retail_pr
         $Script:CapturedWagoUri | Should Not Match 'category='
     }
 
-    It 'while the game is running with no warm cache, returns 200 with an empty result and gameActive:true - never an error, never a live fetch' {
+    It 'while the game is running, still allows a live fetch (never gates on game state) - a null upstream response is just an empty result, no gameActive field' {
+        <#
+          GAME-MODE-SPEC.md (2026-09-08), section 8: INVERTED from "while
+          the game is running with no warm cache, returns 200 with an
+          empty result and gameActive:true - never an error, never a live
+          fetch". Handle-WagoBrowse's own game-mode gate is gone - it
+          always calls Get-WagoCached -AllowLiveFetch:$true regardless of
+          Test-GameRunning, and the gameActive field is dropped from the
+          response entirely (never sent, not even as always-false).
+          $Script:WowFakeProcessNameOverride is still set here (game
+          genuinely reads as running) specifically to prove THAT is no
+          longer what produces the empty result below - MockWagoBehavior
+          'null' (a null upstream response, e.g. what a real cold-cache
+          live fetch racing a Wago hiccup could look like) is what does,
+          and Handle-WagoBrowse's own $paginator/$props null-handling
+          (addon-server.ps1's Handle-WagoBrowse) already tolerates that
+          gracefully with a 200 and empty items/total/categories, same as
+          it would with the game not running.
+        #>
         $Script:MockWagoBehavior = 'null'
         $Script:WowFakeProcessNameOverride = (Get-Process -Id $PID).ProcessName
         $Script:GameRunningCache = $false
@@ -248,10 +266,10 @@ Describe 'Handle-WagoBrowse (smoke, against tests\fixtures\wago\browse_retail_pr
         Handle-WagoBrowse -Context $ctx -RouteMatch @{}
         $ctx.Response.StatusCode | Should Be 200
         $body = Get-FakeResponseBody -Context $ctx
-        $body.gameActive | Should Be $true
+        ($body.PSObject.Properties.Name -contains 'gameActive') | Should Be $false
         $body.items.Count | Should Be 0
         $body.total | Should Be 0
         $body.categories.Count | Should Be 0
-        $Script:CapturedAllowLiveFetch | Should Be $false
+        $Script:CapturedAllowLiveFetch | Should Be $true
     }
 }

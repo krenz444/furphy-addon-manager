@@ -19,7 +19,7 @@ GOALS
 - Furphy checks GitHub Releases (github.com/krenz444/furphy-addon-manager)
   for a newer version and, by default, installs it automatically the next
   time doing so is safe.
-- "Safe" means: never while WoW is running, never while an addon job is
+- "Safe" means: never while an addon job is
   running, and (for the automatic/silent path only) never while any Furphy
   window is open.
 - A user who wants to see what's happening can: see status and a
@@ -53,8 +53,6 @@ NON-GOALS (explicitly out of scope for this feature)
 - Update source: GitHub Releases of krenz444/furphy-addon-manager.
 - Automatic installation is ON by default, with a Settings toggle to turn
   it off, plus "Check now" and "Install now" controls.
-- No network activity while a WoW client is running (existing rule, reused
-  verbatim via Test-GameRunning).
 - Never interrupt a running addon job.
 - A silent background install happens ONLY when no app window is open.
   When a window is open, the SPA shows an update banner with "Install
@@ -117,7 +115,7 @@ Row 1 (toggle):
 ```
 <div class="settings-row" id="app-update-auto-row">
   <div class="settings-row-text">
-    <div class="settings-row-label">Install app updates automatically<button type="button" class="info-tip" tabindex="0" aria-label="More about Install app updates automatically" aria-describedby="app-tooltip" data-tooltip="When a new version of Furphy is ready, it installs on its own the next time no Furphy window is open - and never while WoW is running. Turn this off to only be asked before installing. On by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+    <div class="settings-row-label">Install app updates automatically<button type="button" class="info-tip" tabindex="0" aria-label="More about Install app updates automatically" aria-describedby="app-tooltip" data-tooltip="When a new version of Furphy is ready, it installs on its own the next time no Furphy window is open and no addon job is running. Turn this off to only be asked before installing. On by default."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
   </div>
   <label class="switch">
     <input type="checkbox" id="toggle-app-update-auto">
@@ -162,14 +160,11 @@ selected from GET /api/app-update/status's `state`/`deferredReason`
 
 Buttons:
 - `#btn-app-update-check` ("Check now"): calls POST /api/app-update/check.
-  Disabled with `title="WoW is running"` when `Store.state.gameRunning` is
-  true (the SPA already has this field on every /api/state poll) - same
-  disabled+title idiom Views.settings.render already applies to
-  `#btn-force-reinstall`/`#btn-uninstall-app` (ui\app.js:6756-6763).
+  Never disabled for game state - checking for an app update works the
+  same whether WoW is running or not.
 - `#btn-app-update-install` ("Install now"): hidden unless
   `state` is `ready`. Disabled with `title="An addon job is running"` when
-  `deferredReason==="job-running"`, or `title="WoW is running"` when
-  `gameRunning` is true. On click: calls POST /api/app-update/install
+  `deferredReason==="job-running"`. On click: calls POST /api/app-update/install
   `{relaunch:"window"}`, then immediately calls `App.enterUpdatingState()`
   (new, paralleling `enterUninstallingState`, ui\app.js:8235 - see 3.2).
 - `#link-app-update-whatsnew` ("What's new"): shown once a `latestVersion`
@@ -435,15 +430,15 @@ GET /api/app-update/status
   "windowOpen": true
 }
 ```
-  `deferredReason` is `null | "game-running" | "job-running"` - set only
+  `deferredReason` is `null | "job-running"` - set only
   as the immediate result of the last install ATTEMPT (section 4), not
   recomputed live on every status poll (recomputing live would require
-  this GET to itself call Test-GameRunning/scan jobs on every 5s SPA
+  this GET to itself scan jobs on every 5s SPA
   poll, which is unnecessary work for a read that mostly just echoes
   disk state). `windowOpen` IS computed live on every call, from
   `(Get-Date) - (windowOpenAt from app-update.json)` (section 7) - this
   field is informational for the SPA/tray, not itself security-gating
-  (POST /api/app-update/install re-checks game/job state itself,
+  (POST /api/app-update/install re-checks job state itself,
   authoritatively, at call time - see below).
 - Folded into `Handle-State`'s own response too (addon-server.ps1:6986,
   response body assembled through line ~7160 where `gameRunning` is set
@@ -455,9 +450,6 @@ GET /api/app-update/status
 
 POST /api/app-update/check ("Check now" and any future caller)
 - CSRF required (POST, non-GET - inherited automatically, see above).
-- If `Test-GameRunning`: 200 `{ ok: true, skipped: "game running" }` -
-  NEVER a hard error; a user who just wants to know must not see a red
-  failure because WoW happens to be open.
 - If `state` is already `checking` or `downloading`: 200 with the current
   status object (idempotent - no double-spawn, mirroring
   `Test-MaintenanceChildRunning`'s own re-entrancy guard,
@@ -489,11 +481,6 @@ only in the `relaunch` value they pass)
   `deferredReason="job-running"` to app-update.json before responding, so
   the next status poll's status line shows "Waiting for an addon job to
   finish before installing." without a second round trip.
-- 409 `{ error: "WoW is running" }` if `Test-GameRunning` - a check
-  neither `Handle-Uninstall` nor `Handle-Shutdown` currently makes (they
-  are always human-initiated at a moment WoW's state doesn't matter to
-  them the same way); this route needs it because the SILENT trigger has
-  no human in the loop to have already checked.
 - On success: resolve `$wowRootPath` via `Get-FlavourWowRootPath -Flavor 'retail'`
   (falling back to the no-arg overload) - the exact call
   `Handle-Uninstall` already makes at addon-server.ps1:8680-8681 (both
@@ -517,11 +504,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<st
   identical to `Handle-Uninstall`'s own final two steps
   (addon-server.ps1:8719-8720).
 
-Error codes summary: 200 (ok, or a soft-skip like "game running" on
-check), 202 (check accepted, running in background), 400 (nothing to
-install), 409 (job running / WoW running), 500 (unexpected - installer
-failed to spawn, disk error, etc, `{ error: "<message>" }` matching every
-other handler's error shape in this file).
+Error codes summary: 200 (ok), 202 (check accepted, running in
+background), 400 (nothing to install), 409 (job running), 500
+(unexpected - installer failed to spawn, disk error, etc, `{ error:
+"<message>" }` matching every other handler's error shape in this file).
 
 ===============================================================================
 6. SETTINGS KEYS AND MIGRATION
@@ -568,7 +554,7 @@ Hourly maintenance child: `Invoke-MaintenanceTick`
 (addon-server.ps1:5546) already spawns a hidden, BelowNormal,
 `-MaintenanceOnly` child of the same script at most once per
 `$Script:MaintenanceIntervalMinutes` (60, set at line 9183), gated on
-`!GameRunning` and `Test-MaintenanceChildRunning`. Add ONE more call
+`Test-MaintenanceChildRunning` and the interval. Add ONE more call
 inside the `-MaintenanceOnly` branch (`if ($MaintenanceOnly) {`,
 addon-server.ps1:9228), inside the SAME try/finally that already wraps
 `Initialize-CfCatalogueIndex`/`Initialize-WagoGrowthSnapshots`
@@ -595,15 +581,6 @@ existing `PingUrl()/JobsUrl()/JobUrl()` HTTP-helper idiom
 (host\FurphyHost.cs:6511-6513, called from RunCycle at lines 5790/5840/5899) -
 add one more small helper, `AppUpdateStatusUrl()`/`AppUpdateInstallUrl()`,
 same shape.
-
-Game mode: enforced twice, defense-in-depth like every other mutating
-route in this file - the SPA disables its own buttons when
-`Store.state.gameRunning` is true (client-side convenience only), AND
-`POST /api/app-update/check` / `POST /api/app-update/install` each check
-`Test-GameRunning` (addon-server.ps1:248) server-side authoritatively.
-The hourly/`-MaintenanceOnly` check additionally never even runs while
-`GameRunning` (`Invoke-MaintenanceTick`'s own top-level
-`if ($GameRunning) { return }`, addon-server.ps1:5575).
 
 Running job: enforced only server-side (there is no client button for
 the silent path to disable) - `POST /api/app-update/install`'s 409
@@ -1048,7 +1025,6 @@ newer tag supersedes them.
 | sha256 mismatch | delete downloaded files; never extract; state="error" | "Couldn't check for updates - try again later." | "App-update integrity check FAILED for <tag> - sha256 mismatch, discarding download" |
 | Extracted VERSION != release tag | delete staging folder; state="error" | "Couldn't check for updates - try again later." | "App-update package VERSION (<x>) did not match release tag (<tag>) - discarding" |
 | Extracted VERSION not strictly newer than current (downgrade) | delete staging folder; state="idle"; never installs | "Furphy is up to date (version 1.22.0)." | "App-update refused: staged version is not newer than the running version" |
-| Install requested while WoW is running | 409; state stays "ready" | "Update ready: version 1.23.0." (button disabled, title "WoW is running") | "App-update install refused: WoW is running" |
 | Install requested while an addon job is running | 409; deferredReason="job-running"; retried by tray next cycle | "Waiting for an addon job to finish before installing." | "App-update install deferred: a job is running" |
 | install.ps1 -Upgrade throws before the copy (e.g. disk full) | staged folder left for inspection; state="error" | "Couldn't finish updating - kept your current version (1.22.0)." | "App-update install failed before file copy: <message>" |
 | Post-install /api/ping health check times out or returns wrong version | rollback (8.6) runs; old version relaunched | "Couldn't finish updating - kept your current version (1.22.0)." | "App-update health check failed after installing <tag> - rolled back to <oldVersion>" |

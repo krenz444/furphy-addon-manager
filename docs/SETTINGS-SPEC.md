@@ -85,7 +85,7 @@ Row 2
        stays in force for this row's own label)
   tooltip: "Checks for updates on a schedule and installs them automatically
        - using a separate process that keeps running even after you close
-       Furphy. It pauses while WoW is running. Off by default."
+       Furphy. Off by default."
   prior location: Essentials > Updates (unchanged position)
 
   Row 2a (child, shown only when Row 2 is on)
@@ -95,9 +95,7 @@ Row 2
          paste - do not change)
     label: "How often" (unchanged)
     helper line: none
-    tooltip: "How often Furphy checks for updates in the background. If WoW
-         is already running, it skips that check and tries again once you
-         close the game."
+    tooltip: "How often Furphy checks for updates in the background."
     prior location: Essentials > Updates, nested under Row 2 (unchanged
          position)
 
@@ -472,9 +470,8 @@ Row 20 (new, Round 42 - APP-UPDATE-SPEC.md section 3.1; a NEW, SEPARATE
   label: "Install app updates automatically"
   helper line: none
   tooltip: "When a new version of Furphy is ready, it installs on its
-       own the next time no Furphy window is open - and never while WoW
-       is running. Turn this off to only be asked before installing. On
-       by default."
+       own the next time no Furphy window is open. Turn this off to
+       only be asked before installing. On by default."
   prior location: n/a (new)
   see also: a second, always-visible row directly below (status text +
        Check now / Install now / What's new controls, no settings.json

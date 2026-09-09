@@ -909,16 +909,20 @@
       return hits.length === 0;
     });
 
-    // ---- Game-running blocked state (separate frame, WAGO-BROWSE-SPEC.md
-    // section 3.5's corrected gate) - reuses the same ?game=1 flag /api/state
-    // already answers to. Loaded only now that every check above is done
-    // with `win` (see the comment just above).
+    // ---- Browsing while a WoW client is running (separate frame,
+    // GAME-MODE-SPEC.md 2026-09-08: INVERTED from the old "game-running
+    // blocked state" check - Wago browsing/search works fully while WoW
+    // runs now, matching Handle-WagoSearch's original ungated behavior;
+    // the #browse-gameactive blocked-state element and its gate are both
+    // removed) - reuses the same ?game=1 flag /api/state already answers
+    // to. Loaded only now that every check above is done with `win` (see
+    // the comment just above).
     const gameWin = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago&game=1");
     await waitForReady(gameWin, 8000);
     await wait(700);
-    checkTry("a WoW client running shows the honest game-running message, not a blank list, never a live request", function () {
-      return visible(q(gameWin, "#browse-gameactive")) && !visible(q(gameWin, "#browse-grid")) &&
-        text(q(gameWin, "#browse-gameactive")).indexOf("Wago browsing pauses while a WoW client is running. It'll pick back up once you close the game.") !== -1;
+    checkTry("a WoW client running still shows a real Wago listing - the removed #browse-gameactive blocked state never appears", function () {
+      return !q(gameWin, "#browse-gameactive") && visible(q(gameWin, "#browse-grid")) &&
+        qa(gameWin, "#browse-grid .browse-row").length > 0;
     });
 
     // ---- Gaining this week: ready state (separate frame, ?wagoGainingReady=1
@@ -1781,6 +1785,20 @@
       return onWin.__furphyTest.Store.state.gameRunning === true;
     });
 
+    // GAME-MODE-SPEC.md section 3.2: the persistent Freshness "Last run"
+    // note - net-new coverage (section 8 new-coverage item 5), zero
+    // existing coverage before this. This same ?mock=1&game=1 frame
+    // already carries it for free: ui\app.js's own mock lastRun fixture
+    // has an "Updated" row and computes lastRun.reloadNeeded from this
+    // exact URL flag (mockGameRunningNow()) at page-init time, so the
+    // note is already showing by the time this frame finished loading -
+    // no job needs to run first.
+    checkTry("the persistent 'WoW will use it...' Freshness note shows on My Addons while gameRunning is true and lastRun.reloadNeeded is true", function () {
+      const note = q(onWin, "#myaddons-freshness .freshness-reload-note");
+      return !!note && visible(note) &&
+        text(note).indexOf("WoW will use it once you type /reload in your chat window, or log out and back in.") !== -1;
+    });
+
     // Flips off again on the SAME loaded page (not just at initial load) -
     // this is what actually lets a player resume seeing the art the moment
     // they close WoW, per the fix note's own "resuming automatically when
@@ -1791,6 +1809,17 @@
     onWin.__furphyTest.Store.set({ gameRunning: false });
     checkTry("data-game-active is removed again once gameRunning flips back to false on the same page", function () {
       return !onWin.document.documentElement.hasAttribute("data-game-active");
+    });
+    // Store.set only ever applies the data-game-active side effect itself
+    // (ui\app.js's own set()) - a view's own DOM (Freshness included) only
+    // updates on its next explicit render, exactly like the settings-view
+    // toggle test elsewhere in this file re-renders explicitly after its
+    // own direct Store mutation. The real app reaches this render via its
+    // next /api/state poll; forcing it here proves the note itself (not
+    // just the attribute) is wired to gameRunning, deterministically.
+    onWin.__furphyTest.Views.myAddons.render();
+    checkTry("the Freshness reload note also disappears once gameRunning flips back to false and the view re-renders (moot once the game is closed)", function () {
+      return !q(onWin, "#myaddons-freshness .freshness-reload-note");
     });
 
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
@@ -2179,14 +2208,17 @@
       check("toggling it off round-trips through Actions.saveSettings", false, "#toggle-app-update-auto not found");
     }
 
-    // ---- Install now stays disabled while a game is active (server-
-    // authoritative gameRunning) or while a job is running (client-known,
-    // via Store.state.job - section 3.1's own disabled+title idiom).
+    // ---- Install now stays ENABLED while a game is active (GAME-MODE-
+    // SPEC.md 2026-09-08: INVERTED from the old "disabled while a game is
+    // active" check - the server-authoritative gameRunning disable/title
+    // is removed entirely; only a running addon job disables it now,
+    // client-known via Store.state.job - section 3.1's own disabled+title
+    // idiom, unchanged, exercised a few lines below).
     const gameWin = await loadFrame("?mock=1&test=1&view=settings&appUpdate=ready&game=1");
     await waitForReady(gameWin, 8000);
-    checkTry("Install now is disabled with title \"WoW is running\" while a game is active", function () {
+    checkTry("Install now stays enabled with no title while a game is active (the removed gameRunning gate never fires)", function () {
       const btn = q(gameWin, "#btn-app-update-install");
-      return !!btn && btn.disabled === true && btn.title === "WoW is running";
+      return !!btn && btn.disabled === false && !btn.hasAttribute("title");
     });
 
     const jobWin = await loadFrame("?mock=1&test=1&view=settings&appUpdate=ready");

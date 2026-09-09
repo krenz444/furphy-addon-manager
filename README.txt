@@ -29,8 +29,8 @@ UNINSTALL (three equivalent ways)
 
 UPDATES ITSELF (starting with version 1.22.0)
   Furphy checks for a newer version of ITSELF and installs it on its own, the next time doing so is safe - never
-  while WoW is running, never mid-addon-update, and (for the fully automatic path) never while a Furphy window is
-  open. If a window is open when an update is ready, you'll see a small banner with an Install now button instead;
+  mid-addon-update, and (for the fully automatic path) never while a Furphy window is open. If a window is open
+  when an update is ready, you'll see a small banner with an Install now button instead;
   either way it takes only a few seconds and your addon list/settings/logs are never touched. A tray balloon lets
   you know once, after a silent update finishes.
   Settings has its own "App updates" section (separate from "Update addons in the background" above - that one
@@ -44,9 +44,9 @@ UPDATES ITSELF (starting with version 1.22.0)
 ONE WAY IN
   Desktop shortcut "Furphy Addon Manager" opens the app (installed list, updates, versions, browse, settings).
   The tray icon's own background service keeps your addons updated on its own schedule (its "Update addons in
-  the background" checkbox), so there's nothing else to click just to stay current - it pauses automatically
-  while WoW is actually running. The app refuses to run two operations at once. The tray icon's right-click
-  menu also has its own Start with Windows checkbox and an Uninstall option - see UNINSTALL above.
+  the background" checkbox), so there's nothing else to click just to stay current. The app refuses to run two
+  operations at once. The tray icon's right-click menu also has its own Start with Windows checkbox and an
+  Uninstall option - see UNINSTALL above.
 
 NO API KEY NEEDED
   Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up, no

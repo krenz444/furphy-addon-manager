@@ -470,66 +470,121 @@ Describe 'App-update: VERSION-vs-tag mismatch is refused after extraction' {
 }
 
 # =====================================================================
-# 4) POST /api/app-update/install while WoW is (fakely) running -> 409
-#    (section 12, item 5).
+# 3b) GAME-MODE-SPEC.md (2026-09-08) section 8, new-coverage item 2: POST
+#     /api/app-update/check actually spawns (never a soft-skip) and the
+#     cycle still reaches ready while a fake WoW process is running.
+#     Handle-AppUpdateCheck never had a game-running branch left to
+#     invert by the time this file was written (Package A's own edit had
+#     already dropped it - GAME-MODE-SPEC.md section 2's addon-server.ps1
+#     :9528-9538 row), so this is net-new coverage, not an inversion.
 # =====================================================================
 
-Describe 'App-update: install refused while WoW is running' {
+Describe 'App-update: check spawns and reaches ready while WoW is running' {
     if (-not ($Script:CapCore -and $Script:CapMaintenance)) {
-        It 'POST /api/app-update/install -> 409 "WoW is running" when Test-GameRunning is true' {
+        It 'POST /api/app-update/check is accepted and the cycle reaches ready even when Test-GameRunning is true' {
             Write-PendingSkip 'needs APPUPD-1 (GitHubBaseUrl seam), APPUPD-2 (routes/handlers) and APPUPD-3 (Invoke-AppUpdateMaintenance)'
         }
         return
     }
 
-    # Handle-AppUpdateInstall's real, landed order (confirmed live while
-    # writing this file) checks state=="ready" FIRST (400 "nothing
-    # staged" otherwise) and only reaches the job/game-running gates once
-    # something genuinely is - so this Describe must stage a real ready
-    # update before it can observe the WoW-running 409 at all. The fake
-    # WoW process name is picked and told to the server UP FRONT (so
-    # -WowFakeProcessName is fixed for the server's whole lifetime, per
-    # Test-GameRunning's own design) but the process itself is started
-    # only AFTER staging completes, so "game running" reads false during
-    # the check/download/verify pipeline and true only for the install
-    # attempt this Describe is actually about.
-    # Handle-AppUpdateInstall also resolves a real WoW root
-    # (Get-FlavourWowRootPath) before it ever reaches the game-running
-    # check - a scratch server with no WoW root behind it 500s with
-    # "Could not resolve the WoW folder for this install." instead
-    # (found live while writing this file), so this Describe needs a
-    # real Copy-Fixture root too.
-    $wowRoot = Copy-Fixture
-    $root = New-TempRoot -Name 'appupdate-game-running'
+    $root = New-TempRoot -Name 'appupdate-check-game-running'
     $fakeName = 'WowFakeAppUpdate' + (Get-Random -Maximum 99999)
     $started = $null
     $fakeWow = $null
     try {
+        # Fake WoW started BEFORE the server (and stays alive for the
+        # whole Describe) - unlike the old install Describe this file used
+        # to need careful before/after staging around, there is no gate
+        # left anywhere in this flow to race against Test-GameRunning's
+        # 30s cache, so ordering is no longer load-bearing here.
+        $fakeWow = New-FakeWowProcess -Root $root -ProcessName $fakeName
+        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.6'; ZipEntries = @{ VERSION = '99.0.6' } } -ExtraServerArgs @('-WowFakeProcessName', $fakeName)
+
+        It 'POST /api/app-update/check is accepted (202 fresh, or 200 if the automatic startup tick is already checking/downloading), never a "game running" skip, and the cycle reaches ready' {
+            $check = Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check'
+            @(200, 202) -contains $check.StatusCode | Should Be $true
+            ([string]$check.Body.skipped) | Should Be ''
+
+            # Same "assert only the final resting state" note as the happy-
+            # path Describe above - a fast local stub can legitimately move
+            # through checking/downloading between two poll ticks.
+            $final = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('ready', 'error') -TimeoutSec 30
+            $final.state | Should Be 'ready'
+            $final.latestVersion | Should Be '99.0.6'
+        }
+    } finally {
+        Stop-FakeWowProcess -FakeWow $fakeWow
+        if ($started) {
+            Stop-GitHubReleaseStubServer -Stub $started.Stub
+            Stop-TestServer -Server $started.Server
+        }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.6-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+}
+
+# =====================================================================
+# 4) POST /api/app-update/install succeeds while WoW is (fakely)
+#    running - the old 409 gate is gone (GAME-MODE-SPEC.md 2026-09-08).
+# =====================================================================
+
+Describe 'App-update: install succeeds while WoW is running' {
+    if (-not ($Script:CapCore -and $Script:CapMaintenance)) {
+        It 'POST /api/app-update/install -> 200 ok:true even when Test-GameRunning is true' {
+            Write-PendingSkip 'needs APPUPD-1 (GitHubBaseUrl seam), APPUPD-2 (routes/handlers) and APPUPD-3 (Invoke-AppUpdateMaintenance)'
+        }
+        return
+    }
+
+    # GAME-MODE-SPEC.md (2026-09-08) section 2/6: INVERTED from the old
+    # "install refused while WoW is running" Describe. Handle-
+    # AppUpdateInstall's game-running 409 gate is gone entirely - the two
+    # preconditions that survive are state=="ready" (400 otherwise) and
+    # (server-enforced, unchanged, covered by the separate "install
+    # deferred while an addon job is running" Describe below) no addon job
+    # running. Since there is no gate left to race against a 30s
+    # Test-GameRunning cache, the fake WoW process is simply started UP
+    # FRONT and stays alive for this Describe's ENTIRE run - check,
+    # download, verify, stage, AND install all happen while it is
+    # "running", proving there is nothing left to trip.
+    #
+    # FURPHY_TEST_APPUPDATE_DRYRUN, same seam the "window-initiated
+    # install" Describe further below already uses: install.ps1 is
+    # Package B's own file under active parallel development, and this
+    # build root's hard live-safety rules forbid this test from actually
+    # relaunching it (a real -Upgrade would also set $Script:ShuttingDown
+    # and tear down this Describe's own scratch server) - the dry-run
+    # seam records the fully-constructed command line instead of spawning
+    # anything.
+    # Handle-AppUpdateInstall also resolves a real WoW root
+    # (Get-FlavourWowRootPath) before it reaches state=="ready"'s sibling
+    # checks - a scratch server with no WoW root behind it 500s with
+    # "Could not resolve the WoW folder for this install." instead
+    # (found live while writing the original Describe this inverts), so
+    # this Describe needs a real Copy-Fixture root too.
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'appupdate-succeeds-game-running'
+    $fakeName = 'WowFakeAppUpdate' + (Get-Random -Maximum 99999)
+    $started = $null
+    $fakeWow = $null
+    $originalDryRun = $env:FURPHY_TEST_APPUPDATE_DRYRUN
+    try {
+        $env:FURPHY_TEST_APPUPDATE_DRYRUN = '1'
+        $fakeWow = New-FakeWowProcess -Root $root -ProcessName $fakeName
         $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.4'; ZipEntries = @{ VERSION = '99.0.4' } } -ExtraServerArgs @('-WowFakeProcessName', $fakeName, '-WowRoot', $wowRoot)
         Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check' | Out-Null
         $ready = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('ready', 'error') -TimeoutSec 30
         $ready.state | Should Be 'ready'
 
-        $fakeWow = New-FakeWowProcess -Root $root -ProcessName $fakeName
-
-        It 'returns 409 with an error mentioning WoW, even though state=ready (the WoW-running gate is checked, not skipped, once staged)' {
-            # Test-GameRunning caches its answer for $Script:GameProbeIntervalSeconds
-            # (30, confirmed live in addon-server.ps1) - the staging phase
-            # above already primed that cache to "not running" (nothing
-            # named $fakeName existed yet at that point), so a call made
-            # right after starting the fake process would still read the
-            # STALE cached "false" and 200 instead of 409 (confirmed live
-            # while writing this file - a real, once-per-30s throttle, not
-            # a test bug to work around any other way). Wait past that
-            # window so this call observes a genuinely fresh read.
-            Start-Sleep -Seconds 31
+        It 'returns 200 ok:true (never 409/"WoW is running") once staged, with the fake WoW process still alive the whole time' {
             $r = Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/install' -Body @{ relaunch = 'window' }
-            $r.Ok | Should Be $false
-            $r.StatusCode | Should Be 409
-            $r.Body.error | Should Be 'WoW is running'
+            $r.Ok | Should Be $true
+            $r.StatusCode | Should Be 200
+            $r.Body.ok | Should Be $true
         }
     } finally {
         Stop-FakeWowProcess -FakeWow $fakeWow
+        if ($null -eq $originalDryRun) { Remove-Item Env:\FURPHY_TEST_APPUPDATE_DRYRUN -ErrorAction SilentlyContinue }
+        else { $env:FURPHY_TEST_APPUPDATE_DRYRUN = $originalDryRun }
         if ($started) {
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server

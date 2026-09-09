@@ -65,7 +65,8 @@
                         up-to-two live HTTPS GETs and Initialize-
                         WagoGrowthSnapshots' up-to-10-page-per-flavour Wago
                         crawl, each already self-gated on its own 24h/20h
-                        freshness check and Test-GameRunning - then exits.
+                        freshness check (GAME-MODE-SPEC.md, 2026-09-08: no
+                        longer also gated on Test-GameRunning) - then exits.
                         Never binds a listener, never enters the request
                         loop. Spawned periodically as a hidden, BelowNormal-
                         priority child of the real serving process (see
@@ -231,14 +232,17 @@ function Write-ServerLog {
 # Game state (P1 perf pass) - "is any known WoW client running"
 # =====================================================================
 #
-# Eric's rule (verbatim): "do a full performance tuning / pass, absolutely
-# nothing / everything must have zero impact on gameplay". This server is
-# resident (the background tray keeps it alive, and the native host talks to
-# it while Get New Addons/My Addons is open) - so it needs its OWN cheap,
-# cached answer to "is WoW running right now", not just a UI-side check, so
-# that server-initiated work (the startup catalogue refresh, the keyless
-# enrichment fetches a browsing session can trigger) can refuse to do network
-# I/O while the game is up even if the caller forgot to gate on it.
+# GAME-MODE-SPEC.md (2026-09-08, Eric's rule verbatim: "addon browsing,
+# updates and stuff need to happen while wow is running"): this detection
+# signal no longer gates any network or functional work. It exists ONLY to
+# (a) drive the SPA/tray's decorative-gating attributes and the
+# reload/relog awareness signal (job.reloadNeeded, lastRun.reloadNeeded,
+# the tray balloon's fresh check), and (b) gate the surviving CPU-only
+# measures kept as defense-in-depth for a resident process: the 15s
+# request-loop WaitOne widening, BelowNormal priority/EcoQoS, and the
+# decorative theme-animation CSS gating. It does not refuse or delay any
+# addon check/update/install, Wago/CurseForge browsing, catalogue refresh,
+# enrichment fetch, or self-update check/download/install step.
 #
 # KnownWowProcessNames MUST be kept byte-identical to host\FurphyHost.cs's
 # WowDetector.KnownWowNames (documented as one shared list in SPEC.md's
@@ -350,10 +354,13 @@ function Test-GameRunning {
 # Lowers this process's OS scheduling priority and (Windows 10 1709+) opts
 # into EcoQoS via SetProcessInformation, so the scheduler/power manager
 # treat it as background work rather than something that could compete with
-# a foreground game for cycles - on top of (not instead of) the gameRunning
-# gates above, which stop the work itself rather than just deprioritizing
-# it. Best-effort throughout: a failure here (older Windows, a locked-down
-# environment) must never block startup or a CLI run.
+# a foreground game for cycles. GAME-MODE-SPEC.md section 1.2: this is a
+# CPU-only, resident-process measure kept for exactly that reason - it
+# never stops or delays any addon/browse/update/self-update work, unlike
+# the network gates this same P1 pass used to add elsewhere in this file
+# (all removed - see GAME-MODE-SPEC.md). Best-effort throughout: a failure
+# here (older Windows, a locked-down environment) must never block startup
+# or a CLI run.
 function Set-FurphyLowPriority {
     try {
         [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
@@ -1402,10 +1409,10 @@ function Get-DefaultSettings {
         runAtStartup               = $false
         # APP-UPDATE-SPEC.md section 6: whether a staged, verified app
         # update installs itself automatically the next time doing so is
-        # safe (never while WoW is running or a job is running, and - for
-        # this automatic path only - never while any Furphy window is
-        # open). Default ON - opposite polarity from backgroundUpdates just
-        # above (that one defaults OFF), intentional per Eric's brief.
+        # safe (never while a job is running, and - for this automatic
+        # path only - never while any Furphy window is open). Default ON
+        # - opposite polarity from backgroundUpdates just above (that one
+        # defaults OFF), intentional per Eric's brief.
         # Checking for updates always happens either way; this toggle only
         # gates automatic INSTALLING (section 3.5).
         appUpdateAutoInstall       = $true
@@ -2916,6 +2923,12 @@ function Start-Job {
         # above) - Update-JobStatus's best-effort read no-ops on a falsy
         # ProgressPath exactly like Write-ProgressStep itself does CLI-side.
         ProgressPath  = $progressPath
+        # GAME-MODE-SPEC.md section 4.1: captured ONCE, at job-creation
+        # time - whether WoW was already running when this job started.
+        # addon-sync.ps1 itself has zero game-state awareness, so this can
+        # only be captured here, server-side. Feeds Get-JobStatusView's
+        # reloadNeeded predicate.
+        gameRunningAtStart = (Test-GameRunning)
     }
     Add-JobToHistory -Job $job
     Set-CurrentJobForFlavour -Flavor $Flavor -Job $job
@@ -3156,6 +3169,10 @@ function Start-ImportJob {
         SyncLogOffset = 0
         Phases        = $plan.Phases
         PhaseIndex    = -1
+        # GAME-MODE-SPEC.md section 4.1: captured before checking whether
+        # there is anything to import - correct even on the zero-phases
+        # immediate-finish branch just below.
+        gameRunningAtStart = (Test-GameRunning)
     }
     foreach ($row in $plan.SkipRows) { $job.results.Add($row) }
 
@@ -3395,6 +3412,19 @@ function Load-CheckState {
                     # object in $Script:Jobs carries the same property shape.
                     Phases        = $null
                     PhaseIndex    = 0
+                    # GAME-MODE-SPEC.md section 2/4.1 (bug fix): a job
+                    # persisted before this field existed has no
+                    # gameRunningAtStart key in state.json - $jv.gameRunningAtStart
+                    # reads as $null there, and [bool]$null is $false, the
+                    # same "no signal, no reload note" behavior a brand-new
+                    # job with the field would show if it legitimately
+                    # started with WoW closed. Without this line,
+                    # Get-JobStatusView's reloadNeeded silently reads a
+                    # never-set NoteProperty on every reconstructed job,
+                    # so EVERY job that survives a server restart reports
+                    # reloadNeeded:false from then on, even one that
+                    # genuinely updated an addon while WoW was running.
+                    gameRunningAtStart = [bool]$jv.gameRunningAtStart
                 }
                 $loadedJobs.Add($job)
 
@@ -3574,9 +3604,19 @@ function Apply-JobCompletionSideEffects {
             $summaryParts.Add("$k`: $($counts[$k])")
         }
         $Script:LastRunByFlavour[$flavor] = [PSCustomObject]@{
-            timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            summary   = ($summaryParts -join '  ')
-            rows      = $rows.ToArray()
+            timestamp    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            summary      = ($summaryParts -join '  ')
+            rows         = $rows.ToArray()
+            # GAME-MODE-SPEC.md section 4.2: same predicate as
+            # Get-JobStatusView's reloadNeeded, sourced from the job that
+            # just completed - this is what lets the SPA's "Last run" line
+            # keep the reload reminder after later unrelated jobs pushed
+            # this job out of state.json's 20-entry history.
+            reloadNeeded = [bool]($Job.gameRunningAtStart -and (
+                $rows | Where-Object {
+                    $_.Status -eq 'Installed' -or $_.Status -eq 'Updated' -or $_.Status -eq 'Rolled-back'
+                } | Select-Object -First 1
+            ))
         }
     }
 }
@@ -3771,6 +3811,8 @@ function Start-SwitchSourceJob {
         SyncLogOffset = 0
         Phases        = $phases
         PhaseIndex    = -1
+        # GAME-MODE-SPEC.md section 4.1: captured once, at job-creation time.
+        gameRunningAtStart = (Test-GameRunning)
     }
 
     if (Test-Path -LiteralPath $Script:SyncLogPath) {
@@ -4133,6 +4175,33 @@ function Get-JobStatusView {
         # state 'awaiting_flavour' - $null (safe NoteProperty read) for
         # every other job, exactly like .progress above.
         choices    = $Job.choices
+        # GAME-MODE-SPEC.md section 4.1: whether WoW was already running
+        # when this job started, captured once at job-creation time (Start-
+        # Job/Start-ImportJob/Start-SwitchSourceJob). Exposed here (not just
+        # folded into reloadNeeded below) because Save-CheckState persists
+        # jobs by serializing THIS object - without this field round-
+        # tripping through state.json, Load-CheckState's own
+        # gameRunningAtStart reconstruction (the section 2/8 bug fix) would
+        # always read $null back after a server restart, silently
+        # defeating reloadNeeded for every job that survives one.
+        gameRunningAtStart = [bool]$Job.gameRunningAtStart
+        # GAME-MODE-SPEC.md section 4.1: true only when WoW was already
+        # running when this job STARTED (gameRunningAtStart) AND at least
+        # one result row actually wrote to disk (Installed/Updated/
+        # Rolled-back - deliberately narrower than the four-value
+        # updateAvailable-cleanup set used elsewhere in this file; Pinned/
+        # Unpinned/Ignored/Unignored never touch the AddOns folder, and
+        # Removed is excluded per Eric's literal "updated or installed"
+        # wording, see GAME-MODE-SPEC.md section 7.5). A check-only job's
+        # rows are always Would-update/Up-to-date/Failed/Skipped, so this
+        # naturally evaluates false without a per-kind allowlist. Drives the
+        # SPA toast/note and, via Apply-JobCompletionSideEffects, the
+        # persisted lastRun.reloadNeeded slot too.
+        reloadNeeded = [bool]($Job.gameRunningAtStart -and (
+            $Job.results | Where-Object {
+                $_.Status -eq 'Installed' -or $_.Status -eq 'Updated' -or $_.Status -eq 'Rolled-back'
+            } | Select-Object -First 1
+        ))
     }
 }
 
@@ -4546,21 +4615,16 @@ function Get-WagoCached {
       from the other on-disk/in-memory caches this server keeps (e.g.
       $Script:CfCatalogueIndex), so a bug in one can't reach another's.
 
-      WAGO-BROWSE-SPEC.md section 3.5 (a CORRECTION found during that
-      round - this endpoint's caller, Handle-WagoSearch, never actually
-      gated on Test-GameRunning at all, unlike the keyless-enrichment
-      prefetch elsewhere in this file which already does): -AllowLiveFetch
-      (switch, defaults to $true) is new and fully backward-compatible -
-      every pre-existing call site (Handle-WagoCategories,
-      Handle-WagoAddonDetails, Handle-WagoAddonReleases,
-      Handle-WagoAddonGallery, Get-WagoAutoMatch, Get-CfEnrichmentNoKey)
-      omits it and is byte-for-byte unchanged. When a caller passes
-      -AllowLiveFetch:$false (Handle-WagoBrowse, for its three live-fetch
-      sort modes, while a WoW client is running) and no fresh (<5-minute)
-      cache entry already exists for this exact URI, this returns $null
-      instead of ever calling Invoke-WagoInertiaJson - the letter of the
-      "no network while WoW runs" rule is "no network," not "no data," so
-      an already-warm cache hit is still served either way.
+      -AllowLiveFetch (switch, defaults to $true): every call site
+      (Handle-WagoBrowse, Handle-WagoCategories, Handle-WagoAddonDetails,
+      Handle-WagoAddonReleases, Handle-WagoAddonGallery, Get-WagoAutoMatch,
+      Get-CfEnrichmentNoKey) omits it and always allows a live fetch on a
+      cold miss now - GAME-MODE-SPEC.md (2026-09-08) removed the one call
+      site (Handle-WagoBrowse) that used to pass -AllowLiveFetch:$false
+      while WoW was running. The switch itself stays as general-purpose
+      plumbing (a fresh, <5-minute cache entry is still served either way
+      regardless of live-fetch permission) in case a future caller needs
+      it, but nothing in this file passes $false any more.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$PageUri,
@@ -4779,19 +4843,15 @@ function Handle-WagoBrowse {
       treated as absent. page is [int]::TryParse'd; non-numeric or <=0
       clamps to 1 (hardening over the old blank-only substitution).
 
-      Game-mode rule (WAGO-BROWSE-SPEC.md 3.5 - a CORRECTION over this
-      endpoint's own predecessor: Handle-WagoSearch never gated on
-      Test-GameRunning at all, an ungated hole in this app's "no network
-      while WoW runs" invariant, unlike the keyless-enrichment prefetch
-      elsewhere in this file which already enforces it). For the three
-      live-fetch sorts (popular/name/updated), Get-WagoCached is called
-      with -AllowLiveFetch:(-not (Test-GameRunning)) - an already-warm
-      cache hit still answers (the letter of the rule is "no network," not
-      "no data"), but a cold miss while the game is running returns 200
-      with an empty result set and gameActive:true rather than ever
-      reaching Invoke-WagoHttpRequest. sort=gaining is a pure disk read and
-      is UNAFFECTED by any of this - always answerable regardless of game
-      state.
+      GAME-MODE-SPEC.md (2026-09-08): Wago browsing/search works fully
+      while a WoW client is running, matching Handle-WagoSearch's original
+      (pre-"fix") ungated behavior - the WAGO-BROWSE-SPEC.md 3.5
+      Test-GameRunning gate this endpoint used to have is removed. All
+      three live-fetch sorts (popular/name/updated) always call
+      Get-WagoCached with a live fetch allowed; there is no more
+      game-running blocked state or gameActive field in the response.
+      sort=gaining is a pure disk read and was always answerable
+      regardless of game state.
     #>
     param($Context, $RouteMatch)
 
@@ -4868,28 +4928,10 @@ function Handle-WagoBrowse {
     # switching between the two tabs) and re-sorts the returned page locally
     # via Sort-WagoItemsByUpdated below.
 
-    $gameIsRunning = Test-GameRunning
     try {
-        $props = Get-WagoCached -PageUri $uri -AllowLiveFetch:(-not $gameIsRunning)
+        $props = Get-WagoCached -PageUri $uri -AllowLiveFetch:$true
     } catch {
         Send-Json -Context $Context -StatusCode 502 -Body @{ error = "Wago request failed: $($_.Exception.Message)" }
-        return
-    }
-
-    if ($null -eq $props) {
-        # 3.5: game is running and no warm (<5-minute) cache entry already
-        # existed for this exact URI - never an error; "no data because the
-        # game is running" is an expected, common state, not a failure.
-        $body = [PSCustomObject]@{
-            items       = @()
-            page        = 1
-            lastPage    = 1
-            total       = 0
-            sortApplied = $sortApplied
-            categories  = @()
-            gameActive  = $true
-        }
-        Send-Json -Context $Context -StatusCode 200 -Body $body
         return
     }
 
@@ -5363,29 +5405,21 @@ function Initialize-WagoGrowthSnapshots {
       crawls up to 10 pages of Wago's own popularity listing (the SAME
       Get-WagoCached/Invoke-WagoHttpRequest path, same pacing, every other
       Wago call in this file uses) and writes/prunes
-      <CacheDir>\wago-growth-<gameVersion>.json, gated on:
-        1. Test-GameRunning, checked once before this function does
-           anything at all (mirrors Initialize-CfCatalogueIndex's own
-           startup gate verbatim) AND re-checked immediately before EVERY
-           SINGLE page fetch inside the crawl (the TOCTOU fix - a worst
-           case of up to 6 flavours x 10 pages must never keep firing live
-           requests for 20-30 seconds after WoW actually launched
-           mid-crawl). The instant it flips true from either check: stop
-           the ENTIRE run immediately (not just the current flavour),
-           keeping whatever pages the CURRENT flavour already captured
-           (the PARTIAL rule, below), and skip every remaining
-           not-yet-crawled flavour entirely for this startup - they get
-           another chance at the next 20h-gated opportunity.
-        2. A per-file 20-hour freshness check (that file's own last
-           entry's capturedAt) - per-game_version, not global, so one
-           flavour's recent capture never blocks a newly-installed
-           sibling's first one.
+      <CacheDir>\wago-growth-<gameVersion>.json, gated on a per-file
+      20-hour freshness check (that file's own last entry's capturedAt) -
+      per-game_version, not global, so one flavour's recent capture never
+      blocks a newly-installed sibling's first one. GAME-MODE-SPEC.md
+      (2026-09-08): the crawl runs regardless of WoW's process state - the
+      Test-GameRunning startup gate and the per-page TOCTOU abort this
+      function used to have are both removed; this is Wago's own daily
+      background crawl, and per Eric's policy it needs to happen throughout
+      a play session same as everything else.
 
       PARTIAL rule: if zero pages succeeded for a game_version, nothing is
       written (never persist an empty-items snapshot - it would corrupt
       the "closest snapshot" window search and the readiness rule); if 1+
-      pages succeeded before a later page failed or the game-running abort
-      fired, the snapshot IS still written with whatever was captured.
+      pages succeeded before a later page failed, the snapshot IS still
+      written with whatever was captured.
 
       Exception-safe by construction (4.3): each game_version's crawl runs
       inside its own try/catch (log-and-continue, matching this file's
@@ -5408,20 +5442,15 @@ function Initialize-WagoGrowthSnapshots {
 
     # Round-1-fixer (verifier finding 1): test-mode escape hatch - see
     # $Script:SkipWagoGrowthCrawl's own declaration/comment near the top of
-    # this file for the full rationale. Checked first, before Test-GameRunning
-    # or anything else, so a test run never pays for even one live Wago
-    # request it did not ask for.
+    # this file for the full rationale. Checked first, before anything else,
+    # so a test run never pays for even one live Wago request it did not
+    # ask for.
     if ($Script:SkipWagoGrowthCrawl) {
         Write-ServerLog 'Wago growth snapshot crawl skipped at startup: FURPHY_TEST_SKIP_WAGO_GROWTH is set (test mode)'
         return
     }
 
     $crawlStart = Get-Date
-
-    if (Test-GameRunning) {
-        Write-ServerLog 'Wago growth snapshot crawl skipped at startup: WoW is running'
-        return
-    }
 
     $installedFlavours = Get-CurrentInstalledFlavours
 
@@ -5441,20 +5470,12 @@ function Initialize-WagoGrowthSnapshots {
         }
     }
 
-    $abortAll = $false
     try {
         foreach ($gv in $gameVersionsSeen) {
-            if ($abortAll) { break }
             try {
                 Set-CurrentFlavourContext -Flavor $flavourIdByGameVersion[$gv]
 
-                if (Test-GameRunning) {
-                    Write-ServerLog 'Wago growth snapshot crawl aborted mid-run: WoW started'
-                    $abortAll = $true
-                    break
-                }
-
-                # Gate 2: per-file 20h freshness check.
+                # Per-file 20h freshness check.
                 $snapshotPath = Get-WagoGrowthSnapshotPath -GameVersion $gv
                 $existing = Read-WagoGrowthSnapshotFile -Path $snapshotPath
                 if ($existing -and $existing.snapshots -and @($existing.snapshots).Count -gt 0) {
@@ -5475,17 +5496,11 @@ function Initialize-WagoGrowthSnapshots {
                     }
                 }
 
-                # Crawl up to 10 pages, re-checking game state before EVERY
-                # page fetch (the TOCTOU fix, section 4.2).
+                # Crawl up to 10 pages.
                 $capturedItems = New-Object 'System.Collections.Generic.List[object]'
                 $seenSlugs = @{}
                 $pagesFetched = 0
                 for ($p = 1; $p -le 10; $p++) {
-                    if (Test-GameRunning) {
-                        Write-ServerLog 'Wago growth snapshot crawl aborted mid-run: WoW started'
-                        $abortAll = $true
-                        break
-                    }
                     $pageUri = $Script:WagoBaseUrl + '/?game_version=' + [System.Uri]::EscapeDataString($gv) + '&page=' + $p
                     try {
                         $pageProps = Get-WagoCached -PageUri $pageUri -AllowLiveFetch:$true
@@ -5532,8 +5547,6 @@ function Initialize-WagoGrowthSnapshots {
                     Save-WagoGrowthSnapshot -GameVersion $gv -Items $capturedItems.ToArray() -CapturedAtUtc (Get-Date).ToUniversalTime()
                     Write-ServerLog "Wago growth snapshot captured for '$gv': $($capturedItems.Count) items across $pagesFetched page(s)"
                 }
-
-                if ($abortAll) { break }
             } catch {
                 Write-ServerLog "Wago growth snapshot crawl failed for game_version '$gv': $($_.Exception.Message)"
             }
@@ -5601,14 +5614,17 @@ function Invoke-MaintenanceTick {
       file's only existing "timer tick"). Spawns a hidden, BelowNormal-
       priority -MaintenanceOnly child of THIS SAME SCRIPT at most once every
       $Script:MaintenanceIntervalMinutes, and only when:
-        - -GameRunning is $false (never while WoW is running - the caller
-          already computed this once for its own wait-length decision, so
-          this just reuses it rather than probing a second time);
         - $Script:LastMaintenanceAttemptAt is at least that old ($null-
           initialized to [DateTime]::MinValue, so the very first tick after
           startup always qualifies - "shortly after startup", per the task
           brief);
         - Test-MaintenanceChildRunning says no such child is already up.
+      GAME-MODE-SPEC.md (2026-09-08): this used to also refuse while WoW
+      was running (a single master gate disabling catalogue refresh, the
+      Wago growth crawl, and the hourly self-update check together
+      whenever the game ran) - that gate is dropped. The maintenance child
+      now spawns on its normal interval regardless of game state, same as
+      every other addon/browse/update path in this file.
       The spawned child is itself already fully self-gated (Initialize-
       CfCatalogueIndex/Initialize-WagoGrowthSnapshots's own 24h/20h
       freshness checks, unchanged) - most attempts do nothing beyond a
@@ -5618,16 +5634,13 @@ function Invoke-MaintenanceTick {
       freshness SLAs well inside their own windows.
       $Script:LastMaintenanceAttemptAt is stamped the moment a child is
       actually SPAWNED, not merely considered - a tick that declined to
-      spawn (game running, or one already in flight) tries again on the
-      very next tick once that condition clears, instead of waiting out the
-      rest of the hour.
+      spawn (one already in flight) tries again on the very next tick once
+      that condition clears, instead of waiting out the rest of the hour.
       Best-effort throughout, like every startup/maintenance path in this
       file: a failure here must never affect request handling.
     #>
-    param([bool]$GameRunning)
 
     try {
-        if ($GameRunning) { return }
         if (((Get-Date) - $Script:LastMaintenanceAttemptAt).TotalMinutes -lt $Script:MaintenanceIntervalMinutes) { return }
         if (Test-MaintenanceChildRunning) { return }
 
@@ -5920,14 +5933,7 @@ function Initialize-CfCatalogueIndex {
             $stale = $true
         }
     }
-    if ($stale -and (Test-GameRunning)) {
-        # P1 perf pass (item 2): a startup landing mid-play (crash recovery,
-        # or a machine where the tray's own server auto-start races a login
-        # WoW launch) must not spend network/CPU on a catalogue refresh
-        # while the game is up - use whatever is already on disk (possibly
-        # empty) and let the NEXT restart (or a manual refresh) catch up.
-        Write-ServerLog 'CurseForge catalogue refresh skipped at startup: WoW is running'
-    } elseif ($stale -and $Script:SkipCfCatalogueFetch) {
+    if ($stale -and $Script:SkipCfCatalogueFetch) {
         # first-run-docs:fresh-install-startup-blocks-first-check (Round 36
         # fixer): test-mode escape hatch - see $Script:SkipCfCatalogueFetch's
         # own declaration/comment near the top of this file. Checked after
@@ -6484,20 +6490,18 @@ function Get-CfEnrichmentNoKey {
 
     $catalogueEntry = Get-CfCatalogueEntry -ProjectId $ProjectId
 
-    # P1 perf pass (item 2): "no enrichment prefetch" while a WoW client is
-    # running - both live-network branches below (Wago-match, addon-radar)
-    # are skipped entirely and this falls straight through to the
-    # catalogue-only/memory-and-disk-only fallback (step 3), which does no
-    # network I/O at all. This is a server-side backstop: the SPA/host
-    # already gate the window/poll loop on WowDetector separately, but a
-    # stray request must never itself trigger a live fetch during gameplay.
-    $gameIsRunning = Test-GameRunning
+    # GAME-MODE-SPEC.md (2026-09-08): this used to skip both live-network
+    # branches below (Wago-match, addon-radar) while a WoW client was
+    # running, falling straight through to the catalogue-only/memory-and-
+    # disk-only fallback (step 3). That gate is dropped - per-addon
+    # enrichment always attempts a live/cached lookup now, same as every
+    # other addon/browse/update path in this file.
 
     # 1) Wago match.
     $wagoRef = $null
-    if ((-not $gameIsRunning) -and $rec -and $rec.wagoId) {
+    if ($rec -and $rec.wagoId) {
         $wagoRef = [string]$rec.wagoId
-    } elseif ((-not $gameIsRunning) -and $rec -and $rec.name) {
+    } elseif ($rec -and $rec.name) {
         $auto = Get-WagoAutoMatch -Name $rec.name -Author $rec.author
         if ($auto) { $wagoRef = $auto.slug }
     }
@@ -6528,7 +6532,7 @@ function Get-CfEnrichmentNoKey {
     }
 
     # 2) addon-radar.com, via the catalogue-resolved slug.
-    if ((-not $gameIsRunning) -and $catalogueEntry -and $catalogueEntry.slug) {
+    if ($catalogueEntry -and $catalogueEntry.slug) {
         $detail = Get-AddonRadarDetail -Slug ([string]$catalogueEntry.slug)
         if ($detail) {
             return [PSCustomObject]@{
@@ -9758,11 +9762,6 @@ function Handle-AppUpdateCheck {
        extra is needed here. #>
     param($Context, $RouteMatch)
 
-    if (Test-GameRunning) {
-        Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; skipped = 'game running' }
-        return
-    }
-
     $state = Get-AppUpdateState
     if ($state.state -eq 'checking' -or $state.state -eq 'downloading' -or (Test-AppUpdateChildRunning)) {
         # Idempotent - no double-spawn, mirroring Test-MaintenanceChildRunning's
@@ -9869,13 +9868,6 @@ function Handle-AppUpdateInstall {
         $state.deferredReason = 'job-running'
         try { Save-AppUpdateState -State $state } catch { }
         Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'busy: a job is running' }
-        return
-    }
-
-    if (Test-GameRunning) {
-        $state.deferredReason = 'game-running'
-        try { Save-AppUpdateState -State $state } catch { }
-        Send-Json -Context $Context -StatusCode 409 -Body @{ error = 'WoW is running' }
         return
     }
 
@@ -10261,21 +10253,22 @@ $Script:MaintenanceLockPath = Join-Path -Path $Script:CacheDir -ChildPath 'maint
 $Script:AppUpdateLockPath = Join-Path -Path $Script:CacheDir -ChildPath 'app-update-maintenance.lock'
 $Script:AddonsPathOverride = $AddonsPath
 $Script:IdleMinutes = $IdleMinutes
-# P1 perf pass (item 2): while a WoW client is running, the idle-exit window
-# shortens from the normal 20 minutes to 5 - nothing should be polling this
-# server during gameplay (the SPA/host gate on WowDetector too), so if it's
-# still up and idle 5 minutes into a play session, that is itself a signal
-# something forgot to close/stop polling, and getting the process torn down
-# sooner rather than later is the safer default. $Script:IdleMinutesNormal
-# preserves the caller's real -IdleMinutes value for use the moment
-# Test-GameRunning next reports false.
+# GAME-MODE-SPEC.md (2026-09-08): this used to shorten the idle-exit window
+# from the normal 20 minutes to 5 while a WoW client was running, on the
+# theory that nothing should be polling this server during gameplay. That
+# assumption is exactly what Eric's policy overturns - legitimate work
+# (browsing, checks, updates, the hourly maintenance tick) now happens
+# throughout a play session, so a quiet gap of a few minutes between
+# requests no longer means "this server is stuck, tear it down." Dropped:
+# $Script:IdleMinutesNormal is the only idle-exit window now, regardless of
+# game state.
 $Script:IdleMinutesNormal = $IdleMinutes
-$Script:IdleMinutesGameRunning = 5
 $Script:BuildInfoPathOverride = $BuildInfoPath
 # Test-only substitution for Test-GameRunning (see its own doc comment) -
-# set here, as early as possible, so it is already in effect before
-# Initialize-CfCatalogueIndex's startup gameRunning check runs below. Never
-# set outside a test harness passing -WowFakeProcessName explicitly.
+# set here, as early as possible, so it is already in effect before any
+# later call to Test-GameRunning (job creation, /api/ping, /api/state, the
+# request loop's own probe). Never set outside a test harness passing
+# -WowFakeProcessName explicitly.
 $Script:WowFakeProcessNameOverride = $WowFakeProcessName
 # FLAVORS-SPEC.md CS-F2: overrides Get-InstalledFlavours'/Resolve-
 # EffectiveAddonsPath's own WoW-root detection (S8's fixture path), the same
@@ -10286,7 +10279,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.22.1'
+$Script:Version = '1.23.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {
@@ -10387,9 +10380,8 @@ $Script:LastAddonRadarRequestTime = [DateTime]::MinValue
 #     first request-loop tick after startup already qualifies ("shortly
 #     after startup", per the task brief) - stamped the moment a child is
 #     actually SPAWNED, not merely considered, so a tick that skipped
-#     spawning (game running, or one already in flight) retries on the very
-#     next tick once that condition clears instead of waiting out the full
-#     interval.
+#     spawning (one already in flight) retries on the very next tick once
+#     that condition clears instead of waiting out the full interval.
 #   CfCatalogueCacheLastWriteUtc: the cache file's own LastWriteTimeUtc as
 #     of this process's last successful load of it (startup, or the most
 #     recent Update-CfCatalogueCacheIfChanged reload) - lets that per-tick
@@ -10434,9 +10426,10 @@ $Script:LastJobFilesPruneTime = [DateTime]::MinValue
 # do inline, strictly before it could accept its first request:
 # Initialize-CfCatalogueIndex's up-to-two live HTTPS GETs and Initialize-
 # WagoGrowthSnapshots' up-to-10-page-per-flavour Wago crawl. Both functions
-# are completely UNCHANGED below - they are exactly as self-gated on their
-# own 24h/20h freshness checks and Test-GameRunning as before this round;
-# only WHERE they are called from has moved. This branch never binds a
+# are self-gated on their own 24h/20h freshness checks (GAME-MODE-SPEC.md,
+# 2026-09-08: the Test-GameRunning gate both used to also have is removed -
+# the crawl runs regardless of game state now); only WHERE they are called
+# from has moved. This branch never binds a
 # listener, never enters the request loop, and never sets
 # $Script:AcceptingRequests true (it stays at its $false default the whole
 # time) - so both functions' own "must run before the request loop starts
@@ -10657,11 +10650,12 @@ Remove-OldJobFiles
 # this real startup pass - the next one is due ~$Script:JobCleanupIntervalMinutes later.
 $Script:LastJobFilesPruneTime = Get-Date
 
-# P1 perf pass (item 3): defense in depth on top of the gameRunning gates
-# above - lower this process's own scheduling priority/QoS regardless of
-# whether a game is running right now, since a resident server (the tray
-# keeps it alive across the whole session) should never compete for cycles
-# even during the brief window before Test-GameRunning's first probe.
+# P1 perf pass (item 3), kept per GAME-MODE-SPEC.md section 1.2 (a CPU-only
+# measure, not a network/functional gate): lower this process's own
+# scheduling priority/QoS regardless of whether a game is running right
+# now, since a resident server (the tray keeps it alive across the whole
+# session) should never compete for cycles even during the brief window
+# before Test-GameRunning's first probe.
 Set-FurphyLowPriority
 
 Write-ServerLog "Starting addon-server on port $Script:Port, root $Script:Root"
@@ -10771,16 +10765,20 @@ try {
     while ($true) {
         if ($Script:ShuttingDown) { break }
 
-        # P1 perf pass (item 2): while a WoW client is running, wait longer
-        # between wake-ups (15s instead of the normal-mode wait) - WaitOne
-        # still returns the instant a real request arrives (this only
-        # bounds how often the idle loop wakes up with nothing to do), so
-        # this has zero effect on request latency and only reduces how
-        # often an otherwise-idle process wakes the thread at all during a
-        # play session. Also shortens the idle-exit window itself (5
-        # minutes instead of the normal -IdleMinutes) for the same reason
-        # Test-GameRunning's own section documents - nothing should still
-        # be polling this server deep into a play session.
+        # P1 perf pass (item 2), kept per GAME-MODE-SPEC.md section 1.2:
+        # while a WoW client is running, wait longer between wake-ups (15s
+        # instead of the normal-mode wait) - WaitOne still returns the
+        # instant a real request arrives (this only bounds how often the
+        # idle loop wakes up with nothing to do), so this has zero effect
+        # on request latency and only reduces how often an otherwise-idle
+        # process wakes the thread at all during a play session.
+        # GAME-MODE-SPEC.md section 1.3/4.4: this used to also shorten the
+        # idle-exit window itself (5 minutes instead of the normal
+        # -IdleMinutes) - dropped. Legitimate work (browsing, checks,
+        # updates, the hourly maintenance tick) now happens throughout a
+        # play session, so a quiet gap between requests no longer means
+        # "this server is stuck, tear it down." $idleLimit stays
+        # $Script:IdleMinutesNormal regardless of game state.
         #
         # F1 (idle-loop perf pass): the normal-mode wait was 2000ms; raised
         # to 5000ms since nothing in tests\ depends on a sub-5s reaction to
@@ -10817,7 +10815,6 @@ try {
         $idleLimit = $Script:IdleMinutesNormal
         if ($gameRunningNow) {
             $waitMs = 15000
-            $idleLimit = $Script:IdleMinutesGameRunning
         }
 
         # Round 37 (server perf pass): this loop's own wake-up cadence is
@@ -10826,15 +10823,15 @@ try {
         # them), and MUST NEVER block a pending request: Update-
         # CfCatalogueCacheIfChanged is a single file stat unless the cache
         # actually changed underneath this process; Invoke-MaintenanceTick's
-        # own interval/game-running/lock-file guards make it a real no-op on
-        # every tick except roughly once an hour. long-run:failed-job-
+        # own interval/lock-file guards make it a real no-op on every tick
+        # except roughly once an hour. long-run:failed-job-
         # files-only-pruned-at-startup: Remove-OldJobFiles gets the same
         # "at most once an hour" treatment here - a plain directory
         # listing/delete with no network dependency, so unlike the two
         # calls above there is no per-call internal gate of its own; this
         # tick-level check IS the gate.
         Update-CfCatalogueCacheIfChanged
-        Invoke-MaintenanceTick -GameRunning $gameRunningNow
+        Invoke-MaintenanceTick
         if (((Get-Date) - $Script:LastJobFilesPruneTime).TotalMinutes -ge $Script:JobCleanupIntervalMinutes) {
             Remove-OldJobFiles
             $Script:LastJobFilesPruneTime = Get-Date

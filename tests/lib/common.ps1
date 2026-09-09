@@ -972,6 +972,78 @@ function Remove-AppUpdateTempLitter {
     return $removed
 }
 
+function Get-UninstallTempLitterFiles {
+    <#
+      Lists every %TEMP%\FurphyUninstall-*.ps1 / %TEMP%\FurphyUninstall-*.log
+      file whose own CreationTimeUtc is at or after -CreatedAfterUtc - the
+      same scoped-cleanup contract as Get-AppUpdateTempLitterFolders (that
+      function's own doc comment), adapted for FILES rather than
+      directories. GAME-MODE-SPEC.md-round test hygiene fix (260 leftover
+      copies found on the dev machine): install.ps1's own -Uninstall
+      self-delete (novice:NOVICE-3) removes its %TEMP% .ps1 copy on a
+      clean run, and its paired .log is deliberately never auto-deleted by
+      the product either way - but a test that only cleans up inline,
+      after its own last assertion, leaves BOTH behind the instant an
+      earlier assertion in the same It throws first. Read-only - never
+      deletes anything; exposed separately from
+      Remove-UninstallTempLitterFiles so a test can assert on the exact
+      list, same reasoning as the App-Update sibling.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][datetime]$CreatedAfterUtc
+    )
+    $tempPath = [System.IO.Path]::GetTempPath()
+    $candidates = @()
+    try {
+        $candidates = Get-ChildItem -LiteralPath $tempPath -File -Filter 'FurphyUninstall-*' -Force -ErrorAction SilentlyContinue
+    } catch {
+        $candidates = @()
+    }
+    $matches = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($f in @($candidates)) {
+        try {
+            if (($f.Extension -eq '.ps1' -or $f.Extension -eq '.log') -and $f.CreationTimeUtc -ge $CreatedAfterUtc) {
+                $matches.Add($f.FullName)
+            }
+        } catch {
+            # Gone or inaccessible between enumeration and this read - skip.
+        }
+    }
+    return , @($matches.ToArray())
+}
+
+function Remove-UninstallTempLitterFiles {
+    <#
+      Best-effort delete of every file Get-UninstallTempLitterFiles finds
+      for -CreatedAfterUtc. Call once per test FILE in an AfterAll, after
+      recording -CreatedAfterUtc at the very top of that file (mirrors
+      Server.AppUpdate.Tests.ps1's own $Script:LitterCutoffUtc pattern) -
+      this way every It in the file is covered by ONE sweep that always
+      runs, regardless of which assertion (if any) threw first, instead
+      of each It trying to clean up only its own exact new file via a
+      before/after set difference that a mid-It failure skips entirely.
+      Never throws - a locked file (the just-exited install.ps1 process
+      may still briefly hold its own script/log file open) is logged to
+      the host and skipped, not fatal to the run, same contract as
+      Remove-AppUpdateTempLitter. Returns the count actually removed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][datetime]$CreatedAfterUtc
+    )
+    $removed = 0
+    foreach ($full in (Get-UninstallTempLitterFiles -CreatedAfterUtc $CreatedAfterUtc)) {
+        try {
+            if (Test-Path -LiteralPath $full) {
+                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+                $removed++
+            }
+        } catch {
+            Write-Host "WARN: could not remove uninstall temp litter '$full': $($_.Exception.Message)"
+        }
+    }
+    return $removed
+}
+
 # ---------------------------------------------------------------------
 # Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
 # connection and never reads or responds - used to prove addon-sync.ps1's

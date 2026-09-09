@@ -18,24 +18,26 @@
  FULL-RUN-ONLY BY DESIGN (like fixture-acceptance/the theme audit): the
  tray's own WorkerLoop always waits ~90s before its first cycle (by
  design, unrelated to this test - see host\FurphyHost.cs's own comment on
- that constant), so this file waits for that first skip to complete
+ that constant), so this file waits for that first cycle to complete
  (steady state) BEFORE measuring a clean 90-second window - the whole
  Describe costs a bit over three real wall-clock minutes even before the
- "game stops" half runs. That is well over tests\run-all.ps1 -Quick's
- <4-minute budget for the WHOLE suite, so this layer is never part of
- Quick (tests\run-all.ps1's own Quick layer list omits 'perf', same as
- 'fixture-acceptance').
+ "cycle while WoW keeps running" half runs. That is well over
+ tests\run-all.ps1 -Quick's <4-minute budget for the WHOLE suite, so this
+ layer is never part of Quick (tests\run-all.ps1's own Quick layer list
+ omits 'perf', same as 'fixture-acceptance').
 
  WHY STEADY STATE FIRST: WorkerLoop's first RunCycle fires at t=~90s
  after the tray starts - if this file's own 90-second measurement window
- started at the same moment as the tray, the one-time first-skip
- transition (which DOES write tray-state.json and DOES log
- "[tray] cycle start" - see CompleteCycleSkippedWow's own comment: only
- the SECOND-and-later skip in the same WoW session is silent) would land
- inside the measured window, which would fail "tray-state.json unchanged"
- for a reason that has nothing to do with steady-state overhead. Waiting
- for that one transition to finish first (~100s, with margin) means the
- tray's own nextRunAtUtc is already ~10 minutes out by the time the real
+ started at the same moment as the tray, that first REAL cycle (GAME-
+ MODE-SPEC.md 2026-09-08 removed RunCycle's WowDetector.IsRunning gate
+ entirely, so this first cycle always runs in full now, WoW running or
+ not - it posts a sync job per flavour, DOES write tray-state.json, and
+ DOES log "[tray] cycle start"/"[tray] cycle done...") would land inside
+ the measured window, which would fail "tray-state.json unchanged" for a
+ reason that has nothing to do with steady-state overhead. Waiting for
+ that one cycle to finish first (~100s, with margin) means the tray's own
+ nextRunAtUtc is already ~30 minutes out (this file's own
+ backgroundIntervalMinutes, New-PerfAppRoot below) by the time the real
  90-second measurement starts, comfortably inside a "nothing scheduled"
  window.
 
@@ -175,9 +177,9 @@ function Get-NewLineCountMatching {
     return @($newLines | Where-Object { $_ -match $Pattern }).Count
 }
 
-Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
+Describe 'Perf: light touch while you play (P3 automated layer)' {
 
-    It 'steady state (WoW running, minimized window, tray past its first skip): CPU/network/log growth all stay within tolerance' {
+    It 'steady state (WoW running, minimized window, tray past its first completed cycle): CPU/network/log growth all stay within tolerance' {
         if (-not (Ensure-PerfHostBuilt)) {
             Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
             return
@@ -230,8 +232,8 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             $hostProc.Refresh()
             [FurphyPerfTest.User32]::ShowWindow($hostProc.MainWindowHandle, $Script:SW_MINIMIZE) | Out-Null
 
-            # Wait for the tray's one-time first-skip transition (~90s) to
-            # finish, plus margin, BEFORE measuring - see header comment.
+            # Wait for the tray's first real cycle (~90s) to finish, plus
+            # margin, BEFORE measuring - see header comment.
             Start-Sleep -Seconds $Script:SettleWaitSec
 
             $trayStateBefore = if (Test-Path -LiteralPath $trayStatePath) { Get-Content -LiteralPath $trayStatePath -Raw } else { $null }
@@ -247,7 +249,7 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             # could otherwise leak into this measurement.
             $result = & (Join-Path $PSScriptRoot 'Measure-Furphy.ps1') -Label 'p3-steadystate' -DurationSec $Script:MeasureWindowSec `
                 -ServerLogPath $serverLogPath -ScopeRoot $root -Quiet `
-                -Notes 'P3 perf test: fake Wow.exe running, tray past its first skip, host window minimized (background mode engaged). Steady-state zero-impact assertion window.'
+                -Notes 'P3 perf test: fake Wow.exe running, tray past its first completed cycle, host window minimized (background mode engaged). Steady-state light-touch assertion window.'
 
             $trayStateAfter = if (Test-Path -LiteralPath $trayStatePath) { Get-Content -LiteralPath $trayStatePath -Raw } else { $null }
             $serverLogLenAfter = if (Test-Path -LiteralPath $serverLogPath) { (Get-Item -LiteralPath $serverLogPath).Length } else { 0 }
@@ -269,6 +271,23 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             $totalCpu = $result.TotalCpuSeconds
             if (-not $totalCpu) { $totalCpu = 0 }
 
+            # GAME-MODE-SPEC.md (2026-09-08): these five checks used to read
+            # as "no network while WoW runs" - that gate is gone, addon
+            # browsing/updates/self-update checks all run fully while WoW is
+            # up now. What they actually prove, and still correctly prove,
+            # is narrower and unchanged by the policy: THIS PARTICULAR
+            # 90-second window sits between the tray's first completed
+            # cycle (already finished, during the settle wait above) and
+            # its next one (~30 minutes out, New-PerfAppRoot's
+            # backgroundIntervalMinutes) - nothing is scheduled to run in
+            # it, so the server/tray/SPA correctly stay quiet: zero new TCP
+            # connections, zero new "[tray] cycle start" lines, tray-state.
+            # json byte-identical, and only the (at most 2, POLL_GAME_MS=
+            # 60000-backed) idle SPA polls' worth of log growth. A stray
+            # cycle firing early, or a maintenance/catalogue/growth-crawl
+            # tick landing inside this specific window, would fail these -
+            # that is the real regression these guard against now, not
+            # "did WoW-running block a network call."
             ($serverCpu -lt $Script:ServerCpuMaxSec) | Should Be $true
             ($trayCpu -lt $Script:TrayCpuMaxSec) | Should Be $true
             ($totalCpu -lt $Script:TotalCpuMaxSec) | Should Be $true
@@ -386,85 +405,60 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
         }
     }
 
-    It 'game stops: normal behaviour resumes within 60s (a poll reaches the server; a fresh tray cycle is not skipped)' {
+    It 'cycle while WoW keeps running: a --tray-selftest cycle completes normally (never skipped_wow_running) with the fake WoW process alive the whole time' {
+        <#
+          GAME-MODE-SPEC.md (2026-09-08), section 8: retires the old "game
+          stops: normal behaviour resumes within 60s" It. That test's whole
+          premise - that a fresh tray cycle needed WoW to STOP before it
+          would stop being skipped - is moot now that RunCycle
+          (host\FurphyHost.cs) never gates on WowDetector.IsRunning at all;
+          skipped_wow_running can no longer occur regardless of WoW state,
+          so "resumes once WoW stops" proves nothing a regression could
+          still trip. Replaced with the policy-relevant direction instead:
+          a --tray-selftest cycle completes normally WHILE the fake WoW
+          process is still running for the entire run, not just started
+          then stopped. Merges naturally with the inverted assertion in
+          tests\host\Host.Tests.ps1's "runs the cycle normally (never
+          skipped_wow_running)..." It - this one exercises the same
+          contract through Perf.Tests.ps1's own New-PerfAppRoot/-wow-fake
+          scaffolding (single "retail" flavour, no live install fixture)
+          rather than duplicating Host.Tests.ps1's 3-flavour setup.
+        #>
         if (-not (Ensure-PerfHostBuilt)) {
             Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'
             return
         }
 
-        $root = New-TempRoot -Name 'perf-resume'
+        $root = New-TempRoot -Name 'perf-cycle-while-running'
         New-PerfAppRoot -Root $root -Port 47899
-        $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'perf-resume-wowroot')
+        $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'perf-cycle-while-running-wowroot')
 
         $fakeProcName = 'WowFakePerf' + (Get-Random -Maximum 99999)
         $fakeExePath = Join-Path $root ($fakeProcName + '.exe')
         Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
 
-        $serverLogPath = Join-Path $root 'server.log'
         $hostExe = Join-Path $root 'host\bin\FurphyHost.exe'
 
         $fakeWow = $null
         $server = $null
         $trayProc = $null
-        $hostProc = $null
 
         try {
-            $fakeWow = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '900', '/nobreak') -WindowStyle Hidden -PassThru
+            # Long enough wait ('/t' 120) to comfortably outlast the whole
+            # It, unlike the steady-state It's 900s (this one never
+            # measures CPU over a wall-clock window, so no need to match
+            # that budget) - kept alive for the ENTIRE cycle below, proving
+            # there is no gate left to trip, not just that one happened not
+            # to fire.
+            $fakeWow = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '120', '/nobreak') -WindowStyle Hidden -PassThru
             Start-Sleep -Milliseconds 500
             $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot -IdleMinutes 60 -ExtraArgs @('-WowFakeProcessName', $fakeProcName)
-            $hostProc = Start-Process -FilePath $hostExe -ArgumentList @('--port', '47899', '--wow-fake', $fakeProcName) -PassThru
 
-            Start-Sleep -Seconds 3
-            $hostProc.Refresh()
-            [FurphyPerfTest.User32]::ShowWindow($hostProc.MainWindowHandle, $Script:SW_MINIMIZE) | Out-Null
-            Start-Sleep -Seconds 15
-
-            # Stop WoW, then restore the window (a realistic "the player
-            # alt-tabbed back to check" trigger for ExitBackgroundMode) -
-            # this is the moment normal behaviour should start resuming.
-            Stop-PerfProcessQuiet -Process $fakeWow
-            $fakeWow = $null
-            $serverLogLenAtStop = if (Test-Path -LiteralPath $serverLogPath) { (Get-Item -LiteralPath $serverLogPath).Length } else { 0 }
-            $hostProc.Refresh()
-            [FurphyPerfTest.User32]::ShowWindow($hostProc.MainWindowHandle, $Script:SW_RESTORE) | Out-Null
-
-            $deadline = (Get-Date).AddSeconds($Script:ResumeTimeoutSec)
-            $pollArrived = $false
-            while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Seconds 2
-                if (Test-Path -LiteralPath $serverLogPath) {
-                    $lenNow = (Get-Item -LiteralPath $serverLogPath).Length
-                    if ($lenNow -gt $serverLogLenAtStop) { $pollArrived = $true; break }
-                }
-            }
-            $pollArrived | Should Be $true
-
-            # Tray: this scenario never started a LIVE --tray (the steady-
-            # state It above already covers that combination at length) -
-            # rather than waiting out WorkerLoop's real 10-minute
-            # nextRunAtUtc on a fresh live tray just to prove this, run one
-            # --tray-selftest (RunCycle fires immediately, no 90s wait) now
-            # that WoW has stopped - proves a genuinely due cycle is NOT
-            # skipped once the game is gone, deterministically and fast.
-            # $trayProc is still $null here (nothing to stop) - the
-            # Stop-PerfProcessQuiet call in `finally` below is a no-op
-            # until this line assigns the selftest process to it.
-            $needle = 'perfresume-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+            # --tray-selftest fires RunCycle immediately (no 90s WorkerLoop
+            # wait) - deterministic and fast, fake WoW process still alive
+            # throughout.
+            $needle = 'perfwhilerunning-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
             $markerPath = Join-Path $root ($needle + '.json')
-            # --wow-fake $fakeProcName (below) is required here even though
-            # $fakeWow has already been stopped above: without it,
-            # WowDetector.IsRunning(null) falls back to the REAL
-            # known-WoW-names list, and a genuinely running Wow.exe on the
-            # dev/CI machine (a real play session) makes this selftest
-            # wrongly see the game as still running (lastResult =
-            # "skipped_wow_running") even though THIS scenario's own fake
-            # WoW is gone - the exact false failure confirmed in the Round
-            # 36 verifier report. Passing the now-dead fake name is still
-            # correct: WowDetector looks it up fresh, finds no such
-            # process (it was just stopped), and correctly reports "not
-            # running" - proving the resume path for the right reason
-            # (the game is gone) instead of by accident (the real machine
-            # happened to have no WoW.exe running).
             $selfPsi = New-Object System.Diagnostics.ProcessStartInfo
             $selfPsi.FileName = $hostExe
             $selfPsi.Arguments = '--port 47899 --tray-selftest "' + $markerPath + '" --wow-fake ' + $fakeProcName
@@ -482,9 +476,10 @@ Describe 'Perf: zero impact on gameplay (P3 automated layer)' {
             }
             $marker | Should Not Be $null
             $marker.mutexHeld | Should Be $true
-            ($marker.lastResult -ne 'skipped_wow_running') | Should Be $true
+            $marker.lastResult | Should Not Be 'skipped_wow_running'
+            $marker.serverStarted | Should Be $true
+            @($marker.flavourJobs).Count | Should BeGreaterThan 0
         } finally {
-            Stop-PerfProcessQuiet -Process $hostProc
             Stop-PerfProcessQuiet -Process $trayProc
             Stop-PerfProcessQuiet -Process $fakeWow
             Start-Sleep -Milliseconds 500

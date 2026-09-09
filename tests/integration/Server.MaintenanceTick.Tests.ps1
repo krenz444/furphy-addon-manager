@@ -29,7 +29,18 @@
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 
 function Wait-ForLogLine {
-    param([string]$Path, [string]$Pattern, [int]$TimeoutSec = 20, [int]$PollMs = 200)
+    <#
+      TimeoutSec default 30, not 20 (widened 2026-09-09 per verifier
+      report: a real maintenance-child spawn/finish round trip observed a
+      single 20s timeout under concurrent build/test system load, passing
+      clean on an immediate isolated rerun - no code-level cause, matches
+      this suite's own documented timing-flakiness history, see
+      Server.AppUpdate.Tests.ps1 and this file's -WowFakeProcessName
+      Describe). 30s matches the -TimeoutSec convention already used
+      throughout tests\integration\Server.AppUpdate.Tests.ps1's own
+      Wait-AppUpdateState/Wait-JobDone helpers.
+    #>
+    param([string]$Path, [string]$Pattern, [int]$TimeoutSec = 30, [int]$PollMs = 200)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $Path) {
@@ -52,9 +63,9 @@ Describe 'Invoke-MaintenanceTick - fresh install, no pre-existing cache\ directo
             $server = Start-TestServer -Root $root -Port 47899
 
             $logPath = Join-Path $root 'server.log'
-            $started = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child started' -TimeoutSec 20
+            $started = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child started' -TimeoutSec 30
             $started | Should Be $true
-            $finished = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child finished' -TimeoutSec 20
+            $finished = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child finished' -TimeoutSec 30
             $finished | Should Be $true
 
             $logText = Get-Content -LiteralPath $logPath -Raw
@@ -66,6 +77,53 @@ Describe 'Invoke-MaintenanceTick - fresh install, no pre-existing cache\ directo
             (Test-Path -LiteralPath (Join-Path $root 'cache')) | Should Be $true
             (Test-Path -LiteralPath (Join-Path $root 'cache\maintenance.lock')) | Should Be $false
         } finally {
+            Stop-TestServer -Server $server
+        }
+    }
+}
+
+Describe 'Invoke-MaintenanceTick - spawns while GameRunning is true (GAME-MODE-SPEC.md 2026-09-08)' {
+    <#
+      New coverage (section 8 new-coverage item 1) - no test existed for
+      this gate either way before this round. Invoke-MaintenanceTick used
+      to take a $GameRunning param and `if ($GameRunning) { return }` as
+      its very first line, refusing to spawn the maintenance child at all
+      (catalogue refresh + Wago growth crawl + hourly self-update check,
+      all together) for as long as WoW stayed running. That param/check is
+      gone - the child now spawns on its normal interval regardless of
+      game state, same as this file's other Describe proves for the
+      earlier no-pre-existing-cache-dir fix.
+    #>
+
+    It 'the maintenance child still spawns and finishes cleanly while a fake WoW process is running' {
+        $root = New-TempRoot -Name 'maintenance-gamerunning'
+        $fakeProcName = 'WowFakeMaintenanceTick' + (Get-Random -Maximum 99999)
+        $fakeExePath = Join-Path $root ($fakeProcName + '.exe')
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\timeout.exe') -Destination $fakeExePath -Force
+        $fakeWow = $null
+        $server = $null
+        try {
+            $fakeWow = Start-Process -FilePath $fakeExePath -ArgumentList @('/t', '120', '/nobreak') -WindowStyle Hidden -PassThru
+            Start-Sleep -Milliseconds 500
+
+            $server = Start-TestServer -Root $root -Port 47899 -ExtraArgs @('-WowFakeProcessName', $fakeProcName)
+
+            $logPath = Join-Path $root 'server.log'
+            $started = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child started' -TimeoutSec 30
+            $started | Should Be $true
+            $finished = Wait-ForLogLine -Path $logPath -Pattern 'Maintenance child finished' -TimeoutSec 30
+            $finished | Should Be $true
+
+            # The old gate's own log line ("Maintenance tick skipped -
+            # WoW is running" or similar) must never appear - confirmed by
+            # reading the removed code directly (GAME-MODE-SPEC.md section
+            # 4.4) rather than guessing at exact wording, so this asserts
+            # the STRUCTURAL proof instead: a real spawn+finish pair was
+            # observed above while the fake WoW process was alive for the
+            # server's entire startup and first tick.
+            (Test-Path -LiteralPath (Join-Path $root 'cache\maintenance.lock')) | Should Be $false
+        } finally {
+            if ($fakeWow -and -not $fakeWow.HasExited) { try { Stop-Process -Id $fakeWow.Id -Force -ErrorAction SilentlyContinue } catch { } }
             Stop-TestServer -Server $server
         }
     }

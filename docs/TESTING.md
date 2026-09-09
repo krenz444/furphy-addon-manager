@@ -96,7 +96,8 @@ actually drives them as a real, asserted-against test:
   register/unregister round-trip against the real HKCU `Run` key) and
   writes its own JSON marker, then exits. `--wow-fake <processName>` swaps
   the real "is WoW running" process-name check for a caller-supplied one,
-  so the skip path can be proven without the real game installed.
+  so cycle behavior can be exercised deterministically without a real
+  game installed.
 
 Neither flag can be reached by a normal launch (both require an explicit
 command-line switch nothing else in the app ever passes), and
@@ -306,7 +307,7 @@ use, this time for GitHub Releases:
 - `tests\integration\Server.AppUpdate.Tests.ps1` - a real scratch
   addon-server.ps1 on port 47935 against the stub above: the full
   check/download/verify/extract happy path, a tampered-sha256 refusal, a
-  VERSION-vs-tag mismatch refusal, install-refused-while-WoW-running,
+  VERSION-vs-tag mismatch refusal, install-succeeds-while-WoW-running,
   install-deferred-while-a-job-is-running, the `windowOpenAt` signal
   (stamped only by `GET /api/state`, never by tray-style
   ping/jobs traffic), a false-409 check for a window-initiated install
@@ -314,17 +315,16 @@ use, this time for GitHub Releases:
   seam that records the fully-built install.ps1 command line into
   app-update.json instead of spawning it), and the GitHub rate-limit
   backoff decision. Capability-gated the same way
-  `Server.WagoBrowse.Tests.ps1` already is. Two real, load-bearing
-  findings from writing this file against the landed tree, beyond the
+  `Server.WagoBrowse.Tests.ps1` already is. One real, load-bearing
+  finding from writing this file against the landed tree, beyond the
   env-var-ordering bug above: `Handle-AppUpdateInstall` checks
-  `state == "ready"` BEFORE the job/game-running gates (a 400 "nothing
-  staged" fires first otherwise, so the WoW-running and job-running
-  Describes must stage a real ready update before they can observe their
-  own 409), and `Test-GameRunning` caches its answer for
-  `$Script:GameProbeIntervalSeconds` (30s) - starting a fake WoW process
-  right before an install attempt still reads the stale "not running"
-  answer for up to 30s. Verified passing for real: 9/9, stable across
-  repeated runs.
+  `state == "ready"` BEFORE the job-running gate (a 400 "nothing
+  staged" fires first otherwise, so the job-running Describe must stage
+  a real ready update before it can observe its own 409). (2026-09-08:
+  a second finding used to live here about `Test-GameRunning`'s 30s
+  cache complicating the WoW-running Describe's timing - moot now that
+  the game-running gate itself is gone, see CHANGELOG.md's Round 43
+  entry.) Verified passing for real: 9/9, stable across repeated runs.
 - `tests\fixture-acceptance\AppUpdate.SilentUpgrade.Tests.ps1` - a real
   `install.ps1 -Upgrade` run against a scratch install on port 47940,
   never through the HTTP route (so this file needs none of Package A's
@@ -396,7 +396,7 @@ fixture-acceptance -> perf`):
 | `host` | `tests\host\Host.Tests.ps1` (Pester 3, `-Tag Host`) - builds/uses the real `host\bin\FurphyHost.exe`, drives `--selftest`/`--tray-selftest`. The `--selftest` Describe is tagged `Network` (the CF pane really navigates to curseforge.com); the first two `--tray-selftest` Its (multi-flavour, zero tracked addons) are fully offline. Round 28 added a second `--tray-selftest` Describe, both Its tagged `Network` (real CurseForge installs against a single-flavour retail-only root) - see "Round 28: tray tooltip/icon/menu/balloon history" below. | yes (the two new Network-tagged Its skip under `-Quick`/`-NoNetwork`, same as every other Network-tagged piece) |
 | `spa` | `tests\spa\Run-SpaHarness.ps1` (always) - a same-origin copy of `ui\` driven headlessly, 47 DOM/behavior checks (this count drifts release to release - see Round 28 below for the latest addition; do not treat any specific number here as load-bearing). `tests\spa\Run-ThemeAudit.ps1` (full-run only) - live-computed WCAG contrast for all 16 themes plus one screenshot per theme into `tests\theme-screenshots\`. | harness only; theme audit is full-only |
 | `fixture-acceptance` | `tests\fixture-acceptance\FlavorsSpec.Section8.Tests.ps1` (Pester 3) - a traceability pass over FLAVORS-SPEC.md section 8's own checklist: install.ps1's home-flavour fallback ordering (including the fixture install into `_classic_era_`) and the CurseForge auto-target flavour-resolution cases (S5.5). Real `install.ps1` runs (incl. a real `host\` rebuild) make this full-run-only. `AppUpdate.SilentUpgrade.Tests.ps1` (Round 42, Pester 3) - a real `install.ps1 -Upgrade -Relaunch none` run on scratch port 47940 (see "Round 42" above); a real host\ rebuild makes this full-run-only too. | no |
-| `perf` | `tests\perf\Perf.Tests.ps1` (Pester 3) - Eric's "zero impact on gameplay" pass, asserted: a real fake-Wow.exe + real `addon-server.ps1` + real `--tray` + a real (minimized) host window, sampled over a 90-second steady-state window (server CPU, tray CPU, new TCP connections, server requests, `server.log` growth, `tray-state.json`/host.log all asserted against fixed tolerances); a second Describe stops the fake WoW and asserts normal behaviour resumes within 60s; a third asserts the `-Launcher` fresh-check launch-chain budget (< 3s). The tray's own ~90-second first-cycle delay alone puts this well over the Quick budget - full-run-only. | no |
+| `perf` | `tests\perf\Perf.Tests.ps1` (Pester 3) - Eric's "light touch while you play" pass, asserted: a real fake-Wow.exe + real `addon-server.ps1` + real `--tray` + a real (minimized) host window, sampled over a 90-second steady-state window (server CPU, tray CPU, new TCP connections, server requests, `server.log` growth, `tray-state.json`/host.log all asserted against fixed tolerances); a second Describe proves a `--tray-selftest` cycle completes normally while the fake WoW process is still running. The tray's own ~90-second first-cycle delay alone puts this well over the Quick budget - full-run-only. | no |
 
 **Hygiene, unconditional:** the same port/process/HKCU/`tests\.tmp` sweep
 (`Invoke-HygieneSweep` in `run-all.ps1`) runs BOTH once at the very start
@@ -475,7 +475,7 @@ transcript.
   Quick-vs-full-only by real wall-clock cost (target: Quick's whole run
   stays under 4 minutes).
 - **perf** (`tests\perf\`): extend `Perf.Tests.ps1` (Pester 3, same
-  conventions as `host`/`integration`) if a new "zero impact on gameplay"
+  conventions as `host`/`integration`) if a new "light touch while you play"
   scenario needs asserting. Reuse `tests\perf\Measure-Furphy.ps1` (a real
   fake-Wow.exe + real processes, sampled and rolled up into CPU/IO/TCP/
   request-count numbers) rather than re-deriving sampling logic - it

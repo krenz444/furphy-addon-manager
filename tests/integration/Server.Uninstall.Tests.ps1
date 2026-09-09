@@ -24,9 +24,23 @@
  regression test for the exact incident DISTRIBUTION-SPEC.md section 0
  documents (2026-09-06 14:45, a scratch -Uninstall run that hit the real
  Run value and the real tray before fixes 1/3 landed).
+
+ GAME-MODE-SPEC.md-round test hygiene fix: every real -Uninstall run in
+ this file (both the "real host WINDOW open" Describe and the "run
+ DIRECTLY" Describe below) writes a %TEMP%\FurphyUninstall-<stamp>.log
+ unconditionally, on success or failure - the direct-run Describe never
+ cleaned its own up at all, and the window-open Describe's inline
+ before/after diffing only ran AFTER its own last assertion, skipped
+ entirely by an earlier assertion failure - exactly how ~260 leftover
+ copies were found accumulated on the dev machine this round. Both now
+ use the same scoped-cleanup helper pattern Server.AppUpdate.Tests.ps1
+ already established (Get-/Remove-AppUpdateTempLitter): record
+ $Script:LitterCutoffUtc once here, sweep with
+ Remove-UninstallTempLitterFiles in each Describe's own AfterAll.
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
+$Script:LitterCutoffUtc = (Get-Date).ToUniversalTime()
 
 function Get-ProductionRunValue {
     <# The REAL HKCU Run value's string content, or $null if absent. Never
@@ -171,6 +185,14 @@ function Get-FurphyWebView2ChildrenUnder {
 
 Describe 'POST /api/uninstall - end to end against a real scratch install and scratch server (port 47899 only)' {
 
+    AfterAll {
+        # POST /api/uninstall's real (non-dry-run) path copies install.ps1
+        # to a fresh %TEMP%\FurphyUninstall-<guid>.ps1 and launches it,
+        # which unconditionally writes a paired .log - never cleaned up
+        # before this fix. See this file's own header comment.
+        Remove-UninstallTempLitterFiles -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+
     It 'uninstalls the scratch app cleanly (keep-list preserved), shuts the scratch server down, removes the scratch Installed-Apps test key, and leaves the REAL production Run value / Installed-Apps key / tray pids byte-identical before and after' {
 
         # ---- live-safety snapshot BEFORE ----
@@ -278,6 +300,16 @@ Describe 'POST /api/uninstall - real host WINDOW open (Round 33 defect regressio
     # a REAL window first, proving both the defect's precondition (a live
     # WebView2 child under this appDest) and the fix's own claim (it, and
     # the window, and the whole host\ folder, are all gone afterward).
+
+    AfterAll {
+        # Belt-and-suspenders sweep for the %TEMP%\FurphyUninstall-*.log
+        # this Describe's own It writes on every run - the It's own inline
+        # cleanup below only runs after its content assertion, which an
+        # earlier assertion failure in the same It would skip; this always
+        # runs regardless. See this file's own header comment.
+        Remove-UninstallTempLitterFiles -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+
     It 'closes the real window and its WebView2 children, removes the whole host\ folder with zero leftovers, and writes an uninstall log that says so' {
         if (-not (Test-Path -LiteralPath (Join-Path $Script:FurphyBuildRoot 'host\bin\FurphyHost.exe'))) {
             Write-Host '  (skipped: host\bin\FurphyHost.exe is not built in this build root)'
@@ -535,6 +567,14 @@ Describe 'POST /api/uninstall - a stringified "false" for dryRun is not silently
       safe to prove end-to-end AND was the finding's own live repro.
     #>
 
+    AfterAll {
+        # This Describe's own point is that dryRun:"false" performs a REAL
+        # uninstall - which writes a %TEMP%\FurphyUninstall-*.log the same
+        # as every other real uninstall in this file. See this file's own
+        # header comment.
+        Remove-UninstallTempLitterFiles -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+
     It 'dryRun:"false" (a string) proceeds with the REAL uninstall - never returns dryRun:true, and the scratch app is actually removed' {
 
         # ---- live-safety snapshot BEFORE ----
@@ -661,6 +701,15 @@ Describe 'install.ps1 -Uninstall run DIRECTLY (not via a live server''s own POST
       Start-TestServer/orphan-detection can never collide with anything
       else in this file.
     #>
+
+    AfterAll {
+        # This Describe's own -Uninstall run writes a %TEMP%\
+        # FurphyUninstall-*.log unconditionally (install.ps1 opens it
+        # before the removal sequence starts, regardless of outcome) and
+        # never cleaned it up before this fix - see this file's own header
+        # comment.
+        Remove-UninstallTempLitterFiles -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
 
     function New-OrphanServerScratchInstall {
         $wowRoot = Copy-Fixture -Destination (New-TempRoot -Name 'orphanserver-wowroot')

@@ -1192,10 +1192,27 @@ function Install-AddonPackage {
       previous version of this addon but are not part of the new package.
       Returns a List[object] of the folder names actually installed - every
       candidate folder, or none at all: THROWS if even one candidate folder
-      fails to swap (locked file, ACL-denied, etc. - see
+      fails to swap after retrying (locked file, ACL-denied, etc. - see
       failure-modes:silent-fake-success-on-locked-addons-folder), so a
       caller's ordinary exception handling is always what decides the
       outcome and a partial/failed swap can never be mistaken for success.
+
+      GAME-MODE-SPEC.md section 7.4 (RETRY-ON-LOCK: added, now REQUIRED per
+      this round's task brief, not just the spec's own "recommended"
+      framing): the per-folder Remove-Item+Move-Item swap retries up to 3
+      attempts total, ~150ms apart, before giving up on that folder. WoW
+      itself never holds addon files open mid-session (it reads .toc/Lua/
+      XML once at login/reload, then keeps everything in its own in-memory
+      Lua VM - GAME-MODE-SPEC.md section 7.1), so this is not a
+      WoW-specific fix; it is resilience against OTHER background
+      processes that occasionally touch files under AddOns (Windows
+      Search's indexer, a real-time AV scanner, a cloud-sync client),
+      which become marginally more likely to collide with a swap now that
+      installs happen throughout a play session instead of being
+      concentrated in gaps between sessions. After the retry budget is
+      exhausted, behavior is unchanged from before this round: record the
+      folder in $failedFolders and let the whole-package throw stand -
+      never silently swallow a final failure.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$ZipPath,
@@ -1253,25 +1270,36 @@ function Install-AddonPackage {
     # something sitting at $destPath. A per-folder $swapSucceeded flag,
     # set true only immediately after a successful Move-Item, is the actual
     # ground truth and replaces the Test-Path check entirely.
+    # RETRY-ON-LOCK: added (GAME-MODE-SPEC.md section 7.4) - see this
+    # function's own doc comment above for the full rationale.
     $installedFolders = New-Object 'System.Collections.Generic.List[object]'
     $failedFolders = New-Object 'System.Collections.Generic.List[object]'
     foreach ($folderName in $candidateFolders) {
         $sourcePath = Join-Path -Path $extractDir -ChildPath $folderName
         $destPath = Join-Path -Path $AddonsPath -ChildPath $folderName
         $swapSucceeded = $false
-        try {
-            if (Test-Path -LiteralPath $destPath) {
-                Remove-Item -LiteralPath $destPath -Recurse -Force
+        $lastSwapError = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                if (Test-Path -LiteralPath $destPath) {
+                    Remove-Item -LiteralPath $destPath -Recurse -Force
+                }
+                Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
+                $swapSucceeded = $true
+                break
+            } catch {
+                $lastSwapError = $_
+                if ($attempt -lt 3) {
+                    Write-Log -Level 'WARN' -Message "Folder '$folderName' locked for project $ProjectId (attempt $attempt of 3), retrying in 150ms: $($_.Exception.Message)"
+                    Start-Sleep -Milliseconds 150
+                }
             }
-            Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
-            $swapSucceeded = $true
-        } catch {
-            Write-Log -Level 'ERROR' -Message "Failed to install folder '$folderName' for project $ProjectId : $($_.Exception.Message)"
         }
         if ($swapSucceeded) {
             $installedFolders.Add($folderName)
         } else {
             $failedFolders.Add($folderName)
+            Write-Log -Level 'ERROR' -Message "Failed to install folder '$folderName' for project $ProjectId after 3 attempt(s): $($lastSwapError.Exception.Message)"
         }
     }
 
