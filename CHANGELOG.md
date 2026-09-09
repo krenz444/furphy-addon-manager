@@ -1,5 +1,82 @@
 # Furphy Addon Manager - changelog
 
+## Round 44 (1.24.0: one-file installer)
+
+Eric's request, verbatim: "the install experience needs to be better,
+like gui, easy to use, no ps1 or cmd files, download and install, easy."
+SETUP-SPEC.md is the full design; this entry is the condensed summary.
+
+**What's new, in the player's own words:** download one file,
+`FurphyAddonManager-Setup.exe`, from the stable link
+`releases/latest/download/FurphyAddonManager-Setup.exe` - no zip, no
+Extract All, no `.cmd` visible anywhere. Running it shows a small
+"Preparing Furphy Addon Manager Setup..." splash for about a second,
+then the same install wizard `Install Furphy.cmd` always showed
+("Furphy found World of Warcraft in `<path>`", one Install button),
+unchanged. Windows still shows its blue "Windows protected your PC"
+screen the first time (unsigned, same as before - now on the .exe
+instead of the .cmd) - click More info, then Run anyway; no console,
+`.cmd`, or `.ps1` is ever visible during a normal install, and no
+Windows admin (UAC) prompt appears at any point. The zip is still
+published every release, now as a secondary/advanced/power-user path
+(and still what the self-updater and `irm ... | iex` both use) -
+nothing about what an install *does* changed, only how a player gets
+to it.
+
+**New (setup\FurphySetup.cs, setup\build-setup.ps1):** a small,
+`/target:winexe` C# WinForms bootstrapper, built the same
+`Add-Type`/`CompilerParameters` way `host\build-host.ps1` already builds
+the native host. It embeds the current release zip as a resource,
+extracts it to a per-run `%TEMP%` folder, and launches the existing,
+unmodified `install.ps1` hidden behind its own splash - it contains no
+WoW-detection, registry, or shortcut code of its own, and writes no
+Add/Remove Programs entry (a static regression test guards this).
+`FurphyAddonManager-Setup.exe /S` maps to exactly
+`install.ps1 -Console -Quiet`, with any arguments after `/S` forwarded
+through verbatim - the same silent path admins and this project's own
+tests already relied on. Ships alongside a versioned copy
+(`FurphyAddonManager-Setup-<ver>.exe`) and a `.sha256` sidecar, matching
+the zip's own existing build pattern.
+
+**install.ps1:** one line changed - `Show-InstallConsole` (only ever
+reachable from the interactive wizard's success path) is now skipped
+when `FURPHY_INSTALL_LAUNCHED_BY_SETUP=1`, the environment variable
+FurphySetup.exe sets on its child process - so a Setup-launched install
+never flashes a console window at the very end. Nothing else about
+`install.ps1` changed: WoW detection, flavours, adopt scan,
+`curseforge://` registration, tray, and the Installed-Apps registry
+entry are all reused exactly as they were.
+
+**Packaging (package.ps1):** builds and verifies the new Setup.exe
+alongside the existing zip; the release reminder now lists all six
+assets to attach (`FurphyAddonManager-<ver>.zip`,
+`FurphyAddonManager-latest.zip`, the zip's `.sha256`,
+`FurphyAddonManager-Setup-<ver>.exe`, `FurphyAddonManager-Setup.exe`,
+the Setup exe's `.sha256`). The self-updater needs no code changes at
+all - it matches release assets by exact name and simply never looks at
+the new ones.
+
+**Docs and site:** README.md, README.txt, and the GitHub Pages
+`site\index.html` all describe the new one-file download, the browser's
+own download-safety notice, and the SmartScreen "More info -> Run
+anyway" step, with the zip demoted to an advanced/power-user line.
+DISTRIBUTION-SPEC.md records the reversal of its own earlier "no
+compiled installer EXE" call, with an honest accounting of what it
+costs going forward (recurring SmartScreen reputation reset, the
+AV/EDR heuristic shape, losing the "only .exe is built locally"
+property) and an explicit no-elevation/no-UAC callout.
+
+**Verification (independent verifier pass, static/unit only - see
+"Gates are manual now"):** <!-- ROUND44-COUNTS --> `tests\run-all.ps1
+-Only @('static','unit')` - static 7/7, unit 370/370 (filled in by the
+verifier pass; includes the new Setup.Build.Tests.ps1,
+Setup.PayloadContents.Tests.ps1, and Setup.NoArpWrite.Tests.ps1). Also
+independently ran, one file at a time via Invoke-Pester: the four new
+Setup tests (8/8, 3/3, 4/4, 8/8), every tests\integration\Install.*.Tests.ps1
+and tests\unit\Install.*.Tests.ps1 file, Server.AppUpdate,
+AppUpdate.SilentUpgrade, and Server.Uninstall (-ExcludeTag Host) - all
+green, 0 failures.
+
 ## Round 43 (1.23.0: everything works while WoW is running)
 
 Eric's rule, verbatim (2026-09-08 evening): "addon browsing, updates and

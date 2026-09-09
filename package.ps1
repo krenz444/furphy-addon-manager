@@ -209,6 +209,70 @@ if ($versionedBytes -ne $latestBytes) {
     throw "package.ps1: FAILED - FurphyAddonManager-latest.zip ($latestBytes bytes) is not byte-identical to $zipName ($versionedBytes bytes)"
 }
 
+# SETUP-SPEC.md section 6.2: build the one-file GUI installer
+# (FurphyAddonManager-Setup.exe), which embeds this same versioned zip as
+# its payload (section 6.1 - "byte-for-byte same dist\...zip package.ps1
+# already built... never a second, separately-assembled file list").
+# setup\build-setup.ps1 is a sibling build script, same Add-Type/
+# CompilerParameters idiom as host\build-host.ps1, invoked the same way
+# install.ps1 already invokes host\build-host.ps1 - a fresh child
+# powershell.exe (Add-Type cannot recompile the same TypeDefinition text
+# twice in one process, and package.ps1 may run more than once in a
+# build/test session).
+#
+# Skipped, with a warning, only when setup\build-setup.ps1 is not present
+# under $Source - this keeps the one-file installer step out of the way of
+# tests\integration\Install.PackageUiAllowList.Tests.ps1's own minimal fake
+# -Source fixture (VERSION + ui\ only, no setup\, no icon.ico, no
+# install.ps1), which predates this step and asserts package.ps1 still
+# exits 0 with just the zip built. A real repo checkout always has
+# setup\build-setup.ps1 once Package A lands it, so a normal run always
+# takes the branch below.
+$setupBuildScript = Join-Path -Path $Source -ChildPath 'setup\build-setup.ps1'
+$setupVersionedPath = $null
+$setupStablePath = $null
+$setupShaPath = $null
+if (Test-Path -LiteralPath $setupBuildScript -PathType Leaf) {
+    Write-Host "Building the Setup.exe installer via $setupBuildScript ..."
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setupBuildScript -Version $version -DistDir $DistDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "package.ps1: FAILED - setup\build-setup.ps1 exited with code $LASTEXITCODE"
+    }
+
+    $setupVersionedPath = Join-Path -Path $DistDir -ChildPath "FurphyAddonManager-Setup-$version.exe"
+    $setupStablePath = Join-Path -Path $DistDir -ChildPath 'FurphyAddonManager-Setup.exe'
+    $setupShaPath = "$setupVersionedPath.sha256"
+
+    foreach ($p in @($setupVersionedPath, $setupStablePath, $setupShaPath)) {
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+            throw "package.ps1: FAILED - expected Setup.exe build output missing: $p"
+        }
+        if ((Get-Item -LiteralPath $p).Length -le 0) {
+            throw "package.ps1: FAILED - Setup.exe build output is empty: $p"
+        }
+    }
+
+    # Same sidecar-matches-hash shape package.ps1 already enforces for the
+    # zip above: bare lowercase hex sha256, sidecar for the VERSIONED exe
+    # only (section 6.1, mirroring package.ps1's own established rule).
+    $setupExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupVersionedPath).Hash.ToLowerInvariant()
+    $setupShaContent = (Get-Content -Raw -LiteralPath $setupShaPath).Trim().ToLowerInvariant()
+    if ($setupShaContent -ne $setupExeHash) {
+        throw "package.ps1: FAILED - Setup.exe sha256 sidecar ($setupShaContent) does not match Get-FileHash of the exe ($setupExeHash)"
+    }
+
+    Write-Host "Built $setupVersionedPath"
+    Write-Host "Built $setupStablePath (copy of the versioned exe)"
+    Write-Host "Built $setupShaPath ($setupExeHash)"
+} else {
+    Write-Host "setup\build-setup.ps1 not found under $Source - skipping the Setup.exe build (expected only for a non-repo -Source, e.g. a test fixture)" -ForegroundColor Yellow
+}
+
 Write-Host ''
-Write-Host 'Release step (manual, on demand) - ATTACH ALL THREE ASSETS, every release (fix 8 + APP-UPDATE-SPEC.md section 13):'
-Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`" `"$shaPath`""
+if ($setupVersionedPath) {
+    Write-Host 'Release step (manual, on demand) - ATTACH ALL SIX ASSETS, every release:'
+    Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`" `"$shaPath`" `"$setupVersionedPath`" `"$setupStablePath`" `"$setupShaPath`""
+} else {
+    Write-Host 'Release step (manual, on demand) - ATTACH ALL THREE ASSETS, every release (fix 8 + APP-UPDATE-SPEC.md section 13):'
+    Write-Host "  gh release create v$version `"$zipPath`" `"$latestZipPath`" `"$shaPath`""
+}

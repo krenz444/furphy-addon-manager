@@ -822,6 +822,63 @@ not a one-time fix.
   right-click the tray icon > Uninstall Furphy Addon Manager..., or
   Windows Settings > Apps > Furphy Addon Manager > Uninstall.
 
+### 6.9 2026-09-08: reversing the "no compiled installer EXE" decision
+
+Eric's request, verbatim: "the install experience needs to be better,
+like gui, easy to use, no ps1 or cmd files, download and install, easy."
+This explicitly and knowingly reverses 6.7's "no compiled installer EXE"
+call - not because 6.7's reasoning was wrong (it wasn't: an unsigned EXE
+does trip Windows Defender SmartScreen's full-screen "Windows protected
+your PC" block, which is strictly scarier than today's mild "Open File -
+Security Warning"), but because Eric weighed that cost against "no ps1 or
+cmd files, ever" and chose the latter. See SETUP-SPEC.md for the full
+design (FurphySetup.exe, a small csc-compiled WinForms bootstrapper that
+embeds the existing release zip and launches the existing, unmodified
+install.ps1 wizard).
+
+This is the first downloaded, executed binary this project has ever
+shipped. Everything before this - the zip, install.ps1, Install
+Furphy.cmd - is script text a player's own machine interprets; the only
+compiled .exe that has ever existed on a player's machine
+(host\bin\FurphyHost.exe) has always been built locally, from source,
+during install.ps1's own run, and has never been downloaded pre-built.
+FurphyAddonManager-Setup.exe changes that property for the first time.
+
+Two things worth stating plainly, since they are exactly the properties
+this decision most needed to preserve: FurphySetup.exe never requests
+elevation (no UAC prompt, ever - same PrivilegesRequired=lowest guarantee
+install.ps1 itself already has, HKCU-only registry writes throughout,
+install.ps1:2518's own comment), and it never touches the network itself
+(same section) - it only extracts a payload already embedded in its own
+file and launches a local install.ps1.
+
+**Honest cost accounting, going forward:**
+
+1. SmartScreen reputation resets on every release, not just once - a new
+   zip embedded means a new file hash means a new exe means the
+   full-screen block recurs every version, indefinitely, until enough
+   downloads accumulate per-release (which, for a project this size, may
+   never fully happen). Only paid signing removes this repeatably;
+   documenting "More info -> Run anyway" makes it survivable, not gone.
+2. The extract-embedded-zip-then-launch-hidden-powershell.exe-with-
+   -ExecutionPolicy-Bypass shape is a documented heuristic pattern for
+   malware droppers. The behavior is fully benign and open-source-
+   reviewable, but an occasional AV/EDR false-positive flag on some
+   endpoint product is a real, foreseeable possibility, not a
+   hypothetical one.
+3. This is the first time a compiled binary a player runs was never built
+   on their own machine - a genuine, permanent departure from the
+   property this section used to call out as a benefit ("the only .exe
+   that ever exists on the user's machine is compiled locally").
+   host\bin\FurphyHost.exe still holds that property;
+   FurphyAddonManager-Setup.exe now does not, and never will under this
+   design.
+
+Signing itself is still declined this round (6.7's comparison table
+stands). Revisit only if download volume/SmartScreen friction becomes a
+real support burden - Azure Trusted Signing (~$10/mo, instant reputation)
+remains the concrete pick if that day comes.
+
 -------------------------------------------------------------------------
 ## 7. Change sets by file
 -------------------------------------------------------------------------

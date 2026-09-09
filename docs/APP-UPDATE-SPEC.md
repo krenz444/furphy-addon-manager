@@ -1088,6 +1088,14 @@ install.ps1
   follows the host\ section (around :1698-1710); when `-Relaunch window`
   and `$trayWasRunningIndependently` was true, also relaunches the tray
   (section 8.7).
+- Cross-reference (round 44, SETUP-SPEC.md): FurphyAddonManager-Setup.exe,
+  the new one-file GUI installer, is a first-install tool only - it never
+  sets `-Upgrade` or `-Relaunch`, is never itself downloaded or launched by
+  the self-updater, and its `FURPHY_INSTALL_LAUNCHED_BY_SETUP` environment
+  variable is not read anywhere near this code path. The self-updater's
+  own fixed `-Upgrade -Relaunch <mode> -Console -Quiet` command line
+  (:495) is unchanged and untouched by `/S` or by anything in
+  SETUP-SPEC.md. No functional change here.
 
 host\FurphyHost.cs
 - `TrayForm.RunCycle` (:5763): one new post-cycle step (GET status, POST

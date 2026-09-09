@@ -69,6 +69,18 @@ param(
     # console/wizard behavior untouched but still must not show a dialog
     # (none today, but the two are intentionally independent switches).
     [switch]$Quiet,
+    # SETUP-SPEC.md section 5.3: NOT a param - an environment variable,
+    # $env:FURPHY_INSTALL_LAUNCHED_BY_SETUP, set on this process by
+    # FurphySetup.exe (the GUI bootstrapper) only, never by a manual
+    # "Install Furphy.cmd" double-click and never by a normal caller.
+    # Documented here, next to -Console/-Quiet, because it plays the same
+    # "how was this run launched" role they do. Its only effect: gates the
+    # Show-InstallConsole call near the end of this file, so a
+    # Setup-launched run (started hidden via -WindowStyle Hidden, with
+    # nothing waiting on its console the way Install Furphy.cmd's own
+    # wrapping cmd.exe does) never un-hides its console right before exit
+    # - which would otherwise flash a console window on screen at the very
+    # end of an otherwise console-free install.
     # upgrade-1.1.0:upgrade-1.1.0-downgrade-hides-addons fix: bypasses the
     # downgrade guard in Invoke-FurphyInstallSteps (an OLDER installer run
     # over a NEWER on-disk install is refused by default, since the old
@@ -3019,7 +3031,12 @@ try {
     # The wizard's Form has closed (success or error screen dismissed) -
     # un-hide the console before exiting, see Show-InstallConsole's own
     # comment for why this matters even though nothing here writes to it.
-    Show-InstallConsole
+    # SETUP-SPEC.md section 5.3: skip this when FurphySetup.exe launched
+    # this run (env marker documented next to -Console/-Quiet above) -
+    # such a run has no wrapping cmd.exe waiting on its console, so
+    # un-hiding it here would only flash a console window on screen at
+    # the very end of an otherwise console-free install.
+    if (-not $env:FURPHY_INSTALL_LAUNCHED_BY_SETUP) { Show-InstallConsole }
     exit 0
 } catch {
     Write-Warn2 "Could not show the install wizard, falling back to the console flow: $($_.Exception.Message)"

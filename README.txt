@@ -4,20 +4,28 @@ Keeps your retail addons updated from CurseForge and Wago Addons, and gives you 
 them. No API key required for any of this - see NO API KEY NEEDED below.
 
 NEW INSTALL
-  Download the zip, right-click it and choose Extract All, open the extracted folder, then double-click
-  "Install Furphy.cmd" (or run "install.ps1" from PowerShell). Windows may show a small "Open File - Security
-  Warning" box the first time you run Install Furphy.cmd, since it isn't signed with a paid certificate -
-  click Run. Furphy only writes inside your WoW folder and never asks for admin access. On most machines one
-  small window then opens with a single Install button (or a folder picker if it can't find WoW); on some
-  machines you may see plain console text instead - that's fine, it does the same thing. Either way it finds
-  your WoW folder, copies the app into <WoW>\_retail_\AddonSync, creates the desktop shortcut, registers
-  curseforge:// install links, registers Furphy in Windows' own Settings > Apps list, and adopts any addons
-  already in your AddOns folder. Safe to re-run any time (upgrades the app, adopts anything new, never touches
-  your addon list or settings - and cleans up any leftover launcher files from an older install, if you're
-  upgrading from before 2026-09-07).
+  Download FurphyAddonManager-Setup.exe from the Releases page (or the
+  download button on the landing page). Your browser may show a mild
+  download-safety notice first - choose Keep/Keep anyway, then open the
+  file. Windows may show a blue "Windows protected your PC" screen since
+  it isn't signed with a paid certificate - click More info, then Run
+  anyway. Furphy only writes inside your WoW folder and never asks for
+  admin access, and Setup never shows a Windows admin (UAC) prompt either.
+  A small window then opens with a single Install button (or a folder
+  picker if it can't find WoW). It finds your WoW folder, copies the app
+  into <WoW>\_retail_\AddonSync, creates the desktop shortcut, registers
+  curseforge:// install links, registers Furphy in Windows' own Settings >
+  Apps list, and adopts any addons already in your AddOns folder. Safe to
+  re-run any time.
 
-  Advanced: "irm <url>/install.ps1 | iex" also works from PowerShell if you'd rather skip the downloaded file -
-  not the recommended path for most people, since it skips the readable console log a normal install shows you.
+  Scripted/silent install: FurphyAddonManager-Setup.exe /S (optionally
+  followed by any install.ps1 flag, e.g. -WowPath "<path>").
+
+  Prefer the old zip (Install Furphy.cmd / install.ps1)? Still published
+  on every release for power users and the auto-updater - see the
+  Releases page. Advanced: "irm <url>/install.ps1 | iex" also works from
+  PowerShell with that zip's install.ps1 if you'd rather skip the
+  downloaded file.
 
 UNINSTALL (three equivalent ways)
   - Right-click the tray icon -> Uninstall Furphy Addon Manager...

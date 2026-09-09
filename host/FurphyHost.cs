@@ -2293,7 +2293,7 @@ namespace Furphy
                     if (!Http.PingAnswers(pingUrl, 2000))
                     {
                         LogHost("un-minimize: server not responding, attempting restart");
-                        bool started = ServerLauncher.TryStart(_addonServerScriptPath, _options, LogHost);
+                        bool started = ServerLauncher.TryStart(_addonServerScriptPath, _options, _port, LogHost);
                         LogHost("un-minimize: restart " + (started ? "started" : "failed"));
                     }
                 }
@@ -4631,7 +4631,27 @@ boot();
     // risking drifting from - this exact argument/env-var shape.
     internal static class ServerLauncher
     {
-        public static bool TryStart(string addonServerScriptPath, HostOptions options, Action<string> log)
+        // Package F hotfix (round 44 verifier finding): this always used
+        // to launch addon-server.ps1 with no -Port at all, so the child
+        // fell back to settings.json's own "port" key (or 47831) instead
+        // of whatever port the HOST itself resolved (PortResolver.Resolve
+        // - command-line --port wins over settings.json there too, but
+        // independently). Normally the two fallbacks agree because they
+        // read the same settings.json, but a --port override on the
+        // host's own command line (every test harness's way of forcing a
+        // scratch instance off the production port) then diverged: the
+        // host listened/served on the override, while the child it spawned
+        // still bound whatever port settings.json said - observed
+        // concretely as a --tray-selftest run from a scratch root whose
+        // settings.json said 47831 binding the PRODUCTION port even
+        // though it was launched with --port 47978. Callers now pass the
+        // already-resolved port (their own _port field, computed once via
+        // PortResolver.Resolve) so the child always listens on the exact
+        // port the host will talk to - -Root is deliberately NOT passed
+        // here: addon-server.ps1's own $Root default (its script's parent
+        // directory - see its param block) already resolves to the same
+        // path this psi.WorkingDirectory below does, for every caller.
+        public static bool TryStart(string addonServerScriptPath, HostOptions options, int port, Action<string> log)
         {
             if (string.IsNullOrEmpty(addonServerScriptPath))
             {
@@ -4642,7 +4662,8 @@ boot();
             {
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "powershell.exe";
-                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + addonServerScriptPath + "\"";
+                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + addonServerScriptPath + "\"" +
+                    " -Port " + port.ToString(CultureInfo.InvariantCulture);
 
                 // Same test-mode forwarding TryStartServer always had (see
                 // its own history: Round-1-fixer verifier finding 1) - keeps
@@ -6832,7 +6853,7 @@ boot();
         // prefix unchanged.
         private bool TryStartServer()
         {
-            return ServerLauncher.TryStart(_addonServerScriptPath, _options,
+            return ServerLauncher.TryStart(_addonServerScriptPath, _options, _port,
                 delegate(string msg) { LogHost("[tray] " + msg); });
         }
 
