@@ -311,28 +311,88 @@ Row 13
   prior location: Advanced > WoW versions (unchanged position, unchanged
        visibility gating)
 
-Group 7: "Folders Furphy doesn't manage yet" (unchanged heading, sentence,
-and position)
+Group 7: "Addons Furphy isn't managing yet" (renamed Round 46, 2026-09-09,
+from "Folders Furphy doesn't manage yet"; same position)
 
-Row 14
-  key: n/a (Scan is an action, not a stored setting)
-  control: intro sentence (unchanged: "Folders in your AddOns folder that
-       Furphy doesn't manage yet.") + Scan button + dynamic per-result rows
-  heading tooltip (on the "Folders Furphy doesn't manage yet" h3):
-       "Addons installed by unzipping a download, or with another addon
-       manager, before Furphy knew about them."
-  Scan button tooltip: "Looks only - nothing changes until you take over or
+SUPERSEDED Round 46 (2026-09-09) - kept as history, do not delete. Row 14
+below used to describe a row that re-downloaded a matched addon from
+CurseForge or Wago to establish a record for it ("Take over"). It no
+longer does: as of this round the row uses the same in-place, no-download
+mechanism ADOPT-SPEC.md section 2 gave install.ps1 (the CLI's own
+`-Adopt <folder[]>`), reached through a new server job kind, `adopt`. The
+old wording below was correct for what the row did at the time - it is
+kept only so a future pass doesn't reinvent the "it doesn't touch the
+files themselves" mistake this correction fixed:
+  old heading: "Folders Furphy doesn't manage yet"
+  old intro sentence: "Folders in your AddOns folder that Furphy doesn't
+       manage yet."
+  old per-result action: three variant buttons - "Take over (CF <id>)"
+       (shown when the folder's own .toc names a CurseForge id), "Take
+       over (Wago)" (Wago id), and a third, always-shown "Take over" paired
+       with a manual numeric-ID text input, for a folder with no id of its
+       own. All three re-downloaded and overwrote the folder from the
+       given id.
+  old Scan tooltip: "Looks only - nothing changes until you take over or
        delete a result"
-  Per-result "Take over" button tooltips:
-       CurseForge-id variant: "Re-downloads this addon from CurseForge, so
-            Furphy can keep it updated from now on."
-       Wago-id variant: "Re-downloads this addon from Wago, so Furphy can
-            keep it updated from now on."
-       Manual-ID variant: "Re-downloads this addon from CurseForge, so
-            Furphy can keep it updated from now on." (this path always
-            submits a CurseForge project id)
-       Do NOT ship "it doesn't touch the files themselves" - that claim is
-       false; Take over re-downloads and overwrites the folder.
+  old per-result tooltips (CurseForge/Wago/manual variants, all three):
+       "Re-downloads this addon from CurseForge/Wago, so Furphy can keep it
+       updated from now on."
+
+Row 14 (rewritten Round 46 - new wording below)
+  key: n/a (Scan is an action, not a stored setting)
+  control: intro sentence (NEW: "These are already in your AddOns folder.
+       Furphy can keep them updated without changing anything now." - was
+       "Folders in your AddOns folder that Furphy doesn't manage yet.") +
+       Scan button + Manage all (N) bulk button + dynamic per-result rows,
+       split into two groups (see below)
+  heading tooltip (on the "Addons Furphy isn't managing yet" h3, text
+       UNCHANGED from before this round - still accurate): "Addons
+       installed by unzipping a download, or with another addon manager,
+       before Furphy knew about them."
+  Scan button tooltip (NEW wording, same shape): "Looks only - nothing
+       changes until you click Manage or delete a result." (was "...until
+       you take over or delete a result")
+  Group A - recognizable results (the folder's own .toc names a CurseForge
+       or Wago id): one button per row, replacing the old three-variant
+       set:
+       label: "Manage" (no id shown anywhere on the button or its aria-
+            label - drop the old "(CF <id>)"/"(Wago)" suffix entirely)
+       tooltip: "Furphy will start keeping this addon updated, exactly as
+            it is now - nothing is downloaded or changed."
+       aria-label on the row's info-tip: "More about Manage" (was "More
+            about Take over" (+ CurseForge/Wago/manual-ID suffix))
+       The manual numeric-ID text input is REMOVED from this row - there
+       is no download left for a typed-in id to steer, and recording an
+       id the folder's own .toc doesn't actually declare would break the
+       "exactly as it sits on disk" guarantee ADOPT-SPEC.md section 1
+       states for -Adopt.
+  Bulk button (NEW, Round 46 - sits beside Scan, same row): label "Manage
+       all (N)" (N = count of Group A results currently listed); shown
+       only when Group A has at least one result, same visibility rule
+       "Update all" already uses for "nothing to do". Tooltip: "Furphy
+       will start keeping these N addons updated, exactly as they are now
+       - nothing is downloaded or changed."
+  Group B - unrecognized results (no CurseForge or Wago id in the
+       folder's own .toc, or no .toc at all - today's "No title found"/
+       "No details found" rows): moved under its own sub-heading, NOT
+       mixed into Group A's list:
+       sub-heading text: "Furphy can't tell what these are, so it leaves
+            them alone:"
+       per-row action: Delete only (unchanged Delete button/confirm
+            dialog) - no Manage button, no manual-ID input, on any row in
+            this group
+  Empty/not-yet-run states (UNCHANGED text and logic - Round 5's own
+       distinction between "never scanned" and "scanned, found nothing"
+       stays exactly as it is): "Nothing found yet. Click Scan to look." /
+       "Scanned - nothing found."
+  Job + toast (NEW, Round 46): clicking "Manage", "Manage all (N)", or
+       either Welcome-dialog button (UX-SPEC.md sections 2.4 and 7) posts
+       the server's new `adopt` job kind (maps to `-Adopt`, no network
+       call) rather than the old `add` job kind (which mapped to `-Add`
+       and downloaded). Job-panel title while running: "Managing N
+       addon(s)..." On completion, toast: "Now keeping N addon(s) up to
+       date - nothing was downloaded or changed." (singular: "Now keeping
+       1 addon up to date - nothing was downloaded or changed.")
   prior location: Advanced (unchanged position)
 
 Group 8: "Backup & troubleshooting" (MERGED from three former standalone
@@ -398,8 +458,9 @@ Row 18
        space."
   pre-run placeholder (REPLACES "Click Run to check the AddOns folder,
        config files, CurseForge reachability, and disk space." - mirrors
-       the sibling Untracked-folders section's own not-yet-run wording):
-       "Nothing checked yet. Click Run to look."
+       the sibling "Addons Furphy isn't managing yet" section's own
+       not-yet-run wording, Row 14 above): "Nothing checked yet. Click Run
+       to look."
   Per-check result-row tooltips (title on each row's name span):
        AddOns folder: "Furphy reads and writes files in your AddOns folder
             to install and update addons. A failure here usually means the
@@ -855,6 +916,17 @@ this round: never write the literal string "curseforge://" or any other
 raw protocol/scheme identifier in any tooltip or helper line - this was a
 real leak caught and reverted once already on the install-links row (see
 Section 7).
+
+Additionally, as of Round 46 (2026-09-09): "take over"/"taking over" and
+"reinstall"/"reinstalling" no longer describe Group 7 ("Addons Furphy
+isn't managing yet," Row 14) or either Welcome-dialog button - that
+operation no longer downloads anything, so neither word is accurate any
+more. This is scoped to that one flow, NOT a blanket ban on "reinstall"
+everywhere in Settings: Row 17's "Force reinstall all" button and its
+confirm dialog still perform a real reinstall (every tracked addon is
+re-downloaded) and keep their existing wording untouched - do not rename
+Row 17, and do not flag its continued use of "reinstall" as a banned-term
+violation.
 
 DO-NOT-TOUCH VISIBLE TEXT (must stay exactly as shipped, no tooltip added
 on top, no rewording): (Round 34, 2026-09-07: the two locked "Update addons

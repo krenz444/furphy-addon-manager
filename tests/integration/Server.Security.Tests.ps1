@@ -16,6 +16,12 @@
  on every non-GET call) - this security fix could never actually be
  exercised. Fixed via Invoke-Api's new -ContentType override
  (tests\lib\common.ps1).
+
+ Round 46 (ADOPT-SPEC.md app-side opt-in): the CSRF Describe gained two
+ more Its confirming the new POST /api/jobs kind=adopt case did not slip
+ past the router-level Test-SameOriginRequest gate - see
+ Server.Jobs.Tests.ps1 for kind=adopt's own validation/happy-path
+ coverage.
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
@@ -53,6 +59,23 @@ Describe 'CSRF guard (Test-SameOriginRequest)' {
         It 'GET requests never need Origin/Referer at all' {
             $r = Invoke-Api -Port 47899 -Method Get -Path '/api/state' -NoOrigin
             $r.Ok | Should Be $true
+        }
+
+        # Round 46 (ADOPT-SPEC.md app-side opt-in): kind=adopt is a NEW
+        # state-changing POST /api/jobs case - confirms it did not slip
+        # past the router-level Test-SameOriginRequest gate (which runs
+        # BEFORE Handle-JobsPost's own kind switch, so this holds
+        # regardless of whether the body would otherwise be valid).
+        It 'a POST /api/jobs kind=adopt request with NO Origin/Referer is refused 403, same as every other state-changing job kind' {
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs' -Body @{ kind = 'adopt'; folders = @('SomeAddon') } -NoOrigin
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 403
+        }
+
+        It 'a POST /api/jobs kind=adopt request with a FOREIGN Origin is refused 403' {
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/jobs' -Body @{ kind = 'adopt'; folders = @('SomeAddon') } -Headers @{ Origin = 'http://evil.example.com' } -NoOrigin
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 403
         }
     } finally {
         Stop-TestServer -Server $server

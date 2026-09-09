@@ -1,5 +1,194 @@
 # Furphy Addon Manager - changelog
 
+## Round 46 (1.26.0: the in-app Manage flow keeps your addons as they are)
+
+Round 45's own scope note (ADOPT-SPEC.md section 0) drew a deliberate line:
+install.ps1's unattended first-run step would stop re-downloading addons
+to record them, but the app's own opt-in flow (Settings > "Folders Furphy
+doesn't manage yet," and the first-run Welcome dialog) was a different,
+explicitly-triggered feature and stayed untouched - still a real
+re-download, still saying so plainly. Eric has now said yes to closing
+that gap too: the app's own flow adopts in place now, the same way
+install.ps1 already does.
+
+**Behavior:** both entry points - Settings' per-row and new bulk button,
+and both Welcome-dialog buttons (the first-run "found addons" mode and
+Round 45's own post-install "adopted" notice) - now post a new server job
+kind, `adopt`, which maps to the CLI's existing `-Adopt <folder[]>`
+(ADOPT-SPEC.md section 2) instead of the old download-based `add` kind.
+No network call, no file write under `Interface\AddOns` - the record is
+whatever the folder's own `.toc` already declares, exactly as ADOPT-SPEC
+already guarantees for install.ps1's step. The job panel shows it like
+any other job; completion is a plain toast, "Now keeping N addon(s) up to
+date - nothing was downloaded or changed." Explicit installs (Get new
+addons, `-Add`, the drawer's "Also on CurseForge/Wago" switch) are
+untouched - those still download, on purpose, since the player is asking
+for a specific file.
+
+**Wording:** every remaining "take over"/"taking over"/"adopt"/
+"untracked" string in the SPA is gone. Settings heading: "Addons Furphy
+isn't managing yet" (was "Folders Furphy doesn't manage yet"); helper
+line: "These are already in your AddOns folder. Furphy can keep them
+updated without changing anything now." Per-row button: "Manage" - one
+button, no CurseForge/Wago id shown anywhere, replacing the old
+three-variant set (id-specific button plus a manual numeric-ID entry
+field for an unrecognized folder). New bulk button: "Manage all (N)." A
+folder Furphy can't identify from its own `.toc` no longer gets a manual-
+ID workaround (there is no download left for a typed-in id to steer) -
+it moves under its own line, "Furphy can't tell what these are, so it
+leaves them alone:", with Delete as its only action. First-run Welcome
+dialog: title "Found N addon(s) you already have," body "Furphy can keep
+them updated. Nothing is downloaded or changed now - you'll just see an
+Update badge when a newer version comes out.," buttons "Not now" and
+"Keep them updated" (restyled to the app's primary treatment - it's a
+safe action now, not a bulk re-download). Round 45's post-install
+"adopted" notice keeps its own wording untouched, but its "Not now"
+button is hidden (there is nothing to decline, install.ps1 already
+finished) and its surviving "Got it" button gets the same primary
+treatment, so the two dialogs read as equally trustworthy.
+
+**Docs:** UX-SPEC.md sections 2.4, 6.2, 7, 9 and 11 rewritten for this
+flow, old wording marked superseded with today's date rather than
+deleted; SETTINGS-SPEC.md's Group 7 (Row 14) rewritten the same way, and
+its banned-terms list gains "take over"/"taking over"/"reinstall" for
+this flow specifically - "Force reinstall all" (Row 17) and the CLI's own
+`-Force` flag are unrelated, still-genuine reinstalls and keep their
+existing wording, called out explicitly so a future pass doesn't flag
+them by mistake. README.md and README.txt's own description of the
+in-app flow updated to match.
+
+<!-- ROUND46-COUNTS -->
+**Docs-package verification (this entry's own scope - behavior/code
+verification is a separate package's job, not re-stated here):** files
+touched: UX-SPEC.md, SETTINGS-SPEC.md, README.md, README.txt,
+CHANGELOG.md, VERSION - 6 files, 0 files outside that list read-modified.
+Wording changes: 1 Settings group heading, 1 Settings intro sentence, 1
+Settings per-row button (replacing 3 old variants), 1 new Settings bulk
+button, 1 new "can't tell what these are" sub-heading, 1 new job-
+completion toast, 1 first-run dialog title/body/button-pair rewrite, 1
+post-install dialog button-styling note - 8 distinct strings specified
+against UX-SPEC.md's own copy-table convention. Banned-term sweep (grep
+`take over|taking over|reinstall|untracked|adopt` case-insensitive
+across all 6 touched files): every hit outside a `~~struck~~`/
+"SUPERSEDED"/historical block is either (a) an internal API/CLI
+identifier already exempted by this document's own "internal names may
+keep 'adopt'" convention (`-Adopt`, the `adopt` job kind, ADOPT-SPEC.md
+cross-references), or (b) the deliberately-unrelated "Force reinstall
+all" button/CLI `-Force` flag/generic "reinstall the app" prose, each
+individually called out in the new text next to it - zero unflagged
+hits. ASCII sweep: SETTINGS-SPEC.md, README.md, README.txt and this
+CHANGELOG.md entry are 0 non-ASCII characters end to end; UX-SPEC.md's
+pre-existing prose already carries non-ASCII punctuation (em dashes,
+section-symbol shorthand) throughout the document from earlier rounds -
+every line added or rewritten for Round 46 in that file is plain ASCII,
+verified by scanning every line containing "Round 46" for `ord(c) > 127`.
+Live-safety snapshot (read-only checks, before and after every edit in
+this package): production Run value unchanged
+(`"...\_retail_\AddonSync\host\bin\FurphyHost.exe" --tray`), Uninstall
+DisplayVersion 1.25.1 unchanged, live VERSION file 1.25.1 unchanged, tray
+pid 35488 (FurphyHost) still running throughout - this package never
+touched the live install, `Interface\AddOns`, or `WTF`.
+
+<!-- ROUND46-VERIFIER1-COUNTS -->
+**Verifier pass 1 (code/behavior verification, 2026-09-09):** static/
+unit/spa gate (`tests\run-all.ps1 -Only static,unit,spa`): static 7/7,
+unit 391/391, spa 2/2 (harness 309/309 + theme-audit 500/500) - ALL
+LAYERS PASSED. Integration Pester, one file at a time on port 47899:
+Server.Jobs 24/24, Server.State 14/14, Server.Security 19/19,
+Server.Settings 19/19, Server.AppUpdate 18/18, Cli.Adopt 15/15,
+Cli.AdoptFreshness 17/17 - 126/126 total, 0 failed. Independent scratch
+check (own fixture, port 47960, not the tests package's own suite):
+21/21 - a two-folder adopt (CurseForge + Wago) lands both as
+adopted:true/fileId:null with the AddOns tree byte-identical before/
+after, the third no-id folder lands in leftAlone, a path-traversal or
+nonexistent folder name is 400, and a no-Origin POST is 403. SPA
+mock-mode screenshots (headless Edge, static `ui\` on a scratch port):
+the Settings "Addons Furphy isn't managing yet" section (title, helper
+text, Scan/Manage all(2) buttons, per-row Manage, the "can't tell what
+these are" sub-list), the download-mode Welcome dialog, and the
+completion toast in both singular ("Now keeping 1 addon up to date -
+nothing was downloaded or changed.") and plural ("Now keeping 2 addons
+up to date...") forms all read exactly as specced above, no clipping,
+no banned terms. **One confirmed defect, not yet fixed:** the
+post-install "adopted" Welcome variant's "Not now" button is NOT hidden
+(`ui\app.js` `Components.Welcome.open()`, the `mode === "adopted"`
+branch around line 2848, and `Components.Dialogs.openWelcome()` around
+line 2715, which unconditionally focuses it) - confirmed live via
+`window.__furphyTest.Components.Welcome.open(items, {mode:"adopted"})`:
+`#welcome-skip` renders with `hidden=false`/`display:flex` alongside
+"Got it". This paragraph's own text above ("its 'Not now' button is
+hidden") does not match shipped behavior.
+
+<!-- ROUND46-REFIX1-COUNTS -->
+**REFIX pass 1 (2026-09-09):** fixed the one Verifier-pass-1 defect above.
+`ui\app.js` `Components.Welcome.open()` now sets `#welcome-skip.hidden =
+true` in the `mode === "adopted"` branch and `= false` in the download-
+mode branch (so a later download-mode open never inherits a stale hidden
+Skip button from a prior adopted-mode open); `Components.Dialogs.
+openWelcome()`'s unconditional `#welcome-skip.focus()` is now conditional
+on that same hidden flag. `tests\spa\harness.js` gained the two matching
+assertions. `tests\spa\Run-SpaHarness.ps1`: 311/311 (was 309/309).
+`tests\static\Test-BannedTerms.ps1`: 69/69. `tests\static\Test-
+AsciiScan.ps1`: 95/95. Scope stayed inside `ui\app.js` and `tests\spa\
+harness.js` only.
+
+<!-- ROUND46-VERIFIER2-COUNTS -->
+**Verifier pass 2 (independent re-verification, 2026-09-09):** confirmed
+the REFIX 1 fix live - `#welcome-skip.hidden` is `true` in adopted mode
+and `false` in download mode, matching this entry's own copy above; no
+other regression found across any package. Ownership/scope: every file
+each package's report claimed to touch matches its actual mtime/line-
+count/content (server: `addon-server.ps1` only, 10897->10995 lines; spa +
+REFIX1: `ui\app.js`, `ui\index.html`, `tests\spa\harness.js`; tests:
+`tests\integration\Server.Jobs.Tests.ps1` 416->728,
+`tests\integration\Server.Security.Tests.ps1` 190->213,
+`tests\static\Test-BannedTerms.ps1`; docs: `UX-SPEC.md`,
+`SETTINGS-SPEC.md`, `README.md`, `README.txt`, `CHANGELOG.md`,
+`VERSION`) - no unclaimed cross-package edits. Parse/lint: all 5 touched
+`.ps1` files parse clean
+(`[System.Management.Automation.Language.Parser]::ParseFile`); `node
+--check` clean on `ui\app.js` and `tests\spa\harness.js`. Banned-terms:
+independent grep of `README.md`/`README.txt`/`ui\index.html`/`ui\app.js`
+for "take over"/"taking over"/"reinstall"/"untracked" outside code
+identifiers, comments, and superseded/historical blocks - zero
+unflagged hits (every "reinstall" hit is the unrelated "Force reinstall
+all" button, the CLI's own `-Force` flag, or reinstalling Windows/the
+app itself). ASCII: full-file scan of every touched file confirms every
+non-ASCII line pre-dates this round's edits (struck-through historical
+copy in `UX-SPEC.md`, legacy ellipsis/em-dash in untouched `ui\app.js`
+code) - no new non-ASCII content introduced. Headless gate
+(`tests\run-all.ps1 -Only static,unit,spa`, port 47899 free beforehand,
+no run-all.lock present): static 7/7, unit 391/391, spa 2/2 (harness
+311/311 + theme-audit 500/500) - ALL LAYERS PASSED, 135.8s. Integration
+Pester, one file at a time on port 47899: Server.Jobs 24/24, Server.State
+14/14, Server.Security 19/19 (both new kind=adopt CSRF checks included),
+Server.Settings 19/19, Server.AppUpdate 18/18 (1 test failed on the
+first run - "a single GET /api/state makes windowOpen read true
+immediately afterward" - reproduced as flaky/order-dependent and
+unrelated to this round: passes in isolation and passes on a full
+file re-run; no package touched app-update code), Cli.Adopt 15/15,
+Cli.AdoptFreshness 5/5 offline (Network-tagged cases excluded, by
+design, from every non-`-Network` run) - 114/114 non-flaky total, 0
+attributable failures. Independent scratch check (own fixture, port
+47960, distinct from the tests package's own suite): 13/13 - a
+three-folder adopt (CurseForge id, Wago id, no id) lands the two
+recognizable ones as `adopted:true`/`fileId:null` with the AddOns tree
+byte-identical before/after, the third lands in `leftAlone`, a path-
+traversal folder name is 400, and a no-Origin POST is 403. SPA mock-mode
+screenshots (headless Edge via the Browser pane, static `ui\` on a
+scratch port): the Settings "Addons Furphy isn't managing yet" section
+(title, helper text, Scan/"Manage all (2)", per-row Manage/Delete, the
+"can't tell what these are" sub-list) and the download-mode Welcome
+dialog (title "Found 2 addons you already have," body, "Not now"/"Keep
+them updated") both confirmed via live DOM read with no clipping; the
+"Manage all (2)" click produced the toast "Now keeping 2 addons up to
+date - nothing was downloaded or changed." exactly as specced. Live-
+safety snapshot, before and after every check in this pass: production
+Run value unchanged (`"...\_retail_\AddonSync\host\bin\FurphyHost.exe"
+--tray`), Uninstall DisplayVersion 1.25.1 unchanged, live VERSION file
+1.25.1 unchanged, tray pid 35488 (FurphyHost) still running throughout -
+this pass never touched the live install, `Interface\AddOns`, or `WTF`.
+
 ## Round 45 (1.25.0: a clean switch-over - your addons are never touched during install; honest installer progress)
 
 Eric's two requests, verbatim: (1) "make a more friendly message in the

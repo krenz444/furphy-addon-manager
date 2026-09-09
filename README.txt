@@ -77,8 +77,9 @@ THE APP
                   creation date or any "installs this season" figure at all, so neither is shown anywhere -
                   Recently updated and Gaining this week are the honest stand-ins for "new" and "rising."
   Settings        one page, two tiers - a few Essentials always on screen (release channel, spacing, theme) and
-                  an Advanced section for everything else (CurseForge options, game folders, folders Furphy
-                  doesn't manage yet with one-click take over, backups, diagnostics, open logs, force reinstall).
+                  an Advanced section for everything else (CurseForge options, game folders, addons Furphy
+                  isn't managing yet with one-click Manage - no download, nothing changes until a real update
+                  is found - backups, diagnostics, open logs, force reinstall all).
                   Every row that needs more explaining has a small info icon - hover or tab to it for details.
 
 FILES (this folder)

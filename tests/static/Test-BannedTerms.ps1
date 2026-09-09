@@ -47,7 +47,20 @@ $bannedPhrases = @(
     # the launch-WoW feature and its copy are gone entirely; fail the
     # build if any of these ever reappear in visible UI text.
     'Update & Play', 'Launch WoW', 'update-addons-and-launch',
-    'Update & Open Battle.net'
+    'Update & Open Battle.net',
+    # Round 46 (ADOPT-SPEC.md app-side opt-in, Eric 2026-09-09): the
+    # Settings "Folders Furphy isn't managing yet" section and the
+    # first-run Welcome dialog stop re-downloading addons to establish a
+    # record ("Take over"/"Taking over ...") and adopt them in place
+    # instead (a "Manage"/"Manage all (N)" button, a "Keep them updated"
+    # first-run choice) - same as install.ps1's own already-shipped
+    # ADOPT-SPEC.md 3.4/3.5 wording rewrite. Fail the build if this
+    # retired wording ever reappears in visible UI text. NOT "reinstall":
+    # that word is legitimately used elsewhere for wholly unrelated,
+    # unaffected features (Settings' "Force reinstall all", the per-addon
+    # "Reinstall from CurseForge/Wago" switch-source action) - banning it
+    # globally would break those, not this flow.
+    'take over', 'taking over'
 )
 $bannedWords = @('toc', 'compat', 'stale', 'adopt', 'digest', 'indexed')
 

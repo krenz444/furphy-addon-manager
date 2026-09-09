@@ -2463,6 +2463,28 @@ function Build-CliArgs {
             $argsList.Add('-Rollback')
             $argsList.Add([string]$Params.projectId)
         }
+        'adopt' {
+            # ROUND 46 (ADOPT-SPEC.md app-side opt-in): Settings' "Manage"/
+            # "Manage all" row buttons and the first-run Welcome dialog's
+            # "Keep them updated" button both post {kind:'adopt', folders:
+            # [...]} - top-level AddOns folder NAMES (never project ids),
+            # comma-joined into a single -Adopt token for the identical
+            # "-File binding only keeps the first bare token" reason the
+            # 'sync' case above documents for -Only/-Add/-Remove. Handle-
+            # JobsPost already validated every name (no path separators,
+            # resolves under this flavour's own AddOns folder) before
+            # Start-Job was ever called, so this stays a plain pass-through -
+            # addon-sync.ps1's own -Adopt handles an unrecognizable/already-
+            # tracked folder per-name (see ADOPT-SPEC.md section 2) rather
+            # than failing the whole batch.
+            if (-not ($Params -and $Params.folders -and @($Params.folders).Count -gt 0)) {
+                throw 'folders is required for kind adopt'
+            }
+            $folderStrings = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($f in @($Params.folders)) { $folderStrings.Add([string]$f) }
+            $argsList.Add('-Adopt')
+            $argsList.Add(($folderStrings -join ','))
+        }
         default {
             throw "Unknown job kind: $Kind"
         }
@@ -4096,6 +4118,33 @@ function Update-JobStatus {
         }
         $Job.state = 'done'
 
+        # ROUND 46 (ADOPT-SPEC.md app-side opt-in): an 'adopt' job's raw
+        # results rows (status/name/folders/reason, straight off addon-
+        # sync.ps1's -Adopt -Json output - see that CLI's own jsonResults
+        # construction) are summarized into the shape the SPA's job panel
+        # actually wants: adoptedCount, adopted:[{name,folders}] for every
+        # row this run newly recorded, leftAlone:[folder] (flattened, one
+        # entry per un-adopted folder - not-found/no-recognizable-id/
+        # already-tracked all land here alike, same as ADOPT-SPEC.md
+        # section 2's own "skip, never abort the batch" contract) for every
+        # other row. Every other job kind never sets these NoteProperties at
+        # all - Get-JobStatusView's own reads default to $null for them,
+        # same pattern as .progress/.choices.
+        if ($Job.kind -eq 'adopt') {
+            $adoptedRows = New-Object 'System.Collections.Generic.List[object]'
+            $leftAloneRows = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($r in $Job.results) {
+                if ($r.status -eq 'Adopted') {
+                    $adoptedRows.Add([PSCustomObject]@{ name = $r.name; folders = @($r.folders) })
+                } elseif ($r.folders) {
+                    foreach ($f in @($r.folders)) { $leftAloneRows.Add([string]$f) }
+                }
+            }
+            Add-Member -InputObject $Job -MemberType NoteProperty -Name 'adoptedCount' -Value $adoptedRows.Count -Force
+            Add-Member -InputObject $Job -MemberType NoteProperty -Name 'adopted' -Value $adoptedRows.ToArray() -Force
+            Add-Member -InputObject $Job -MemberType NoteProperty -Name 'leftAlone' -Value $leftAloneRows.ToArray() -Force
+        }
+
         Apply-JobCompletionSideEffects -Job $Job -Parsed $parsed
     } else {
         $Job.state = 'failed'
@@ -4175,6 +4224,13 @@ function Get-JobStatusView {
         # state 'awaiting_flavour' - $null (safe NoteProperty read) for
         # every other job, exactly like .progress above.
         choices    = $Job.choices
+        # ROUND 46 (ADOPT-SPEC.md app-side opt-in): set only on a finished
+        # 'adopt' job (see Update-JobStatus's own success branch) - $null
+        # (safe NoteProperty read) for every other job/kind, exactly like
+        # .progress/.choices above.
+        adoptedCount = $Job.adoptedCount
+        adopted      = $Job.adopted
+        leftAlone    = $Job.leftAlone
         # GAME-MODE-SPEC.md section 4.1: whether WoW was already running
         # when this job started, captured once at job-creation time (Start-
         # Job/Start-ImportJob/Start-SwitchSourceJob). Exposed here (not just
@@ -7244,7 +7300,7 @@ function Handle-JobsPost {
     }
 
     $kind = [string]$body.kind
-    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'rollback', 'switch-source', 'add-by-slug', 'update-all-flavours')
+    $validKinds = @('sync', 'check', 'add', 'remove', 'install', 'rollback', 'switch-source', 'add-by-slug', 'update-all-flavours', 'adopt')
     if (-not ($validKinds -contains $kind)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: unknown kind '$kind'" }
         return
@@ -7384,6 +7440,48 @@ function Handle-JobsPost {
     if ($kind -eq 'rollback' -and (-not $body.projectId)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId required' }
         return
+    }
+    if ($kind -eq 'adopt') {
+        # ROUND 46 (ADOPT-SPEC.md app-side opt-in): validated HERE, before
+        # Start-Job/Build-CliArgs ever run, same defense-in-depth precedent
+        # as Handle-ScanDelete's own folder-name check just below in this
+        # file - every name must be a bare top-level folder (no path
+        # separators, no '..'), resolve under THIS flavour's own AddOns
+        # folder (containment check, not just a syntactic one), and actually
+        # exist right now. $Script:CurrentFlavour is already the flavour
+        # this request resolved to (Set-CurrentFlavourContext, run by
+        # Invoke-Route before this handler) - 'adopt' never re-resolves it
+        # the way 'add'/'install' can (see Start-Job's S5.5 block), so this
+        # is the same flavour Start-Job will actually dispatch to below.
+        $adoptFolders = @()
+        if ($body.folders) { $adoptFolders = @($body.folders) }
+        if ($adoptFolders.Count -eq 0) {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: folders required' }
+            return
+        }
+        $adoptAddonsPath = Resolve-EffectiveAddonsPath
+        if (-not $adoptAddonsPath) {
+            Send-Json -Context $Context -StatusCode 500 -Body @{ error = 'AddOns path could not be resolved' }
+            return
+        }
+        $adoptAddonsFull = [System.IO.Path]::GetFullPath($adoptAddonsPath)
+        foreach ($rawAdoptFolder in $adoptFolders) {
+            $adoptFolderName = [string]$rawAdoptFolder
+            if ($adoptFolderName -match '[\\/]' -or $adoptFolderName -match '\.\.' -or $adoptFolderName.Trim().Length -eq 0) {
+                Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: invalid folder name' }
+                return
+            }
+            $adoptTarget = Join-Path -Path $adoptAddonsPath -ChildPath $adoptFolderName
+            $adoptTargetFull = [System.IO.Path]::GetFullPath($adoptTarget)
+            if (-not $adoptTargetFull.StartsWith($adoptAddonsFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: invalid folder path' }
+                return
+            }
+            if (-not (Test-Path -LiteralPath $adoptTargetFull -PathType Container)) {
+                Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: folder not found: $adoptFolderName" }
+                return
+            }
+        }
     }
 
     $result = Start-Job -Kind $kind -Params $body -FlavourExplicit $flavourGiven
@@ -10279,7 +10377,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.25.1'
+$Script:Version = '1.26.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

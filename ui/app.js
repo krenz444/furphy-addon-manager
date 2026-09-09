@@ -556,9 +556,17 @@ const Mock = (function () {
     return "up_to_date";
   }
 
+  // THE CHANGE (this round): a mixed fixture - one CurseForge-recognizable
+  // folder, one Wago-recognizable folder, one Furphy can't identify at all
+  // (no .toc, no id) - so ?mock=1 exercises Settings' split "Addons Furphy
+  // isn't managing yet" list (recognizable rows get a Manage button; the
+  // unrecognizable one is listed separately, under its own "leaves them
+  // alone" line) and the bulk "Manage all (N)" button counting only the
+  // two recognizable rows.
   const untracked = [
-    { folder: "OldClique", title: "Clique", version: "60300-1", hasToc: true },
-    { folder: "leftover_stuff", title: null, version: null, hasToc: false }
+    { folder: "OldClique", title: "Clique", version: "60300-1", hasToc: true, curseId: "4058", wagoId: null },
+    { folder: "SimpleRaidTimer", title: "Simple Raid Timer", version: "2.1.0", hasToc: true, curseId: null, wagoId: "simple-raid-timer" },
+    { folder: "leftover_stuff", title: null, version: null, hasToc: false, curseId: null, wagoId: null }
   ];
 
   // E16 (keyless CurseForge enrichment): a small offline-catalogue-shaped
@@ -645,6 +653,11 @@ const Mock = (function () {
     if (kind === "install") return ["Downloading selected version...", "Installed."];
     if (kind === "rollback") return ["Restoring previous version from local backup...", "Rolled back."];
     if (kind === "import") return ["Adding new addons...", "Applying pinned versions...", "Applying ignore flags...", "Import complete."];
+    // THE CHANGE (this round): the SPA's own "adopt" job kind - reads each
+    // named folder's own .toc, no download (mirrors the CLI's -Adopt, see
+    // ADOPT-SPEC.md section 2). Config-only, like remove/rollback/import
+    // above, so this never enters PROGRESS_KINDS below.
+    if (kind === "adopt") return ["Reading addon folders...", "Done."];
     return ["Working..."];
   }
 
@@ -760,6 +773,53 @@ const Mock = (function () {
           if (idx !== -1) {
             job.results.push({ status: "Removed", name: addons[idx].name, version: addons[idx].version, projectId: addons[idx].projectId, wagoSlug: addons[idx].slug });
             addons.splice(idx, 1);
+          }
+        });
+      } else if (kind === "adopt") {
+        // THE CHANGE (this round): mirrors the CLI's -Adopt (ADOPT-SPEC.md
+        // section 2.3) at fixture-simulation fidelity - folder names only,
+        // no download. Each named folder is looked up in the mock's own
+        // `untracked` fixture (the same one /api/scan reads) for whatever
+        // id its .toc carries; found + a recognizable id + not already
+        // tracked -> a new adopted:true/fileId:null record (and the folder
+        // is removed from `untracked`, so a later Scan no longer lists it -
+        // same as the real CLI would no longer surface it as untracked);
+        // anything else -> Skipped with a plain reason, matching the real
+        // CLI's own skip reasons.
+        const folders = (params && params.folders) || [];
+        job.results = [];
+        folders.forEach(function (folder) {
+          const idx = untracked.findIndex(function (u) { return u.folder === folder; });
+          const scanned = idx !== -1 ? untracked[idx] : null;
+          if (!scanned) {
+            job.results.push({ status: "Skipped", name: folder, version: "", projectId: null, fileId: null, wagoSlug: null, folders: [folder], reason: "folder not found" });
+            return;
+          }
+          if (!scanned.curseId && !scanned.wagoId) {
+            job.results.push({ status: "Skipped", name: scanned.title || folder, version: scanned.version || "", projectId: null, fileId: null, wagoSlug: null, folders: [folder], reason: "no recognizable id" });
+            return;
+          }
+          const name = scanned.title || folder;
+          if (scanned.curseId) {
+            const pid = Number(scanned.curseId);
+            const already = addons.find(function (a) { return a.projectId === pid; });
+            if (already) {
+              job.results.push({ status: "Skipped", name: already.name, version: already.version, projectId: pid, fileId: null, wagoSlug: null, folders: [folder], reason: "id already tracked as " + already.name });
+              return;
+            }
+            addons.push({ name: name, projectId: pid, fileId: null, version: scanned.version || "", fileName: null, installedAt: null, folders: [folder], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null, adopted: true, adoptedAt: new Date().toISOString() });
+            untracked.splice(idx, 1);
+            job.results.push({ status: "Adopted", name: name, version: scanned.version || "", projectId: pid, fileId: null, wagoSlug: null, folders: [folder], reason: null });
+          } else {
+            const slug = scanned.wagoId;
+            const already = addons.find(function (a) { return a.source === "wago" && a.slug === slug; });
+            if (already) {
+              job.results.push({ status: "Skipped", name: already.name, version: already.version, projectId: null, fileId: null, wagoSlug: slug, folders: [folder], reason: "id already tracked as " + already.name });
+              return;
+            }
+            addons.push({ name: name, projectId: null, fileId: null, version: scanned.version || "", fileName: null, installedAt: null, folders: [folder], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: null, slug: slug, curseId: null, updateAvailable: null, adopted: true, adoptedAt: new Date().toISOString() });
+            untracked.splice(idx, 1);
+            job.results.push({ status: "Adopted", name: name, version: scanned.version || "", projectId: null, fileId: null, wagoSlug: slug, folders: [folder], reason: null });
           }
         });
       } else if (kind === "install") {
@@ -2657,7 +2717,14 @@ Components.Dialogs = (function () {
     // a11y-keyboard:a11y-dialog-no-trap-no-return - move focus into the
     // dialog on open (WAI-ARIA APG modal pattern); Skip is the least
     // destructive control, same "safe default" choice as confirm() below.
-    setTimeout(function () { Utils.qs("#welcome-skip").focus(); }, 160);
+    // In "adopted" mode Components.Welcome.open() hides Skip (nothing to
+    // decline there - see its own comment), so focus would land on an
+    // invisible/unfocusable element and break the Tab trap; fall back to
+    // the one visible/focusable control ("Got it") whenever Skip is hidden.
+    setTimeout(function () {
+      const skipBtn = Utils.qs("#welcome-skip");
+      (skipBtn.hidden ? Utils.qs("#welcome-adopt") : skipBtn).focus();
+    }, 160);
   }
   function closeWelcome() { hide("welcome"); }
 
@@ -2738,11 +2805,6 @@ Components.Dialogs = (function () {
    front, so a fresh install (or a hand-populated AddOns folder) doesn't
    look empty when it actually has addons Furphy could already manage. */
 Components.Welcome = (function () {
-  // A bare numeric CurseForge id, or "wago:<id>" - exactly the token shape
-  // addon-sync.ps1's -Add classifier (and this app's own Store.addonKey)
-  // already expects, so no further translation happens server-side either.
-  function targetFor(u) { return u.curseId ? String(u.curseId) : ("wago:" + u.wagoId); }
-
   function itemRow(u) {
     const isWago = !u.curseId && !!u.wagoId;
     const badge = Utils.el("span", { class: "source-badge " + (isWago ? "is-wago" : "is-cf"), title: isWago ? "Wago Addons" : "CurseForge" }, [isWago ? "Wago" : "CF"]);
@@ -2757,17 +2819,27 @@ Components.Welcome = (function () {
   // ADOPT-SPEC.md 4.2: a second, optional mode ("adopted") reuses this same
   // dialog for the new, additive "you're already covered" notice shown
   // after an install adopted N addons - never at the same moment as the
-  // original "download" mode (App.maybeShowWelcome only fires on an empty
-  // roster; App.maybeShowAdoptedNotice only fires when at least one adopted
-  // record exists, so the two conditions are mutually exclusive).
+  // original ("download", now really "in-place") mode (App.maybeShowWelcome
+  // only fires on an empty roster; App.maybeShowAdoptedNotice only fires
+  // when at least one adopted record exists, so the two conditions are
+  // mutually exclusive).
   //
-  // Correctness note: the title's static markup (index.html) has FOUR child
-  // nodes in order - an <svg> icon, a text node " Found ", the (now inert)
-  // #welcome-count span, then a trailing text node. Never assign through
-  // titleEl.lastChild alone (that leaves the leading text/span in place and
-  // garbles the sentence on the very next open() call, in either mode) -
-  // strip every child after the icon first, then rebuild from scratch, so
-  // repeated opens in either mode stay idempotent.
+  // THE CHANGE (this round): the first mode's own name is now a misnomer -
+  // it no longer downloads anything either. Kept as "download" purely as
+  // the internal options.mode value (nothing external reads it), since
+  // renaming it is a bigger diff than it's worth; every user-visible string
+  // below is rewritten, which is what actually matters. Both modes' primary
+  // button now runs the same non-downloading in-place adopt (Actions.
+  // adoptAll posts the server's 'adopt' job kind with folder names, not the
+  // old 'add' kind's project-id targets - see that function's own comment),
+  // matching Settings' "Addons Furphy isn't managing yet" row actions
+  // (Actions.adoptFolder/adoptManyFolders).
+  //
+  // Correctness note (still true after the copy rewrite): never assign
+  // through titleEl.lastChild alone - strip every child after the icon
+  // first, then rebuild from scratch, so repeated opens in either mode stay
+  // idempotent (no leftover text/node from a previous open() call, in
+  // either mode, can ever survive into the next one).
   function open(items, options) {
     const mode = (options && options.mode) || "download";
     const list = Utils.qs("#welcome-list");
@@ -2785,11 +2857,21 @@ Components.Welcome = (function () {
       bodyEl.textContent = "They're already the way you like them, so Furphy left the files alone and is just keeping track of them from here. You'll see an Update badge here if a newer version ever comes out.";
       adoptBtn.textContent = "Got it";
       adoptBtn.onclick = function () { Components.Dialogs.closeWelcome(); Actions.acknowledgeAdopted(items); };
+      // UX-SPEC.md 2.4 / this round's CHANGELOG entry: there is nothing to
+      // decline here - install.ps1 already finished adopting before this
+      // dialog ever opens - so Skip has no role in this mode.
+      Utils.qs("#welcome-skip").hidden = true;
     } else {
-      titleEl.appendChild(document.createTextNode(" Found " + items.length + " addons in your AddOns folder"));
-      bodyEl.textContent = "Furphy can start managing these - it re-downloads each one so it can keep them updated from now on.";
-      adoptBtn.textContent = "Take over all (" + items.length + ")";
-      adoptBtn.onclick = function () { Actions.adoptAll(items.map(targetFor)); };
+      const n = items.length;
+      titleEl.appendChild(document.createTextNode(" Found " + n + " addon" + (n === 1 ? "" : "s") + " you already have"));
+      bodyEl.textContent = "Furphy can keep them updated. Nothing is downloaded or changed now - you'll just see an Update badge when a newer version comes out.";
+      adoptBtn.textContent = "Keep them updated";
+      adoptBtn.onclick = function () { Actions.adoptAll(items.map(function (u) { return u.folder; })); };
+      // Reverse of the adopted-mode hide above, so a later "download"-mode
+      // open() never inherits a stale hidden Skip button from a previous
+      // "adopted"-mode open() - same idempotency guarantee this function's
+      // own comment already promises for the title/body text.
+      Utils.qs("#welcome-skip").hidden = false;
     }
     Components.Dialogs.openWelcome();
   }
@@ -3117,14 +3199,23 @@ Components.Chip = (function () {
     }, [Utils.el("span", { class: "chip-dot" }), label]);
   }
 
-  function forJobStatus(status) {
+  function forJobStatus(status, title) {
     const map = {
       "Updated": "chip-success", "Installed": "chip-success", "Removed": "chip-success",
       "Unpinned": "chip-success", "Unignored": "chip-success", "Up-to-date": "chip-success", "Rolled-back": "chip-success",
       "Would-update": "chip-warning", "Pinned": "chip-info", "Ignored": "chip-muted", "Skipped": "chip-muted",
-      "Failed": "chip-danger"
+      "Failed": "chip-danger",
+      // THE CHANGE (this round): the 'adopt' job kind's own CLI status word
+      // (ADOPT-SPEC.md section 2.9's -Adopt -Json contract) - mapped to a
+      // plain label below rather than shown raw, per UX-SPEC.md section 11's
+      // banned-term rule ("adopt" as a user-facing word).
+      "Adopted": "chip-success"
     };
-    return build(status, map[status] || "chip-muted");
+    // Every other status word here already reads as plain English on its
+    // own (Updated/Installed/Pinned/Skipped/...) - only "Adopted" needs a
+    // friendlier label; everything else falls through to the raw status.
+    const labels = { "Adopted": "Now managed" };
+    return build(labels[status] || status, map[status] || "chip-muted", title);
   }
 
   return { forStatus: forStatus, build: build, forJobStatus: forJobStatus };
@@ -4418,7 +4509,7 @@ Components.JobPanel = (function () {
   function titleFor(job) {
     if (Store.state.jobLabel) return Store.state.jobLabel;
     if (!job) return "Working…";
-    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", rollback: "Rolling back version", import: "Loading addon list", "switch-source": "Reinstalling from another source" };
+    const map = { check: "Checking for updates", sync: "Syncing addons", add: "Adding addon", install: "Installing version", remove: "Removing addon", rollback: "Rolling back version", import: "Loading addon list", "switch-source": "Reinstalling from another source", adopt: "Managing addons" };
     return map[job.kind] || "Working…";
   }
 
@@ -4452,7 +4543,7 @@ Components.JobPanel = (function () {
     [/^Checking for updates/, "Checked for updates"],
     [/^Force reinstalling/, "Force reinstalled"],
     [/^Rolling back/, "Rolled back"],
-    [/^Taking over/, "Took over"],
+    [/^Managing/, "Managed"],
     [/^Retrying/, "Retried"],
     [/^Updating/, "Updated"],
     [/^Installing/, "Installed"],
@@ -4713,7 +4804,14 @@ Components.JobPanel = (function () {
             Utils.el("button", { type: "button", class: "link-btn", onclick: function () { retryFailedResult(job, r); } }, ["Retry"])
           ]));
         } else {
-          row.push(Components.Chip.forJobStatus(r.status));
+          // THE CHANGE (this round): the 'adopt' job kind's Skipped rows
+          // carry a plain-English `.reason` (e.g. "already managed as X",
+          // "no recognizable id" - ADOPT-SPEC.md section 2.3/2.9) - shown
+          // as this chip's own tooltip rather than a new row element, since
+          // it's supplementary detail, not a failure needing its own Retry.
+          // Every other kind's result rows carry no `.reason` field at all,
+          // so this is a no-op (undefined -> no title) everywhere else.
+          row.push(Components.Chip.forJobStatus(r.status, r.reason));
         }
         resultsBox.appendChild(Utils.el("div", { class: "job-result-row" + (failed ? " is-failed" : "") }, row));
       });
@@ -5193,18 +5291,19 @@ const Actions = (function () {
   function addWagoWithVersion(slug, releaseId) { return startJob("add", { source: "wago", slug: slug, fileId: releaseId }, "Installing addon"); }
   function addByWagoSlug(slug) { return startJob("add", { source: "wago", slug: slug }, "Adding addon"); }
 
-  // E18: the first-run Welcome dialog's "Take over all" - one job installing
-  // every already-fully-formed target token (a bare numeric CurseForge id,
-  // or "wago:<id>") at once, mirroring what install.ps1 itself does via the
-  // CLI directly. See Build-CliArgs's 'add' case (addon-server.ps1) for the
-  // server-side projectIds handling this relies on.
-  // CS5 (UX-SPEC.md 6.2/7): "Adopt"/"Adopting" -> "Take over"/"Taking over"
-  // in this display label too - the only other surviving caller besides
-  // Views.settings' untrackedRow (renamed by CS4).
-  function adoptAll(targets) {
+  // THE CHANGE (this round): the first-run Welcome dialog's "Keep them
+  // updated" - one job adopting every named folder in place, no download.
+  // Folder names only (the server's 'adopt' job kind maps this to the
+  // CLI's -Adopt, which re-derives everything else itself from each
+  // folder's own .toc - see ADOPT-SPEC.md section 2.1/2.3). Was "add" with
+  // a projectIds array of pre-resolved target tokens before this round;
+  // that download-and-overwrite behavior is gone from this flow entirely
+  // (see adoptFlavour's own comment below for the matching Settings-side
+  // change and why both now share one job kind).
+  function adoptAll(folders) {
     Components.Dialogs.closeWelcome();
-    const label = "Taking over " + targets.length + " addon" + (targets.length === 1 ? "" : "s");
-    return startJob("add", { projectIds: targets }, label);
+    const label = "Managing " + folders.length + " addon" + (folders.length === 1 ? "" : "s");
+    return startJob("adopt", { folders: folders }, label, adoptFlavour());
   }
 
   // ADOPT-SPEC.md 4.2: "Got it" on the adopted-notice Welcome dialog. A
@@ -5285,13 +5384,17 @@ const Actions = (function () {
     }
   }
 
-  // CS4 (UX-SPEC.md 6.2/§7): "Adopt"/"Adopting" -> "Take over"/"Taking
-  // over" in the job-panel title this label feeds - these two functions are
-  // called only from Views.settings' "Folders Furphy doesn't manage yet"
-  // row actions (grepped, no other caller), so this rename is fully scoped
-  // to that one section; Components.Welcome's own separate "Adopt all"
-  // first-run flow (Actions.adoptAll, untouched here) is CS5's own copy-
-  // sweep territory per UX-SPEC.md section 10.
+  // THE CHANGE (this round): Eric asked for the app's own opt-in flow
+  // (Settings > "Addons Furphy isn't managing yet", and the first-run
+  // Welcome dialog above) to adopt in place, the same non-downloading way
+  // ADOPT-SPEC.md's -Adopt already made install.ps1's own first-run step
+  // work - was "add" (download + overwrite, one job per target id/folder)
+  // before this round; now the server's 'adopt' job kind, folder name(s)
+  // only, no download, no CurseForge/Wago id needed from the SPA at all
+  // (the CLI re-derives it from each folder's own .toc - ADOPT-SPEC.md
+  // section 2.1). Every "Take over"/"Taking over" string this section used
+  // to show is gone with it - see Views.settings' untrackedRow/renderUntracked
+  // (this file) and UX-SPEC.md section 11 for the full wording rule.
   // FLAVORS-SPEC.md CS-F4: -Scan (and so this folder) is already scoped to
   // whichever flavour is currently active (S5.1) - naming that flavour
   // explicitly here skips CS-F3's own CurseForge ambiguity picker, which
@@ -5300,11 +5403,15 @@ const Actions = (function () {
   // so the URL stays byte-identical there (Api.postJob's own qs() drops an
   // undefined value).
   function adoptFlavour() { return Store.hasMultipleFlavours() ? Store.state.activeFlavour : undefined; }
-  function adopt(folder, projectId) { return startJob("add", { projectId: Number(projectId) }, "Taking over " + folder, adoptFlavour()); }
-  // E12: one-click adoption from the Wago id/slug -Scan found in the
-  // folder's own .toc (## X-Wago-ID) - same shape as installLatestWago,
-  // just with a "Taking over..." label to match `adopt`'s.
-  function adoptWago(folder, wagoRef) { return startJob("add", { source: "wago", slug: wagoRef }, "Taking over " + folder, adoptFlavour()); }
+  function adoptManyFolders(folders) {
+    const n = folders.length;
+    const label = "Managing " + n + " addon" + (n === 1 ? "" : "s");
+    return startJob("adopt", { folders: folders }, label, adoptFlavour());
+  }
+  // Per-row "Manage" button (Views.settings' untrackedRow) - a one-folder
+  // call through the same bulk function above, so both call sites share
+  // exactly one label/job-body shape.
+  function adoptFolder(folder) { return adoptManyFolders([folder]); }
 
   // Round 5 fix: each individual Settings control (a release-channel radio,
   // the auto-update toggle) calls saveSettings independently, so flipping
@@ -5626,7 +5733,7 @@ const Actions = (function () {
     forceReinstallAll: forceReinstallAll, uninstall: uninstall, uninstallApp: uninstallApp, installVersion: installVersion, pinCurrent: pinCurrent, rollback: rollback,
     installLatest: installLatest, addWithVersion: addWithVersion, addByProjectId: addByProjectId,
     toggleIgnore: toggleIgnore, unpin: unpin,
-    deleteUntracked: deleteUntracked, adopt: adopt, adoptWago: adoptWago, saveSettings: saveSettings,
+    deleteUntracked: deleteUntracked, adoptFolder: adoptFolder, adoptManyFolders: adoptManyFolders, saveSettings: saveSettings,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
     whatChanged: whatChanged, importAddons: importAddons,
     updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
@@ -7400,19 +7507,53 @@ Views.settings = (function () {
     });
   }
 
+  // THE CHANGE (this round): shows/hides and labels the section's bulk
+  // "Manage all (N)" button, right next to Scan - N counts only the
+  // recognizable rows (renderUntracked() below hands it the same list it
+  // just offered per-row Manage buttons to). bindOnce() wires its one
+  // click handler; this just keeps its visibility/label/busy-state in
+  // sync on every render, same pattern as #btn-force-reinstall above.
+  function updateManageAllButton(recognizable) {
+    const btn = Utils.qs("#btn-manage-untracked");
+    if (!btn) return;
+    if (!recognizable.length) { btn.hidden = true; return; }
+    btn.hidden = false;
+    const busy = Store.isBusy();
+    btn.disabled = busy;
+    if (busy) btn.title = "Another task is running"; else btn.removeAttribute("title");
+    btn.textContent = "Manage all (" + recognizable.length + ")";
+  }
+
   function renderUntracked() {
     const box = Utils.qs("#untracked-list");
     box.textContent = "";
-    if (untrackedLoading) { box.appendChild(Utils.el("div", { class: "skeleton-row" })); return; }
-    if (untrackedError) { box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't scan: " + describeError(untrackedError)])); return; }
+    if (untrackedLoading) { box.appendChild(Utils.el("div", { class: "skeleton-row" })); updateManageAllButton([]); return; }
+    if (untrackedError) { box.appendChild(Utils.el("p", { class: "muted-text" }, ["Couldn't scan: " + describeError(untrackedError)])); updateManageAllButton([]); return; }
     if (!untrackedList.length) {
       // CS4 (UX-SPEC.md 6.2/§7): "Untracked" -> "doesn't manage yet" in
       // every visible string here, not just the section heading/intro.
-      const msg = untrackedScanned ? "Scanned — nothing found." : "Nothing found yet. Click Scan to look.";
+      const msg = untrackedScanned ? "Scanned - nothing found." : "Nothing found yet. Click Scan to look.";
       box.appendChild(Utils.el("p", { class: "muted-text" }, [msg]));
+      updateManageAllButton([]);
       return;
     }
-    untrackedList.forEach(function (u) { box.appendChild(untrackedRow(u)); });
+    // THE CHANGE (this round): split into the folders Furphy can identify
+    // (offered a one-click Manage button) and the ones it can't (listed
+    // plainly, never offered a button at all) - a folder with no
+    // recognizable id can never succeed through the server's 'adopt' job
+    // kind either, since the CLI itself derives everything from the id its
+    // own .toc carries and skips anything that has none (ADOPT-SPEC.md
+    // section 2.3's "no recognizable id" reason). This replaces the old
+    // per-row manual-ID fallback, which no longer has anything to feed -
+    // -Adopt only ever takes folder names, never an id.
+    const recognizable = untrackedList.filter(function (u) { return u.curseId || u.wagoId; });
+    const unrecognizable = untrackedList.filter(function (u) { return !u.curseId && !u.wagoId; });
+    recognizable.forEach(function (u) { box.appendChild(untrackedRow(u)); });
+    if (unrecognizable.length) {
+      box.appendChild(Utils.el("p", { class: "muted-text untracked-unmanaged-intro" }, ["Furphy can't tell what these are, so it leaves them alone:"]));
+      unrecognizable.forEach(function (u) { box.appendChild(untrackedRow(u)); });
+    }
+    updateManageAllButton(recognizable);
     // Round 32 (SETTINGS-SPEC.md section 3): rescan() calls this function
     // directly (not the outer Views.settings.render()), so the fresh
     // per-result .info-tip buttons built above need their own wiring pass
@@ -7421,58 +7562,31 @@ Views.settings = (function () {
   }
 
   function untrackedRow(u) {
-    // CS5 (UX-SPEC.md 6.2's own flagged follow-up): add the missing "find
-    // this on the addon's page" hint - a title tooltip rather than another
-    // visible sentence, matching Browse's own light-touch fallback link.
-    const idInput = Utils.el("input", { type: "text", placeholder: "Numeric ID", title: "Find this on the addon's CurseForge or Wago page" });
+    const recognizable = !!(u.curseId || u.wagoId);
     const busy = Store.isBusy();
-    const actions = [idInput];
-    // Round 32 (SETTINGS-SPEC.md section 2, Row 15): wraps a "Take over"
-    // button with its own .info-tip sibling explaining what the action
-    // actually does (re-downloads and overwrites the folder) - replaces the
-    // old bare title= mechanism hint, per section 3's "no bare title= for
-    // any NEW settings tooltip" rule.
-    function takeOverButton(text, ariaSuffix, tooltipText, onclick) {
-      return Utils.el("span", { class: "btn-tip-group" }, [
-        Utils.el("button", { type: "button", class: "btn btn-outline", disabled: busy, onclick: onclick }, [text]),
+    const actions = [];
+    // THE CHANGE (this round): one plain "Manage" button, folder-name only
+    // (no more separate CF/Wago-specific buttons, and no more manual-ID
+    // input) - the server's 'adopt' job kind only ever needs the folder
+    // name; the CLI re-derives its title/version/id itself from that
+    // folder's own .toc (ADOPT-SPEC.md section 2.1). Only offered when
+    // Furphy actually found a recognizable id (see renderUntracked above);
+    // an unrecognizable row gets Delete only.
+    if (recognizable) {
+      actions.push(Utils.el("span", { class: "btn-tip-group" }, [
+        Utils.el("button", { type: "button", class: "btn btn-outline", disabled: busy, onclick: function () { Actions.adoptFolder(u.folder); } }, ["Manage"]),
         Utils.el("button", {
           type: "button", class: "info-tip", tabindex: "0",
-          "aria-label": "More about Take over" + (ariaSuffix ? " (" + ariaSuffix + ")" : ""),
-          "aria-describedby": "app-tooltip", dataset: { tooltip: tooltipText }
+          "aria-label": "More about Manage", "aria-describedby": "app-tooltip",
+          dataset: { tooltip: "Furphy starts keeping this addon updated. Nothing is downloaded or changed right now." }
         }, [Utils.icon("info")])
-      ]);
+      ]));
     }
-    // E12: -Scan reports whatever curseId/wagoId it found in the folder's own
-    // .toc (## X-Curse-Project-ID / ## X-Wago-ID) - offer a one-click take-
-    // over straight from either id, ahead of the manual Project-ID input,
-    // when the folder's own info already answers the question. CS4
-    // (UX-SPEC.md 6.2/§7): "Adopt" -> "Take over" in every visible string
-    // this row shows - Actions.adopt/adoptWago (this row's only callers)
-    // carry the matching "Taking over..." job-panel label.
-    if (u.curseId) {
-      actions.push(takeOverButton("Take over (CF " + u.curseId + ")", "CurseForge",
-        "Re-downloads this addon from CurseForge, so Furphy can keep it updated from now on.",
-        function () { Actions.adopt(u.folder, Number(u.curseId)); }));
-    }
-    if (u.wagoId) {
-      actions.push(takeOverButton("Take over (Wago)", "Wago",
-        "Re-downloads this addon from Wago, so Furphy can keep it updated from now on.",
-        function () { Actions.adoptWago(u.folder, u.wagoId); }));
-    }
-    actions.push(
-      takeOverButton("Take over", "manual ID",
-        "Re-downloads this addon from CurseForge, so Furphy can keep it updated from now on.",
-        function () {
-          const v = idInput.value.trim();
-          if (!/^\d+$/.test(v)) { Components.Toast.show("Enter a numeric ID first.", "warning"); return; }
-          Actions.adopt(u.folder, Number(v));
-        }),
-      Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"])
-    );
+    actions.push(Utils.el("button", { type: "button", class: "btn btn-danger-outline", onclick: function () { Actions.deleteUntracked(u.folder); } }, ["Delete"]));
     return Utils.el("div", { class: "untracked-row" }, [
       Utils.el("div", { class: "untracked-info" }, [
         Utils.el("div", { class: "untracked-folder" }, [u.folder]),
-        Utils.el("div", { class: "untracked-meta" }, [u.title ? (u.title + (u.version ? " · " + u.version : "")) : (u.hasToc ? "No title found" : "No details found")])
+        Utils.el("div", { class: "untracked-meta" }, [u.title ? (u.title + (u.version ? " - " + u.version : "")) : (u.hasToc ? "No title found" : "No details found")])
       ]),
       Utils.el("div", { class: "untracked-actions" }, actions)
     ]);
@@ -7829,6 +7943,15 @@ Views.settings = (function () {
     });
 
     Utils.qs("#btn-scan").addEventListener("click", function () { rescan(); });
+
+    // THE CHANGE (this round): reads the current scan result fresh at
+    // click time (rather than baking a folder list into the button's
+    // onclick on every render) - same one-time-wire, read-state-live
+    // pattern every other static Settings button in this function uses.
+    Utils.qs("#btn-manage-untracked").addEventListener("click", function () {
+      const folders = untrackedList.filter(function (u) { return u.curseId || u.wagoId; }).map(function (u) { return u.folder; });
+      if (folders.length) Actions.adoptManyFolders(folders);
+    });
 
     Utils.qs("#btn-force-reinstall").addEventListener("click", async function () {
       const ok = await Components.Dialogs.confirm({
@@ -8362,8 +8485,24 @@ const App = (function () {
         // job panel (Components.JobPanel.wholeJobFailureReason), and the
         // toast itself is just a transient nudge to look at the panel - the
         // raw text stays reachable only behind that panel's own Details.
-        let summary = job.state === "failed" ? Components.JobPanel.wholeJobFailureReason(job)
-          : Components.JobPanel.summarize(job.results);
+        let summary;
+        if (job.state === "failed") {
+          summary = Components.JobPanel.wholeJobFailureReason(job);
+        } else if (job.kind === "adopt") {
+          // THE CHANGE (this round): a plain, count-aware sentence instead
+          // of the generic status-count summary below - that one would
+          // read "N adopted", repeating the banned "adopt" word right back
+          // at the player (UX-SPEC.md section 11). Falls back to the
+          // generic summary only when nothing was actually adopted (every
+          // named folder got Skipped), so a no-op run still says something
+          // true rather than "Now keeping 0 addons up to date".
+          const adoptedCount = (job.results || []).filter(function (r) { return r.status === "Adopted"; }).length;
+          summary = adoptedCount > 0
+            ? "Now keeping " + adoptedCount + " addon" + (adoptedCount === 1 ? "" : "s") + " up to date - nothing was downloaded or changed."
+            : Components.JobPanel.summarize(job.results);
+        } else {
+          summary = Components.JobPanel.summarize(job.results);
+        }
         // GAME-MODE-SPEC.md section 3.1: the server already knows whether
         // the game was running when this job STARTED (job.reloadNeeded,
         // section 4.1) - trust that, never re-derive it client-side against

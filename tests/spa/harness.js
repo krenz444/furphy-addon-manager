@@ -1165,8 +1165,12 @@
       "More about World of Warcraft folder",
       "More about AddOns folder",
       "More about Show test realms (PTR/Beta)",
-      "More about Folders Furphy doesn't manage yet",
+      "More about Addons Furphy isn't managing yet",
       "More about Scan",
+      // THE CHANGE (this round): the bulk "Manage all (N)" button's own
+      // tooltip - a static row (present regardless of whether Scan has
+      // ever run; only its button's `hidden` state depends on that).
+      "More about Manage all",
       "More about Save / load your addon list",
       "More about Open logs folder",
       "More about Force reinstall all",
@@ -1318,16 +1322,59 @@
 
     // ---- Untracked folders + Diagnostics: dynamic per-row tooltips only
     // exist once Scan/Run have actually populated their lists.
+    //
+    // THE CHANGE (this round): Settings' "Addons Furphy isn't managing yet"
+    // row/bulk actions adopt in place (server job kind 'adopt') instead of
+    // re-downloading - the mock's own `untracked` fixture (ui\app.js) is
+    // now mixed on purpose: OldClique (CurseForge id), SimpleRaidTimer
+    // (Wago id), leftover_stuff (no id at all) - so this exercises both
+    // the recognizable-row "Manage" button/tooltip and the unrecognizable
+    // row's own "leaves them alone" listing in one scan.
     const scanBtn = q(win, "#btn-scan");
     if (scanBtn) {
       await clickAndSettle(win, scanBtn, 800);
-      checkTry("every 'Take over' button in a Scan result has its own wired .info-tip (Row 15 per-result tooltips)", function () {
+      checkTry("section title reads 'Addons Furphy isn't managing yet' (not the old 'Folders ... doesn't manage yet')", function () {
+        // The markup spells this apostrophe as the HTML entity &rsquo; (a
+        // curly quote once rendered), same as every other heading in this
+        // file - normalize before comparing against the plain ASCII
+        // apostrophe this check is written with.
+        const curlyApostrophe = String.fromCharCode(8217);
+        const t = text(q(win, "#settings-untracked > h3")).split(curlyApostrophe).join("'");
+        return t.indexOf("Addons Furphy isn't managing yet") === 0;
+      });
+      checkTry("section helper text explains nothing is downloaded or changed", function () {
+        return text(q(win, "#settings-untracked > p.muted-text")) === "These are already in your AddOns folder. Furphy can keep them updated without changing anything now.";
+      });
+      checkTry("every recognizable row (2 of them, by the mixed fixture) shows exactly one 'Manage' button with its own wired .info-tip, never 'Take over'", function () {
         const rows = qa(win, "#untracked-list .untracked-row");
-        if (rows.length === 0) return false; // the default mock fixture always has >=1 result
-        return rows.every(function (r) {
-          const groups = Array.prototype.slice.call(r.querySelectorAll(".btn-tip-group"));
-          return groups.length > 0 && groups.every(function (g) { return !!g.querySelector(".info-tip[data-tooltip]"); });
+        const withManage = rows.filter(function (r) {
+          return Array.prototype.slice.call(r.querySelectorAll(".btn-tip-group button.btn")).some(function (b) { return text(b) === "Manage"; });
         });
+        if (withManage.length !== 2) return false;
+        return withManage.every(function (r) {
+          const groups = Array.prototype.slice.call(r.querySelectorAll(".btn-tip-group"));
+          return groups.length === 1 && groups.every(function (g) { return !!g.querySelector(".info-tip[data-tooltip]"); });
+        });
+      });
+      checkTry("the unrecognizable row (leftover_stuff) has no Manage button and no numeric-ID input, only Delete", function () {
+        const rows = qa(win, "#untracked-list .untracked-row");
+        const row = rows.filter(function (r) { return text(r.querySelector(".untracked-folder")) === "leftover_stuff"; })[0];
+        if (!row || row.querySelector(".btn-tip-group") || row.querySelector("input")) return false;
+        const actionBtns = Array.prototype.slice.call(row.querySelectorAll(".untracked-actions button"));
+        return actionBtns.length === 1 && text(actionBtns[0]) === "Delete";
+      });
+      checkTry("folders with no recognizable id are introduced with the plain 'leaves them alone' line", function () {
+        return qa(win, "#untracked-list p.muted-text").some(function (p) { return text(p) === "Furphy can't tell what these are, so it leaves them alone:"; });
+      });
+      checkTry("bulk 'Manage all (2)' button is visible and counts only the 2 recognizable rows", function () {
+        const btn = q(win, "#btn-manage-untracked");
+        return !!btn && btn.hidden === false && text(btn) === "Manage all (2)";
+      });
+      checkTry("no 'take over'/'taking over'/'reinstall' wording anywhere in the untracked-folders section", function () {
+        const section = text(q(win, "#settings-untracked")).toLowerCase();
+        const tipText = qa(win, "#settings-untracked .info-tip[data-tooltip]").map(function (b) { return (b.dataset.tooltip || "").toLowerCase(); }).join(" ");
+        const combined = section + " " + tipText;
+        return combined.indexOf("take over") === -1 && combined.indexOf("reinstall") === -1;
       });
     }
     const runBtn = q(win, "#btn-run-diagnostics");
@@ -2377,17 +2424,27 @@
       const adoptBtn = q(win, "#welcome-adopt");
       checkTry("Welcome (adopted mode): title reads 'Furphy found 2 addon(s) you already had', no leftover download-mode text", function () {
         const t = titleEl && titleEl.textContent;
-        return !!t && t.indexOf("Furphy found 2 addon(s) you already had") !== -1 && t.indexOf("AddOns folder") === -1;
+        // THE CHANGE (this round): download mode's own title now also ends
+        // "... you already have" - tense is the only thing that tells the
+        // two modes apart ("had" vs "have"), so check that specifically
+        // rather than the old, no-longer-either-mode "AddOns folder".
+        return !!t && t.indexOf("Furphy found 2 addon(s) you already had") !== -1 && t.indexOf("you already have") === -1;
       });
-      checkTry("Welcome (adopted mode): body explains the files were left alone, not re-downloaded", function () {
+      checkTry("Welcome (adopted mode): body explains the files were left alone, not the in-place-adopt wording", function () {
         const t = bodyEl && bodyEl.textContent;
-        return !!t && t.indexOf("left the files alone") !== -1 && t.indexOf("re-downloads") === -1;
+        return !!t && t.indexOf("left the files alone") !== -1 && t.indexOf("Nothing is downloaded or changed now") === -1;
       });
-      checkTry("Welcome (adopted mode): the button reads 'Got it', not 'Take over all (...)'", function () {
+      checkTry("Welcome (adopted mode): the button reads 'Got it', not 'Keep them updated'", function () {
         return !!adoptBtn && adoptBtn.textContent === "Got it";
       });
       checkTry("Welcome (adopted mode): the dialog is open", function () {
         return q(win, "#dialog-welcome").hidden === false;
+      });
+      // UX-SPEC.md 2.4 / this round's CHANGELOG entry: there is nothing to
+      // decline in adopted mode - install.ps1 already finished adopting
+      // before this dialog ever opens - so Skip must be hidden here.
+      checkTry("Welcome (adopted mode): the 'Not now' skip button is hidden", function () {
+        return q(win, "#welcome-skip").hidden === true;
       });
 
       // Re-open in the ORIGINAL "download" mode straight after - proves the
@@ -2395,16 +2452,26 @@
       // is idempotent across a mode switch and never leaves adopted-mode
       // text (or a stale count span) behind, the exact bug the fix targets.
       Components.Welcome.open([{ curseId: "999999", title: "Test Untracked Addon", folder: "TestUntrackedAddon" }]);
-      checkTry("Welcome (download mode, re-opened after adopted mode): title reverts cleanly with no leftover adopted-mode text", function () {
+      checkTry("Welcome (download mode, re-opened after adopted mode): title reverts cleanly (singular 'addon'), no leftover adopted-mode text", function () {
         const t = titleEl && titleEl.textContent;
-        return !!t && t.indexOf("Found 1 addons in your AddOns folder") !== -1 && t.indexOf("you already had") === -1;
+        return !!t && t.indexOf("Found 1 addon you already have") !== -1 && t.indexOf("you already had") === -1;
       });
-      checkTry("Welcome (download mode, re-opened after adopted mode): body reverts to the re-download explanation", function () {
+      checkTry("Welcome (download mode, re-opened after adopted mode): body reverts to the plain 'nothing is downloaded or changed' explanation", function () {
         const t = bodyEl && bodyEl.textContent;
-        return !!t && t.indexOf("re-downloads") !== -1;
+        return !!t && t.indexOf("Nothing is downloaded or changed now") !== -1;
       });
-      checkTry("Welcome (download mode, re-opened after adopted mode): the button reverts to 'Take over all (1)'", function () {
-        return !!adoptBtn && adoptBtn.textContent === "Take over all (1)";
+      checkTry("Welcome (download mode, re-opened after adopted mode): the button reverts to 'Keep them updated'", function () {
+        return !!adoptBtn && adoptBtn.textContent === "Keep them updated";
+      });
+      // Reverse of the adopted-mode hide above - re-opening in download
+      // mode must never leave the skip button stuck hidden from a previous
+      // adopted-mode open() call.
+      checkTry("Welcome (download mode, re-opened after adopted mode): the 'Not now' skip button is visible again", function () {
+        return q(win, "#welcome-skip").hidden === false;
+      });
+      checkTry("Welcome (download mode): no 'take over'/'taking over'/'reinstall'/'adopt' wording anywhere in the dialog's rendered text", function () {
+        const dlgText = text(q(win, "#dialog-welcome")).toLowerCase();
+        return dlgText.indexOf("take over") === -1 && dlgText.indexOf("reinstall") === -1 && !/\badopt\b/.test(dlgText);
       });
       Components.Dialogs.closeWelcome();
     } else {
@@ -2412,6 +2479,142 @@
     }
 
     checkTry("no console errors during this phase", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Phase (THE CHANGE, this round): Eric's follow-up to ADOPT-SPEC.md - the
+  // app's own opt-in "Addons Furphy isn't managing yet" flow (Settings
+  // row/bulk actions, and the first-run Welcome dialog) now adopts in
+  // place too - server job kind 'adopt', folder names only, no download -
+  // instead of re-downloading via the old 'add' kind. Drives the real
+  // job/toast/panel path end to end against the mock's own mixed
+  // `untracked` fixture (ui\app.js: OldClique/CurseForge,
+  // SimpleRaidTimer/Wago, leftover_stuff/no id), intercepting
+  // window.__furphyTest.Mock.handle (same pattern phaseWagoSearchRace
+  // above already uses) to see the exact job body a click posts.
+  // ------------------------------------------------------------------
+  async function waitForJobDone(win, kind, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 4000);
+    while (Date.now() < deadline) {
+      const job = win.__furphyTest && win.__furphyTest.Store && win.__furphyTest.Store.state.job;
+      if (job && job.kind === kind && job.state === "done") return job;
+      await wait(100);
+    }
+    return null;
+  }
+
+  function interceptAdoptPost(win) {
+    const mock = win.__furphyTest && win.__furphyTest.Mock;
+    const captured = { body: null };
+    if (!mock) return captured;
+    const origHandle = mock.handle;
+    mock.handle = function (method, path, body) {
+      if (method === "POST" && typeof path === "string" && path.indexOf("/api/jobs") === 0 && body && body.kind === "adopt") {
+        captured.body = body;
+      }
+      return origHandle.call(mock, method, path, body);
+    };
+    return captured;
+  }
+
+  async function phaseAdoptInPlaceFlow() {
+    beginPhase("THE CHANGE: Settings/Welcome adopt in place (server job kind 'adopt')");
+
+    // ---- Per-row "Manage" (one addon) - job kind 'adopt' with exactly
+    // that one folder (never a projectId/source, never 'add'); toast and
+    // job-panel chip use plain, non-'adopt' wording; toast is singular.
+    {
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      const scanBtn = q(win, "#btn-scan");
+      if (!scanBtn) {
+        check("per-row Manage posts one 'adopt' job with just that folder (never 'add', never a projectId)", false, "#btn-scan not found");
+      } else {
+        await clickAndSettle(win, scanBtn, 800);
+        const captured = interceptAdoptPost(win);
+        const rows = qa(win, "#untracked-list .untracked-row");
+        const row = rows.filter(function (r) { return text(r.querySelector(".untracked-folder")) === "OldClique"; })[0];
+        const manageBtn = row && Array.prototype.slice.call(row.querySelectorAll(".btn-tip-group button.btn")).filter(function (b) { return text(b) === "Manage"; })[0];
+        if (!manageBtn) {
+          check("per-row Manage posts one 'adopt' job with just that folder (never 'add', never a projectId)", false, "OldClique row/Manage button not found");
+        } else {
+          await clickAndSettle(win, manageBtn, 150);
+          checkTry("per-row Manage posts one 'adopt' job with just that folder (never 'add', never a projectId)", function () {
+            const b = captured.body;
+            return !!b && b.kind === "adopt" && Array.isArray(b.folders) && b.folders.length === 1 && b.folders[0] === "OldClique" && b.projectId === undefined;
+          });
+          // The panel shows this job exactly like any other kind - a plain
+          // present-progressive title while it runs (Actions.startJob's own
+          // label, via titleFor's PAST_TENSE_PATTERNS wiring); once done,
+          // JobPanel's existing all-succeeded auto-collapse (kind-agnostic,
+          // fires for ANY job with zero Failed rows - same as a completed
+          // remove/rollback/import already gets) may immediately overwrite
+          // the title with its own generic "checked just now" text, so only
+          // the running-state title is asserted literally here.
+          const runningDeadline = Date.now() + 1500;
+          let sawRunningTitle = false;
+          while (Date.now() < runningDeadline) {
+            const j = win.__furphyTest && win.__furphyTest.Store && win.__furphyTest.Store.state.job;
+            if (j && j.kind === "adopt" && j.state === "running" && /^Managing/.test(text(q(win, "#job-title")))) { sawRunningTitle = true; break; }
+            await wait(80);
+          }
+          check("the adopt job shows a plain 'Managing ...' title in the job panel while it runs, never 'adopt'/'take over'", sawRunningTitle);
+          const job = await waitForJobDone(win, "adopt", 4000);
+          checkTry("once the job panel settles (done or auto-collapsed), its title carries no 'adopt'/'take over'/'reinstall' wording", function () {
+            const t = text(q(win, "#job-title")).toLowerCase();
+            return !!job && t.length > 0 && !/\badopt/.test(t) && t.indexOf("take over") === -1 && t.indexOf("reinstall") === -1;
+          });
+          checkTry("the job's own result row shows 'Now managed', never the raw CLI status word 'Adopted'", function () {
+            const resultRows = qa(win, "#job-results .job-result-row");
+            const sawFriendly = resultRows.some(function (r) { return text(r).indexOf("Now managed") !== -1; });
+            const sawRaw = resultRows.some(function (r) { return /\bAdopted\b/.test(text(r)); });
+            return sawFriendly && !sawRaw;
+          });
+          await wait(200);
+          checkTry("toast reads the plain, singular 'Now keeping 1 addon up to date - nothing was downloaded or changed.'", function () {
+            const toasts = qa(win, "#toast-container .toast-body").map(text);
+            return toasts.indexOf("Now keeping 1 addon up to date - nothing was downloaded or changed.") !== -1;
+          });
+          checkTry("no 'adopt'/'take over'/'reinstall' wording in that toast", function () {
+            const toasts = qa(win, "#toast-container .toast-body").map(function (el) { return text(el).toLowerCase(); });
+            return !toasts.some(function (t) { return /\badopt/.test(t) || t.indexOf("take over") !== -1 || t.indexOf("reinstall") !== -1; });
+          });
+        }
+      }
+      checkTry("no console errors (per-row Manage)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Bulk "Manage all (N)" - one job carrying every recognizable
+    // folder at once; toast is plural.
+    {
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      const scanBtn = q(win, "#btn-scan");
+      if (!scanBtn) {
+        check("bulk Manage all posts one 'adopt' job with every recognizable folder (2), never 'add'", false, "#btn-scan not found");
+      } else {
+        await clickAndSettle(win, scanBtn, 800);
+        const captured = interceptAdoptPost(win);
+        const bulkBtn = q(win, "#btn-manage-untracked");
+        if (!bulkBtn || bulkBtn.hidden) {
+          check("bulk Manage all posts one 'adopt' job with every recognizable folder (2), never 'add'", false, "#btn-manage-untracked not visible");
+        } else {
+          await clickAndSettle(win, bulkBtn, 150);
+          checkTry("bulk Manage all posts one 'adopt' job with every recognizable folder (2), never 'add'", function () {
+            const b = captured.body;
+            return !!b && b.kind === "adopt" && Array.isArray(b.folders) && b.folders.length === 2 &&
+              b.folders.indexOf("OldClique") !== -1 && b.folders.indexOf("SimpleRaidTimer") !== -1;
+          });
+          await waitForJobDone(win, "adopt", 4000);
+          await wait(200);
+          checkTry("toast reads the plain, plural 'Now keeping 2 addons up to date - nothing was downloaded or changed.'", function () {
+            const toasts = qa(win, "#toast-container .toast-body").map(text);
+            return toasts.indexOf("Now keeping 2 addons up to date - nothing was downloaded or changed.") !== -1;
+          });
+        }
+      }
+      checkTry("no console errors (bulk Manage all)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
   }
 
   async function main() {
@@ -2438,6 +2641,7 @@
     await phaseUninstall();
     await phaseAppUpdates();
     await phaseAdoptSpaCoverage();
+    await phaseAdoptInPlaceFlow();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

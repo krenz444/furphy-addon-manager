@@ -1300,12 +1300,22 @@
               </section>
 
               <section class="settings-group" id="settings-untracked">
-                <h3>Folders Furphy doesn&rsquo;t manage yet<button type="button" class="info-tip" tabindex="0" aria-label="More about Folders Furphy doesn't manage yet" aria-describedby="app-tooltip" data-tooltip="Addons installed by unzipping a download, or with another addon manager, before Furphy knew about them."><svg class="icon"><use href="#icon-info"></use></svg></button></h3>
-                <p class="muted-text">Folders in your AddOns folder that Furphy doesn&rsquo;t manage yet.</p>
-                <span class="btn-tip-group">
-                  <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
-                  <button type="button" class="info-tip" tabindex="0" aria-label="More about Scan" aria-describedby="app-tooltip" data-tooltip="Looks only - nothing changes until you take over or delete a result"><svg class="icon"><use href="#icon-info"></use></svg></button>
-                </span>
+                <h3>Addons Furphy isn&rsquo;t managing yet<button type="button" class="info-tip" tabindex="0" aria-label="More about Addons Furphy isn't managing yet" aria-describedby="app-tooltip" data-tooltip="Addons installed by unzipping a download, or with another addon manager, before Furphy knew about them."><svg class="icon"><use href="#icon-info"></use></svg></button></h3>
+                <p class="muted-text">These are already in your AddOns folder. Furphy can keep them updated without changing anything now.</p>
+                <div class="btn-row">
+                  <span class="btn-tip-group">
+                    <button type="button" class="btn btn-outline" id="btn-scan">Scan</button>
+                    <button type="button" class="info-tip" tabindex="0" aria-label="More about Scan" aria-describedby="app-tooltip" data-tooltip="Looks only - nothing changes until you manage or delete a result"><svg class="icon"><use href="#icon-info"></use></svg></button>
+                  </span>
+                  <!-- THE CHANGE (this round): adopts every recognizable
+                       folder in one job, in place - see Actions.adoptManyFolders
+                       (ui\app.js). Hidden until a scan finds at least one
+                       folder Furphy can identify. -->
+                  <span class="btn-tip-group">
+                    <button type="button" class="btn btn-outline" id="btn-manage-untracked" hidden>Manage all (0)</button>
+                    <button type="button" class="info-tip" tabindex="0" aria-label="More about Manage all" aria-describedby="app-tooltip" data-tooltip="Furphy starts keeping all of these updated. Nothing is downloaded or changed right now."><svg class="icon"><use href="#icon-info"></use></svg></button>
+                  </span>
+                </div>
                 <div id="untracked-list" class="untracked-list"></div>
               </section>
 
@@ -1524,20 +1534,25 @@
 <!-- E18: first-run welcome - shown once when addons.json has 0 records and a
      scan finds folders with a recognizable CurseForge/Wago id already sitting
      in AddOns (e.g. right after install.ps1 adoption was skipped, or a fresh
-     AddOns folder the user populated by hand before ever opening the app). -->
+     AddOns folder the user populated by hand before ever opening the app).
+     THE CHANGE (this round): this no longer re-downloads anything - it
+     manages the folders in place, same as Settings' own "Addons Furphy
+     isn't managing yet" row actions. The static text below is only ever a
+     pre-JS fallback; Components.Welcome.open() rebuilds it on every real
+     open (both modes) before the dialog is ever shown. -->
 <div class="dialog dialog-welcome" id="dialog-welcome" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-welcome-title">
-  <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found <span id="welcome-count">0</span> addons in your AddOns folder</h3>
-  <p class="muted-text" id="welcome-body">Furphy can start managing these — it re-downloads each one so it can keep them updated from now on.</p>
+  <h3 id="dialog-welcome-title"><svg class="icon"><use href="#icon-download"></use></svg> Found 0 addons you already have</h3>
+  <p class="muted-text" id="welcome-body">Furphy can keep them updated. Nothing is downloaded or changed now - you'll just see an Update badge when a newer version comes out.</p>
   <ul class="welcome-list" id="welcome-list"></ul>
   <div class="nokey-inline welcome-nokey-note">
     <svg class="icon"><use href="#icon-info"></use></svg>
     <span>Looking for something else? <button type="button" class="link-btn" id="welcome-browse-link">See Get new addons</button></span>
   </div>
   <div class="dialog-footer">
-    <button type="button" class="btn btn-ghost" id="welcome-skip">Skip</button>
+    <button type="button" class="btn btn-ghost" id="welcome-skip">Not now</button>
     <!-- Review fix: was btn-accent. Round 34 removed the sidebar's accent
          CTA entirely, so nothing in the app is accent-colored any more. -->
-    <button type="button" class="btn btn-outline" id="welcome-adopt">Take over all</button>
+    <button type="button" class="btn btn-outline" id="welcome-adopt">Keep them updated</button>
   </div>
 </div>
 
