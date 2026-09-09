@@ -2959,7 +2959,9 @@ function Show-InstallWizard {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'Furphy Addon Manager - Install'
-    $form.ClientSize = New-Object System.Drawing.Size(480, 250)
+    # Round 45.1: 250 -> 290 so the finish screen's detail text (up to four
+    # wrapped lines) never runs under the buttons or off the window.
+    $form.ClientSize = New-Object System.Drawing.Size(480, 290)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
@@ -3015,7 +3017,7 @@ function Show-InstallWizard {
     # pump (called from every Write-Step/Write-Info/Write-Warn2 during
     # Invoke-FurphyInstallSteps) still animates it between steps.
     $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Size = New-Object System.Drawing.Size(340, 16)
+    $progressBar.Size = New-Object System.Drawing.Size(440, 16)
     $progressBar.Location = New-Object System.Drawing.Point(20, 100)
     $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
     $progressBar.Minimum = 0
@@ -3034,7 +3036,7 @@ function Show-InstallWizard {
     # warning text) beneath it.
     $progressTitleLabel = New-Object System.Windows.Forms.Label
     $progressTitleLabel.AutoSize = $false
-    $progressTitleLabel.Size = New-Object System.Drawing.Size(340, 18)
+    $progressTitleLabel.Size = New-Object System.Drawing.Size(440, 18)
     $progressTitleLabel.Location = New-Object System.Drawing.Point(20, 120)
     $progressTitleLabel.Font = New-Object System.Drawing.Font($progressTitleLabel.Font, [System.Drawing.FontStyle]::Bold)
     $progressTitleLabel.Text = ''
@@ -3043,7 +3045,10 @@ function Show-InstallWizard {
 
     $progressDetailLabel = New-Object System.Windows.Forms.Label
     $progressDetailLabel.AutoSize = $false
-    $progressDetailLabel.Size = New-Object System.Drawing.Size(340, 42)
+    # Round 45.1: full width and four lines tall - the smoke test showed the
+    # "your addons were not changed" / "found N addons" lines clipped below
+    # a 340x42 label once the install path wrapped.
+    $progressDetailLabel.Size = New-Object System.Drawing.Size(440, 72)
     $progressDetailLabel.Location = New-Object System.Drawing.Point(20, 140)
     $progressDetailLabel.Text = ''
     $progressDetailLabel.Visible = $false
@@ -3051,7 +3056,7 @@ function Show-InstallWizard {
 
     $btnInstall = New-Object System.Windows.Forms.Button
     $btnInstall.Text = 'Install'
-    $btnInstall.Location = New-Object System.Drawing.Point(370, 192)
+    $btnInstall.Location = New-Object System.Drawing.Point(370, 232)
     $btnInstall.Size = New-Object System.Drawing.Size(90, 32)
     $btnInstall.Enabled = [bool]$InitialWowRoot
     $form.Controls.Add($btnInstall)
@@ -3123,10 +3128,13 @@ function Show-InstallWizard {
             } else {
                 $lblStatus.Text = 'Furphy Addon Manager is ready to use.'
                 $summaryLines = New-Object 'System.Collections.Generic.List[string]'
-                $summaryLines.Add("Installed to: $($script:appDest)")
-                $summaryLines.Add('Your addons and WoW settings were not changed - Furphy only manages the copy it keeps track of.')
+                # Round 45.1: the install path is already shown in the path
+                # box above, and a long one wrapped this label past its
+                # bounds and hid the two lines that matter - so the path
+                # stays in the console/log output only.
+                $summaryLines.Add('Your addons and WoW settings were not changed.')
                 if ($Script:LastAdoptedCount -gt 0) {
-                    $summaryLines.Add("Found $($Script:LastAdoptedCount) addon(s) you already had - nothing was downloaded or changed.")
+                    $summaryLines.Add("Found $($Script:LastAdoptedCount) addon(s) you already had - Furphy is keeping track of them; nothing was downloaded.")
                 }
                 $progressDetailLabel.Text = [string]::Join("`r`n", $summaryLines.ToArray())
             }
@@ -3150,13 +3158,13 @@ function Show-InstallWizard {
             $btnInstall.Visible = $false
             $btnClose = New-Object System.Windows.Forms.Button
             $btnClose.Text = 'Close'
-            $btnClose.Location = New-Object System.Drawing.Point(370, 192)
+            $btnClose.Location = New-Object System.Drawing.Point(370, 232)
             $btnClose.Size = New-Object System.Drawing.Size(90, 32)
             $btnClose.Add_Click({ $form.Close() })
             $form.Controls.Add($btnClose)
             $btnOpen = New-Object System.Windows.Forms.Button
             $btnOpen.Text = 'Open Furphy Addon Manager'
-            $btnOpen.Location = New-Object System.Drawing.Point(20, 192)
+            $btnOpen.Location = New-Object System.Drawing.Point(20, 232)
             $btnOpen.Size = New-Object System.Drawing.Size(220, 32)
             $btnOpen.Add_Click({
                 try {

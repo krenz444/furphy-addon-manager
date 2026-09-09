@@ -53,6 +53,16 @@ files the player installed themselves, there is a local copy of what
 they had to fall back to; a fix to `Save-BackupZip`'s own pruning keeps
 that snapshot from being deleted by the next routine update.
 
+**Installer wizard finish screen (Round 45.2, shipped as 1.25.1):** the
+interactive smoke run against a scratch WoW folder showed the two lines
+that matter most - "Your addons and WoW settings were not changed." and
+"Found N addon(s) you already had - Furphy is keeping track of them;
+nothing was downloaded." - clipped below a 340x42 detail label once the
+install path wrapped. The window is now 480x290 (was 250), the bar and
+both labels span the full 440 width, the detail label is four lines
+tall, the buttons sit at y=232, and the "Installed to:" line stays in
+the console/log output only (the path box above already shows it).
+
 **Installer wizard, two follow-ups from Eric trying 1.24.0 (Round 45.1):**
 "there is still a progress bar not doing anything until you click
 install" and "it also is still moving when the install completes". The
