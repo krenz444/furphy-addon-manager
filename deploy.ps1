@@ -163,7 +163,7 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
     New-Item -ItemType Directory -Force -Path (Join-Path $RepoPath 'ui'), (Join-Path $RepoPath 'docs') | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $RepoPath 'ui') -File | Remove-Item -Force
     Copy-Item -Path (Join-Path $uiSrc '*') -Destination (Join-Path $RepoPath 'ui') -Recurse -Force
-    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'APP-UPDATE-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
+    foreach ($f in @('SPEC.md', 'ROADMAP.md', 'OVERNIGHT-REPORT.md', 'UX-SPEC.md', 'THEMES-SPEC.md', 'FLAVORS-SPEC.md', 'SETTINGS-SPEC.md', 'DISTRIBUTION-SPEC.md', 'REMOVAL-SPEC.md', 'WAGO-BROWSE-SPEC.md', 'APP-UPDATE-SPEC.md', 'GAME-MODE-SPEC.md', 'SETUP-SPEC.md', 'TESTING.md', 'NIGHT-REPORT-2026-09-05.md', 'NIGHT-REPORT-2026-09-07.md')) {
         $s = Join-Path $Source $f
         if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $RepoPath "docs\$f") -Force }
     }
@@ -181,6 +181,14 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
     New-Item -ItemType Directory -Force -Path $rh, (Join-Path $rh 'lib') | Out-Null
     foreach ($f in @('FurphyHost.cs', 'build-host.ps1', 'adfilter-hosts.txt', 'selftest.html')) { $s = Join-Path $Source "host\$f"; if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $rh $f) -Force } }
     Get-ChildItem -LiteralPath (Join-Path $Source 'host\lib') -File -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $rh 'lib') -Force
+    # Round 44: the one-file installer's sources (setup\FurphySetup.cs +
+    # setup\build-setup.ps1) are repo content too; dist\ output never is.
+    $setupSrc = Join-Path $Source 'setup'
+    if (Test-Path -LiteralPath $setupSrc -PathType Container) {
+        $setupDst = Join-Path $RepoPath 'setup'
+        New-Item -ItemType Directory -Force -Path $setupDst | Out-Null
+        Get-ChildItem -LiteralPath $setupSrc -File | Where-Object { $_.Extension -in @('.cs', '.ps1', '.md') } | Copy-Item -Destination $setupDst -Force
+    }
 
     # T4: mirror tests\ SOURCES only - never tests\.tmp (scratch, cleaned
     # after every run), tests\last-report.json/.md (this build root's own
