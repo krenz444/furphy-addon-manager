@@ -82,6 +82,19 @@
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 
+# Litter-cleanup cutoff (this round's fixer task) - captured as the very
+# first thing this file does, before any Describe below can possibly
+# stage a real release into %TEMP%. Every Describe that reaches
+# state=ready via a REAL local GitHub stub (never the -AppUpdateOnly
+# direct-state-file Describes, which never touch %TEMP% at all) removes
+# its own %TEMP%\FurphyUpdate-<its own exact tag>-<guid> folder in its
+# own finally block, using this same cutoff - see
+# tests\lib\common.ps1's own Remove-AppUpdateTempLitter doc comment for
+# why the cutoff (never a blind "sweep everything matching the prefix")
+# is what makes this safe to run alongside another fixer's own
+# concurrently-running test session on this same shared machine.
+$Script:LitterCutoffUtc = (Get-Date).ToUniversalTime()
+
 $Script:AddonServerPath = Join-Path $Script:FurphyBuildRoot 'addon-server.ps1'
 $Script:ServerSourceText = Get-Content -LiteralPath $Script:AddonServerPath -Raw
 
@@ -376,6 +389,12 @@ Describe 'App-update: happy path (check -> available -> ready)' {
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server
         }
+        # This Describe reaches state=ready, which really does extract a
+        # real %TEMP%\FurphyUpdate-v99.0.0-<guid> folder (section 8.4) -
+        # narrowly scoped to this Describe's own exact tag, never a blind
+        # "FurphyUpdate-" sweep (see this file's own header + common.ps1's
+        # Remove-AppUpdateTempLitter doc comment).
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.0-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 
@@ -515,6 +534,7 @@ Describe 'App-update: install refused while WoW is running' {
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server
         }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.4-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 
@@ -575,6 +595,7 @@ Describe 'App-update: install deferred while an addon job is running' -Tags 'Net
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server
         }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.5-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 
@@ -676,6 +697,7 @@ Describe 'App-update: a window-initiated install is not falsely blocked by the w
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server
         }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.3-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 
@@ -701,9 +723,25 @@ Describe 'App-update: a 403/429 from GitHub never regresses state, never throws,
         $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ ReleaseStatus = 403; RetryAfterSeconds = 120 }
 
         It 'the check ends in error/idle (never available/downloading/ready) with a rate-limit lastError, and hitting the limit does not trigger a tight retry loop' {
+            $pre = (Invoke-Api -Port $Script:AppUpdatePort -Method Get -Path '/api/app-update/status').Body
             Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check' | Out-Null
 
-            $final = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('error', 'idle', 'available', 'ready') -TimeoutSec 30
+            # Round 42.1: a fresh app-update.json starts out "idle", so waiting
+            # for "idle" alone can return before any check has run at all
+            # (the server's own startup check may still be in flight). Wait
+            # for evidence that a check actually completed: a terminal
+            # non-idle state, or idle with a lastError/checkedAt that moved.
+            $final = $null
+            $deadline = (Get-Date).AddSeconds(45)
+            while ((Get-Date) -lt $deadline) {
+                $r = Invoke-Api -Port $Script:AppUpdatePort -Method Get -Path '/api/app-update/status'
+                if ($r.Ok) {
+                    $final = $r.Body
+                    if (@('error', 'available', 'ready') -contains $final.state) { break }
+                    if ($final.state -eq 'idle' -and ($final.lastError -or ([string]$final.checkedAt -ne [string]$pre.checkedAt))) { break }
+                }
+                Start-Sleep -Milliseconds 300
+            }
             @('available', 'downloading', 'ready') -contains $final.state | Should Be $false
             $final.lastError | Should Be 'GitHub rate limit reached - try again later.'
 
@@ -833,6 +871,7 @@ Describe 'App-update: a stale lock recording a reused PID is ignored, not treate
         }
     } finally {
         if ($stub) { Stop-GitHubReleaseStubServer -Stub $stub }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.1.0-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 
@@ -923,6 +962,150 @@ Describe 'App-update: Check-now immediately after server start never leaves stat
         if ($started) {
             Stop-GitHubReleaseStubServer -Stub $started.Stub
             Stop-TestServer -Server $started.Server
+        }
+        # This race can legitimately settle on 'ready' (a real staged
+        # %TEMP%\FurphyUpdate-v99.1.1-<guid> folder) or on idle/available/
+        # error (no folder at all, per this file's own header) -
+        # Remove-AppUpdateTempLitter is a safe no-op when nothing matches,
+        # so this always runs rather than branching on which outcome won.
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.1.1-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+}
+
+# =====================================================================
+# 13/14) This round's fixer task, item 3: a stale `stagedPath` left over
+#     from a prior FAILED/rolled-back install attempt (exactly this
+#     round's own root-caused incident - install.ps1's own rollback write
+#     is a read-merge-write of state/lastError/lastErrorAt only, per
+#     Remove-AppUpdateStaleStaging's own doc comment in addon-server.ps1,
+#     so the OLD `stagedPath` value and its folder both survive on disk
+#     untouched by that write) must be gone - both the JSON field AND the
+#     folder on disk - once the NEXT maintenance pass has actually
+#     confirmed one of the two spec-named outcomes that make it safe to
+#     reclaim (section 8.8): "idle" (still not newer) or "ready" (a fresh
+#     newer tag supersedes it). Uses the SAME -AppUpdateOnly / direct-
+#     state-file seam Describes 10/11 already use above - no HTTP server,
+#     no real relaunch, nothing install.ps1-shaped at all (that mechanism
+#     is this file's sibling AppUpdate.SilentUpgrade.Tests.ps1's own job,
+#     never this file's, per Describe 7's own header note) - this file's
+#     own version of "dry-run/none": no real subprocess relaunch, no real
+#     window/tray, ever.
+#
+#     The synthetic "stale" folder each Describe below plants lives under
+#     tests\.tmp (New-TempRoot), deliberately NEVER the real %TEMP% -
+#     Remove-AppUpdateStaleStaging (addon-server.ps1) never cares which
+#     directory a stagedPath value points at, and a tests\.tmp path makes
+#     the "was it actually deleted" assertion unambiguous with zero risk
+#     of colliding with a REAL %TEMP%\FurphyUpdate-*/FurphyRollback-*
+#     folder some other process on this shared machine is concurrently
+#     using (this file's own header explains the same reasoning for
+#     Remove-AppUpdateTempLitter's -CreatedAfterUtc cutoff above - this
+#     sidesteps the need for that guard entirely by never touching the
+#     real %TEMP% for the STALE side of the fixture at all). The "ready"
+#     Describe's own FRESH stagedPath, unavoidably, IS a real
+#     %TEMP%\FurphyUpdate-<tag>-<guid> folder (addon-server.ps1's own
+#     section 8.4 extraction target - not something a test seam can
+#     redirect) - that one is removed by its own exact, just-returned
+#     path in its own finally block, never a prefix sweep.
+# =====================================================================
+
+Describe 'App-update: a stale stagedPath from a prior failed install is cleared on the next check (idle outcome - still not newer)' {
+    if (-not ($Script:CapCore -and $Script:CapMaintenance)) {
+        It 'stagedPath is cleared to null and the leftover folder is deleted once the check confirms still-not-newer' {
+            Write-PendingSkip 'needs APPUPD-1 (GitHubBaseUrl seam), APPUPD-2 (routes/handlers) and APPUPD-3 (Invoke-AppUpdateMaintenance)'
+        }
+        return
+    }
+
+    $root = New-TempRoot -Name 'appupdate-stale-staged-idle'
+    $stub = $null
+    try {
+        # v0.0.1 is older than ANY reasonable running $Script:Version
+        # (this scratch server has no VERSION file of its own, so it
+        # falls back to addon-server.ps1's own hardcoded default - see
+        # that file's own E18 comment near its bottom) - deliberately NOT
+        # hardcoding that default's exact current value here, so this
+        # Describe keeps working unchanged if that default is ever bumped.
+        $stub = Start-GitHubReleaseStubServer -TagName 'v0.0.1' -ZipEntries @{ VERSION = '0.0.1' }
+
+        It 'a stale stagedPath and its folder both disappear once this check confirms still-not-newer' {
+            $staleFolder = New-TempRoot -Name 'appupdate-stale-staged-folder-idle'
+            'stale leftover from an abandoned/rolled-back install attempt' | Set-Content -LiteralPath (Join-Path $staleFolder 'VERSION') -Encoding Ascii
+            (Test-Path -LiteralPath $staleFolder -PathType Container) | Should Be $true
+
+            Write-AppUpdateStateFile -Root $root -Fields @{ state = 'error'; stagedPath = $staleFolder; lastError = 'rolled back to 0.0.0 after post-install health check failed' }
+
+            Invoke-AppUpdateOnlyPass -Root $root -GitHubBaseUrl $stub.BaseUrl -TimeoutSec 30
+
+            $state = Read-AppUpdateStateFile -Root $root
+            $state | Should Not Be $null
+            $state.state | Should Be 'idle'
+            ([string]::IsNullOrEmpty([string]$state.stagedPath)) | Should Be $true
+            (Test-Path -LiteralPath $staleFolder) | Should Be $false
+        }
+    } finally {
+        if ($stub) { Stop-GitHubReleaseStubServer -Stub $stub }
+    }
+}
+
+Describe 'App-update: a stale stagedPath from a prior failed install is cleared when a fresh newer release supersedes it (ready outcome)' {
+    if (-not ($Script:CapCore -and $Script:CapMaintenance)) {
+        It 'the OLD stale folder is deleted; stagedPath now points at the FRESH staged release' {
+            Write-PendingSkip 'needs APPUPD-1 (GitHubBaseUrl seam), APPUPD-2 (routes/handlers) and APPUPD-3 (Invoke-AppUpdateMaintenance)'
+        }
+        return
+    }
+
+    $root = New-TempRoot -Name 'appupdate-stale-staged-ready'
+    $stub = $null
+    # $script: (never a bare local $newStagedPath) - REQUIRED, found live
+    # while verifying this file: Pester's own It scriptblock runs in its
+    # OWN child scope, so a plain `$newStagedPath = ...` assignment made
+    # INSIDE the It below stays local to that It and is never visible to
+    # this Describe's own `finally` (which runs OUTSIDE any It) - the
+    # `finally` block's own read of a bare $newStagedPath silently saw
+    # $null every time, and its cleanup never ran, leaving a real
+    # %TEMP%\FurphyUpdate-v99.2.0-<guid> folder behind on every run (found
+    # live via leftover folders after this file's own Pester runs -
+    # exactly the class of litter task item 1 exists to catch). $script:
+    # is this file's own script scope (Pester creates one script scope per
+    # file, not per Describe/It - the same scope every other $Script:
+    # variable in this file already uses), reachable for both read and
+    # write from inside the It below AND from this finally block outside
+    # it.
+    $Script:newStagedPath = $null
+    try {
+        $stub = Start-GitHubReleaseStubServer -TagName 'v99.2.0' -ZipEntries @{ VERSION = '99.2.0' }
+
+        It 'the old stale folder is gone; app-update.json''s stagedPath now points at the new one, which DOES exist' {
+            $staleFolder = New-TempRoot -Name 'appupdate-stale-staged-folder-ready'
+            'stale leftover from an abandoned/rolled-back install attempt' | Set-Content -LiteralPath (Join-Path $staleFolder 'VERSION') -Encoding Ascii
+            (Test-Path -LiteralPath $staleFolder -PathType Container) | Should Be $true
+
+            Write-AppUpdateStateFile -Root $root -Fields @{ state = 'error'; stagedPath = $staleFolder; lastError = 'rolled back to 0.0.0 after post-install health check failed' }
+
+            Invoke-AppUpdateOnlyPass -Root $root -GitHubBaseUrl $stub.BaseUrl -TimeoutSec 30
+
+            $state = Read-AppUpdateStateFile -Root $root
+            $state | Should Not Be $null
+            $state.state | Should Be 'ready'
+            $state.latestVersion | Should Be '99.2.0'
+            ([string]::IsNullOrEmpty([string]$state.stagedPath)) | Should Be $false
+            ([string]$state.stagedPath) | Should Not Be $staleFolder
+            $Script:newStagedPath = [string]$state.stagedPath
+            (Test-Path -LiteralPath $staleFolder) | Should Be $false
+            (Test-Path -LiteralPath $Script:newStagedPath -PathType Container) | Should Be $true
+        }
+    } finally {
+        if ($stub) { Stop-GitHubReleaseStubServer -Stub $stub }
+        # The FRESH stagedPath this outcome creates is a real
+        # %TEMP%\FurphyUpdate-v99.2.0-<guid> folder (addon-server.ps1's
+        # own section 8.4 extraction, not something this test seam
+        # redirects) - removed here by its own exact, just-asserted path,
+        # never a prefix sweep, so this can never touch anything this
+        # Describe did not itself just create.
+        if ($Script:newStagedPath -and (Test-Path -LiteralPath $Script:newStagedPath)) {
+            Remove-Item -LiteralPath $Script:newStagedPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

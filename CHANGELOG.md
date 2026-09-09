@@ -1,5 +1,74 @@
 # Furphy Addon Manager - changelog
 
+## Round 42.1 (1.22.1: the silent self-update no longer undoes itself)
+
+Found by the one deliberate real-GitHub upgrade the orchestrator ran
+from a scratch install laid out like a real one (VERSION forced to
+1.21.9, app at <wowroot>\_retail_\AddonSync, scratch port): the lookup,
+the download, the sha256 check, the staged extraction and the installer
+spawn all worked, and the copy finished in three seconds - then the
+install rolled itself back. 1.22.0 is the first version carrying the
+updater, so no real install had tried this path yet.
+
+**Installer (install.ps1):**
+- Root cause: the -Upgrade path relaunched Furphy FIRST and only then
+  waited for the upgraded app to answer /api/ping with the new version.
+  With -Relaunch tray the relaunched tray does not start addon-server.ps1
+  until its first cycle about 90 seconds later, so the 20-second health
+  check found nothing and Invoke-InstallRollbackAndRelaunchOld restored
+  the old files - every silent background update would have reverted.
+  The window path was unaffected because the launcher starts a server at
+  once.
+- Fix: a new Invoke-InstallVerifyNewFiles starts a short-lived, hidden
+  verification addon-server.ps1 from the freshly copied files itself,
+  polls /api/ping until it reports the new VERSION, shuts it down with a
+  graceful POST /api/shutdown (by-pid stop as the fallback) and waits for
+  the port to stop answering - and only then relaunches per the caller's
+  -Relaunch intent. The check now runs for every intent including none,
+  so the headless tests exercise it.
+- Rollback outcomes are now two distinct messages that can never
+  collide: "rolled back to <old> after <reason>" when the rollback
+  succeeded, "rollback FAILED after <reason> - manual reinstall required
+  (backup at ...)" only when it threw. The old text said both at once.
+- The staged %TEMP%\FurphyUpdate-<tag>-<guid> folder is removed on every
+  outcome (success, rollback, rollback failure) by a delayed, detached
+  self-delete; at most one FurphyRollback backup is kept per install.
+
+**Server (addon-server.ps1):**
+- Invoke-AppUpdateMaintenance now writes state="checking" the moment it
+  holds the app-update lock (never downgrading downloading/ready/
+  installing). Handle-AppUpdateCheck's "already running" branch writes
+  nothing by design, so a status poll landing in the short gap between
+  the lock and the core's own first write still read a stale "idle" - the
+  full gate caught it once as the rate-limit integration case ending
+  without its error text. Every core exit rewrites the file and the
+  stuck-checking watchdog covers a dead child, so nothing can strand it.
+  The test now waits for evidence a check completed (a terminal state, or
+  idle with a moved checkedAt or a lastError) instead of the initial idle.
+
+**Tests:**
+- tests\fixture-acceptance\AppUpdate.SilentUpgrade.Tests.ps1 (15 checks)
+  now covers the health-check pass (VERSION bumps, no lingering
+  verification process, staged folder gone) and the health-check failure
+  (rollback wording, one backup, staged folder gone) with -Relaunch none.
+- tests\integration\Server.AppUpdate.Tests.ps1 (17 checks) asserts the
+  stagedPath is cleared and the folder is gone after either outcome.
+- tests\lib\common.ps1 gained a scoped TEMP cleanup helper; the
+  app-update tests no longer leave FurphyUpdate-*/FurphyRollback-*
+  folders behind (34 such folders and 260 leftover uninstall temp
+  scripts from earlier runs were removed by hand).
+
+**Verification:** static 7/7, unit 360/360; AppUpdate.SilentUpgrade
+15/15, Server.AppUpdate 17/17, Server.Uninstall 5/5 (one file at a time -
+every Server.*.Tests.ps1 file uses port 47899 and must not run in
+parallel). Independent end-to-end through the real server path against
+the GitHub stub, with the PC idle and WoW closed so a scratch tray was
+allowed: 1.21.9 -> 1.22.1 with relaunch "tray" ended in state=installed
+and a scratch tray running from the new files; a deliberately broken
+1.22.2 ended in state=error with exactly "rolled back to 1.21.9 after
+post-install health check failed", VERSION restored, tray relaunched
+from the restored files. Production untouched throughout.
+
 ## Round 42 (1.22.0: the app updates itself)
 
 Five parallel packages built against one frozen design,

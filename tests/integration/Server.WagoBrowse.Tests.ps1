@@ -978,6 +978,13 @@ Describe 'Wago browse: category + gaining incompatibility' {
         } finally { Remove-Item Env:\FURPHY_TEST_WAGO_BASEURL -ErrorAction SilentlyContinue }
 
         It 'sort=gaining&categoryId=<n> returns identical items/order to sort=gaining alone, and never touches the stub' {
+            # Round 42.1: count only requests made DURING the two browse
+            # calls. The full gate once saw a single stray stub request that
+            # landed before this It ran (startup-time background work, not
+            # the browse path this test guards), which failed an absolute
+            # "0 requests ever" assertion.
+            $stubRequestsBefore = @(Get-WagoStubRequests -Stub $stub)
+            $requestsBefore = @($stubRequestsBefore).Count
             $r1 = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?sort=gaining')
             $r2 = Invoke-Api -Port 47899 -Method Get -Path (Add-WagoBrowsePath '/api/wago/browse?sort=gaining&categoryId=4')
             $r1.Ok | Should Be $true
@@ -987,7 +994,8 @@ Describe 'Wago browse: category + gaining incompatibility' {
             $r1.Body.ready | Should Be $r2.Body.ready
             $r1.Body.snapshotCount | Should Be $r2.Body.snapshotCount
 
-            (Get-WagoStubRequests -Stub $stub).Count | Should Be 0
+            $stubRequestsAfter = @(Get-WagoStubRequests -Stub $stub)
+            (@($stubRequestsAfter).Count - $requestsBefore) | Should Be 0
         }
     } finally {
         Stop-TestServer -Server $server

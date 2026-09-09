@@ -861,6 +861,118 @@ function Get-GitHubReleaseStubRequests {
 }
 
 # ---------------------------------------------------------------------
+# App-update %TEMP% litter (this round's own fixer task): every real,
+# end-to-end exercise of the self-updater - a scratch addon-server.ps1
+# actually staging a release under $env:TEMP\FurphyUpdate-<tag>-<guid>
+# (section 8.4), or a real install.ps1 -Upgrade run creating its own
+# $env:TEMP\FurphyRollback-<hash> backup (section 8.6) - leaves a REAL
+# folder behind under the real, shared %TEMP% that nothing in either
+# pipeline's own normal success path deletes on its own (see
+# Remove-AppUpdateStaleStaging's doc comment in addon-server.ps1 for why
+# a staged folder is deliberately kept around by the PRODUCT itself for
+# "one more tick" before a maintenance pass reclaims it - fine in
+# production, but a test suite that runs this pipeline dozens of times a
+# day must not just let all of them pile up forever). Found live: dozens
+# of leftover FurphyUpdate-v88.*/v99.* and FurphyRollback-* folders under
+# %TEMP% from earlier rounds' own runs of this exact test suite.
+#
+# -CreatedAfterUtc is mandatory and is never defaulted to "now" here on
+# purpose - every caller must capture its OWN cutoff (plain
+# `(Get-Date).ToUniversalTime()`) at the very top of its file/Describe,
+# BEFORE anything that could stage a release or run -Upgrade, and pass
+# that same value back in here. This is what keeps both functions safe
+# to point at a broad prefix like "FurphyUpdate-" or "FurphyRollback-"
+# without ever touching a folder some OTHER process (a real production
+# install of this same app on this same machine, or another fixer's own
+# concurrently-running test session on this same shared box) created
+# before this run started, or is still in the middle of creating - see
+# AppUpdate.SilentUpgrade.Tests.ps1's own "Targeted cleanup ONLY" comment
+# for the exact same reasoning applied to a single deterministic path;
+# this is that same guard generalized to a whole prefix.
+# ---------------------------------------------------------------------
+
+function Get-AppUpdateTempLitterFolders {
+    <#
+      Lists every %TEMP%\<Prefix>* directory whose own CreationTimeUtc is
+      at or after -CreatedAfterUtc. Read-only - never deletes anything;
+      exposed separately from Remove-AppUpdateTempLitter so a test can
+      ASSERT on the exact list (e.g. "at most one FurphyRollback- folder
+      exists for this dest", "no FurphyUpdate- folder survives this run")
+      rather than only being able to sweep it away. Never throws - an
+      unreadable %TEMP% (never expected in practice) or a folder that
+      disappears mid-enumeration (a benign race with something else
+      cleaning up concurrently) is simply not counted, and returns an
+      empty array rather than a $null single value even when nothing
+      matches.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][datetime]$CreatedAfterUtc
+    )
+    $tempPath = [System.IO.Path]::GetTempPath()
+    $candidates = @()
+    try {
+        $candidates = Get-ChildItem -LiteralPath $tempPath -Directory -Filter ($Prefix + '*') -Force -ErrorAction SilentlyContinue
+    } catch {
+        $candidates = @()
+    }
+    $matches = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($dir in @($candidates)) {
+        try {
+            if ($dir.CreationTimeUtc -ge $CreatedAfterUtc) { $matches.Add($dir.FullName) }
+        } catch {
+            # Gone or inaccessible between enumeration and this read - skip.
+        }
+    }
+    return , @($matches.ToArray())
+}
+
+function Remove-AppUpdateTempLitter {
+    <#
+      Best-effort recursive delete of every folder
+      Get-AppUpdateTempLitterFolders finds for -Prefix / -CreatedAfterUtc
+      (see that function's own doc comment for the exact same safety
+      contract - never a folder older than -CreatedAfterUtc). Call once
+      per prefix ("FurphyUpdate-" / "FurphyRollback-", or a more specific
+      "FurphyUpdate-<exact tag>-" when a caller already knows its own
+      exact release tag and wants a narrower, even-more-collision-proof
+      match) in an AfterAll/finally, after recording -CreatedAfterUtc at
+      the very start of the test file/Describe. Never throws - a locked
+      folder (AV, an orphaned child process still holding a handle) is
+      logged to the host and skipped, not fatal to the run, same contract
+      as Remove-TempRoots. Returns the count actually removed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][datetime]$CreatedAfterUtc
+    )
+    $removed = 0
+    # Deliberately NOT `@(Get-AppUpdateTempLitterFolders ...)` here - that
+    # function already returns via the `, @(...)` idiom (a single pipeline
+    # object that IS the array, guarding against PowerShell collapsing an
+    # empty array to $null on return - see its own doc comment). Wrapping
+    # the CALL SITE in a second @() double-wraps it into a 1-element array
+    # whose single element is the (possibly empty) inner array - found
+    # live while verifying this file: with zero matches, $full then became
+    # that inner EMPTY ARRAY itself rather than never looping at all,
+    # and Test-Path -LiteralPath $full failed to bind ("...because it is
+    # an empty array"). A bare `foreach ($full in (Get-Foo))` already
+    # iterates a comma-wrapped function's elements correctly, empty or
+    # not - no extra @() needed or wanted here.
+    foreach ($full in (Get-AppUpdateTempLitterFolders -Prefix $Prefix -CreatedAfterUtc $CreatedAfterUtc)) {
+        try {
+            if (Test-Path -LiteralPath $full) {
+                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+                $removed++
+            }
+        } catch {
+            Write-Host "WARN: could not remove app-update temp litter '$full': $($_.Exception.Message)"
+        }
+    }
+    return $removed
+}
+
+# ---------------------------------------------------------------------
 # Black-hole TCP listener (Round 26 hardening, item 2): accepts a real TCP
 # connection and never reads or responds - used to prove addon-sync.ps1's
 # FURPHY_TEST_CF_BASEURL/FURPHY_TEST_WAGO_BASEURL override actually reaches

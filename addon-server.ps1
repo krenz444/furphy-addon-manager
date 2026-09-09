@@ -9172,6 +9172,26 @@ function Invoke-AppUpdateMaintenance {
         # Best-effort, matching Test-MaintenanceChildRunning's own lock -
         # a failed lock write never blocks the real work below.
     }
+    if ($lockAcquired) {
+        # Round 42.1: make the on-disk state agree with the lock the moment
+        # it is held. Handle-AppUpdateCheck's "already running" branch
+        # (Test-AppUpdateChildRunning true) deliberately writes nothing, so
+        # a caller polling GET /api/app-update/status in the short gap
+        # between this lock acquisition and Invoke-AppUpdateMaintenanceCore's
+        # own state="checking" write still saw a stale "idle" and stopped
+        # waiting too early (the rate-limit integration test caught this
+        # once under the full gate). Every exit of the Core rewrites the
+        # file, and the stuck-checking watchdog covers a child that dies,
+        # so this can never strand a "checking". Never downgrade an
+        # in-flight download, a staged "ready" or an install.
+        try {
+            $inflight = Get-AppUpdateState
+            if (@('idle', 'available', 'error') -contains [string]$inflight.state) {
+                $inflight.state = 'checking'
+                Save-AppUpdateState -State $inflight
+            }
+        } catch { }
+    }
     try {
         Invoke-AppUpdateMaintenanceCore -Force:$Force
     } finally {
@@ -10266,7 +10286,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.22.0'
+$Script:Version = '1.22.1'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

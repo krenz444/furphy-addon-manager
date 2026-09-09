@@ -87,13 +87,16 @@ param(
     # Never set by a normal manual install/repair.
     [switch]$Upgrade,
     # APP-UPDATE-SPEC.md section 8.7: which of the two run modes to bring
-    # back after a passing -Upgrade - "window" (Addon Manager.vbs),
-    # "tray" (host\bin\FurphyHost.exe --tray), or "none" (relaunch
-    # nothing and skip the post-install health check entirely - the real
-    # HTTP route only ever sends "window"/"tray"; "none" exists so a
+    # back after a passing -Upgrade - "window" (Addon Manager.vbs), "tray"
+    # (host\bin\FurphyHost.exe --tray), or "none" (relaunch nothing - the
+    # real HTTP route only ever sends "window"/"tray"; "none" exists so a
     # headless verification pass can exercise the file-level upgrade
-    # without starting a window or tray on the machine running it).
-    # Meaningless without -Upgrade.
+    # without starting a window or tray on the machine running it). The
+    # post-install health check (Invoke-InstallVerifyNewFiles) runs for
+    # EVERY value here, "none" included - it uses its own short-lived
+    # verification server rather than whatever -Relaunch starts, so it no
+    # longer depends on a relaunch happening at all. Meaningless without
+    # -Upgrade.
     [string]$Relaunch
 )
 
@@ -1986,6 +1989,165 @@ function Test-InstallHealthCheck {
     return $false
 }
 
+function Wait-InstallPortStopsAnswering {
+    <#
+      The inverse of Test-InstallHealthCheck's poll loop: waits, with the
+      same real-elapsed-time Stopwatch bounding (not a naive counter - see
+      that function's own comment for why that matters), for GET /api/ping
+      on -Port to STOP answering. Returns $true once nothing answers
+      within one -PollMs-spaced attempt, $false if something is still
+      answering when -TimeoutMs elapses. Never throws. Used by Invoke-
+      InstallVerifyNewFiles both to confirm a stale pre-existing listener
+      has actually let go of the port before it binds its own verification
+      server, and to confirm its OWN verification server's listener has
+      actually closed after asking it to shut down.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutMs = 10000,
+        [int]$PollMs = 300
+    )
+    $uri = "http://localhost:$Port/api/ping"
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 1 -ErrorAction Stop | Out-Null
+        } catch {
+            return $true
+        }
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
+        Start-Sleep -Milliseconds $PollMs
+    }
+}
+
+function Invoke-InstallVerifyNewFiles {
+    <#
+      APP-UPDATE-SPEC.md section 8.6 (the self-relaunch-dependent-health-
+      check fix): the OLD health check waited on WHOEVER Invoke-
+      InstallRelaunch had just started to answer /api/ping - fine for
+      -Relaunch window (the launcher starts addon-server.ps1 itself, right
+      away), but -Relaunch tray starts host\bin\FurphyHost.exe --tray
+      directly, and THAT process does not start addon-server.ps1 until its
+      own first background cycle (~90s later, confirmed live) - so the 20s
+      health check found no server, declared a perfectly good upgrade
+      unhealthy, and rolled it back every single time -Relaunch tray was
+      used. -Relaunch none (the test-only value) never answered /api/ping
+      at all, so the OLD code skipped the health check for it entirely.
+
+      The fix: verify the NEW files ourselves, with our OWN short-lived
+      addon-server.ps1 child pointed at $AppDest, BEFORE Invoke-
+      InstallRelaunch ever runs and regardless of $Relaunch's value - the
+      health check no longer depends on who (if anyone) is about to
+      relaunch, or how soon they start a server of their own. Same command
+      line shape deploy.ps1's own section-5 verify step and tests\lib\
+      common.ps1's Start-TestServer already use to do exactly this for a
+      fresh build/a test root; this is that same idea for a live -Upgrade.
+      Reuses Test-InstallHealthCheck for the poll-for-version loop and
+      Invoke-InstallServerShutdown for the CSRF-safe POST /api/shutdown
+      rather than reimplementing either.
+
+      Runs for -Relaunch none too, on purpose (see the caller) - a
+      headless run now exercises the exact same health check every real
+      -Relaunch window/tray run does.
+
+      Defensive: if something is ALREADY listening on $AppDest's own port
+      before this runs (the stop step at the top of Invoke-
+      FurphyInstallSteps missed it - e.g. a server that ignored its own
+      graceful shutdown request), that stale listener is shut down first
+      (logged) so our own verification server's HttpListener bind never
+      collides with it.
+
+      Always stops the verification server itself before returning,
+      whether the health check passed or failed - via the same graceful
+      POST /api/shutdown, waited out with a bounded poll, with a
+      by-PID-only Stop-Process fallback (never by name, never any other
+      process) if it somehow does not exit on its own - so neither a
+      passing nor a failing health check ever leaves an extra server bound
+      to the install's port, or still holding a handle on addon-server.ps1
+      itself, once this function returns. The caller's very next step is
+      either Restore-InstallCodeFromRollback or Invoke-InstallRelaunch,
+      both of which touch or replace files under $AppDest.
+
+      Never throws - a failure anywhere in here (the server failing to
+      start, the port refusing to close) is reported as Healthy=$false and
+      best-effort logged, exactly like Test-InstallHealthCheck's own
+      "never throws" contract, so a verification problem always reads as a
+      failed health check (-> rollback) rather than an unhandled exception
+      escaping the -Upgrade try/catch with a less specific error message.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppDest,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+        [string]$WowRoot
+    )
+
+    $port = Get-InstallPort -AppDest $AppDest
+
+    $preExisting = $false
+    try {
+        $probe = Invoke-RestMethod -Method Get -Uri "http://localhost:$port/api/ping" -TimeoutSec 2 -ErrorAction Stop
+        if ($probe) { $preExisting = $true }
+    } catch {
+        # Nothing answering yet - the port is already free, as expected.
+    }
+    if ($preExisting) {
+        Write-Warn2 "A server was already listening on port $port before verification (the stop step missed it) - shutting it down first."
+        Invoke-InstallServerShutdown -AppDest $AppDest
+        if (-not (Wait-InstallPortStopsAnswering -Port $port -TimeoutMs 5000)) {
+            Write-Warn2 "Port $port was still answering 5s after asking the stale server to shut down - starting the verification server anyway."
+        }
+    }
+
+    $serverScript = Join-Path -Path $AppDest -ChildPath 'addon-server.ps1'
+    $argList = New-Object 'System.Collections.Generic.List[string]'
+    $argList.Add((ConvertTo-SafeProcessArg '-NoProfile'))
+    $argList.Add((ConvertTo-SafeProcessArg '-ExecutionPolicy')); $argList.Add((ConvertTo-SafeProcessArg 'Bypass'))
+    $argList.Add((ConvertTo-SafeProcessArg '-File')); $argList.Add((ConvertTo-SafeProcessArg $serverScript))
+    $argList.Add((ConvertTo-SafeProcessArg '-Root')); $argList.Add((ConvertTo-SafeProcessArg $AppDest))
+    $argList.Add((ConvertTo-SafeProcessArg '-IdleMinutes')); $argList.Add((ConvertTo-SafeProcessArg '2'))
+    if ($WowRoot) {
+        $argList.Add((ConvertTo-SafeProcessArg '-WowRoot')); $argList.Add((ConvertTo-SafeProcessArg $WowRoot))
+    }
+
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
+    } catch {
+        Write-Warn2 "Could not start the verification server: $($_.Exception.Message)"
+        return [PSCustomObject]@{ Healthy = $false }
+    }
+
+    $healthy = Test-InstallHealthCheck -Port $port -ExpectedVersion $ExpectedVersion -TimeoutMs 30000
+    if ($healthy) {
+        Write-Info "Verification server on port $port answered with version $ExpectedVersion."
+    } else {
+        Write-Warn2 "Verification server on port $port did not answer with version $ExpectedVersion within 30s."
+    }
+
+    if ($proc -and $proc.HasExited) {
+        Write-Warn2 "Verification server process had already exited (exit code $($proc.ExitCode)) - the new addon-server.ps1 likely failed to start."
+    } else {
+        Invoke-InstallServerShutdown -AppDest $AppDest
+        $closed = Wait-InstallPortStopsAnswering -Port $port -TimeoutMs 10000
+        if ($proc -and -not $proc.HasExited) {
+            if ($closed) {
+                try { $proc.WaitForExit(3000) | Out-Null } catch { }
+            }
+            if (-not $proc.HasExited) {
+                try {
+                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                    Write-Warn2 'Verification server did not exit on its own after being asked to shut down - stopped it by PID.'
+                } catch {
+                    Write-Warn2 "Could not stop the verification server (pid $($proc.Id)): $($_.Exception.Message)"
+                }
+            }
+        }
+        if ($healthy) { Write-Info 'Verification server shut down.' }
+    }
+
+    return [PSCustomObject]@{ Healthy = $healthy }
+}
+
 function Invoke-InstallStartTray {
     <# Starts host\bin\FurphyHost.exe --tray directly - the exact
        command line StartupRegistry.BuildRunValue already builds
@@ -2058,6 +2220,31 @@ function Invoke-InstallRelaunch {
     }
 }
 
+function Remove-InstallStagedUpdateFolder {
+    <#
+      Shared by Invoke-InstallAppUpdateCleanup's success path AND (this
+      round - previously missing) both Invoke-InstallRollbackAndRelaunchOld
+      outcomes: deletes -StagedRoot (the %TEMP%\FurphyUpdate-* folder this
+      install.ps1 process is itself running FROM under -Upgrade - it has
+      done its job, whether the upgrade ended in success, a successful
+      rollback, or a failed rollback) via a DELAYED, DETACHED self-delete
+      (this running process's own script file lives inside that folder, so
+      this can never be synchronous). No-op when -StagedRoot is empty or
+      already gone. Never throws - a leftover staged folder is disk
+      clutter, not a failed upgrade/rollback.
+    #>
+    param([string]$StagedRoot)
+    if (-not $StagedRoot) { return }
+    if (-not (Test-Path -LiteralPath $StagedRoot -PathType Container)) { return }
+    try {
+        $stagedRootEsc = $StagedRoot.Replace('"', '')
+        $selfDeleteCmd = 'ping -n 3 127.0.0.1 >nul & rd /s /q "' + $stagedRootEsc + '"'
+        Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c ' + $selfDeleteCmd) -WindowStyle Hidden | Out-Null
+    } catch {
+        # Best-effort - a leftover staged folder is disk clutter, not a failed upgrade.
+    }
+}
+
 function Invoke-InstallRollbackAndRelaunchOld {
     <#
       APP-UPDATE-SPEC.md section 8.6: shared by BOTH rollback triggers -
@@ -2074,16 +2261,40 @@ function Invoke-InstallRollbackAndRelaunchOld {
       "server left down; nothing further attempted automatically" - no
       relaunch is attempted in that case, since the code on disk is now
       in an unknown state.
+
+      Wording fix (this round, found live - the self-contradicting
+      lastError a real upgrade produced: "rollback FAILED after
+      post-install health check failed - rolled back to 1.21.9 - manual
+      reinstall required" even though the restore had, in fact, succeeded):
+      -Reason is ONLY the trigger ("post-install health check failed" /
+      "install failed while copying files") - never the outcome - so the
+      two outcome messages below can never collide with each other.
+      "rolled back to <OldVersion> after <Reason>" is written ONLY once
+      the restore has actually succeeded; "rollback FAILED after <Reason>
+      - manual reinstall required (backup at <BackupPath>)" is written
+      ONLY when Restore-InstallCodeFromRollback itself threw - exactly one
+      of the two is ever true for a given call. Invoke-InstallRelaunch
+      (the RESTORED files) is likewise only ever reached on the successful
+      branch - a failed restore leaves the code on disk in an unknown
+      state and relaunches nothing, per the failure-modes table above.
+
+      Also (this round): deletes the staged -Upgrade source folder
+      (-StagedRoot, the caller's own $SourceRoot) on EITHER outcome, via
+      Remove-InstallStagedUpdateFolder (shared with Invoke-
+      InstallAppUpdateCleanup's success path, defined just above) - a
+      rollback used to leave that %TEMP%\FurphyUpdate-* folder behind
+      forever, since only the success path ever cleaned it up.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppDest,
         [string]$BackupPath,
         [Parameter(Mandatory = $true)][string]$Relaunch,
-        [Parameter(Mandatory = $true)][string]$LastErrorMessage,
+        [Parameter(Mandatory = $true)][string]$Reason,
         [Parameter(Mandatory = $true)][string]$OldVersion,
-        [bool]$TrayWasRunningIndependently
+        [bool]$TrayWasRunningIndependently,
+        [string]$StagedRoot
     )
-    Write-Warn2 "$LastErrorMessage"
+    Write-Warn2 "$Reason"
 
     $restoreAttempted = ($BackupPath -and (Test-Path -LiteralPath $BackupPath -PathType Container))
     $restoreOk = $true
@@ -2098,22 +2309,26 @@ function Invoke-InstallRollbackAndRelaunchOld {
     }
 
     $nowIso = Get-InstallUtcNowIso
+    Remove-InstallStagedUpdateFolder -StagedRoot $StagedRoot
+
     if (-not $restoreOk) {
+        $lastError = "rollback FAILED after $Reason - manual reinstall required (backup at $BackupPath)"
         Set-InstallAppUpdateJsonFields -AppDest $AppDest -Fields @{
             state       = 'error'
-            lastError   = "rollback FAILED after $LastErrorMessage - manual reinstall required (backup at $BackupPath)"
+            lastError   = $lastError
             lastErrorAt = $nowIso
         }
         Write-InstallLogLine "App-update rollback FAILED - manual reinstall required, backup at $BackupPath"
         return [PSCustomObject]@{ Restored = $false }
     }
 
+    $lastError = "rolled back to $OldVersion after $Reason"
     Set-InstallAppUpdateJsonFields -AppDest $AppDest -Fields @{
         state       = 'error'
-        lastError   = $LastErrorMessage
+        lastError   = $lastError
         lastErrorAt = $nowIso
     }
-    Write-InstallLogLine "App-update: $LastErrorMessage"
+    Write-InstallLogLine "App-update: $lastError"
 
     Invoke-InstallRelaunch -AppDest $AppDest -Relaunch $Relaunch -TrayWasRunningIndependently $TrayWasRunningIndependently
 
@@ -2135,7 +2350,12 @@ function Invoke-InstallAppUpdateCleanup {
       -Uninstall script copy. $StagedRoot is expected to be $SourceRoot
       and ONLY ever passed when $Upgrade is set - a normal manual install
       must never have its source folder (wherever the user unzipped it)
-      scheduled for deletion.
+      scheduled for deletion. The actual delete is Remove-
+      InstallStagedUpdateFolder (defined further below, alongside Invoke-
+      InstallRollbackAndRelaunchOld, which shares it for its own two
+      rollback outcomes) - factored out this round so a rollback can call
+      the exact same delete logic instead of only this success path ever
+      cleaning up.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppDest,
@@ -2158,15 +2378,7 @@ function Invoke-InstallAppUpdateCleanup {
         lastError   = $null
     }
 
-    if ($StagedRoot -and (Test-Path -LiteralPath $StagedRoot -PathType Container)) {
-        try {
-            $stagedRootEsc = $StagedRoot.Replace('"', '')
-            $selfDeleteCmd = 'ping -n 3 127.0.0.1 >nul & rd /s /q "' + $stagedRootEsc + '"'
-            Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c ' + $selfDeleteCmd) -WindowStyle Hidden | Out-Null
-        } catch {
-            # Best-effort - a leftover staged folder is disk clutter, not a failed upgrade.
-        }
-    }
+    Remove-InstallStagedUpdateFolder -StagedRoot $StagedRoot
 }
 
 function Invoke-FurphyInstallSteps {
@@ -2253,11 +2465,18 @@ if ($Script:DowngradeSkipped) { return }
 #         Steps, defined above - extracted unchanged so both this plain
 #         path and the -Upgrade path below share one implementation).
 #         APP-UPDATE-SPEC.md sections 8.6/8.7/8.8: under -Upgrade only,
-#         wraps that same copy in backup/rollback and adds the
-#         post-success relaunch + health check + cleanup. A plain
-#         install/repair (no -Upgrade) runs Invoke-InstallCopyAndBuild
-#         Steps bare, exactly as before this feature - a throw there
-#         still propagates straight out, unchanged error behavior.
+#         wraps that same copy in backup/health-check/rollback/relaunch/
+#         cleanup. A plain install/repair (no -Upgrade) runs Invoke-
+#         InstallCopyAndBuildSteps bare, exactly as before this feature -
+#         a throw there still propagates straight out, unchanged error
+#         behavior.
+#         This round: the health check (Invoke-InstallVerifyNewFiles) now
+#         runs BEFORE Invoke-InstallRelaunch, using its own short-lived
+#         verification server rather than whatever Invoke-InstallRelaunch
+#         just started - it no longer depends on who relaunches or how
+#         soon they start a server of their own (see that function's own
+#         doc comment), and it now runs for -Relaunch none too, not only
+#         window/tray.
 # =====================================================================
 
 if ($Upgrade) {
@@ -2299,24 +2518,21 @@ if ($Upgrade) {
             }
         } catch { }
 
+        Write-Step 'Verifying the new version before relaunching'
+        $verifyResult = Invoke-InstallVerifyNewFiles -AppDest $appDest -ExpectedVersion $newVersionRaw -WowRoot $wowRoot
+        if (-not $verifyResult.Healthy) {
+            Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -Reason 'post-install health check failed' -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently -StagedRoot $SourceRoot
+            return
+        }
+        Write-Info 'Health check passed.'
+
         Write-Step 'Relaunching Furphy'
         Invoke-InstallRelaunch -AppDest $appDest -Relaunch $upgradeRelaunch -TrayWasRunningIndependently $trayWasRunningIndependently
-
-        if ($upgradeRelaunch -ne 'none') {
-            Write-Step 'Waiting for the upgraded app to answer a health check'
-            $installPort = Get-InstallPort -AppDest $appDest
-            $healthOk = Test-InstallHealthCheck -Port $installPort -ExpectedVersion $newVersionRaw
-            if (-not $healthOk) {
-                Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -LastErrorMessage "post-install health check failed - rolled back to $oldVersionRaw" -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently
-                return
-            }
-            Write-Info 'Health check passed.'
-        }
 
         Invoke-InstallAppUpdateCleanup -AppDest $appDest -StagedRoot $SourceRoot
         Write-Info "Upgrade to $newVersionRaw complete."
     } catch {
-        Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -LastErrorMessage "install failed while copying files - rolled back to $oldVersionRaw" -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently
+        Invoke-InstallRollbackAndRelaunchOld -AppDest $appDest -BackupPath $backupPath -Relaunch $upgradeRelaunch -Reason 'install failed while copying files' -OldVersion $oldVersionRaw -TrayWasRunningIndependently $trayWasRunningIndependently -StagedRoot $SourceRoot
         return
     }
 } else {

@@ -29,14 +29,27 @@
  TEST-ONLY value this file expects Package B to add to install.ps1's own
  -Relaunch parameter (never reachable through the HTTP route at all,
  since Handle-AppUpdateInstall's request-body validation never lets
- anything but "window"/"tray" through) meaning "skip any process
- relaunch, and therefore skip the health-check/rollback-on-health-check-
- failure step that only makes sense once something has actually been
- relaunched" - while STILL performing the backup, copy, parse-check, and
+ anything but "window"/"tray" through) meaning "skip any REAL process
+ relaunch" - while STILL performing the backup, copy, parse-check, and
  the try/catch-driven rollback-on-COPY-EXCEPTION path (section 8.6's
  OTHER, independent failure mode) exactly as normal. This is a
  coordination note for whoever implements Package B, not a
  renegotiation of anything in sections 4/5/6/8.5's own fixed shapes.
+
+ UPDATED THIS ROUND (the tray-relaunch-race fix, APPUPD-B5/B6 below):
+ -Relaunch none no longer ALSO skips the health-check/rollback-on-
+ health-check-failure step the way the paragraph above originally read -
+ this build's own root-caused incident (a `-Relaunch tray` relaunch not
+ starting addon-server.ps1 for up to ~90s, so the OLD health check, which
+ only ever polled the RELAUNCHED process itself, always lost that race
+ and rolled back every silent background self-update on its own success)
+ is fixed by running the health check against a real, short-lived
+ VERIFICATION instance of the newly staged code BEFORE any real relaunch
+ happens at all, regardless of -Relaunch's own value - so -Relaunch none
+ now exercises that same verification/health-check MECHANISM too, still
+ without ever starting a real tray/window. Only a REAL tray/window
+ relaunch's OWN /api/ping poll remains out of this file's reach (see the
+ narrower KNOWN, DELIBERATE GAP below).
 
  This file therefore invokes install.ps1 -Upgrade DIRECTLY as its own
  child process (mirroring tests\integration\Install.Downgrade.Tests.ps1's
@@ -47,25 +60,38 @@
  SUCCESS-path fields (state="installed" etc.) - those are written by the
  SERVER (Package A) after a successful child exits, which has no part in
  this file's scope. install.ps1 DOES write app-update.json directly on
- its own FAILURE path (section 8.6) - this file's rollback Describe
- asserts exactly that.
+ its own FAILURE path (section 8.6) - this file's rollback Describes
+ assert exactly that.
 
- KNOWN, DELIBERATE GAP: section 12 also asks for a forced
- health-check-FAILURE case (as distinct from the copy-failure case this
- file DOES cover) - by construction, that scenario requires a real
- relaunch + a real /api/ping poll cycle, which this file will never
- exercise on this shared desktop for the same live-safety reason -Relaunch
- none exists at all. See the dedicated Describe below (still present,
- still capability-gated) for exactly this reasoning stated as its own
- permanent PENDING skip - not silently dropped, not conflated with "package
- not landed yet". A future isolated/CI-only environment (never this
- session's own desktop) is the right place to add real coverage for it.
+ KNOWN, DELIBERATE GAP (narrowed this round): section 12 also asks for a
+ forced health-check-FAILURE case (as distinct from the copy-failure case
+ this file already covered, and the health-check-failure case it now ALSO
+ covers via -Relaunch none's own verification instance - see Describes 3/4
+ below) - what remains permanently out of THIS file's reach is only a
+ REAL tray/window relaunch's OWN /api/ping poll specifically, which by
+ construction needs an actual relaunched process on this shared desktop.
+ See the dedicated Describe below (still present, still capability-gated)
+ for exactly this narrower reasoning stated as its own permanent PENDING
+ skip - not silently dropped, not conflated with "package not landed
+ yet". A future isolated/CI-only environment (never this session's own
+ desktop) is the right place to add real coverage for it.
 
  Windows PowerShell 5.1, Pester 3 syntax, ASCII only.
 =====================================================================
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
+
+# Litter-cleanup cutoff (this round's fixer task) - captured as the very
+# first thing this file does, before any Describe below can possibly run
+# install.ps1 -Upgrade and create a real %TEMP%\FurphyRollback-<hash>
+# backup (section 8.6) or, once APPUPD-B5 lands, a real verification-
+# related temp folder of its own. See tests\lib\common.ps1's own
+# Remove-AppUpdateTempLitter doc comment for why this cutoff (never a
+# blind sweep) is what makes it safe to run this file alongside another
+# fixer's own concurrently-running test session on this same shared
+# machine.
+$Script:LitterCutoffUtc = (Get-Date).ToUniversalTime()
 
 $Script:InstallScript = Join-Path $Script:FurphyBuildRoot 'install.ps1'
 $Script:InstallSourceText = Get-Content -LiteralPath $Script:InstallScript -Raw
@@ -90,6 +116,30 @@ $Script:CapRollback = [bool](
 # exception logic still runs exactly as normal.
 $Script:CapRelaunchNone = [bool]($Script:InstallSourceText -match "(?i)'none'")
 
+# APPUPD-B5 (this round's fixer task, the health-check-verify fix): the
+# tray-relaunch race this build's own root-caused incident report
+# describes - Invoke-InstallRelaunch running BEFORE
+# Test-InstallHealthCheck, so a `-Relaunch tray` relaunch that has not
+# started addon-server.ps1 yet (up to ~90s later) always loses the race
+# against a 20s health-check poll and rolls itself back - is fixed by
+# running the health check against a real, short-lived VERIFICATION
+# instance of the newly staged code BEFORE any real relaunch happens at
+# all, regardless of -Relaunch's own value. Grepped as the literal
+# 'Health check passed.' console/log line this file's own coordination
+# contract (see header note) has the installer fixer commit to emitting
+# on a passing check - never a function/variable name, since none was
+# ever agreed between these two files.
+$Script:CapHealthCheckVerify = [bool]($Script:InstallSourceText -match [regex]::Escape('Health check passed.'))
+
+# APPUPD-B6: the matching FAILED-health-check rollback wording fix -
+# 'rolled back to <old> after post-install health check failed',
+# replacing the old self-contradictory "rollback FAILED ... rolled back
+# to ..." wording this incident's own root-cause report quoted verbatim
+# (app-update.json's lastError claiming the rollback both failed AND
+# succeeded in the same sentence, even though the restore had in fact
+# worked).
+$Script:CapHealthCheckRollbackWording = [bool]($Script:InstallSourceText -match [regex]::Escape('rolled back to'))
+
 $Script:CapCore = $Script:CapUpgradeSwitch -and $Script:CapStopRunningApp -and $Script:CapRollback
 
 Write-Host ''
@@ -98,6 +148,8 @@ Write-Host "  APPUPD-B1 -Upgrade/-Relaunch param block .. $Script:CapUpgradeSwit
 Write-Host "  APPUPD-B2 Invoke-InstallStopRunningApp ..... $Script:CapStopRunningApp"
 Write-Host "  APPUPD-B3 backup/rollback functions ........ $Script:CapRollback"
 Write-Host "  APPUPD-B4 -Relaunch 'none' literal found .... $Script:CapRelaunchNone (best-effort grep only - see note below)"
+Write-Host "  APPUPD-B5 'Health check passed.' literal .... $Script:CapHealthCheckVerify (coordination log line - see note below)"
+Write-Host "  APPUPD-B6 'rolled back to' literal ........... $Script:CapHealthCheckRollbackWording (coordination log line - see note below)"
 Write-Host ''
 
 function Write-PendingSkip {
@@ -177,6 +229,62 @@ function Get-ProductionSnapshot {
         Uninstall = (Get-ProductionInstalledAppsSnapshot)
         TrayPids  = (Get-LiveFurphyTrayPids)
     }
+}
+
+function Get-ProcessesReferencingPath {
+    <#
+      Live Win32_Process rows whose own CommandLine contains -PathNeedle
+      (case-insensitive substring match) - used by the health-check-verify
+      Describes below to prove a short-lived verification instance
+      install.ps1's own -Upgrade path may spawn against the newly staged
+      code (APPUPD-B5) is genuinely gone again once install.ps1 itself has
+      exited, without this file needing to know that instance's own
+      process name or port (Package B's own implementation detail, never
+      coordinated with this file beyond the three log lines named in this
+      file's own header). -PathNeedle is always one of THIS TEST's own
+      freshly-generated scratch paths (New-TempRoot's timestamp+random
+      suffix makes every call unique), so this can never mistake some
+      OTHER, unrelated process (a real production tray, another fixer's
+      own concurrently-running scratch install) for one of ours.
+      Best-effort: an inaccessible/already-gone process row is simply not
+      counted, never a reason to throw.
+    #>
+    param([Parameter(Mandatory = $true)][string]$PathNeedle)
+    try {
+        $procs = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue
+    } catch {
+        return @()
+    }
+    $found = New-Object 'System.Collections.Generic.List[int]'
+    foreach ($p in @($procs)) {
+        $cl = [string]$p.CommandLine
+        if ($cl -and $cl.ToLowerInvariant().Contains($PathNeedle.ToLowerInvariant())) {
+            $found.Add([int]$p.ProcessId)
+        }
+    }
+    return @($found.ToArray())
+}
+
+function Wait-PathGone {
+    <#
+      Polls until -Path no longer exists, or -TimeoutSec elapses. Used by
+      the health-check Describes below: install.ps1's own
+      Remove-InstallStagedUpdateFolder (found live while reading its
+      source for this task) deletes -SourceDir (this file's own $newerSrc
+      - the folder install.ps1 itself is RUNNING FROM under -Upgrade) via
+      a DETACHED, DELAYED self-delete (`ping -n 3 ... & rd /s /q`, since a
+      running script cannot synchronously delete its own containing
+      folder) on every -Upgrade outcome (success AND rollback alike) - so
+      "the staged folder is gone" is only ever true a couple of seconds
+      AFTER Invoke-CliProcess has already returned, never immediately.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [int]$TimeoutSec = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-Path -LiteralPath $Path)) { return $true }
+        Start-Sleep -Milliseconds 300
+    }
+    return -not (Test-Path -LiteralPath $Path)
 }
 
 # ---------------------------------------------------------------------
@@ -290,6 +398,35 @@ function Invoke-AppUpdateUpgrade {
       addon-server.ps1/install.ps1 to change it) - this test file must
       still pass them regardless, since ITS OWN paths are exactly the
       scratch case that guard does not fully cover.
+
+      SECOND LIVE-SAFETY FINDING, load-bearing, found live while
+      verifying THIS ROUND's own APPUPD-B5 fix: Invoke-InstallVerifyNewFiles
+      (install.ps1) starts its own short-lived verification addon-server.ps1
+      via a bare Start-Process, with NONE of tests\lib\common.ps1's own
+      Start-TestServer safety net (FURPHY_TEST_GITHUB_BASEURL/
+      FURPHY_TEST_SKIP_WAGO_GROWTH/FURPHY_TEST_SKIP_CF_CATALOGUE) - and that
+      verification instance's own NORMAL startup self-spawns a
+      "-MaintenanceOnly" child exactly like a real production server does
+      (confirmed live: its own server.log showed a REAL CurseForge catalogue
+      fetch, a REAL Wago growth crawl, AND a REAL api.github.com app-update
+      check, all fired from what this file believed was a fully offline
+      -Relaunch none run). -Relaunch none newly reaching this verification
+      step at all (APPUPD-B5, this round) means every EXISTING Describe in
+      this file that calls -Upgrade - not only the two new health-check
+      Describes below - started making these same real calls the moment
+      that fix landed, a direct violation of this session's own "never
+      touch real GitHub" rule this file's own header names explicitly.
+      Fixed here, the same way Start-TestServer fixes it for its own child:
+      -EnvironmentOverrides sets the identical three vars on install.ps1's
+      OWN process, which Start-Process (both install.ps1's call to spawn
+      its verification server, and that server's own further self-spawn)
+      inherits by default - closing this off for every caller of this
+      function, not just the two Describes that exposed it. A separate,
+      out-of-scope observation for whoever reviews Package B: production
+      use of a real -Upgrade has no reason to skip this same real work
+      (a live user's machine has real internet, and it may be the point),
+      so this fix belongs here, in the test-only caller, never in
+      install.ps1 itself.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SourceDir,
@@ -297,7 +434,12 @@ function Invoke-AppUpdateUpgrade {
         [int]$TimeoutSec = 180
     )
     $upgradeScript = Join-Path -Path $SourceDir -ChildPath 'install.ps1'
-    return Invoke-CliProcess -ScriptPath $upgradeScript -ArgumentList @('-WowPath', $WowRoot, '-Upgrade', '-Relaunch', 'none', '-Console', '-Quiet', '-NoShortcuts', '-NoProtocol', '-SkipAdopt') -TimeoutSec $TimeoutSec
+    $envOverrides = @{
+        FURPHY_TEST_GITHUB_BASEURL     = 'http://127.0.0.1:1'
+        FURPHY_TEST_SKIP_WAGO_GROWTH   = '1'
+        FURPHY_TEST_SKIP_CF_CATALOGUE  = '1'
+    }
+    return Invoke-CliProcess -ScriptPath $upgradeScript -ArgumentList @('-WowPath', $WowRoot, '-Upgrade', '-Relaunch', 'none', '-Console', '-Quiet', '-NoShortcuts', '-NoProtocol', '-SkipAdopt') -TimeoutSec $TimeoutSec -EnvironmentOverrides $envOverrides
 }
 
 # =====================================================================
@@ -465,24 +607,208 @@ Describe 'install.ps1 -Upgrade (silent, -Relaunch none): a locked destination fi
 }
 
 # =====================================================================
-# 3) Forced HEALTH-CHECK-failure rollback - PERMANENTLY, DELIBERATELY
-#    not exercised in this file. See the header comment's "KNOWN,
-#    DELIBERATE GAP" for why: this scenario, by construction, needs a
-#    real relaunch + a real /api/ping poll cycle (a real window or tray
-#    process actually starting), which this build's own hard live-safety
-#    rules forbid on this shared, interactive desktop for THIS session -
-#    -Relaunch none exists specifically so every OTHER Describe in this
-#    file never needs one. This is not a capability gate (it stays
-#    pending even once install.ps1 fully supports -Upgrade) - it is a
-#    standing, environment-scoped skip, same shape as this suite's own
+# 3) Health-check PASS (this round's fixer task, item 2): the
+#    tray-relaunch-race fix (APPUPD-B5) - a real, short-lived
+#    VERIFICATION instance of the newly staged code answers /api/ping
+#    with the NEW version, and is shut down again, BEFORE install.ps1
+#    ever relaunches anything real - now runs even under -Relaunch none,
+#    since the verification step no longer depends on a real tray/window
+#    relaunch actually happening (that is what root-caused this build's
+#    own incident: -Relaunch tray's own real relaunch does not start
+#    addon-server.ps1 for up to ~90s, so the OLD health check, which
+#    only ever polled the RELAUNCHED process, always lost that race).
+#    This Describe therefore covers the health-check MECHANISM itself
+#    without ever opening a real tray/window on this shared desktop -
+#    the still-permanent, still out-of-scope gap that remains is a real
+#    tray/window relaunch's OWN /api/ping poll specifically, covered by
+#    Describe 5 below, unchanged from before this round.
+# =====================================================================
+
+Describe 'install.ps1 -Upgrade (silent, -Relaunch none): the post-copy health check passes against the newly staged code' {
+    if (-not ($Script:CapCore -and $Script:CapRelaunchNone -and $Script:CapHealthCheckVerify)) {
+        It 'stdout logs a passing health check, VERSION stays at the NEW version (no rollback), and no verification process is left running' {
+            Write-PendingSkip 'needs APPUPD-B5 (the "Health check passed." health-check-verify fix landing in install.ps1''s -Upgrade path) - not landed yet, or this file''s own grep marker text does not match'
+        }
+        return
+    }
+
+    $before = Get-ProductionSnapshot
+    $installed = $null
+    $newerSrc = $null
+    try {
+        $installed = New-AppUpdateScratchInstall
+        $installed.ExitCode | Should Be 0
+        $currentVersion = (Get-Content -LiteralPath (Join-Path $installed.AppDest 'VERSION')).Trim()
+        $newVersion = Get-BumpedVersion -Current $currentVersion
+        $newerSrc = New-AppUpdateNewerFixtureSource -NewVersion $newVersion
+
+        It 'VERSION bumps to the new version and stdout shows the health check passing' {
+            $upgrade = Invoke-AppUpdateUpgrade -SourceDir $newerSrc -WowRoot $installed.WowRoot
+            $upgrade.ExitCode | Should Be 0
+            (Get-Content -LiteralPath (Join-Path $installed.AppDest 'VERSION')).Trim() | Should Be $newVersion
+            $upgrade.StdOut | Should Match ([regex]::Escape('Health check passed.'))
+        }
+
+        It 'no process referencing this scratch install''s own AppDest path is left running once install.ps1 has exited' {
+            # A real verification instance, if install.ps1's own -Upgrade
+            # path started one against $installed.AppDest to run this
+            # check, must be shut down again before install.ps1 itself
+            # exits (Invoke-CliProcess above already waited for that exit)
+            # - a lingering match here means something was left running.
+            # Polled, not a single instantaneous read: found live while
+            # verifying this file - Stop-Process -Force (TerminateProcess)
+            # is not synchronous (same real quirk tests\lib\common.ps1's
+            # own Wait-ProcessReallyGone doc comment already documents), so
+            # a check made immediately after install.ps1's own process has
+            # exited can still observe its OWN verification child for a
+            # short window even though nothing is actually stuck.
+            $deadline = (Get-Date).AddSeconds(5)
+            $leftover = @(Get-ProcessesReferencingPath -PathNeedle $installed.AppDest)
+            while (($leftover.Count -gt 0) -and ((Get-Date) -lt $deadline)) {
+                Start-Sleep -Milliseconds 250
+                $leftover = @(Get-ProcessesReferencingPath -PathNeedle $installed.AppDest)
+            }
+            (@($leftover).Count) | Should Be 0
+        }
+
+        It 'the staged source folder ($newerSrc) is gone - a successful upgrade cleans up after itself, never leaving it behind' {
+            (Wait-PathGone -Path $newerSrc -TimeoutSec 15) | Should Be $true
+        }
+
+        It 'production Run value, Uninstall DisplayVersion and live tray pids are byte-identical before/after' {
+            $after = Get-ProductionSnapshot
+            Assert-ProductionUnchanged -Before $before -After $after
+        }
+    } finally {
+        # This Describe never breaks the copy, so no rollback backup
+        # should exist at all - best-effort cleanup only, matching the
+        # same targeted (never blind-swept), single-deterministic-path
+        # convention as the two Describes above, in case a bug DOES
+        # create one.
+        if ($installed) {
+            $backupPath = Get-AppUpdateRollbackBackupPath -AppDest $installed.AppDest
+            if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if ($installed -and (Test-Path -LiteralPath $installed.WowRoot)) { Remove-Item -LiteralPath $installed.WowRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($newerSrc -and (Test-Path -LiteralPath $newerSrc)) { Remove-Item -LiteralPath $newerSrc -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# =====================================================================
+# 4) Health-check FAIL -> rollback (this round's fixer task, item 2): a
+#    deliberately BROKEN staged addon-server.ps1 (the newly staged code
+#    fails to answer /api/ping at all) must fail APPUPD-B5's own
+#    verification step and trigger the SAME rollback machinery Describe 2
+#    above already covers for a copy-phase exception - restated here for
+#    a health-check-phase failure specifically, with the NON-
+#    contradictory lastError wording (APPUPD-B6) this incident's own
+#    root-cause report called out by name: the OLD wording claimed
+#    "rollback FAILED ... rolled back to <old>" in the same sentence even
+#    though the restore had in fact succeeded; the fix commits to
+#    'rolled back to <old> after post-install health check failed' for
+#    exactly this (successful-rollback) outcome, reserving "rollback
+#    FAILED" for a genuinely failed restore (a different, not-covered-
+#    here scenario) - never both in one message again.
+# =====================================================================
+
+Describe 'install.ps1 -Upgrade (silent, -Relaunch none): a broken staged addon-server.ps1 fails the health check and rolls back' {
+    if (-not ($Script:CapCore -and $Script:CapRelaunchNone -and $Script:CapHealthCheckVerify -and $Script:CapHealthCheckRollbackWording)) {
+        It 'the health check fails, code is rolled back, VERSION stays at the OLD version, lastError is the non-contradictory wording, and no more than one rollback backup exists for this dest' {
+            Write-PendingSkip 'needs APPUPD-B5 (health-check-verify) AND APPUPD-B6 (non-contradictory rollback wording) landing in install.ps1''s -Upgrade path - not landed yet, or this file''s own grep marker text does not match'
+        }
+        return
+    }
+
+    $before = Get-ProductionSnapshot
+    $installed = $null
+    $newerSrc = $null
+    try {
+        $installed = New-AppUpdateScratchInstall
+        $installed.ExitCode | Should Be 0
+        $currentVersion = (Get-Content -LiteralPath (Join-Path $installed.AppDest 'VERSION')).Trim()
+        $newVersion = Get-BumpedVersion -Current $currentVersion
+        $newerSrc = New-AppUpdateNewerFixtureSource -NewVersion $newVersion
+        $beforeServerHash = (Get-FileHash -LiteralPath (Join-Path $installed.AppDest 'addon-server.ps1') -Algorithm SHA256).Hash
+
+        # Deliberately break the STAGED (newer-fixture) copy of
+        # addon-server.ps1 so that whatever install.ps1 starts to answer
+        # its own verification /api/ping poll fails outright rather than
+        # ever binding a listener - a fast, deterministic health-check
+        # failure, never a slow hang.
+        $brokenServerPath = Join-Path $newerSrc 'addon-server.ps1'
+        "throw 'FURPHY-TEST: deliberately broken addon-server.ps1 (health-check-failure fixture, AppUpdate.SilentUpgrade.Tests.ps1)'" |
+            Set-Content -LiteralPath $brokenServerPath -Encoding Ascii
+
+        It 'the health check fails; the OLD code is restored; VERSION stays at the OLD version; app-update.json carries the non-contradictory rollback wording, never "rollback FAILED"' {
+            $upgrade = Invoke-AppUpdateUpgrade -SourceDir $newerSrc -WowRoot $installed.WowRoot
+
+            (Get-Content -LiteralPath (Join-Path $installed.AppDest 'VERSION')).Trim() | Should Be $currentVersion
+            (Get-FileHash -LiteralPath (Join-Path $installed.AppDest 'addon-server.ps1') -Algorithm SHA256).Hash | Should Be $beforeServerHash
+
+            $appUpdateJsonPath = Join-Path $installed.AppDest 'app-update.json'
+            (Test-Path -LiteralPath $appUpdateJsonPath) | Should Be $true
+            $appUpdateJson = Get-Content -Raw -LiteralPath $appUpdateJsonPath | ConvertFrom-Json
+            $appUpdateJson.state | Should Be 'error'
+            $appUpdateJson.lastError | Should Match ('rolled back to.*' + [regex]::Escape($currentVersion) + '.*after post-install health check failed')
+            $appUpdateJson.lastError | Should Not Match ([regex]::Escape('rollback FAILED'))
+        }
+
+        It 'at most one FurphyRollback backup folder exists for this dest, and it is the exact deterministic one' {
+            $backupPath = Get-AppUpdateRollbackBackupPath -AppDest $installed.AppDest
+            $tempPath = [System.IO.Path]::GetTempPath()
+            $hashPrefix = (Split-Path -Path $backupPath -Leaf)
+            $matches = @(Get-ChildItem -LiteralPath $tempPath -Directory -Filter ($hashPrefix + '*') -Force -ErrorAction SilentlyContinue)
+            (@($matches).Count) | Should Be 1
+            $matches[0].FullName | Should Be $backupPath
+        }
+
+        It 'the staged source folder ($newerSrc) is gone - a rollback cleans up after itself too, never leaving it behind' {
+            (Wait-PathGone -Path $newerSrc -TimeoutSec 15) | Should Be $true
+        }
+
+        It 'production Run value, Uninstall DisplayVersion and live tray pids are byte-identical before/after' {
+            $after = Get-ProductionSnapshot
+            Assert-ProductionUnchanged -Before $before -After $after
+        }
+    } finally {
+        # Targeted cleanup ONLY - see Describe 2's own finally block above
+        # for the full "never a blind FurphyRollback-* sweep" reasoning;
+        # identical here.
+        if ($installed) {
+            $backupPath = Get-AppUpdateRollbackBackupPath -AppDest $installed.AppDest
+            if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if ($installed -and (Test-Path -LiteralPath $installed.WowRoot)) { Remove-Item -LiteralPath $installed.WowRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($newerSrc -and (Test-Path -LiteralPath $newerSrc)) { Remove-Item -LiteralPath $newerSrc -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# =====================================================================
+# 5) Forced HEALTH-CHECK-failure rollback via a REAL tray/window relaunch
+#    - PERMANENTLY, DELIBERATELY not exercised in this file. See the
+#    header comment's "KNOWN, DELIBERATE GAP" for why: this scenario, by
+#    construction, needs a real relaunch + a real /api/ping poll cycle
+#    against the RELAUNCHED process itself (a real window or tray process
+#    actually starting), which this build's own hard live-safety rules
+#    forbid on this shared, interactive desktop for THIS session. This is
+#    now narrower than it used to be: Describes 3/4 above already cover
+#    the health-check MECHANISM itself (APPUPD-B5/B6) via -Relaunch none's
+#    own verification instance, added this round specifically so every
+#    OTHER Describe in this file never needs a real relaunch - what
+#    remains permanently out of scope here is only the REAL tray/window
+#    relaunch's own /api/ping poll. This is not a capability gate (it
+#    stays pending even once install.ps1 fully supports -Upgrade) - it is
+#    a standing, environment-scoped skip, same shape as this suite's own
 #    host/perf layers being excluded from a normal run for an analogous
 #    "would touch the real desktop" reason (see TESTING.md).
 # =====================================================================
 
-Describe 'install.ps1 -Upgrade: forced health-check-failure rollback (section 8.6/12)' {
+Describe 'install.ps1 -Upgrade: forced health-check-failure rollback via a REAL tray/window relaunch (section 8.6/12)' {
     It 'a real relaunch answers /api/ping with the WRONG version -> rollback restores the old version and it answers /api/ping again' {
-        Write-PendingSkip 'PERMANENT, environment-scoped skip (not "package not landed") - this scenario needs a real window/tray relaunch + /api/ping poll cycle, which this session''s hard live-safety rules forbid starting on this shared desktop. Add real coverage only in an isolated/CI-only environment that is never this interactive desktop; see this file''s own header comment for the full reasoning.'
+        Write-PendingSkip 'PERMANENT, environment-scoped skip (not "package not landed") - this scenario needs a real window/tray relaunch + /api/ping poll cycle against the RELAUNCHED process itself, which this session''s hard live-safety rules forbid starting on this shared desktop. Add real coverage only in an isolated/CI-only environment that is never this interactive desktop; see this file''s own header comment for the full reasoning. (The health-check MECHANISM itself is covered without a real relaunch by Describes 3/4 above.)'
     }
 }
 
+Remove-AppUpdateTempLitter -Prefix 'FurphyRollback-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
 Remove-TempRoots
