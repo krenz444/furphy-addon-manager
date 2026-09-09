@@ -919,4 +919,4 @@ files get deleted by hand. URGENT: DISTRIBUTION-SPEC.md's in-progress
 installer-wizard success screen currently specs a brand-new "Launch WoW"
 button - flag this to the concurrent lifecycle-build workflow now.
 
-File: C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\specs\REMOVAL-SPEC.md
+File: REMOVAL-SPEC.md

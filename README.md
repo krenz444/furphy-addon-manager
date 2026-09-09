@@ -85,7 +85,6 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 | `Addon Manager.vbs` | Starts the server hidden if it is not running and opens the UI as an Edge `--app` window. |
 | `curseforge-handler.vbs` / `register-protocol.ps1` | The `curseforge://` install-link handler and its (per-user, reversible) registration. |
 | `deploy.ps1` | Dev tool: copies a build into a live `_retail_\AddonSync` folder with a backup and end-to-end verification; never overwrites state files. Not needed for a normal install - use `install.ps1`. |
-| `iterate.workflow.js` | The Claude Code workflow used to develop this: audit -> fix -> implement roadmap items -> review -> test (CLI, server API, browser-driven UI). |
 | `SPEC.md` / `ROADMAP.md` / `OVERNIGHT-REPORT.md` | Authoritative spec and API contract, backlog, and build log - developer-facing, not needed to use the app. |
 
 ## CLI

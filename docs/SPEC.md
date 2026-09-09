@@ -1,6 +1,6 @@
 # Furphy Addon Manager - specification (authoritative)
 
-Working directory for this build: `C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\AddonSync2\`
+Working directory for this build: the build root (a scratch copy of the app kept outside the live install; the live install is `_retail_\AddonSync` inside the WoW folder).
 (called ROOT below). Production deployment target (do NOT touch during the build): `C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync\`.
 
 Components:
@@ -230,7 +230,7 @@ UI (`ui\index.html`, `ui\style.css`, `ui\app.js`) only - no CLI or server change
 ACCEPTANCE (see ROADMAP.md E5 for the authoritative test): verified with the real UI against the dev-only `?mock=1` backend (offline, no CurseForge access) - running "Update all" (a sync job) surfaces an Updated row with a "What changed" `.link-btn` next to it in the job results panel; clicking it without an API key configured opens the detail drawer on the Versions tab; after saving an API key in Settings, installing a new addon (an add job, status `Installed`) and clicking its "What changed" control opens the drawer on the Changelog tab and loads that specific file's changelog text. The My Addons header's "Last run: ... &middot; Details" line is present immediately on a fresh page load (`?mock=1`'s static initial `lastRun`) and again after every job completes with an updated summary; its Details link reopens the job progress panel showing the last known results.
 
 ## Test facts
-Scratch AddOns dir for tests: `C:\Users\drops\AppData\Local\Temp\claude\C--Users-drops-Documents-3d\e63e63f2-6f4b-4497-8d16-50029ad3f751\scratchpad\test-addons` (create fresh). Small real projects for network tests: 1521253 (BonusRollConfirm, 6 KB, single file id 8720783 newest), 911525 (Max Camera Distance, small). Keep CurseForge requests <= 25 per tester. Never touch `C:\Program Files (x86)\World of Warcraft`. Test server port 47899. No CurseForge API key is available during the build - key-gated features must be tested for their no-key behaviour (409 no-key, UI no-key panels) and their request construction only.
+Scratch AddOns dir for tests: a fresh folder under the build root's `tests\.tmp\` (never the real AddOns folder). Small real projects for network tests: 1521253 (BonusRollConfirm, 6 KB, single file id 8720783 newest), 911525 (Max Camera Distance, small). Keep CurseForge requests <= 25 per tester. Never touch `C:\Program Files (x86)\World of Warcraft`. Test server port 47899. No CurseForge API key is available during the build - key-gated features must be tested for their no-key behaviour (409 no-key, UI no-key panels) and their request construction only.
 
 ## Expansion E4
 
