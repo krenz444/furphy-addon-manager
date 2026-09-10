@@ -215,6 +215,19 @@ $script:WagoBaseUrl = 'https://addons.wago.io'
 if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_WAGO_BASEURL)) {
     $script:WagoBaseUrl = $env:FURPHY_TEST_WAGO_BASEURL.TrimEnd('/')
 }
+# Round 47 (GITHUB-SOURCE-SPEC.md 3.4): GitHub as a third addon source.
+# FURPHY_TEST_GITHUB_BASEURL is the SAME env var addon-server.ps1 already
+# reads (for its own self-update GitHub lookup) - one seam configures both
+# processes in a test. Spelled $script:GitHubBaseUrl (capital Hub) to match
+# addon-server.ps1's own $Script:GitHubBaseUrl casing exactly (the two
+# variables live in separate script-scoped processes, so there is no
+# functional collision either way - this is purely for anyone grepping
+# both files together).
+$script:GithubUserAgent = 'FurphyAddonManager-AddonSync'
+$script:GitHubBaseUrl = 'https://api.github.com'
+if (-not [string]::IsNullOrWhiteSpace($env:FURPHY_TEST_GITHUB_BASEURL)) {
+    $script:GitHubBaseUrl = $env:FURPHY_TEST_GITHUB_BASEURL.TrimEnd('/')
+}
 
 # =====================================================================
 # Flavours (FLAVORS-SPEC.md S2.1) - static tables, defined once at script
@@ -282,6 +295,39 @@ function Invoke-LogRotationIfNeeded {
     }
 }
 
+function Get-RedactedLogText {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 4.4/6.2): defense-in-depth scrub
+      applied at this file's own log choke point (Write-Log below) so an
+      accidental future interpolation of a raw githubToken value into any
+      message string - not something this design intentionally does
+      anywhere (every GitHub-related log line in this file references only
+      $Record.repo/$displayLabel/fixed text, never $GithubToken or
+      $settings.githubToken) - still never reaches sync.log. Matches both
+      real GitHub PAT formats (github_pat_... fine-grained, ghp_... classic)
+      plus their close variants (gho_, ghu_, ghs_, ghr_ - GitHub's other
+      OAuth/app token prefixes, redacted the same way even though this app
+      never issues or stores those shapes, since a player could in
+      principle paste one into the same field). Duplicated verbatim in
+      addon-server.ps1 (Write-ServerLog's own choke point) since the two
+      scripts share no dependency by design.
+
+      The {8,} floor (not a rounder {20,}) is deliberate: this build's own
+      hard rule mandates every test/fixture token look like
+      "github_pat_TESTONLY_0000" - a 13-character suffix a {20,} floor would
+      NOT catch, even though a real fine-grained PAT's suffix (82+ chars) or
+      a classic ghp_ token's (36 chars) clears either floor easily. Lowering
+      it to {8,} costs nothing against a real leaked token while letting
+      Server.GithubTokenRedaction.Tests.ps1 prove this regex against the
+      project's own canonical fixture literal.
+    #>
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Text }
+    $Text = $Text -replace '\bgithub_pat_[A-Za-z0-9_]{8,}', 'github_pat_***REDACTED***'
+    $Text = $Text -replace '\bgh[pousr]_[A-Za-z0-9]{8,}', 'gh?_***REDACTED***'
+    return $Text
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level,
@@ -295,7 +341,7 @@ function Write-Log {
     # which runs before flavour resolution - so this is never undefined).
     $flavourPrefix = ''
     if ($script:LogFlavourPrefix) { $flavourPrefix = $script:LogFlavourPrefix }
-    $line = "$timestamp [$Level] $flavourPrefix$Message"
+    $line = Get-RedactedLogText ("$timestamp [$Level] $flavourPrefix$Message")
     try {
         Invoke-LogRotationIfNeeded -Path $script:LogPath
         Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
@@ -964,6 +1010,140 @@ function Invoke-WagoRequest {
         throw $lastError
     }
     return $result
+}
+
+function Invoke-GithubRequest {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.4): performs one GitHub HTTP request
+      (JSON GET, or a file download when -OutFile is supplied). Mirrors
+      Invoke-CfRequest above almost exactly - same 300ms pace, same
+      retry-once-after-a-wait shape - but retries on 403 OR 429 (GitHub's two
+      "back off" codes, matching addon-server.ps1's own
+      Invoke-AppUpdateMaintenanceCore precedent) and honors a Retry-After
+      header when present, capped at 10 seconds (this runs synchronously
+      inside a user-facing sync job covering possibly many addons - unlike
+      the App-Update maintenance path's own hours-long persisted backoff,
+      a per-addon check inside a live sync must never block the whole run
+      for anywhere near that long; 10s is a firm, generous-enough single
+      retry window, floored at 5s when the header is absent or unparsable,
+      matching Invoke-CfRequest's own fixed 5s wait). A 404 is never
+      retried here - see Sync-SingleGithubAddon's own release-lookup catch
+      block for why (it means "no access right now", not "transient").
+
+      -GithubToken, when non-empty, is sent as "Authorization: Bearer
+      <token>" - never on the command line, never logged (the caller reads
+      it from settings.json only, GITHUB-SOURCE-SPEC.md 3.9).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [string]$Accept = 'application/vnd.github+json',
+        [string]$GithubToken = $null,
+        [string]$OutFile,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        $ProgressAddon = $null
+    )
+
+    $headers = @{ 'Accept' = $Accept }
+    if (-not [string]::IsNullOrWhiteSpace($GithubToken)) {
+        $headers['Authorization'] = 'Bearer ' + $GithubToken
+    }
+
+    $maxAttempts = 2
+    $attempt = 0
+    $lastError = $null
+    $result = $null
+
+    while ($attempt -lt $maxAttempts) {
+        $attempt++
+        $shouldRetry = $false
+        $lastError = $null
+        $waitSeconds = 5
+        try {
+            if ($OutFile) {
+                Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:GithubUserAgent -OutFile $OutFile -TimeoutSec 60 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
+                $result = $null
+            } else {
+                $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:GithubUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            }
+        } catch {
+            $lastError = $_
+            $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
+            if ($statusCode -eq 404) {
+                # 404 is never retried - it means "no access right now" (no
+                # token, an expired/rotated token, or a genuinely
+                # nonexistent repo), not "transient". Falls through to the
+                # unconditional Start-Sleep/throw below like any other
+                # non-retried failure.
+            } elseif (($statusCode -eq 403 -or $statusCode -eq 429) -and ($attempt -lt $maxAttempts)) {
+                try {
+                    $retryAfterHeader = $_.Exception.Response.Headers['Retry-After']
+                    if ($retryAfterHeader) {
+                        $ras = 0
+                        if ([int]::TryParse([string]$retryAfterHeader, [ref]$ras) -and $ras -gt 0) { $waitSeconds = [Math]::Min($ras, 10) }
+                    }
+                } catch { }
+                Write-Log -Level 'WARN' -Message "HTTP $statusCode from GitHub - waiting $waitSeconds seconds and retrying"
+                $shouldRetry = $true
+            }
+        }
+
+        Start-Sleep -Milliseconds 300
+
+        if (-not $lastError) {
+            return $result
+        }
+        if (-not $shouldRetry) {
+            throw $lastError
+        }
+        Start-Sleep -Seconds $waitSeconds
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+    return $result
+}
+
+function Get-GithubRateLimitBackoffUntil {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.4a): computes the UTC backoff
+      timestamp for a GitHub 403/429 response that survived
+      Invoke-GithubRequest's own bounded retry above - mirrors
+      Invoke-AppUpdateMaintenanceCore's own precedent (addon-server.ps1,
+      the self-update release-lookup catch block) verbatim: Retry-After
+      (seconds) preferred, else X-RateLimit-Reset (unix epoch seconds),
+      capped at 6 hours (21600s), floored at 60s so a header parse quirk
+      can never produce a near-zero backoff that just re-hits the limit
+      next tick. Falls back to a fixed 1-hour (3600s) backoff when neither
+      header is present/parsable. Returns an ISO-8601 UTC string
+      ('yyyy-MM-ddTHH:mm:ssZ'). Factored out as its own function (rather
+      than inlined in Sync-SingleGithubAddon's catch block) so it can be
+      unit-tested directly against hand-built header values.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc
+    )
+
+    $backoffSeconds = 3600
+    try {
+        $retryAfterHeader = $ErrorRecord.Exception.Response.Headers['Retry-After']
+        $resetHeader = $ErrorRecord.Exception.Response.Headers['X-RateLimit-Reset']
+        if ($retryAfterHeader) {
+            $ras = 0
+            if ([int]::TryParse([string]$retryAfterHeader, [ref]$ras) -and $ras -gt 0) { $backoffSeconds = $ras }
+        } elseif ($resetHeader) {
+            $resetEpoch = 0L
+            if ([long]::TryParse([string]$resetHeader, [ref]$resetEpoch) -and $resetEpoch -gt 0) {
+                $resetAt = [DateTimeOffset]::FromUnixTimeSeconds($resetEpoch).UtcDateTime
+                $backoffSeconds = [Math]::Max(0, ($resetAt - $NowUtc).TotalSeconds)
+            }
+        }
+    } catch { }
+    if ($backoffSeconds -gt 21600) { $backoffSeconds = 21600 }
+    if ($backoffSeconds -lt 60) { $backoffSeconds = 60 }
+    return $NowUtc.AddSeconds($backoffSeconds).ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 
 function Get-WagoInertiaVersion {
@@ -1954,7 +2134,15 @@ function Invoke-RollbackForRecord {
         return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
     }
 
-    $replacedFileId = $Record.fileId
+    # Round 47 (GITHUB-SOURCE-SPEC.md 2.2): for a GitHub record, "the id
+    # being replaced" is installedTag, not fileId (which stays $null forever
+    # on this source) - captured here so the source-branched swap below has
+    # the right OLD value to move into previousFileId either way.
+    if ($Record.source -eq 'github') {
+        $replacedFileId = $Record.installedTag
+    } else {
+        $replacedFileId = $Record.fileId
+    }
     $replacedVersion = $Record.version
     $replacedFileName = $Record.fileName
 
@@ -1974,13 +2162,31 @@ function Invoke-RollbackForRecord {
         $restoredFileName = $replacedFileName
     }
 
-    $Record.fileId = $prevFileId
-    $Record.version = $Record.previousVersion
-    $Record.fileName = $restoredFileName
-    $Record.previousFileId = $replacedFileId
-    $Record.previousVersion = $replacedVersion
-    $Record.previousFileName = $replacedFileName
-    $Record.pinnedFileId = $prevFileId
+    # Round 47 (GITHUB-SOURCE-SPEC.md 2.2): fileId is never set on a GitHub
+    # record - installedTag is this source's identity field, kept identical
+    # to .version on every write (2.2's own invariant). This generic
+    # rollback function is shared by every source, so the swap itself must
+    # branch: a GitHub record swaps installedTag (which previousFileId
+    # already holds the OLD value of, per Sync-SingleGithubAddon's own
+    # bookkeeping) rather than fileId, and never touches pinnedFileId -
+    # Sync-SingleGithubAddon never reads it (GitHub has no per-file pin
+    # concept, unlike CurseForge/Wago's channel-based pinning).
+    if ($Record.source -eq 'github') {
+        $Record.installedTag = $prevFileId
+        $Record.version = $Record.previousVersion
+        $Record.fileName = $restoredFileName
+        $Record.previousFileId = $replacedFileId
+        $Record.previousVersion = $replacedVersion
+        $Record.previousFileName = $replacedFileName
+    } else {
+        $Record.fileId = $prevFileId
+        $Record.version = $Record.previousVersion
+        $Record.fileName = $restoredFileName
+        $Record.previousFileId = $replacedFileId
+        $Record.previousVersion = $replacedVersion
+        $Record.previousFileName = $replacedFileName
+        $Record.pinnedFileId = $prevFileId
+    }
     # novice:NOVICE-2: a rollback genuinely reinstalls a different file, so
     # installedAt must reflect THIS action, same as Sync-SingleAddon/
     # Sync-SingleWagoAddon already do on every real install/update - without
@@ -2899,6 +3105,22 @@ function New-AddonRecord {
         curseId           = $null
         latestGameVersions = @()
         latestFileDate     = $null
+        # Round 47 (GITHUB-SOURCE-SPEC.md 2.1/2.2): GitHub as a third addon
+        # source. repo is the "owner/name" identity string. installedTag is
+        # the installed release's tag_name (or the literal "unknown" - see
+        # 3.7) and is this source's version-identity field IN PLACE OF
+        # fileId - fileId is never set for a GitHub record; .version is
+        # always kept identical to installedTag on every write so every
+        # existing generic display path needs no source branch. assetName
+        # records which asset was actually installed ("zipball" for the
+        # source-zipball fallback, $null when adopted-in-place with nothing
+        # downloaded). githubRateLimitedUntil is a per-record backoff
+        # timestamp (3.4a) - $null until this repo's own check first hits a
+        # 403/429 that survives Invoke-GithubRequest's bounded retry.
+        repo                   = $null
+        installedTag           = $null
+        assetName              = $null
+        githubRateLimitedUntil = $null
         # ADOPT-SPEC.md 2.4: $true only for a record created by -Adopt
         # (recorded exactly as it sat on disk, no download). adoptedAt is
         # the UTC ISO-8601 timestamp of that adoption. A record created by
@@ -2930,6 +3152,28 @@ function New-WagoAddonRecord {
     $rec.projectId = $null
     $rec.source = 'wago'
     $rec.slug = $Slug
+    return $rec
+}
+
+function New-GithubAddonRecord {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 2.3): the GitHub counterpart to
+      New-AddonRecord/New-WagoAddonRecord above. A GitHub addon has no
+      numeric CurseForge project id either, so projectId stays $null and
+      repo ("owner/name") becomes the record's stable identity instead -
+      built on New-AddonRecord (ProjectId 0, an otherwise-unused placeholder
+      immediately overwritten below) for the same reason New-WagoAddonRecord
+      is, so every field this codebase's other 90% assumes every record
+      carries stays in sync with it automatically.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo
+    )
+
+    $rec = New-AddonRecord -ProjectId 0
+    $rec.projectId = $null
+    $rec.source = 'github'
+    $rec.repo = $Repo
     return $rec
 }
 
@@ -3029,6 +3273,25 @@ function Initialize-AddonRecordFields {
     if (-not (Get-Member -InputObject $Record -Name 'adoptedAt' -MemberType NoteProperty)) {
         Add-Member -InputObject $Record -NotePropertyName 'adoptedAt' -NotePropertyValue $null
     }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 2.4): a record saved before GitHub
+    # existed as a source predates these four fields entirely - default
+    # $null is correct for every one of them, same "never overwrite an
+    # existing value" pattern as every other field above. (source already
+    # defaults to 'curseforge' via the existing check above - untouched; a
+    # record with no source field predates every third-party source and is
+    # correctly assumed CurseForge.)
+    if (-not (Get-Member -InputObject $Record -Name 'repo' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'repo' -NotePropertyValue $null
+    }
+    if (-not (Get-Member -InputObject $Record -Name 'installedTag' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'installedTag' -NotePropertyValue $null
+    }
+    if (-not (Get-Member -InputObject $Record -Name 'assetName' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'assetName' -NotePropertyValue $null
+    }
+    if (-not (Get-Member -InputObject $Record -Name 'githubRateLimitedUntil' -MemberType NoteProperty)) {
+        Add-Member -InputObject $Record -NotePropertyName 'githubRateLimitedUntil' -NotePropertyValue $null
+    }
 }
 
 # =====================================================================
@@ -3048,6 +3311,11 @@ function Get-Settings {
     $defaults = [PSCustomObject]@{
         releaseType = 1
         port        = 47831
+        # Round 47 (GITHUB-SOURCE-SPEC.md 3.9): the CLI reads the shared
+        # GitHub personal access token ONLY from settings.json, never from a
+        # command-line parameter - there is no -Token/-GithubToken switch
+        # anywhere in this script. $null (not "") when never set.
+        githubToken = $null
     }
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -3071,12 +3339,16 @@ function Get-Settings {
         $result = [PSCustomObject]@{
             releaseType = $defaults.releaseType
             port        = $defaults.port
+            githubToken = $defaults.githubToken
         }
         if ($null -ne $parsed.releaseType) {
             $result.releaseType = [int]$parsed.releaseType
         }
         if ($null -ne $parsed.port) {
             $result.port = [int]$parsed.port
+        }
+        if ($null -ne $parsed.githubToken) {
+            $result.githubToken = [string]$parsed.githubToken
         }
         return $result
     } catch {
@@ -3369,7 +3641,14 @@ function Sync-SingleAddon {
         # -InstalledInterface only matters for -Flavor 'classic' (S2.4's
         # dynamic progression resolution).
         [string]$Flavor = 'retail',
-        $InstalledInterface = $null
+        $InstalledInterface = $null,
+        # Round 47 (GITHUB-SOURCE-SPEC.md 3.2): threaded straight through to
+        # Sync-SingleGithubAddon; not consumed by the CurseForge body below
+        # (CurseForge/Wago records never auto-adopt a folder during a plain
+        # sync - see 3.3a's own note on why the folder-claim guard is
+        # GitHub-only for now).
+        [string]$GithubToken = $null,
+        $ClaimedFolders = $null
     )
 
     # E12: a Wago-sourced record is processed by its own function rather
@@ -3379,6 +3658,14 @@ function Sync-SingleAddon {
     # dispatch is the only new code path they see.
     if ($Record.source -eq 'wago') {
         return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface
+    }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 3.2): a GitHub-sourced record is
+    # likewise processed by its own function - same reasoning as the Wago
+    # dispatch just above. DefaultMaxReleaseType/FileIdOverride are accepted
+    # but ignored by the GitHub path (GitHub has no release-type/alpha-beta
+    # concept and no per-file pin id).
+    if ($Record.source -eq 'github') {
+        return Sync-SingleGithubAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface -GithubToken $GithubToken -ClaimedFolders $ClaimedFolders
     }
 
     $cfMapping = Get-CfFlavourMapping -Flavor $Flavor -InstalledInterface $InstalledInterface
@@ -4028,6 +4315,469 @@ function Sync-SingleWagoAddon {
     }
 }
 
+function Get-ZipTopLevelFolderNames {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.3a step 8): lists the distinct
+      top-level directory names inside a zip WITHOUT extracting it, so
+      Sync-SingleGithubAddon's folder-ownership collision guard can inspect
+      what a downloaded package would install BEFORE ever calling
+      Install-AddonPackage (which would otherwise be the first thing to
+      touch disk). Reads zip entry paths directly via ZipArchive rather than
+      Install-AddonPackage's own Get-ChildItem-after-extraction approach,
+      since nothing has been extracted yet at the point this is called.
+      Entry paths inside a real zip always use '/' (the ZIP format's own
+      separator - confirmed for both GitHub's asset-by-id and zipball
+      downloads), but '\' is normalized too defensively. Never throws;
+      returns an empty list on any read failure so the caller's guard
+      degrades to "nothing to check" rather than aborting an otherwise-valid
+      install.
+    #>
+    param([Parameter(Mandatory = $true)][string]$ZipPath)
+
+    $names = New-Object 'System.Collections.Generic.List[object]'
+    $archive = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($entry in $archive.Entries) {
+            $normalized = ($entry.FullName -replace '\\', '/')
+            $slashIndex = $normalized.IndexOf('/')
+            if ($slashIndex -gt 0) {
+                $top = $normalized.Substring(0, $slashIndex)
+                $topKey = $top.ToLowerInvariant()
+                if ($top.Length -gt 0 -and $seen.Add($topKey)) {
+                    $names.Add($top)
+                }
+            }
+        }
+    } catch {
+        # Best-effort - see doc comment above.
+    } finally {
+        if ($archive) { $archive.Dispose() }
+    }
+    Write-Output -NoEnumerate $names
+}
+
+function ConvertTo-NormalizedGithubZip {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.6.3): given a raw GitHub zipball zip
+      (one top-level "owner-repo-sha" directory) and the record's own repo
+      name, produces a NEW zip in $StagingPath whose top-level entries are
+      exactly what Install-AddonPackage expects: one folder per .toc-bearing
+      subdirectory of the wrapper, OR - when the wrapper's OWN root holds a
+      .toc directly, with no subdirectory at all - a single folder renamed
+      to the repo name wrapping everything (decision 1: "if the archive
+      root itself holds a .toc, the folder is named after the repo").
+      Install-AddonPackage itself needs ZERO changes for GitHub because of
+      this rewrite step.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$RawZipPath,
+        # Deliberately NOT [Parameter(Mandatory = $true)]: PowerShell's own
+        # mandatory-string binding rejects an empty string BEFORE this
+        # function's body ever runs, with a generic binder error that does
+        # not mention "unsafe repo-derived folder name" - which would make
+        # an empty RepoName throw a DIFFERENT-shaped error than every other
+        # unsafe value below (".", "..", "sub/dir"), even though it is
+        # exactly as unsafe and must be rejected by the SAME guard, with the
+        # SAME message, for the SAME reason. An omitted -RepoName simply
+        # defaults to "" and is caught by the IsNullOrWhiteSpace check below
+        # like any other blank value.
+        [string]$RepoName = '',
+        [Parameter(Mandatory = $true)][string]$StagingPath
+    )
+    # Defense-in-depth (GITHUB-SOURCE-SPEC.md 3.6.3, review finding A/1):
+    # $RepoName is re-derived from $Record.repo at the call site via the
+    # same `-replace '^.*/', ''` the adopt-in-place path (3.7) also uses, so
+    # this guard catches a future caller that ever builds $Record.repo
+    # through a path other than today's validated entry points, not just a
+    # hypothetical hole in those. Verified empirically against this exact
+    # PowerShell 5.1 build: Join-Path does NOT resolve ".."/"." itself, but
+    # Move-Item's destination resolution does, at the OS level, the moment
+    # the call actually runs - a $RepoName of ".." here would silently
+    # relocate the wrapper directory to $StagingPath's own PARENT instead of
+    # renaming it in place; a $RepoName of "." would collapse onto
+    # $rebuiltDir itself. Neither is safe to let through unexamined - reject
+    # before any filesystem operation below ever runs.
+    if ([string]::IsNullOrWhiteSpace($RepoName) -or ($RepoName -match '^\.+$') -or ($RepoName -match '[\\/]')) {
+        throw "Refusing to build a zip using an unsafe repo-derived folder name ('$RepoName')"
+    }
+    $scratchDir = Join-Path -Path $StagingPath -ChildPath ("_ghzip_" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
+    $rebuiltDir = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($RawZipPath, $scratchDir)
+        $topEntries = @(Get-ChildItem -LiteralPath $scratchDir -Force)
+        if ($topEntries.Count -ne 1 -or -not $topEntries[0].PSIsContainer) {
+            throw "Unexpected zipball shape (expected exactly one top-level directory)"
+        }
+        $wrapperPath = $topEntries[0].FullName
+        $wrapperHasOwnToc = @(Get-ChildItem -LiteralPath $wrapperPath -Filter '*.toc' -File -ErrorAction SilentlyContinue).Count -gt 0
+
+        $rebuiltDir = Join-Path -Path $StagingPath -ChildPath ("_ghrebuild_" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $rebuiltDir -Force | Out-Null
+        if ($wrapperHasOwnToc) {
+            Move-Item -LiteralPath $wrapperPath -Destination (Join-Path -Path $rebuiltDir -ChildPath $RepoName)
+        } else {
+            foreach ($child in (Get-ChildItem -LiteralPath $wrapperPath -Force)) {
+                Move-Item -LiteralPath $child.FullName -Destination (Join-Path -Path $rebuiltDir -ChildPath $child.Name)
+            }
+        }
+        $normalizedZipPath = Join-Path -Path $StagingPath -ChildPath ("_ghnorm_" + [Guid]::NewGuid().ToString('N') + ".zip")
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($rebuiltDir, $normalizedZipPath)
+        return $normalizedZipPath
+    } finally {
+        Remove-Item -LiteralPath $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($rebuiltDir -and (Test-Path -LiteralPath $rebuiltDir)) { Remove-Item -LiteralPath $rebuiltDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $RawZipPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Sync-SingleGithubAddon {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.3): the GitHub counterpart to
+      Sync-SingleAddon/Sync-SingleWagoAddon above, dispatched to from
+      Sync-SingleAddon for any record with source 'github'. Unlike
+      CurseForge/Wago, this source has no numeric fileId at all -
+      installedTag is the version-identity field instead (2.2), which is
+      why every place below that reads/writes "the id currently installed"
+      uses $Record.installedTag rather than $Record.fileId, and why
+      $Record.fileId is never touched here.
+
+      Also unlike CurseForge/Wago, a never-before-checked GitHub record can
+      resolve itself entirely from disk with no network call at all when a
+      folder named after the repo already exists (3.7, "adopt-in-place") -
+      this is the ONLY source with that automatic fast path inside a plain
+      sync, which is why the folder-ownership collision guard (3.3a,
+      $ClaimedFolders) is consulted here and nowhere else: CurseForge/Wago
+      records only ever adopt via the explicit, already-guarded -Adopt verb.
+
+      -GithubToken is read by the caller from settings.json only (3.9) and
+      never appears in any message this function logs.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [Parameter(Mandatory = $true)][string]$AddonsPath,
+        [Parameter(Mandatory = $true)][string]$StagingPath,
+        [Parameter(Mandatory = $true)][string]$BackupsPath,
+        [switch]$Force,
+        [switch]$DryRun,
+        [switch]$ExplicitTarget,
+        [int]$ProgressTotal = 0,
+        [int]$ProgressIndex = 0,
+        [string]$Flavor = 'retail',
+        $InstalledInterface = $null,
+        [string]$GithubToken = $null,
+        # 3.3a: a lowercased-folder-name -> owning-record-identity-string map
+        # built ONCE per run by the main sync loop (over every OTHER
+        # record's .folders) - lets the adopt-in-place step and the
+        # pre-install step below refuse to adopt/install over a folder a
+        # DIFFERENT tracked addon already owns, the same protection -Adopt's
+        # own $ownedFoldersForAdopt guard gives the general adopt flow.
+        $ClaimedFolders = $null
+    )
+
+    $displayLabel = $Record.name
+    if (-not $displayLabel) {
+        $displayLabel = "github:$($Record.repo)"
+    }
+    $currentPhase = 'checking'
+
+    try {
+        if ($Record.ignoreUpdates -and (-not $Force) -and (-not $ExplicitTarget)) {
+            Write-Log -Level 'INFO' -Message "Ignored: github:$($Record.repo) ($displayLabel) has ignoreUpdates set"
+            return [PSCustomObject]@{ Status = 'Ignored'; Name = $displayLabel; Version = $Record.version }
+        }
+
+        # 3.7/3.3a (review fold-in, finding A/1): reject a repo whose last
+        # segment is empty, all-dots, or contains a path separator BEFORE it
+        # is ever used to build a filesystem path. Belt-and-suspenders -
+        # ConvertTo-TargetToken/Handle-JobsPost/parseGithubRepoInput already
+        # reject this shape at every input layer; this is the check at the
+        # one place that would otherwise do something dangerous with it if
+        # that ever changed.
+        $repoNameOnly = $Record.repo -replace '^.*/', ''
+        if ([string]::IsNullOrWhiteSpace($repoNameOnly) -or ($repoNameOnly -match '^\.+$') -or ($repoNameOnly -match '[\\/]')) {
+            Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): repo name is not a safe folder name, refusing to adopt or install"
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = 'checking' }
+        }
+
+        # 3.7: adopt-in-place fast path - runs ONLY when this record has
+        # never been checked/installed by Furphy yet (installedTag still
+        # $null), before any network call at all.
+        $candidatePath = Join-Path -Path $AddonsPath -ChildPath $repoNameOnly
+        if ((-not $Record.installedTag) -and (Test-Path -LiteralPath $candidatePath -PathType Container)) {
+            # 3.3a: a folder that already exists on disk under the repo's
+            # own name might already be CLAIMED by a different tracked
+            # record (a coincidentally-matching CurseForge/Wago/other-GitHub
+            # addon folder name) - never adopt over it silently.
+            $ownerOfCandidate = $null
+            $isClaimedByOther = $ClaimedFolders -and $ClaimedFolders.TryGetValue($repoNameOnly, [ref]$ownerOfCandidate) -and ($ownerOfCandidate -ne "github:$($Record.repo)")
+            if ($isClaimedByOther) {
+                Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): folder '$repoNameOnly' is already tracked by $ownerOfCandidate - rename or remove that addon in Furphy first."
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = 'checking' }
+            }
+
+            $tocInfo = Get-FolderTocInfo -FolderPath $candidatePath -Flavor $Flavor -InstalledInterface $InstalledInterface
+            if ($tocInfo.hasToc) {
+                $rawVersion = $tocInfo.version
+                $looksLikeTag = ($rawVersion -and ($rawVersion.Trim() -match '^[vV]?[0-9][\w.\-]*$'))
+                $tagValue = if ($looksLikeTag) { $rawVersion.Trim() } else { 'unknown' }
+                if (-not $DryRun) {
+                    $Record.folders = @($repoNameOnly)
+                    $Record.installedTag = $tagValue
+                    $Record.version = $tagValue
+                    $Record.name = $(if ($tocInfo.title) { $tocInfo.title } else { $repoNameOnly })
+                    $Record.adopted = $true
+                    $Record.adoptedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                }
+                Write-Log -Level 'INFO' -Message "Adopted github:$($Record.repo) ($($Record.name)) folder: $repoNameOnly, installedTag=$tagValue"
+                return [PSCustomObject]@{ Status = 'Adopted'; Name = $Record.name; Version = $tagValue }
+            }
+        }
+
+        # 3.4a: a per-record, persisted rate-limit backoff - skip the
+        # network call entirely while still inside a previously-recorded
+        # backoff window, rather than re-hammering a currently-limited
+        # shared token.
+        if ($Record.githubRateLimitedUntil) {
+            $limitedUntil = $null
+            try {
+                $limitedUntil = [DateTime]::ParseExact([string]$Record.githubRateLimitedUntil, 'yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal))
+            } catch { $limitedUntil = $null }
+            if ($limitedUntil -and ((Get-Date).ToUniversalTime() -lt $limitedUntil)) {
+                Write-Log -Level 'INFO' -Message "GitHub addon $($Record.repo) ($displayLabel): still rate-limited until $($Record.githubRateLimitedUntil), skipping this check"
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = 'checking-network-github' }
+            }
+        }
+
+        # 3.5: release lookup - headers, auth, 404-with-token vs without,
+        # rate-limit backoff.
+        $releaseUri = "$script:GitHubBaseUrl/repos/$($Record.repo)/releases/latest"
+        try {
+            $resp = Invoke-GithubRequest -Uri $releaseUri -Accept 'application/vnd.github+json' -GithubToken $GithubToken
+            $release = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
+            if ($statusCode -eq 404) {
+                # GitHub returns 404 (never 403) for a private repo whether
+                # the request carried no token, an expired/rotated token, or
+                # a token with no access - and for a genuinely nonexistent
+                # repo. Furphy cannot tell these apart from the response
+                # alone, so every 404 gets the same actionable message
+                # pointing at the one thing the player can actually go fix.
+                $currentPhase = 'checking-needs-token'
+                Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): GitHub returned 404 for the release lookup (no access with the token currently in Settings, or none is set). Paste a current token in Settings > GitHub addons."
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+            }
+            if ($statusCode -eq 403 -or $statusCode -eq 429) {
+                # 3.4a: Invoke-GithubRequest's own bounded retry already
+                # tried once; if it still threw a 403/429 this far, persist
+                # the backoff onto the record so the NEXT tick skips the
+                # lookup instead of re-hammering a currently-limited shared
+                # token.
+                $Record.githubRateLimitedUntil = Get-GithubRateLimitBackoffUntil -ErrorRecord $_ -NowUtc (Get-Date).ToUniversalTime()
+                $currentPhase = 'checking-network-github'
+                Write-Log -Level 'WARN' -Message "GitHub addon $($Record.repo) ($displayLabel): rate-limited (HTTP $statusCode), backing off until $($Record.githubRateLimitedUntil)"
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+            }
+            $currentPhase = 'checking-network-github'
+            Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): release lookup failed: $($_.Exception.Message)"
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+        }
+
+        # A successful lookup this far means this repo's token (if any) is
+        # not currently rate-limited - captured here (rather than only after
+        # a full install) so a record that turns out to be Up-to-date below
+        # still clears a stale backoff from an earlier failed check.
+        $Record.githubRateLimitedUntil = $null
+
+        # Whether this is the very first real install for this record
+        # (never checked/installed before OR only ever adopted-in-place,
+        # never yet updated) - captured now, before anything below mutates
+        # installedTag, for the previous-version bookkeeping and
+        # Installed-vs-Updated status text further down.
+        $isNewInstall = (-not $Record.installedTag)
+
+        # 3.6.1: asset selection - pure computation against the parsed
+        # release JSON, no network yet (so DryRun below never downloads).
+        $zipAssets = @($release.assets | Where-Object { $_.name -match '(?i)\.zip$' })
+        $chosenAsset = $null
+        if ($zipAssets.Count -gt 0) {
+            # Deterministic, not random: Select-Object -First 1 after
+            # Where-Object takes the first match in $release.assets' own
+            # (stable, creation-order) order - "prefer" is never "arbitrary".
+            $nameMatch = $zipAssets | Where-Object { $_.name -match [regex]::Escape($repoNameOnly) } | Select-Object -First 1
+            if ($nameMatch) { $chosenAsset = $nameMatch } else { $chosenAsset = $zipAssets[0] }
+        }
+
+        $assetName = $null
+        $downloadUri = $null
+        $downloadAccept = $null
+        if ($chosenAsset) {
+            # 3.6.1: the asset's OWN "url" field (the API asset endpoint) -
+            # NEVER browser_download_url, which does not accept a Bearer
+            # token for a private repo. Same header/field pair Eric's
+            # existing one-off script already uses.
+            $assetName = $chosenAsset.name
+            $downloadUri = $chosenAsset.url
+            $downloadAccept = 'application/octet-stream'
+        } else {
+            # 3.6.2: no .zip asset at all - fall back to the release's own
+            # zipball_url (present on every GitHub release unconditionally).
+            if (-not $release.zipball_url) {
+                $currentPhase = 'checking'
+                Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): release $($release.tag_name) has no .zip asset and no zipball URL."
+                return [PSCustomObject]@{ Status = 'Skipped'; Name = $displayLabel; Version = $Record.version }
+            }
+            $assetName = 'zipball'
+            $downloadUri = $release.zipball_url
+            $downloadAccept = 'application/vnd.github+json'
+        }
+
+        # 3.3 step 5: installedTag string-compare - a plain -eq, never
+        # Get-NormalizedVersionString's loose compare (GitHub tags are
+        # exact, stable identifiers by construction).
+        $selectedTag = [string]$release.tag_name
+        if ($Record.installedTag -and (-not $Force) -and ($Record.installedTag -eq $selectedTag)) {
+            Write-Log -Level 'INFO' -Message "Up-to-date: github:$($Record.repo) ($displayLabel) tag $selectedTag"
+            return [PSCustomObject]@{ Status = 'Up-to-date'; Name = $displayLabel; Version = $Record.version }
+        }
+
+        if ($DryRun) {
+            Write-Log -Level 'INFO' -Message "DryRun: would update github:$($Record.repo) ($displayLabel) to tag $selectedTag"
+            return [PSCustomObject]@{ Status = 'Would-update'; Name = $displayLabel; Version = $selectedTag }
+        }
+
+        # 3.3 step 7: download the chosen asset or zipball, then normalize a
+        # zipball into an Install-AddonPackage-ready zip when needed (3.6.3).
+        $currentPhase = 'downloading'
+        $script:ProgressTallies = Update-ProgressTallies -Tallies $script:ProgressTallies -FoundUpdate
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'downloading'
+
+        $safeRepoForFile = ($Record.repo -replace '[^a-zA-Z0-9-]', '_')
+        $safeTagForFile = ($selectedTag -replace '[^a-zA-Z0-9.-]', '_')
+        $rawZipPath = Join-Path -Path $StagingPath -ChildPath ("github-{0}-{1}.zip" -f $safeRepoForFile, $safeTagForFile)
+        Invoke-GithubRequest -Uri $downloadUri -Accept $downloadAccept -GithubToken $GithubToken -OutFile $rawZipPath -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $displayLabel | Out-Null
+
+        $installZipPath = $rawZipPath
+        if ($assetName -eq 'zipball') {
+            $installZipPath = ConvertTo-NormalizedGithubZip -RawZipPath $rawZipPath -RepoName $repoNameOnly -StagingPath $StagingPath
+        }
+
+        # 3.3 step 8 / 3.3a: before calling Install-AddonPackage, check
+        # every folder name the chosen zip's own top level actually
+        # contains against $ClaimedFolders, excluding this record's OWN
+        # currently-tracked folders (an update re-claiming its own existing
+        # folder is not a collision). Any match owned by a DIFFERENT record
+        # aborts BEFORE Install-AddonPackage is called at all.
+        $currentPhase = 'installing'
+        Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
+
+        $ownFolderSet = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($f in $Record.folders) {
+            if ($f) { [void]$ownFolderSet.Add(([string]$f).ToLowerInvariant()) }
+        }
+        if ($ClaimedFolders) {
+            foreach ($topName in (Get-ZipTopLevelFolderNames -ZipPath $installZipPath)) {
+                if ($ownFolderSet.Contains($topName.ToLowerInvariant())) { continue }
+                $ownerOfTop = $null
+                if ($ClaimedFolders.TryGetValue($topName, [ref]$ownerOfTop) -and ($ownerOfTop -ne "github:$($Record.repo)")) {
+                    Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): folder '$topName' is already tracked by $ownerOfTop - rename or remove that addon in Furphy first."
+                    return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+                }
+            }
+        }
+
+        $backupKey = Get-RecordBackupKey -Record $Record
+        # ADOPT-SPEC.md 2.6 / GITHUB-SOURCE-SPEC.md 3.3 step 8: Wago/CF's own
+        # $isNewInstall (computed from fileId, which stays $null through
+        # their whole adopted-but-never-updated window) is what gates this
+        # call for them. GitHub's adopt-in-place (3.7) already sets
+        # installedTag away from $null at adoption time, so $isNewInstall as
+        # defined above is FALSE by the time an adopted GitHub record first
+        # reaches here - it would never fire the one time it actually
+        # matters (right before Install-AddonPackage's first-ever destructive
+        # swap over the player's original, never-Furphy-downloaded folders).
+        # Save-PreAdoptBackupZip's own contract is idempotent (a no-op once
+        # adopted-original.zip already exists, or if none of $Folders exist
+        # on disk), so gating on adopted alone - dropping isNewInstall here
+        # specifically - is safe on every later call and correct on the
+        # first one.
+        if ($Record.adopted) {
+            Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $backupKey
+        }
+        $newFolders = Install-AddonPackage -ZipPath $installZipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
+
+        if ($newFolders.Count -eq 0) {
+            Write-Log -Level 'ERROR' -Message "Install produced zero usable folders for github:$($Record.repo) ($displayLabel)"
+            $Record.folders = $newFolders.ToArray()
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+        }
+
+        $title = Get-TocTitle -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
+        $finalName = $Record.name
+        if ($title) {
+            $finalName = $title
+        } elseif (-not $finalName) {
+            $finalName = $repoNameOnly
+        }
+
+        if (-not $isNewInstall) {
+            # 3.3 step 11: previousFileId is set to the OLD installedTag (a
+            # string, exactly like Wago already stores a non-numeric release
+            # id in this generically-typed field) - previousFileName stays
+            # $null (GitHub tracks no fileName).
+            $Record.previousFileId = $Record.installedTag
+            $Record.previousVersion = $Record.version
+            $Record.previousFileName = $Record.fileName
+        }
+
+        $Record.name = $finalName
+        # 2.2: fileId is NEVER touched here - stays whatever it already was
+        # ($null on every real GitHub record). installedTag/version are
+        # always set together, identically, per 2.2's own invariant.
+        $Record.installedTag = $selectedTag
+        $Record.version = $selectedTag
+        $Record.assetName = $assetName
+        $Record.installedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Record.folders = $newFolders.ToArray()
+
+        # 3.3 step 13: GitHub gives no game-version metadata at all;
+        # latestFileDate is the release's own published_at, straight from
+        # the GitHub JSON (informational parity with CF's dateCreated/Wago's
+        # created_at - costs nothing extra, already fetched).
+        $Record.latestGameVersions = @()
+        if ($release.published_at) { $Record.latestFileDate = $release.published_at }
+
+        $deps = Get-PackageDependencies -AddonsPath $AddonsPath -Folders $newFolders -Flavor $Flavor -InstalledInterface $InstalledInterface
+        $Record.requiredDeps = $deps.required
+        $Record.optionalDeps = $deps.optional
+
+        # 3.3 step 15: $FileId here is $selectedTag, a string - Save-BackupZip's
+        # own -FileId param is already untyped for exactly this reason. The
+        # resulting backup path is backups\github-<owner>_<repo>\<tag>.zip.
+        Save-BackupZip -ZipPath $installZipPath -ProjectId $backupKey -FileId $selectedTag -BackupsRoot $BackupsPath -PreviousFileId $Record.previousFileId
+
+        $folderSummary = $newFolders -join ', '
+        Write-Log -Level 'INFO' -Message "Installed github:$($Record.repo) ($finalName) tag $selectedTag folders: $folderSummary"
+
+        if ($isNewInstall) {
+            $statusText = 'Installed'
+        } else {
+            $statusText = 'Updated'
+        }
+
+        return [PSCustomObject]@{ Status = $statusText; Name = $finalName; Version = $selectedTag }
+
+    } catch {
+        Write-Log -Level 'ERROR' -Message "Failed processing github:$($Record.repo) ($displayLabel) : $($_.Exception.Message)"
+        return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+    }
+}
+
 function Remove-AddonByTarget {
     <#
       Finds a record in $Config by name (case-insensitive) or project id,
@@ -4052,6 +4802,21 @@ function Remove-AddonByTarget {
         $wagoRef = $Matches[1]
     }
 
+    # Round 47 (GITHUB-SOURCE-SPEC.md 3.1): accept a "github:owner/repo"
+    # token or a full github.com URL too, matched against a GitHub record's
+    # repo - additive, same shape as the wagoRef block just above.
+    $githubRef = $null
+    if ($Target -match '(?i)^github:(.+)$') {
+        $githubRef = $Matches[1].Trim()
+    } elseif ($Target -match "(?i)^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100})") {
+        # Same ".git" fix as ConvertTo-TargetToken's own github.com branch -
+        # the character class allows '.', so a trailing ".git" is captured
+        # as part of the match itself; stripped explicitly so a pasted
+        # clone URL still matches the repo string exactly as it was stored
+        # when the addon was added.
+        $githubRef = $Matches[1] -replace '(?i)\.git$', ''
+    }
+
     $targetIdValue = 0
     $isNumeric = [int]::TryParse($Target, [ref]$targetIdValue)
     $targetLower = $Target.ToLowerInvariant()
@@ -4064,6 +4829,10 @@ function Remove-AddonByTarget {
                 $match = $item
                 break
             }
+        }
+        if ($githubRef -and ($item.source -eq 'github') -and $item.repo -and ($item.repo.ToLowerInvariant() -eq $githubRef.ToLowerInvariant())) {
+            $match = $item
+            break
         }
         if ($isNumeric -and $item.projectId -and ([int64]$item.projectId -eq [int64]$targetIdValue)) {
             $match = $item
@@ -4085,7 +4854,7 @@ function Remove-AddonByTarget {
     # for a Wago one, which has no numeric projectId to interpolate at all
     # (the pre-E12 wording would otherwise print a bare, confusing
     # "project " with nothing after it).
-    $matchLabel = if ($match.source -eq 'wago') { "wago:$($match.slug)" } else { "project $($match.projectId)" }
+    $matchLabel = if ($match.source -eq 'wago') { "wago:$($match.slug)" } elseif ($match.source -eq 'github') { "github:$($match.repo)" } else { "project $($match.projectId)" }
 
     if (-not $DryRun) {
         foreach ($folderName in $match.folders) {
@@ -4221,6 +4990,17 @@ function ConvertTo-TargetToken {
       pre-E12 ConvertTo-ExpandedIdArray did for a non-numeric value - a bad
       token is still reported through this script's normal Write-Log/exit-2
       path rather than left to fail confusingly later.
+
+      Round 47 (GITHUB-SOURCE-SPEC.md 3.1): widened with a fourth branch and
+      two more descriptor fields, IsGithub/GithubRepo, accepting a bare
+      "owner/repo", a "github:owner/repo" token, or a github.com URL (with
+      or without scheme/www, trailing slash, .git, or a subpath) - tried
+      AFTER the existing numeric-id check and BEFORE the final throw, so a
+      bare "owner/repo" is only reached once the token has already failed
+      to parse as an int64 project id (a repo name can never collide with a
+      decimal number either way). Every existing branch above now sets
+      IsGithub/GithubRepo explicitly too, same discipline WagoRef already
+      gets on the numeric-id branch.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Token,
@@ -4229,19 +5009,58 @@ function ConvertTo-TargetToken {
 
     $parsedId = [int64]0
     if ([int64]::TryParse($Token, [ref]$parsedId)) {
-        return [PSCustomObject]@{ IsWago = $false; ProjectId = $parsedId; WagoRef = $null }
+        return [PSCustomObject]@{ IsWago = $false; ProjectId = $parsedId; WagoRef = $null; IsGithub = $false; GithubRepo = $null }
     }
     if ($Token -match '(?i)^wago:(.+)$') {
         $ref = $Matches[1].Trim()
         if ($ref.Length -eq 0) {
             throw "-$ParamName value '$Token' has an empty wago: reference."
         }
-        return [PSCustomObject]@{ IsWago = $true; ProjectId = $null; WagoRef = $ref }
+        return [PSCustomObject]@{ IsWago = $true; ProjectId = $null; WagoRef = $ref; IsGithub = $false; GithubRepo = $null }
     }
     if ($Token -match '(?i)^https?://addons\.wago\.io/addons/([a-z0-9-]+)') {
-        return [PSCustomObject]@{ IsWago = $true; ProjectId = $null; WagoRef = $Matches[1] }
+        return [PSCustomObject]@{ IsWago = $true; ProjectId = $null; WagoRef = $Matches[1]; IsGithub = $false; GithubRepo = $null }
     }
-    throw "-$ParamName value '$Token' is not a valid CurseForge project id, a wago:<slug-or-id> reference, or a https://addons.wago.io/addons/<slug> URL."
+
+    $ownerPattern = '[A-Za-z0-9][A-Za-z0-9-]{0,38}'   # 1-39 chars, GitHub username shape (close enough - not a full validator)
+    $repoPattern  = '[A-Za-z0-9._-]{1,100}'            # GitHub repo-name shape
+    # Review fold-in, finding A/1: $repoPattern's character class allows '.'
+    # and '-', so a repo segment made ENTIRELY of dots or hyphens (".", "..",
+    # "---") matches it cleanly - and later becomes a bare filesystem path
+    # SEGMENT (Sync-SingleGithubAddon's own repoNameOnly) fed straight into
+    # Join-Path against $AddonsPath/$StagingPath. Join-Path does not resolve
+    # ".." itself, but every consumer that actually touches the resulting
+    # path (Test-Path/Remove-Item/Move-Item) resolves it at the OS level, so
+    # a repo of "x/.." would make that later path resolve to the PARENT of
+    # $AddonsPath (i.e. Interface itself) - reject this at the source so no
+    # downstream code ever has to reason about it.
+    $repoTraversalPattern = '^\.+$'   # matches ".", "..", "...", etc. - an all-dots segment, the only shape in $repoPattern's own character class that can resolve outside its parent directory
+
+    # bare owner/repo
+    if ($Token -match "(?i)^($ownerPattern)/($repoPattern)$") {
+        if ($Matches[2] -match $repoTraversalPattern) { throw "-$ParamName value '$Token' is not a valid GitHub repo (the repo name cannot be '.' or '..')" }
+        return [PSCustomObject]@{ IsWago = $false; ProjectId = $null; WagoRef = $null; IsGithub = $true; GithubRepo = "$($Matches[1])/$($Matches[2])" }
+    }
+    # github:owner/repo
+    if ($Token -match "(?i)^github:($ownerPattern)/($repoPattern)$") {
+        if ($Matches[2] -match $repoTraversalPattern) { throw "-$ParamName value '$Token' is not a valid GitHub repo (the repo name cannot be '.' or '..')" }
+        return [PSCustomObject]@{ IsWago = $false; ProjectId = $null; WagoRef = $null; IsGithub = $true; GithubRepo = "$($Matches[1])/$($Matches[2])" }
+    }
+    # github.com/owner/repo, with or without scheme/www, trailing slash, .git, or a subpath
+    if ($Token -match "(?i)^(?:https?://)?(?:www\.)?github\.com/($ownerPattern)/($repoPattern)(?:\.git)?(?:[/?#].*)?$") {
+        # Fix (verified empirically): $repoPattern's own character class
+        # already allows '.', so it greedily matches a trailing ".git" as
+        # part of group 2 itself before the dedicated (?:\.git)? group ever
+        # gets a look - the match still succeeds (nothing after requires
+        # backtracking), so ".git" is never actually stripped by the regex
+        # alone despite the comment above's intent. Stripped explicitly here
+        # instead of relying on the regex to have done it.
+        $repoCaptured = $Matches[2] -replace '(?i)\.git$', ''
+        if ($repoCaptured -match $repoTraversalPattern) { throw "-$ParamName value '$Token' is not a valid GitHub repo (the repo name cannot be '.' or '..')" }
+        return [PSCustomObject]@{ IsWago = $false; ProjectId = $null; WagoRef = $null; IsGithub = $true; GithubRepo = "$($Matches[1])/$repoCaptured" }
+    }
+
+    throw "-$ParamName value '$Token' is not a valid CurseForge project id, a wago:<slug-or-id> reference, a https://addons.wago.io/addons/<slug> URL, an owner/repo, or a https://github.com/<owner>/<repo> URL."
 }
 
 function ConvertTo-ExpandedTargetArray {
@@ -4275,6 +5094,14 @@ function Test-RecordMatchesTarget {
         [Parameter(Mandatory = $true)]$Target
     )
 
+    # Round 47 (GITHUB-SOURCE-SPEC.md 3.1): checked first, same as the Wago
+    # branch just below - a GitHub target never falls through to the
+    # numeric projectId compare.
+    if ($Target.IsGithub) {
+        if ($Record.source -ne 'github') { return $false }
+        if (-not $Record.repo) { return $false }
+        return ($Record.repo.ToLowerInvariant() -eq $Target.GithubRepo.ToLowerInvariant())
+    }
     if ($Target.IsWago) {
         if ($Record.source -ne 'wago') { return $false }
         $ref = $Target.WagoRef.ToLowerInvariant()
@@ -4283,6 +5110,7 @@ function Test-RecordMatchesTarget {
         return $false
     }
     if ($Record.source -eq 'wago') { return $false }
+    if ($Record.source -eq 'github') { return $false }
     if (-not $Record.projectId) { return $false }
     try {
         return ([int64]$Record.projectId -eq [int64]$Target.ProjectId)
@@ -4295,6 +5123,7 @@ function Get-TargetLabel {
     <# E12: a human-readable label for a target descriptor, for log messages and "not found" result rows. #>
     param([Parameter(Mandatory = $true)]$Target)
 
+    if ($Target.IsGithub) { return "github:$($Target.GithubRepo)" }
     if ($Target.IsWago) { return "wago:$($Target.WagoRef)" }
     return "project $($Target.ProjectId)"
 }
@@ -4315,6 +5144,13 @@ function Get-RecordBackupKey {
     if ($Record.source -eq 'wago') {
         $safeSlug = ($Record.slug -replace '[^a-zA-Z0-9-]', '_')
         return "wago-$safeSlug"
+    }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 3.1): mirrors the wago-<slug>
+    # sanitization exactly - "bart-dev-wow/AuraUpdater" becomes backup key
+    # "github-bart-dev-wow_AuraUpdater".
+    if ($Record.source -eq 'github') {
+        $safeRepo = ($Record.repo -replace '[^a-zA-Z0-9-]', '_')
+        return "github-$safeRepo"
     }
     return [string][int]$Record.projectId
 }
@@ -4589,7 +5425,7 @@ try {
                 }
                 $statusRows.Add([PSCustomObject]@{
                         Name        = $item.name
-                        Source      = $(if ($item.source -eq 'wago') { 'Wago' } else { 'CurseForge' })
+                        Source      = $(if ($item.source -eq 'wago') { 'Wago' } elseif ($item.source -eq 'github') { 'GitHub' } else { 'CurseForge' })
                         Version     = $item.version
                         FileId      = $item.fileId
                         InstalledAt = $item.installedAt
@@ -4955,12 +5791,14 @@ try {
             $removeProjectId = $null
             $removeFileId = $null
             $removeWagoSlug = $null
+            $removeRepo = $null
             if ($removeResult.Record) {
                 $removeProjectId = $removeResult.Record.projectId
                 $removeFileId = $removeResult.Record.fileId
                 $removeWagoSlug = $removeResult.Record.slug
+                $removeRepo = $removeResult.Record.repo
             }
-            $resultsRows.Add([PSCustomObject]@{ Status = $removeResult.Status; Name = $removeResult.Name; Version = $removeResult.Version; ProjectId = $removeProjectId; FileId = $removeFileId; WagoSlug = $removeWagoSlug })
+            $resultsRows.Add([PSCustomObject]@{ Status = $removeResult.Status; Name = $removeResult.Name; Version = $removeResult.Version; ProjectId = $removeProjectId; FileId = $removeFileId; WagoSlug = $removeWagoSlug; Repo = $removeRepo })
             if ($removeResult.Removed -and $removeResult.Record) {
                 $config.Remove($removeResult.Record) | Out-Null
             }
@@ -4991,10 +5829,19 @@ try {
                 if (-not $existingDisplayName) {
                     $existingDisplayName = Get-TargetLabel $target
                 }
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $existingDisplayName; Version = $existing.version; ProjectId = $existing.projectId; FileId = $existing.fileId; WagoSlug = $existing.slug })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $existingDisplayName; Version = $existing.version; ProjectId = $existing.projectId; FileId = $existing.fileId; WagoSlug = $existing.slug; Repo = $existing.repo })
                 continue
             }
-            if ($target.IsWago) {
+            # Round 47 (GITHUB-SOURCE-SPEC.md 3.8): no other new code is
+            # needed in this block - the newly-added record's installedTag
+            # is $null, so the very next sync pass (this SAME run, since
+            # -Add falls through into the normal toSync loop exactly like a
+            # CurseForge/Wago add already does) runs Sync-SingleGithubAddon
+            # on it, which is where 3.7's adopt-in-place check or 3.3's
+            # first real install actually happens.
+            if ($target.IsGithub) {
+                $newRecord = New-GithubAddonRecord -Repo $target.GithubRepo
+            } elseif ($target.IsWago) {
                 $newRecord = New-WagoAddonRecord -Slug $target.WagoRef
             } else {
                 $newRecord = New-AddonRecord -ProjectId $target.ProjectId
@@ -5043,16 +5890,16 @@ try {
         foreach ($folderName in $adoptFolderNames) {
             $folderPath = Join-Path -Path $effectiveAddonsPath -ChildPath $folderName
             if (-not (Test-Path -LiteralPath $folderPath -PathType Container)) {
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'folder not found' })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Repo = $null; Folders = @($folderName); Reason = 'folder not found' })
                 continue
             }
             if ($ownedFoldersForAdopt.Contains($folderName.ToLowerInvariant())) {
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'already tracked' })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Repo = $null; Folders = @($folderName); Reason = 'already tracked' })
                 continue
             }
             $adoptTocInfo = Get-FolderTocInfo -FolderPath $folderPath -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
             if ((-not $adoptTocInfo.curseId) -and (-not $adoptTocInfo.wagoId)) {
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'no recognizable id' })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Repo = $null; Folders = @($folderName); Reason = 'no recognizable id' })
                 continue
             }
 
@@ -5061,7 +5908,7 @@ try {
             if ($adoptTocInfo.curseId) {
                 $adoptParsedCurseId = [int64]0
                 if (-not [int64]::TryParse($adoptTocInfo.curseId, [ref]$adoptParsedCurseId)) {
-                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Folders = @($folderName); Reason = 'id not usable' })
+                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $folderName; Version = ''; ProjectId = $null; FileId = $null; WagoSlug = $null; Repo = $null; Folders = @($folderName); Reason = 'id not usable' })
                     continue
                 }
                 $adoptGroupKey = "cf:$adoptParsedCurseId"
@@ -5109,7 +5956,7 @@ try {
                 $adoptExistingLabel = $adoptExisting.name
                 if (-not $adoptExistingLabel) { $adoptExistingLabel = Get-TargetLabel $adoptGroupTarget }
                 foreach ($f in $adoptGroupFolders) {
-                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $f; Version = ''; ProjectId = $adoptExisting.projectId; FileId = $adoptExisting.fileId; WagoSlug = $adoptExisting.slug; Folders = @($f); Reason = "id already tracked as $adoptExistingLabel" })
+                    $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = $f; Version = ''; ProjectId = $adoptExisting.projectId; FileId = $adoptExisting.fileId; WagoSlug = $adoptExisting.slug; Repo = $adoptExisting.repo; Folders = @($f); Reason = "id already tracked as $adoptExistingLabel" })
                 }
                 continue
             }
@@ -5139,7 +5986,7 @@ try {
 
             $config.Add($newAdoptRecord)
             Write-Log -Level 'INFO' -Message "Adopted $(Get-TargetLabel $adoptGroupTarget) ($adoptName) folders: $($adoptGroupFolders -join ', ')"
-            $resultsRows.Add([PSCustomObject]@{ Status = 'Adopted'; Name = $adoptName; Version = $newAdoptRecord.version; ProjectId = $newAdoptRecord.projectId; FileId = $newAdoptRecord.fileId; WagoSlug = $newAdoptRecord.slug; Folders = $adoptGroupFolders; Reason = $null })
+            $resultsRows.Add([PSCustomObject]@{ Status = 'Adopted'; Name = $adoptName; Version = $newAdoptRecord.version; ProjectId = $newAdoptRecord.projectId; FileId = $newAdoptRecord.fileId; WagoSlug = $newAdoptRecord.slug; Repo = $newAdoptRecord.repo; Folders = $adoptGroupFolders; Reason = $null })
         }
     }
 
@@ -5160,10 +6007,10 @@ try {
                     $displayName = Get-TargetLabel $target
                 }
                 Write-Log -Level 'INFO' -Message "Unpinned $(Get-TargetLabel $target) ($displayName)"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Unpinned'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Unpinned'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug; Repo = $match.repo })
             } else {
                 Write-Log -Level 'WARN' -Message "Unpin target $(Get-TargetLabel $target) not found in addons.json"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }) })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }); Repo = $(if ($target.IsGithub) { $target.GithubRepo }) })
             }
         }
     }
@@ -5184,10 +6031,10 @@ try {
                     $displayName = Get-TargetLabel $target
                 }
                 Write-Log -Level 'INFO' -Message "Ignoring updates for $(Get-TargetLabel $target) ($displayName)"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Ignored'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Ignored'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug; Repo = $match.repo })
             } else {
                 Write-Log -Level 'WARN' -Message "Ignore target $(Get-TargetLabel $target) not found in addons.json"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }) })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }); Repo = $(if ($target.IsGithub) { $target.GithubRepo }) })
             }
         }
     }
@@ -5208,10 +6055,10 @@ try {
                     $displayName = Get-TargetLabel $target
                 }
                 Write-Log -Level 'INFO' -Message "Stopped ignoring updates for $(Get-TargetLabel $target) ($displayName)"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Unignored'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Unignored'; Name = $displayName; Version = $match.version; ProjectId = $match.projectId; FileId = $match.fileId; WagoSlug = $match.slug; Repo = $match.repo })
             } else {
                 Write-Log -Level 'WARN' -Message "Unignore target $(Get-TargetLabel $target) not found in addons.json"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }) })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }); Repo = $(if ($target.IsGithub) { $target.GithubRepo }) })
             }
         }
     }
@@ -5232,10 +6079,10 @@ try {
                 if (Get-Member -InputObject $rollbackResult -Name 'FileId' -MemberType NoteProperty) {
                     $rollbackFileId = $rollbackResult.FileId
                 }
-                $resultsRows.Add([PSCustomObject]@{ Status = $rollbackResult.Status; Name = $rollbackResult.Name; Version = $rollbackResult.Version; ProjectId = $match.projectId; FileId = $rollbackFileId; WagoSlug = $match.slug })
+                $resultsRows.Add([PSCustomObject]@{ Status = $rollbackResult.Status; Name = $rollbackResult.Name; Version = $rollbackResult.Version; ProjectId = $match.projectId; FileId = $rollbackFileId; WagoSlug = $match.slug; Repo = $match.repo })
             } else {
                 Write-Log -Level 'WARN' -Message "Rollback target $(Get-TargetLabel $target) not found in addons.json"
-                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }) })
+                $resultsRows.Add([PSCustomObject]@{ Status = 'Skipped'; Name = (Get-TargetLabel $target); Version = ''; ProjectId = $(if (-not $target.IsWago) { $target.ProjectId }); FileId = $null; WagoSlug = $(if ($target.IsWago) { $target.WagoRef }); Repo = $(if ($target.IsGithub) { $target.GithubRepo }) })
             }
         }
     }
@@ -5289,6 +6136,26 @@ try {
         }
     }
 
+    # Round 47 (GITHUB-SOURCE-SPEC.md 3.3a): a lowercased-folder-name ->
+    # owning-record-identity-string map, built ONCE per run over EVERY
+    # record in $config (not just $toSync - folder ownership is a fact
+    # about the whole tracked set, not just what this run happens to sync),
+    # so Sync-SingleGithubAddon's adopt-in-place and pre-install steps can
+    # refuse to adopt/install over a folder a DIFFERENT tracked addon
+    # already owns - the same protection -Adopt's own $ownedFoldersForAdopt
+    # guard gives the general adopt flow. Identity strings match exactly
+    # what Get-TargetLabel/the label branches elsewhere in this file already
+    # produce for that record's own source ("github:<repo>" / "wago:<slug>"
+    # / the bare projectId string).
+    $claimedFolders = New-Object -TypeName 'System.Collections.Generic.Dictionary[string,string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $config) {
+        if (-not $item.folders) { continue }
+        $ownerIdentity = if ($item.source -eq 'github') { "github:$($item.repo)" } elseif ($item.source -eq 'wago') { "wago:$($item.slug)" } else { "$($item.projectId)" }
+        foreach ($f in $item.folders) {
+            if ($f) { $claimedFolders[[string]$f] = $ownerIdentity }
+        }
+    }
+
     # CS1: n-of-N progress reporting (UX-SPEC.md section 4.1). $progressIndex
     # is the count of addons already FINISHED (bumped after each one below),
     # so a determinate bar can render index/total at any point mid-run. A
@@ -5329,13 +6196,15 @@ try {
         if (-not $progressLabel) {
             if ($record.source -eq 'wago') {
                 $progressLabel = "wago:$($record.slug)"
+            } elseif ($record.source -eq 'github') {
+                $progressLabel = "github:$($record.repo)"
             } else {
                 $progressLabel = "project $($record.projectId)"
             }
         }
         Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $progressLabel -Phase 'checking'
 
-        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
+        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface -GithubToken $settings.githubToken -ClaimedFolders $claimedFolders
 
         # For a real (non-DryRun) Installed/Updated row, Sync-SingleAddon
         # mutates $record.fileId in place before returning, so $record.fileId
@@ -5349,7 +6218,7 @@ try {
         if (Get-Member -InputObject $rowResult -Name 'FileId' -MemberType NoteProperty) {
             $rowFileId = $rowResult.FileId
         }
-        $resultsRows.Add([PSCustomObject]@{ Status = $rowResult.Status; Name = $rowResult.Name; Version = $rowResult.Version; ProjectId = $record.projectId; FileId = $rowFileId; WagoSlug = $record.slug })
+        $resultsRows.Add([PSCustomObject]@{ Status = $rowResult.Status; Name = $rowResult.Name; Version = $rowResult.Version; ProjectId = $record.projectId; FileId = $rowFileId; WagoSlug = $record.slug; Repo = $record.repo })
 
         # CS1: bump index (this addon is now finished, one way or another)
         # and write the final per-addon phase, mapped from the same
@@ -5382,12 +6251,23 @@ try {
     if ((-not $DryRun) -and ($addedRecords.Count -gt 0)) {
         $placeholders = New-Object 'System.Collections.Generic.List[object]'
         foreach ($r in $addedRecords) {
-            if (-not $r.fileId) {
+            # Round 47 (GITHUB-SOURCE-SPEC.md 2.2): fileId is NEVER set on a
+            # GitHub record - installedTag is this source's identity field
+            # instead, and stays $null exactly as long as no installable
+            # file has been found either (unset from adopt-in-place through
+            # a Failed/Skipped return, set the moment Sync-SingleGithubAddon
+            # actually installs/adopts something). Without this branch,
+            # every freshly-added GitHub addon - even one that installed
+            # successfully this same run - would be misdiagnosed as "never
+            # got an installable file" and silently removed from addons.json
+            # right after being created.
+            $gotInstallableFile = if ($r.source -eq 'github') { [bool]$r.installedTag } else { [bool]$r.fileId }
+            if (-not $gotInstallableFile) {
                 $placeholders.Add($r)
             }
         }
         foreach ($placeholder in $placeholders) {
-            $placeholderLabel = if ($placeholder.source -eq 'wago') { "wago:$($placeholder.slug)" } else { "Project $($placeholder.projectId)" }
+            $placeholderLabel = if ($placeholder.source -eq 'wago') { "wago:$($placeholder.slug)" } elseif ($placeholder.source -eq 'github') { "github:$($placeholder.repo)" } else { "Project $($placeholder.projectId)" }
             Write-Log -Level 'WARN' -Message "$placeholderLabel was not added: no installable file was found, so no record was saved"
             $config.Remove($placeholder) | Out-Null
         }
@@ -5446,6 +6326,10 @@ try {
                     projectId = $r.ProjectId
                     fileId    = $r.FileId
                     wagoSlug  = $r.WagoSlug
+                    # Round 47 (GITHUB-SOURCE-SPEC.md 4.7): additive - null
+                    # on every non-GitHub row, same "generic result-row clone"
+                    # discipline WagoSlug already established.
+                    repo      = $r.Repo
                     # ADOPT-SPEC.md 2.8: additive - null/empty on every
                     # non-adopt row, same as the existing WagoSlug field is
                     # null on a CurseForge row.

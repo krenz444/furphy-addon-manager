@@ -1,5 +1,163 @@
 # Furphy Addon Manager - changelog
 
+## Round 47 (1.27.0: guild addons on GitHub update like everything else)
+
+GitHub joins CurseForge and Wago Addons as a third addon source, dispatched
+through the SAME staging/backup/rollback/adopt machinery every other source
+already uses - Eric's own guild ships two addons this way
+(`bart-dev-wow/AuraUpdater`, `bart-dev-wow/TimelineReminders`), some guilds'
+releases private and gated behind a shared token. `GITHUB-SOURCE-SPEC.md`
+(new this round, shipped in ROOT) is the authoritative design/rationale
+document, including a security review's fold-in log; `SPEC.md`'s own new
+Round 47 section is the terse "what is true" cross-reference.
+
+**Settings gets a "GitHub addons" card** (behind Advanced, where the removed
+CurseForge API key field used to live): a token field (password-style,
+show/hide, Save/Remove) for guilds that gate their addons behind one, and
+"Add an addon from GitHub" (paste a `github.com/owner/repo` link, or type
+`owner/repo`). "Get new addons" gets a matching small "From a GitHub link"
+entry. My Addons rows get a "GitHub" source badge alongside CurseForge/Wago.
+A tracked GitHub addon's Versions tab shows Installed/Latest tags and an
+Update button - no release-history browsing this round (a deliberate
+non-goal).
+
+**Already have the addon installed** (from Eric's old one-off script, or a
+manual download)? Paste its GitHub link anyway - Furphy recognizes the
+folder already sitting under its repo's own name and adopts it in place,
+reading the version straight from its `.toc`, no re-download.
+
+**The token never leaves this PC except to GitHub itself.** It lives in
+plain text in `settings.json` (the same trust boundary the old one-off
+script's own config file already was), is read once per CLI run straight
+from disk (never a command-line argument, never written to a job's own
+command line or params), and is sent only to `api.github.com` - GitHub's
+own asset-by-id/zipball endpoints answer with a redirect to a pre-signed
+URL that needs no Authorization header at all, and this build's HTTP layer
+does not resend one across that redirect regardless (verified empirically,
+not just assumed). `GET /api/settings` never returns the raw token, only
+whether one is saved and its last four characters, for recognition. A
+defense-in-depth regex scrub catches a `github_pat_.../ghp_...`-shaped
+substring in any log line, on top of the primary control that no message
+this feature writes ever interpolates the token in the first place. A
+missing or wrong token gives one plain, actionable message either way:
+"This addon needs a GitHub token - paste it in Settings > GitHub addons."
+(GitHub answers a private repo's release lookup with the same 404 whether
+the token is absent, expired, or simply wrong - there is no way to tell
+those apart from the response alone, so Furphy doesn't pretend to.)
+
+**Under the hood:** a GitHub-sourced `addons.json` record carries `repo`,
+`installedTag` (the release's own `tag_name` - this source's version-
+identity field, the same role `fileId` plays for CurseForge), `assetName`
+(the `.zip` asset actually installed, or `"zipball"`), and a per-record
+`githubRateLimitedUntil` backoff so a shared guild token that hits GitHub's
+rate limit backs off on its own rather than every member's install
+re-hammering it. Asset selection prefers a release's `.zip` asset whose
+name contains the repo name, falling back to the release's own zipball
+(its `owner-repo-sha` wrapper stripped) when there is no `.zip` asset at
+all. A folder-ownership guard refuses to adopt or install over a folder a
+DIFFERENT tracked addon already owns - the same protection the general
+`-Adopt` flow already gives every other source, extended to this source's
+own automatic adopt-on-sync fast path (the only one with such a path
+inside a plain sync).
+
+<!-- ROUND47-COUNTS -->
+**Final verified counts (independent verifier, pass 3):** the full headless
+gate (`tests\run-all.ps1 -Only @('static','unit','spa')`) - static 7/7, unit
+467/467, spa 2/2 (harness 348/348, theme-audit 500/500) - ALL LAYERS PASSED
+in 120.4s. Every GitHub-source-relevant Pester file re-run one at a time
+(33 files: 13 `Cli.*` and 2 `Server.Github*` unit files, 5 `Cli.*` and 5
+`Github.*` integration files, 4 more `Server.*` unit files, 5 more
+`Server.*` integration files) - 385/385 passed, 0 failed (one
+`Server.Settings` integration run showed a single failure under back-to-
+back port reuse across 33 files run in sequence; an immediate isolated
+re-run of that same file, no code touched, came back 19/19 clean - a
+transient flake, not a regression). A fresh independent end-to-end pass
+against a real local GitHub-release stub on a scratch server (never the
+live install): private-repo add with a two-folder `.zip` asset, tag bump
++ check + update with a real backup zip, a zipball-only repo with its
+wrapper directory stripped, adopt-in-place with a byte-identical `.toc`
+and zero network calls, the missing-token error path, and a 5-way token-
+leak sweep (`sync.log`, `server.log`, `state.json`, `addons.json`, every
+job file, `GET /api/settings`, `GET /api/state`) plus a stub request-log
+Authorization audit - 55/55 passed, the fake token appearing nowhere
+except `settings.json` on disk (by design) and the Authorization header
+sent only to the release-lookup/asset endpoints. Parse-all (18 touched
+`.ps1` files, 0 errors) and `node --check` (`ui\app.js`,
+`tests\spa\harness.js`) both clean. No real GitHub call, no real token,
+and no write to the live install anywhere in this verification pass.
+
+**Docs+Tests package verification (this entry's own scope - Package A/B/C's
+own CLI/server/SPA behavior is verified in their own package work, not
+re-stated here):** files touched: `tests\fixtures\github-release-stub\
+GitHubReleaseStubServer.ps1` (extended, not rewritten from scratch -
+owner/repo parameterized, a token gate added to three routes, an
+asset-by-id route and a zipball route added, `/__control/requests` gained
+`hasAuthorization`/`authorizationMatched`), `tests\lib\common.ps1`
+(`New-GitHubZipballFixtureZip` added; `Start-GitHubReleaseStubServer`
+gained 8 new optional parameters, all defaulting to today's exact
+self-update-fixture behavior; `Invoke-Api` gained an additive `RawText`
+field; `-ExtraAssets` now accepts byte-array content alongside its
+original string content), 9 new `tests\unit\*.Tests.ps1` files, 5 new
+`tests\integration\Github.*.Tests.ps1` files, README.md, README.txt,
+SPEC.md, SETTINGS-SPEC.md, UX-SPEC.md, this CHANGELOG.md entry, VERSION -
+23 files touched, 0 files outside that list read-modified (in particular:
+addon-sync.ps1, addon-server.ps1, ui\*, tests\spa\harness.js, and
+tests\spa\Run-SpaHarness.ps1 were never opened for writing by this
+package). Test counts (Invoke-Pester per file, one at a time, against the
+live build as Packages A/B landed it): unit 76/76 across the 9 new files
+(Cli.GithubUrlParse 27, Cli.GithubFolderSafety 6, Cli.GithubAssetSelect 4,
+Cli.GithubZipballNormalize 2, Cli.GithubAdoptFolderTocLooksLikeTag 6,
+Cli.GithubFolderClaimGuard 4, Cli.GithubRateLimitBackoff 8,
+Server.GithubTokenRedaction 14, Server.GithubSettingsView 5); integration
+10/10 across the 5 new files (Github.PublicRepoAddAndUpdate 1,
+Github.PrivateRepoNeedsToken 3, Github.AssetVsZipball 3,
+Github.AdoptInPlace 2, Github.TokenNeverInStateOrSettings 1) - 86/86 total,
+0 failed, run against real scratch WoW roots/app roots (Copy-Fixture/
+Copy-FurphyAppFiles) and a real local GitHub-release stub on the
+47950-47969 port range (Server.* files, none of which this package added,
+untouched), never the real WoW install and never a real GitHub token -
+every fixture token used is the literal `github_pat_TESTONLY_0000` or an
+equally obvious fake. One genuine, reusable finding surfaced while writing
+these tests and is folded into `New-GitHubZipballFixtureZip`'s own return
+statement and two test files' own assertions: wrapping a real
+`System.Collections.Generic.List[object]` in the `@()` array-subexpression
+operator throws a raw "Argument types do not match" `ArgumentException`
+when evaluated inside a Pester 3 `It` block on this exact build/Pester
+version (reproduced in complete isolation, unrelated to any addon-sync.ps1
+code) - worked around by reading `.Count`/index directly off the list
+(or `.ToArray()`) instead of wrapping it, and a helper's own `return`
+changed to `Write-Output -NoEnumerate` so a `[byte[]]` return value
+survives the call boundary without silently unrolling into a generic
+`Object[]` (PS 5.1's well-known "a function's own return unwraps an
+array" trap, hit here for the first time with a byte array specifically).
+Github.PrivateRepoNeedsToken.Tests.ps1's own 5-way leak check (server.log,
+sync.log, every file under `jobs\`, the raw text of `GET /api/state`, and
+the raw text of `GET /api/settings`) is the single most load-bearing
+assertion in this whole package and passed clean on first correct attempt
+(after fixing this test's own initial wrong assumption that a job's
+`results` row carries `failPhase` - it travels through `job.progress`
+instead, the same channel `ui\app.js`'s own `failureReason()` already
+reads it from). ASCII sweep: every new file and every line added to an
+existing file this package touched is 0 non-ASCII characters (checked
+programmatically, scoped to exactly the text this package added - the
+pre-existing prose in SPEC.md/UX-SPEC.md this package left untouched
+already carries non-ASCII em dashes from earlier rounds, same as every
+prior round's own docs-package note here). No disallowed AI-provider or
+model name appears anywhere in any touched file; no occurrence of the
+build's own scratch session path in any
+touched file (a grep for the literal session GUID found zero hits; the
+plain English word "scratchpad" appears twice in this file, both
+pre-existing, from earlier rounds, and neither is the build path). Live-
+safety snapshot (read-only checks, before and after this package's own
+work): production Run value unchanged (`"...\_retail_\AddonSync\host\
+bin\FurphyHost.exe" --tray`), Uninstall DisplayVersion 1.26.0 unchanged,
+live VERSION file 1.26.0 unchanged, tray pid 34108 (FurphyHost) still
+running throughout (plus a second FurphyHost pid 27116, present before
+this package started and unrelated to it) - this package never opened
+`C:\Program Files (x86)\World of Warcraft\_retail_\AddonSync`,
+`Interface\AddOns`, `WTF`, or the real `settings.json` for reading or
+writing at any point.
+
 ## Round 46 (1.26.0: the in-app Manage flow keeps your addons as they are)
 
 Round 45's own scope note (ADOPT-SPEC.md section 0) drew a deliberate line:

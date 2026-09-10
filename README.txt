@@ -1,7 +1,8 @@
 Furphy Addon Manager (AddonSync)
 =================================
-Keeps your retail addons updated from CurseForge and Wago Addons, and gives you a CurseForge-style app to manage
-them. No API key required for any of this - see NO API KEY NEEDED below.
+Keeps your retail addons updated from CurseForge, Wago Addons, and GitHub, and gives you a CurseForge-style app to
+manage them. No API key required for CurseForge or Wago - see NO API KEY NEEDED below. Some guilds ship their own
+addons as GitHub releases instead, sometimes gated behind a token the guild hands out - see ADDONS FROM GITHUB below.
 
 NEW INSTALL
   Download FurphyAddonManager-Setup.exe from the Releases page (or the
@@ -60,6 +61,22 @@ NO API KEY NEEDED
   Installing, updating, browsing and searching both CurseForge and Wago Addons all work with no sign-up, no
   account, and no key of any kind - there's nothing to configure.
 
+ADDONS FROM GITHUB (guild addons)
+  Some guilds ship their own addons as GitHub releases instead of CurseForge or Wago - sometimes as PRIVATE
+  releases, gated behind a token the guild hands out (often a Patreon perk). Furphy manages those too, exactly
+  like any CurseForge or Wago addon: checked, updated, pinned, rolled back.
+  - Public addon: paste its github.com/owner/repo link (Settings > GitHub addons, or "From a GitHub link" under
+    Get new addons) - no token needed.
+  - Private addon: paste the token your guild gave you into Settings > GitHub addons and hit Save, once. The
+    token stays on your own PC (it lives in your local settings.json, same as every other setting) and is only
+    ever sent to GitHub itself when Furphy checks that one addon - never to CurseForge, Wago, or anywhere else,
+    and Furphy never shows it back to you or writes it to any log file. If a token stops working (guilds rotate
+    these), Furphy just tells you to paste a fresh one.
+  - Already have the addon installed from an old script? Paste its GitHub link anyway - Furphy recognizes the
+    folder that's already there and starts managing it in place, no re-download.
+  - Once your GitHub addons show up in Furphy, any separate updater script or scheduled task you were using
+    before is no longer needed - you can delete it.
+
 THE APP
   My Addons       installed addons with version, update badges, status (up to date / update available / pinned /
                   ignored), per-addon menu: Update, Versions (install any specific version), Pin/Unpin, Ignore
@@ -89,7 +106,7 @@ FILES (this folder)
   Addon Manager.vbs   starts the server hidden if needed and opens the app window right away (native, or Edge as a fallback)
   ui\                 the app's HTML/JS/CSS (no internet resources, works offline except the addon sources)
   addons.json         your addon list and installed state (project id, file id, version, folders, pin/ignore flags)
-  settings.json       release channel, background-update flag, port
+  settings.json       release channel, background-update flag, port, GitHub token (if you pasted one)
   VERSION             the installed version (also reported by the app's Settings -> About)
   last-run.txt        result table of the most recent update run
   sync.log            everything the updater did          server.log   everything the server did

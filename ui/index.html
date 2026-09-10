@@ -26,6 +26,11 @@
   <symbol id="icon-kebab" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></symbol>
   <symbol id="icon-close" viewBox="0 0 24 24"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></symbol>
   <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A11 11 0 0 1 12 19c-7 0-11-7-11-7a20.7 20.7 0 0 1 4.2-5.2M9.9 4.2A10.4 10.4 0 0 1 12 4c7 0 11 7 11 7a20.6 20.6 0 0 1-2.5 3.5"/><path d="M14.1 14.1a3 3 0 1 1-4.2-4.2"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+  <!-- Round 47 (GitHub source): plain open-eye glyph for the token
+       show/hide toggle - aria-pressed communicates state, matching how
+       #density-toggle's segmented buttons already use aria state rather
+       than swapping icons, so no closed-eye variant is needed here. -->
+  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="icon-chevron-down" viewBox="0 0 24 24"><polyline points="6,9 12,15 18,9"/></symbol>
   <symbol id="icon-chevron-right" viewBox="0 0 24 24"><polyline points="9,6 15,12 9,18"/></symbol>
   <symbol id="icon-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15,3 21,3 21,9"/><line x1="10" y1="14" x2="21" y2="3"/></symbol>
@@ -1027,6 +1032,10 @@
           <div class="browse-fallback">
             <p class="muted-text"><button type="button" class="link-btn" id="btn-cf-web-search">Not on Wago? Try CurseForge</button></p>
             <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-link">Or type an addon's CurseForge ID number</button></p>
+            <!-- Round 47 (GITHUB-SOURCE-SPEC.md section 5.4, entry point 2):
+                 opens the same add-from-GitHub flow the Settings > GitHub
+                 addons card's own inline input uses. -->
+            <p class="muted-text"><button type="button" class="link-btn" id="btn-browse-add-github-link">From a GitHub link</button></p>
           </div>
         </div>
 
@@ -1231,6 +1240,39 @@
                     <input type="checkbox" id="toggle-cf-focus">
                     <span class="switch-track"><span class="switch-thumb"></span></span>
                   </label>
+                </div>
+              </section>
+
+              <!-- Round 47 (GITHUB-SOURCE-SPEC.md section 5.1): a guild's
+                   shared GitHub personal access token for private-release
+                   addons (AuraUpdater/TimelineReminders-shaped), plus a
+                   free-text "add by link" entry point. The token field is
+                   password-style (show/hide via #github-token-show, never
+                   echoed anywhere else in the DOM) - Views.settings.
+                   renderGithub paints hasGithubToken/githubTokenHint here,
+                   never the raw value (that never leaves settings.json). -->
+              <section class="settings-group" id="settings-github">
+                <h3>GitHub addons</h3>
+                <p class="muted-text">Some guilds share addons as private GitHub releases and give you a token. It stays on this PC and is only ever sent to GitHub.</p>
+                <div class="settings-row settings-row-col">
+                  <div class="settings-row-label">Token<button type="button" class="info-tip" tabindex="0" aria-label="More about Token" aria-describedby="app-tooltip" data-tooltip="Some guilds share addons as private GitHub releases and give you a token. It stays on this PC and is only ever sent to GitHub."><svg class="icon"><use href="#icon-info"></use></svg></button></div>
+                  <div class="token-input-row">
+                    <input type="password" id="github-token-input" placeholder="Paste your token" autocomplete="off">
+                    <button type="button" class="icon-btn" id="github-token-show" aria-label="Show token" aria-pressed="false"><svg class="icon"><use href="#icon-eye"></use></svg></button>
+                  </div>
+                  <p class="muted-text" id="github-token-status"></p>
+                  <div class="settings-row-actions">
+                    <button type="button" class="btn btn-outline" id="github-token-save">Save</button>
+                    <button type="button" class="btn btn-ghost" id="github-token-remove" hidden>Remove</button>
+                  </div>
+                </div>
+                <div class="settings-row settings-row-col">
+                  <div class="settings-row-label">Add an addon from GitHub</div>
+                  <div class="token-input-row">
+                    <input type="text" id="github-add-input" placeholder="github.com/owner/repo" autocomplete="off">
+                    <button type="button" class="btn btn-outline" id="github-add-submit">Add</button>
+                  </div>
+                  <p class="form-msg" id="github-add-error" hidden></p>
                 </div>
               </section>
 
@@ -1518,6 +1560,24 @@
       <!-- Review fix: was btn-accent. Round 34 removed the sidebar's accent
            CTA entirely, so nothing in the app is accent-colored any more. -->
       <button type="submit" class="btn btn-outline" id="add-addon-submit">Add</button>
+    </div>
+  </form>
+</div>
+
+<!-- Round 47 (GITHUB-SOURCE-SPEC.md section 5.4): the "From a GitHub link"
+     entry point (Get new addons) opens this same dialog the Settings
+     card's own inline input (#github-add-input) shares its submit logic
+     with (Actions.submitGithubAddInput) - just reading from
+     #github-add-dialog-input instead. -->
+<div class="dialog" id="dialog-github-add" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-github-add-title">
+  <h3 id="dialog-github-add-title">Add an addon from GitHub</h3>
+  <p class="muted-text">Paste a github.com/owner/repo link, or type owner/repo.</p>
+  <form id="github-add-form">
+    <input type="text" id="github-add-dialog-input" placeholder="github.com/owner/repo" autocomplete="off">
+    <p class="form-msg" id="github-add-dialog-error" hidden></p>
+    <div class="dialog-footer">
+      <button type="button" class="btn btn-ghost" id="github-add-dialog-cancel">Cancel</button>
+      <button type="submit" class="btn btn-outline" id="github-add-dialog-submit">Add</button>
     </div>
   </form>
 </div>

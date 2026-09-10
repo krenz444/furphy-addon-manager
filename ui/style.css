@@ -1305,6 +1305,15 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 .inline-form { display: flex; gap: 8px; }
 .inline-form input { flex: 1; }
 
+/* Round 47 (GitHub source, GITHUB-SOURCE-SPEC.md 5.1/5.4): an input paired
+   with one adjacent button - the token field's show/hide toggle, and the
+   "Add an addon from GitHub" free-text input's own Add button. Same shape
+   as .inline-form above, kept as its own name since the spec's own markup
+   names it and it needs to sit inside a .settings-row-col rather than a
+   bare row. */
+.token-input-row { display: flex; gap: 8px; align-items: center; }
+.token-input-row input { flex: 1; min-width: 0; }
+
 /* ==========================================================================
    Top bars / list summaries
    ========================================================================== */
@@ -1513,6 +1522,12 @@ input[type="text"]:focus-visible, input[type="search"]:focus-visible, input[type
 }
 .source-badge.is-cf { background: var(--accent-tint); color: var(--accent-hover); }
 .source-badge.is-wago { background: var(--info-tint); color: var(--info); }
+/* Round 47 (GitHub source, GITHUB-SOURCE-SPEC.md 5.5): reuses the existing
+   neutral tint pair every theme already defines (chip-muted/version-tag.
+   previous use the identical pairing) rather than adding a new per-theme
+   color - a third, distinct hue isn't needed for a source this SPA never
+   lets a player browse into existence (it's always added by hand). */
+.source-badge.is-github { background: var(--muted-tint); color: var(--text-muted); }
 
 /* E16: a small neutral secondary pill marking WHERE keyless-mode content
    came from - "Indexed"/"Live match" on a Browse card, "via addon-radar"/
@@ -2261,6 +2276,11 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
    dep-dot + name + button. */
 .compat-section { margin-top: 16px; }
 .compat-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Round 47 (GitHub source): the Versions tab's minimal Installed/Latest
+   rows for a GitHub addon (no release-history table - section 1's
+   non-goal) - reuses .settings-row's own divider styling, just wrapped so
+   it doesn't need a .settings-group ancestor to look right in the drawer. */
+.versions-simple-list { margin-bottom: 12px; }
 .versions-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; }
 .versions-table th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--text-faint); padding: 0 10px 4px; }
 .versions-table td { padding: 9px 10px; background: var(--bg-2); border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); font-size: 12.5px; vertical-align: middle; }

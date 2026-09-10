@@ -275,7 +275,14 @@ const Mock = (function () {
   // FLAVORS-SPEC.md CS-F4: activeFlavour/showTestRealms join the mock
   // settings shape too (S3.4 - same plain client-writable pattern as
   // adFilter/cfFocus), round-tripped by the PUT handler below.
-  const mockSettings = { releaseType: 1, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false, appUpdateAutoInstall: true };
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 4.2/5.8): mirrors the real
+  // server's Get-SettingsView - the raw githubToken string itself is never
+  // stored on this object (or anywhere else this mock keeps state) at all,
+  // only the two view fields a real GET /api/settings would ever expose.
+  // The PUT handler below derives githubTokenHint (last 4 chars) from
+  // whatever was typed at save time and then discards the rest, same as
+  // the real Handle-SettingsPut never round-tripping the value back out.
+  const mockSettings = { releaseType: 1, port: 47831, adFilter: true, cfFocus: true, hostWindow: null, backgroundUpdates: false, backgroundIntervalMinutes: 120, runAtStartup: false, activeFlavour: "retail", showTestRealms: false, appUpdateAutoInstall: true, hasGithubToken: false, githubTokenHint: null };
 
   // FLAVORS-SPEC.md CS-F4 (section 8's own acceptance item / task brief's own
   // "?mock=1&flavours=3" verify step): ?mock=1&flavours=N (2-4) fakes an
@@ -412,7 +419,11 @@ const Mock = (function () {
     // My Addons source badge, the drawer's Wago branches, and "Also on
     // CurseForge" (curseId set, matching a real dual-hosted addon in spirit)
     // without the real server.
-    { name: "Simple Damage Meter", projectId: null, fileId: "r7k2m9q1", version: "3.4.0", fileName: "simple-damage-meter-r7k2m9q1.zip", installedAt: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), folders: ["SimpleDamageMeter"], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: "SDM001", slug: "simple-damage-meter", curseId: "654321", updateAvailable: { fileId: "r8n4p2s3", version: "3.5.0" } }
+    { name: "Simple Damage Meter", projectId: null, fileId: "r7k2m9q1", version: "3.4.0", fileName: "simple-damage-meter-r7k2m9q1.zip", installedAt: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), folders: ["SimpleDamageMeter"], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "wago", wagoId: "SDM001", slug: "simple-damage-meter", curseId: "654321", updateAvailable: { fileId: "r8n4p2s3", version: "3.5.0" } },
+    // Round 47 (GitHub third source): a GitHub-sourced tracked addon,
+    // exercising the My Addons source badge, the drawer's GitHub branches,
+    // and the minimal Versions tab tag display without the real server.
+    { name: "TimelineReminders", projectId: null, fileId: null, version: "v454", fileName: null, installedAt: new Date(Date.now() - 1 * 24 * 3600e3).toISOString(), folders: ["TimelineReminders"], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "github", repo: "bart-dev-wow/TimelineReminders", installedTag: "v454", assetName: null, updateAvailable: { fileId: null, version: "v455" } }
   ];
 
   // Round 32 (WAGO-BROWSE-SPEC.md): the original 4-entry fixture is kept
@@ -636,7 +647,7 @@ const Mock = (function () {
   // compares against it rather than bare a.projectId. Hoisted to module
   // scope (CS1) so both finalizeJobResults and the progress-step builder
   // below share one definition.
-  function mockKey(a) { return a.source === "wago" ? "wago:" + a.slug : a.projectId; }
+  function mockKey(a) { return a.source === "wago" ? "wago:" + a.slug : (a.source === "github" ? "github:" + a.repo : a.projectId); }
 
   // CS1 (UX-SPEC.md section 4.1/4.3): job kinds whose progress the real CLI
   // reports via progress.json - the same job kinds addon-server.ps1 threads
@@ -735,6 +746,22 @@ const Mock = (function () {
           const rec = { name: name, projectId: null, fileId: fid, version: "1.0.0", fileName: name + "-1.0.0.zip", installedAt: new Date().toISOString(), folders: [name], author: null, ignoreUpdates: false, pinnedFileId: params.fileId || null, releaseType: null, source: "wago", wagoId: null, slug: slug, curseId: null, updateAvailable: null };
           addons.push(rec);
           job.results = [{ status: "Installed", name: name, version: "1.0.0", projectId: null, fileId: fid, wagoSlug: slug }];
+        } else if (params.source === "github" && params.repo) {
+          // Round 47 (GITHUB-SOURCE-SPEC.md section 4.5/3.8): a brand-new
+          // GitHub add posts {source:'github', repo} - mirrors the wago
+          // branch just above exactly, keyed on repo instead of slug, and
+          // (decision 3) leaves installedTag/assetName null on the fresh
+          // record - a real CLI would try adopt-in-place/first install
+          // next; this mock has no filesystem to adopt from, so it always
+          // lands on a fresh "Installed" record, same simplification the
+          // wago branch above already makes for its own fresh add.
+          const repo = params.repo;
+          const existing = addons.find(function (a) { return a.source === "github" && a.repo === repo; });
+          if (existing) { job.results = [{ status: "Skipped", name: existing.name, version: existing.version, projectId: null, fileId: null, wagoSlug: null }]; return; }
+          const repoName = repo.replace(/^.*\//, "");
+          const rec = { name: repoName, projectId: null, fileId: null, version: "1.0.0", fileName: null, installedAt: new Date().toISOString(), folders: [repoName], author: null, ignoreUpdates: false, pinnedFileId: null, releaseType: null, source: "github", repo: repo, installedTag: "1.0.0", assetName: repoName + "-1.0.0.zip", updateAvailable: null };
+          addons.push(rec);
+          job.results = [{ status: "Installed", name: repoName, version: "1.0.0", projectId: null, fileId: null, wagoSlug: null }];
         } else {
           const pid = params.projectId;
           const name = "New Addon " + pid;
@@ -951,7 +978,9 @@ const Mock = (function () {
     } else if (kind === "check") {
       targets = addons.map(function (a) { return { label: a.name, ref: a, status: "Up-to-date" }; });
     } else if (kind === "add") {
-      const label = (params && params.source === "wago" && params.slug) ? ("New Wago Addon (" + params.slug + ")") : ("New Addon " + (params && params.projectId));
+      const label = (params && params.source === "wago" && params.slug) ? ("New Wago Addon (" + params.slug + ")")
+        : (params && params.source === "github" && params.repo) ? ("New GitHub Addon (" + params.repo + ")")
+        : ("New Addon " + (params && params.projectId));
       targets = [{ label: label, ref: null, status: "Installed" }];
     } else if (kind === "install") {
       const a = addons.find(function (x) { return mockKey(x) === (params && params.projectId); });
@@ -1322,6 +1351,22 @@ const Mock = (function () {
         }
         if (typeof body.showTestRealms === "boolean") mockSettings.showTestRealms = body.showTestRealms;
         if (typeof body.appUpdateAutoInstall === "boolean") mockSettings.appUpdateAutoInstall = body.appUpdateAutoInstall;
+        // Round 47 (GITHUB-SOURCE-SPEC.md section 4.2/4.3): mirrors
+        // Handle-SettingsPut's own clear semantics - an empty string clears
+        // (Remove), a non-empty string sets (Save), omitting the field
+        // entirely leaves whatever was saved before untouched. The raw
+        // value is never stored anywhere this mock keeps state - only the
+        // two view fields a real GET /api/settings would ever expose.
+        if (typeof body.githubToken === "string") {
+          const tok = body.githubToken;
+          if (tok.trim().length === 0) {
+            mockSettings.hasGithubToken = false;
+            mockSettings.githubTokenHint = null;
+          } else {
+            mockSettings.hasGithubToken = true;
+            mockSettings.githubTokenHint = tok.length <= 4 ? tok : tok.slice(-4);
+          }
+        }
         return currentSettings();
       }
       // Round 18 (tray stage B): fake tray/startup endpoints - see mockTray above.
@@ -1603,7 +1648,11 @@ const Mock = (function () {
       // FLAVORS-SPEC.md CS-F4 (S3.4/S5.2)
       activeFlavour: mockSettings.activeFlavour, showTestRealms: mockSettings.showTestRealms,
       // APP-UPDATE-SPEC.md section 6
-      appUpdateAutoInstall: mockSettings.appUpdateAutoInstall
+      appUpdateAutoInstall: mockSettings.appUpdateAutoInstall,
+      // Round 47 (GITHUB-SOURCE-SPEC.md section 4.2): view fields only -
+      // the raw token is never part of this response, mirroring
+      // Get-SettingsView never returning it either.
+      hasGithubToken: mockSettings.hasGithubToken, githubTokenHint: mockSettings.githubTokenHint
     };
   }
 })();
@@ -1741,6 +1790,13 @@ const Utils = (function () {
   // "wago:..." key passes through untouched instead of becoming NaN.
   function normalizeId(id) {
     if (typeof id === "string" && id.toLowerCase().indexOf("wago:") === 0) return id;
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7, finding I/10's own gap):
+    // mirrors the wago branch above exactly - without this, Drawer.open's
+    // own `const key = Utils.normalizeId(pid)` silently turns a
+    // "github:owner/repo" key into NaN (the fallthrough Number(id) below)
+    // BEFORE addonByProjectId's own new github branch ever gets a string
+    // to match against, so that fix alone never actually fires end to end.
+    if (typeof id === "string" && id.toLowerCase().indexOf("github:") === 0) return id;
     return Number(id);
   }
 
@@ -2440,6 +2496,10 @@ const Store = (function () {
   // start a job now goes through this instead.
   function addonKey(addon) {
     if (addon && addon.source === "wago") return "wago:" + addon.slug;
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7): mirrors the wago branch
+    // above exactly - a GitHub record has no projectId either (2.1), so its
+    // stable key is "github:owner/repo" instead.
+    if (addon && addon.source === "github") return "github:" + addon.repo;
     return addon ? addon.projectId : null;
   }
 
@@ -2450,6 +2510,17 @@ const Store = (function () {
       return state.addons.find(function (a) {
         return a.source === "wago" && (((a.slug || "").toLowerCase() === ref) || ((a.wagoId || "").toLowerCase() === ref));
       });
+    }
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7, finding I/10's fix): the
+    // REVERSE of addonKey's own github branch above - without this, every
+    // "github:owner/repo" key addonKey now produces resolves to nothing
+    // here, which left Components.Drawer.open() treating every GitHub
+    // addon as untracked (tracked: false) and firing a pointless
+    // CurseForge-keyless enrichment call for a repo with no CurseForge
+    // project at all - see Drawer.open's own isGithub branch below.
+    if (typeof key === "string" && key.toLowerCase().indexOf("github:") === 0) {
+      const ref = key.slice(7).toLowerCase();
+      return state.addons.find(function (a) { return a.source === "github" && (a.repo || "").toLowerCase() === ref; });
     }
     return state.addons.find(function (a) { return a.projectId === key; });
   }
@@ -2710,6 +2781,18 @@ Components.Dialogs = (function () {
   }
   function closeAdd() { hide("add"); }
 
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5.4): same show/hide pattern as
+  // openAdd/closeAdd just above - Entry point 2 ("From a GitHub link" in
+  // Get new addons) opens this; Entry point 1 (the Settings card's own
+  // inline input) never opens a dialog at all, it already lives on a page.
+  function openGithubAdd() {
+    Utils.qs("#github-add-dialog-input").value = "";
+    Utils.qs("#github-add-dialog-error").hidden = true;
+    show("github-add");
+    setTimeout(function () { Utils.qs("#github-add-dialog-input").focus(); }, 160);
+  }
+  function closeGithubAdd() { hide("github-add"); }
+
   // E18: first-run welcome (Components.Welcome builds its content; this just
   // owns the shared show/hide/backdrop/Esc plumbing, same as add/confirm).
   function openWelcome() {
@@ -2753,11 +2836,13 @@ Components.Dialogs = (function () {
   function backdropClicked() {
     if (openName === "confirm") resolveConfirm(false);
     else if (openName === "add") closeAdd();
+    else if (openName === "github-add") closeGithubAdd();
     else if (openName === "welcome") closeWelcome();
   }
   function escPressed() {
     if (openName === "confirm") { resolveConfirm(false); return true; }
     if (openName === "add") { closeAdd(); return true; }
+    if (openName === "github-add") { closeGithubAdd(); return true; }
     if (openName === "welcome") { closeWelcome(); return true; }
     return false;
   }
@@ -2793,6 +2878,7 @@ Components.Dialogs = (function () {
   return {
     openAdd: openAdd, closeAdd: closeAdd, confirm: confirm, resolveConfirm: resolveConfirm,
     openWelcome: openWelcome, closeWelcome: closeWelcome,
+    openGithubAdd: openGithubAdd, closeGithubAdd: closeGithubAdd,
     backdropClicked: backdropClicked, escPressed: escPressed, isOpen: isOpen,
     trapTab: trapTab
   };
@@ -3443,13 +3529,19 @@ Components.Drawer = (function () {
     // read source off of yet - see Views.browse.card).
     const key = Utils.normalizeId(pid);
     const isWago = opts.source === "wago" || (typeof key === "string" && key.toLowerCase().indexOf("wago:") === 0);
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7, finding I/10): mirrors
+    // isWago exactly - a GitHub row's key is "github:owner/repo" (Store.
+    // addonKey), so the same string-prefix check identifies it here.
+    const isGithub = opts.source === "github" || (typeof key === "string" && key.toLowerCase().indexOf("github:") === 0);
     const addon = Store.addonByProjectId(key);
     const slug = opts.slug || (addon ? addon.slug : null) || (isWago && typeof key === "string" ? key.slice(5) : null);
     // Round 16 (E22, CurseForge key removal): every CurseForge-sourced
     // drawer is keyless now (the old keyed 'curseforge' source, fed by
     // Api.cfMod, is gone) - every render function below reads
     // Store.state.drawer.enrich, populated via /api/cf/enrich (loadEnrich).
-    const source = isWago ? "wago" : "cf-keyless";
+    // Round 47: third arm for GitHub - a GitHub record's own addon.repo is
+    // its identity, not a CurseForge-keyless enrichment target at all.
+    const source = isWago ? "wago" : (isGithub ? "github" : "cf-keyless");
     // Round 15 (OverlayTracker): open() can be called again to re-target an
     // already-open drawer at a different addon (no intervening close()) -
     // only count the 0->1 transition, never a re-open while already open.
@@ -3483,7 +3575,13 @@ Components.Drawer = (function () {
     });
     renderHeader();
     selectTab(Store.state.drawer.tab);
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7): GitHub gives no author/
+    // description to enrich (2.1) - no network call at all here, same as
+    // Wago's own dedicated branch above skips loadEnrich (the CurseForge-
+    // keyless enrichment call has no CurseForge project id to look up for
+    // a repo).
     if (isWago) { loadWagoAddon(); }
+    else if (isGithub) { /* no fetch - see comment above */ }
     else { loadEnrich(); }
   }
 
@@ -3697,6 +3795,13 @@ Components.Drawer = (function () {
   function renderHeader() {
     const d = Store.state.drawer;
     if (d.source === "wago") { renderWagoHeader(); return; }
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5, quality follow-up beyond
+    // the spec's own literal text): the CurseForge-keyless header below
+    // this guard unconditionally pushes a "CurseForge" external-link
+    // button and reads d.enrich (never populated for GitHub - Drawer.open
+    // skips loadEnrich per 5.7) - left unguarded, a GitHub addon's header
+    // would show a nonsensical CurseForge link and no source badge at all.
+    if (d.source === "github") { renderGithubHeader(); return; }
     const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
     // Round 16 (E22, CurseForge key removal): every CurseForge-sourced
     // drawer is keyless now (source is always 'cf-keyless') - this header
@@ -3822,6 +3927,40 @@ Components.Drawer = (function () {
     children.forEach(function (c) { if (c) container.appendChild(c); });
   }
 
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5, quality follow-up): GitHub's
+  // own header - deliberately minimal (GitHub gives Furphy no downloads/
+  // likes/last-updated metadata to show, 2.1), just the name, the source
+  // badge, a plain link out to the repo itself, and the same generic
+  // primary action button every other source already uses.
+  function renderGithubHeader() {
+    const d = Store.state.drawer;
+    const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
+    const repo = addon ? addon.repo : (typeof d.projectId === "string" && d.projectId.toLowerCase().indexOf("github:") === 0 ? d.projectId.slice(7) : null);
+    const name = addon ? addon.name : (repo ? repo.replace(/^.*\//, "") : "GitHub addon");
+
+    const children = [
+      Utils.el("div", { class: "drawer-header-top" }, [
+        Components.Logo.build({ projectId: null, name: name }, 56),
+        Utils.el("div", {}, [
+          Utils.el("div", { class: "drawer-title" }, [name])
+        ])
+      ]),
+      Utils.el("span", { class: "source-badge is-github" }, ["GitHub"])
+    ];
+
+    if (repo) {
+      children.push(Utils.el("div", { class: "drawer-links" }, [
+        Utils.el("a", { class: "btn btn-outline", href: "https://github.com/" + repo, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "GitHub"])
+      ]));
+    }
+
+    children.push(Utils.el("div", { class: "drawer-primary-action" }, [primaryActionButton(addon, null)]));
+
+    const container = Utils.qs("#drawer-header");
+    container.textContent = "";
+    children.forEach(function (c) { if (c) container.appendChild(c); });
+  }
+
   // Review fix: these were all btn-accent, which meant the drawer's own
   // primary action rendered in the exact same accent color as the sidebar's
   // old persistent CTA whenever the drawer was open - two accent buttons on
@@ -3868,7 +4007,23 @@ Components.Drawer = (function () {
 
   function renderOverview() {
     if (Store.state.drawer.source === "wago") { renderWagoOverview(); return; }
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5, quality follow-up): left
+    // unguarded, renderKeylessOverview's own "!d.enrich" branch shows
+    // "Loading description..." forever for a GitHub addon (d.enrich is
+    // never populated - Drawer.open skips loadEnrich per 5.7), since
+    // nothing ever resolves that promise. Same non-goal as the changelog/
+    // screenshots tabs (section 1: no rich release-history for GitHub) -
+    // this is the identical honest-empty-state treatment those already get.
+    if (Store.state.drawer.source === "github") { renderGithubOverview(); return; }
     renderKeylessOverview();
+  }
+
+  function renderGithubOverview() {
+    const panel = Utils.qs("#drawer-panel-overview");
+    panel.textContent = "";
+    panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["GitHub doesn't give Furphy a description to show here."]));
+    renderCompat(panel);
+    renderDependencies(panel);
   }
 
   // E16: Overview for the drawer's (only, since Round 16's key removal)
@@ -4098,10 +4253,45 @@ Components.Drawer = (function () {
     return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.addWagoWithVersion(d.slug, relId); } }, ["Install"]);
   }
 
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7): deliberately minimal - no
+  // release-history browse (non-goal, section 1). Shows exactly what is
+  // known without a new network call the drawer does not already make;
+  // resolves `addon` via the addonByProjectId fix above, so `d.tracked`
+  // and the Update button below now work for a real GitHub row.
+  function renderGithubVersions() {
+    const panel = Utils.qs("#drawer-panel-versions");
+    panel.textContent = "";
+    const d = Store.state.drawer;
+    const addon = d.tracked ? Store.addonByProjectId(d.projectId) : null;
+    const rows = [];
+    const installedTag = addon ? addon.installedTag : null;
+    rows.push(Utils.el("div", { class: "settings-row" }, [
+      Utils.el("div", { class: "settings-row-text" }, [
+        Utils.el("div", { class: "settings-row-label" }, ["Installed"]),
+        Utils.el("div", { class: "settings-row-value" }, [installedTag || "-"])
+      ])
+    ]));
+    if (addon && addon.updateAvailable && addon.updateAvailable.version) {
+      rows.push(Utils.el("div", { class: "settings-row" }, [
+        Utils.el("div", { class: "settings-row-text" }, [
+          Utils.el("div", { class: "settings-row-label" }, ["Latest"]),
+          Utils.el("div", { class: "settings-row-value" }, [addon.updateAvailable.version])
+        ]),
+        Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.startJob("sync", { ids: [Store.addonKey(addon)] }); } }, ["Update"])
+      ]));
+    }
+    panel.appendChild(Utils.el("div", { class: "versions-simple-list" }, rows));
+    panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["Furphy shows the installed and latest release tag for GitHub addons - full release history isn't browsable here."]));
+  }
+
   function renderVersions() {
     const panel = Utils.qs("#drawer-panel-versions");
     const d = Store.state.drawer;
     if (d.source === "wago") { renderWagoVersions(); return; }
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7): must come before the
+    // /api/addons/.../files fetch below (that endpoint is CF/Wago-only - a
+    // GitHub record carries no numeric projectId for it to key off at all).
+    if (d.source === "github") { renderGithubVersions(); return; }
     if (!d.files && !d.filesLoading) {
       d.filesLoading = true;
       const pid = projectId();
@@ -4241,9 +4431,15 @@ Components.Drawer = (function () {
 
     panel.textContent = "";
     panel.appendChild(Utils.el("p", { class: "rich-content muted-text" }, ["No changelog available."]));
-    panel.appendChild(Utils.el("div", { class: "btn-row" }, [
-      Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, (d.enrich && d.enrich.slug) || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"])
-    ]));
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.7): this fallthrough is the
+    // CORRECT behavior for a GitHub addon too (GitHub gives Furphy no
+    // changelog text at all) - only the "View on CurseForge.com" link
+    // itself must not show, since there is no CurseForge page for a repo.
+    if (d.source !== "github") {
+      panel.appendChild(Utils.el("div", { class: "btn-row" }, [
+        Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnCurseForge(d.projectId, (d.enrich && d.enrich.slug) || d.slug); } }, [Utils.icon("external"), "View on CurseForge.com"])
+      ]));
+    }
   }
 
   // E12: Wago's gallery shape is documented in SPEC as "inspect and
@@ -4428,6 +4624,12 @@ Components.JobPanel = (function () {
     // the user their WoW version is unsupported (a permanent condition) when
     // the real cause was often a transient CurseForge hiccup worth retrying.
     if (failPhase === "checking-network") return "Couldn't check for updates — CurseForge might be having trouble";
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.6/3.6.5): two GitHub-source
+    // buckets, same "most specific phase first" ordering, placed alongside
+    // the existing checking-network line just above (its CurseForge-
+    // specific counterpart). Text is VERBATIM per the fixed decision.
+    if (failPhase === "checking-needs-token") return "This addon needs a GitHub token - paste it in Settings > GitHub addons.";
+    if (failPhase === "checking-network-github") return "Couldn't check for updates - GitHub might be having trouble";
     if (failPhase === "checking") return "No matching version found";
     if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
     return "Something went wrong";
@@ -5547,6 +5749,51 @@ const Actions = (function () {
     fail("Type a numeric CurseForge ID, or paste a wago.io addon link.");
   }
 
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5.3): the shared parser both
+  // GitHub add entry points (5.4) resolve through - a full github.com link
+  // (with/without scheme/www/.git/trailing slash/subpath) or a bare
+  // "owner/repo" pair, tried in that order, exactly matching the shapes the
+  // CLI's own ConvertTo-TargetToken accepts (section 3.1). Returns the
+  // normalized "owner/repo" string, or null when nothing matched.
+  const GITHUB_OWNER_RE = "[A-Za-z0-9][A-Za-z0-9-]{0,38}";
+  const GITHUB_REPO_RE = "[A-Za-z0-9._-]{1,100}";
+  function parseGithubRepoInput(raw) {
+    const value = (raw || "").trim();
+    let m = value.match(new RegExp("^(?:https?://)?(?:www\\.)?github\\.com/(" + GITHUB_OWNER_RE + ")/(" + GITHUB_REPO_RE + ")(?:\\.git)?/?(?:[?#].*)?$", "i"));
+    if (!m) m = value.match(new RegExp("^(" + GITHUB_OWNER_RE + ")/(" + GITHUB_REPO_RE + ")$", "i"));
+    if (!m) return null;
+    let repo = m[2];
+    // Found while implementing (not in the original spec text): GITHUB_REPO_RE's
+    // own character class already includes '.', so a greedy match always
+    // swallows a trailing ".git" before the explicit "(?:\.git)?" suffix
+    // above ever gets a chance to strip it - a regex engine never backtracks
+    // a greedy match once the rest of the pattern already succeeds on zero
+    // repetitions of an optional group. Stripped here instead (also
+    // normalizes a bare "owner/repo.git" typed by hand, which has no such
+    // suffix group of its own at all).
+    if (/\.git$/i.test(repo) && repo.length > 4) repo = repo.slice(0, -4);
+    // REVIEW FOLD-IN, finding A/1 (GITHUB-SOURCE-SPEC.md 3.1/4.5): a repo
+    // segment of "." or ".." matches GITHUB_REPO_RE cleanly but is not a
+    // safe folder name once it reaches the CLI's filesystem code - reject
+    // it here too, at the earliest point, same guard as the other two.
+    if (!repo || /^\.+$/.test(repo)) return null;
+    return m[1] + "/" + repo;
+  }
+
+  // Shared by both entry points (5.4) - the Settings card's own inline
+  // input calls this with no opts (its error box is #github-add-error, and
+  // there is no dialog to close - it already lives on a page); the "From a
+  // GitHub link" dialog passes its own error box id and closeDialog:true.
+  async function submitGithubAddInput(raw, opts) {
+    opts = opts || {};
+    const errorBox = Utils.qs(opts.errorSelector || "#github-add-error");
+    function fail(msg) { errorBox.textContent = msg; errorBox.hidden = false; errorBox.className = "form-msg is-error"; }
+    const repo = parseGithubRepoInput(raw);
+    if (!repo) { fail("Paste a github.com/owner/repo link, or type owner/repo."); return; }
+    if (opts.closeDialog) Components.Dialogs.closeGithubAdd();
+    await startJob("add", { source: "github", repo: repo });
+  }
+
   // E4: posts an imported addons-export.json body to /api/import (job kind
   // "import"), started/tracked the same way startJob() does for every other
   // kind - just via Api.importAddons (a bare POST of `payload` itself, not
@@ -5735,6 +5982,8 @@ const Actions = (function () {
     toggleIgnore: toggleIgnore, unpin: unpin,
     deleteUntracked: deleteUntracked, adoptFolder: adoptFolder, adoptManyFolders: adoptManyFolders, saveSettings: saveSettings,
     openWhat: openWhat, openOnCurseForge: openOnCurseForge, searchDependency: searchDependency, searchCurseForgeWebsite: searchCurseForgeWebsite, submitAddInput: submitAddInput,
+    // Round 47 (GitHub third source)
+    submitGithubAddInput: submitGithubAddInput,
     whatChanged: whatChanged, importAddons: importAddons,
     updateSelected: updateSelected, uninstallSelected: uninstallSelected, ignoreSelected: ignoreSelected,
     // E12 (Wago second source)
@@ -6071,9 +6320,14 @@ Views.myAddons = (function () {
 
   // E12: a tiny source badge (CF/Wago) next to each row's name, so a mixed
   // tracked list stays legible about where each addon actually comes from.
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5.5): third branch for GitHub -
+  // spelled out in full ("GitHub"), matching "Wago" rather than the
+  // abbreviated "CF", short enough to fit the same pill without truncation.
   function sourceBadge(a) {
-    const isWago = a.source === "wago";
-    return Utils.el("span", { class: "source-badge " + (isWago ? "is-wago" : "is-cf"), title: isWago ? "Wago Addons" : "CurseForge" }, [isWago ? "Wago" : "CF"]);
+    const badgeClass = a.source === "wago" ? "is-wago" : (a.source === "github" ? "is-github" : "is-cf");
+    const badgeLabel = a.source === "wago" ? "Wago Addons" : (a.source === "github" ? "GitHub" : "CurseForge");
+    const badgeText = a.source === "wago" ? "Wago" : (a.source === "github" ? "GitHub" : "CF");
+    return Utils.el("span", { class: "source-badge " + badgeClass, title: badgeLabel }, [badgeText]);
   }
 
   // CS2 (UX-SPEC.md section 3.1): the merged Version cell - "installed ->
@@ -6642,7 +6896,12 @@ Views.browse = (function () {
     // (source-badge.is-cf) too.
     const heading = [
       Utils.el("span", { class: "browse-row-title" }, [entry.name]),
-      Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : "is-cf") }, [entry.source === "wago" ? "Wago" : "CurseForge"])
+      // Round 47 (GITHUB-SOURCE-SPEC.md section 5.5): third branch added for
+      // consistency even though this grid never actually shows a GitHub
+      // entry today (non-goal 1 - GitHub addons are never browsable, only
+      // added by pasting a link) - dead code here until/unless a future
+      // round changes that, kept in lockstep with sourceBadge() above.
+      Utils.el("span", { class: "source-badge " + (entry.source === "wago" ? "is-wago" : (entry.source === "github" ? "is-github" : "is-cf")) }, [entry.source === "wago" ? "Wago" : (entry.source === "github" ? "GitHub" : "CurseForge")])
     ];
     if (entry.deltaLabel) heading.push(Utils.el("span", { class: "chip chip-success" }, [entry.deltaLabel]));
     const main = [Utils.el("div", { class: "browse-row-heading" }, heading)];
@@ -6963,6 +7222,8 @@ Views.browse = (function () {
     });
     Utils.qs("#btn-browse-add-link").addEventListener("click", function () { Components.Dialogs.openAdd(); });
     Utils.qs("#btn-browse-add-link-fallback").addEventListener("click", function () { Components.Dialogs.openAdd(); });
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.4, entry point 2)
+    Utils.qs("#btn-browse-add-github-link").addEventListener("click", function () { Components.Dialogs.openGithubAdd(); });
 
     Utils.qs("#btn-cf-open-window").addEventListener("click", function () { openCfWindowFallback(); });
     Utils.qs("#btn-browse-install-note-settings").addEventListener("click", function () { App.switchView("settings"); });
@@ -7030,6 +7291,11 @@ Views.browse = (function () {
 
 /* ---------- Settings ---------- */
 Views.settings = (function () {
+  // Round 48: true while #github-token-input holds an in-progress, unsaved
+  // paste (set by the "input" listener in bindOnce, cleared once Save
+  // finishes or the field is emptied again). renderGithub reads this to
+  // decide whether it's safe to reset the field - see that function.
+  let githubTokenInputDirty = false;
   let untrackedList = [];
   let untrackedLoading = false;
   let untrackedError = null;
@@ -7073,6 +7339,7 @@ Views.settings = (function () {
 
     renderFlavourSettings(s);
     renderBrowsing(s);
+    renderGithub(s);
     renderBackgroundUpdates(s);
     renderAppUpdates(s);
     Components.ProtocolControl.render("settings-protocol-control");
@@ -7192,6 +7459,31 @@ Views.settings = (function () {
     // desktop window is used next, since only the native host has a
     // CurseForge pane to trim. So this row is never hidden.
     Utils.qs("#toggle-cf-focus").checked = !!s.cfFocus;
+  }
+
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 5.2): the raw token is never
+  // sent to this page at all (hasGithubToken/githubTokenHint only) - the
+  // input is cleared on render (see the Round 48 dirty-flag guard just
+  // below) so a saved token never sits pre-filled in the DOM (it was never
+  // fetched back in the first place).
+  function renderGithub(s) {
+    const hasToken = !!s.hasGithubToken;
+    Utils.qs("#github-token-status").textContent = hasToken
+      ? ("Token saved, ending in " + (s.githubTokenHint || "----") + ".")
+      : "No token saved.";
+    Utils.qs("#github-token-remove").hidden = !hasToken;
+    // Round 48 fix: renderGithub runs on every Settings repaint, including
+    // ones driven by scheduleIdlePoll -> reloadState's background poll
+    // (POLL_ONLINE_MS, ~5s) on ANY polled field change - not just a
+    // settings/token change. Resetting the value unconditionally here used
+    // to silently wipe a token the player had just pasted but not yet
+    // clicked Save on. Skip the reset while githubTokenInputDirty says the
+    // field holds that kind of in-progress, unsaved edit; the Save handler
+    // clears the flag (and the field) itself once the save actually lands.
+    if (!githubTokenInputDirty) {
+      Utils.qs("#github-token-input").value = "";
+    }
+    Utils.qs("#github-token-input").placeholder = hasToken ? "Paste a new token to replace it" : "Paste your token";
   }
 
   // Round 18 (tray stage B): unlike adFilter, these three are meaningful
@@ -7789,6 +8081,53 @@ Views.settings = (function () {
     Utils.qs("#toggle-cf-focus").addEventListener("change", function (ev) {
       Actions.saveSettings({ cfFocus: ev.target.checked });
       Host.cfFocus(ev.target.checked);
+    });
+
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.2): the token field's own
+    // show/hide toggle - only ever flips the input's type attribute and
+    // this button's own aria-pressed, never touches the value itself.
+    Utils.qs("#github-token-show").addEventListener("click", function () {
+      const input = Utils.qs("#github-token-input");
+      const showing = input.type === "text";
+      input.type = showing ? "password" : "text";
+      this.setAttribute("aria-pressed", String(!showing));
+    });
+    // Round 48: marks the field dirty the moment the player types or pastes
+    // into it, so renderGithub (see that function) leaves an in-progress
+    // edit alone across a background poll repaint instead of wiping it.
+    // Emptying the field by hand clears the flag too, back to the normal
+    // "nothing unsaved here" state.
+    Utils.qs("#github-token-input").addEventListener("input", function (ev) {
+      githubTokenInputDirty = ev.target.value.length > 0;
+    });
+    // Save is a no-op with an inline nudge on an empty field, not a silent
+    // clear - clearing is Remove's own job alone, so the two actions stay
+    // unambiguous (FIXED DECISION 4/5.2).
+    Utils.qs("#github-token-save").addEventListener("click", async function () {
+      const inputEl = Utils.qs("#github-token-input");
+      const val = inputEl.value;
+      if (!val) { Components.Toast.show("Paste a token first, or use Remove.", "warning"); return; }
+      await Actions.saveSettings({ githubToken: val }, "Token saved.");
+      // Round 48: the paste just got saved, so it's safe (and correct) to
+      // clear the field now - do it explicitly rather than relying on the
+      // next renderGithub, since that call already fired synchronously
+      // inside saveSettings while the field was still marked dirty. If the
+      // save throws instead, this line is skipped and the player's typed
+      // token is left in place and still marked dirty, so it survives any
+      // background poll while they retry.
+      githubTokenInputDirty = false;
+      inputEl.value = "";
+    });
+    Utils.qs("#github-token-remove").addEventListener("click", async function () {
+      await Actions.saveSettings({ githubToken: "" }, "Token removed.");
+    });
+    Utils.qs("#github-add-submit").addEventListener("click", function () {
+      Actions.submitGithubAddInput(Utils.qs("#github-add-input").value);
+    });
+    // Clear a stale validation error as soon as the user edits their input again.
+    Utils.qs("#github-add-input").addEventListener("input", function () { Utils.qs("#github-add-error").hidden = true; });
+    Utils.qs("#github-add-input").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); Utils.qs("#github-add-submit").click(); }
     });
 
     // Round 18 (tray stage B): these three drive the background tray
@@ -8860,6 +9199,18 @@ const App = (function () {
     });
     // Clear a stale validation error as soon as the user edits their input again.
     Utils.qs("#add-addon-input").addEventListener("input", function () { Utils.qs("#add-addon-error").hidden = true; });
+
+    // Round 47 (GITHUB-SOURCE-SPEC.md section 5.4): the "From a GitHub
+    // link" dialog - shares Actions.submitGithubAddInput with the Settings
+    // card's own inline input (Views.settings.bindOnce), just pointed at
+    // this dialog's own input/error box and told to close itself on success.
+    Utils.qs("#github-add-dialog-cancel").addEventListener("click", function () { Components.Dialogs.closeGithubAdd(); });
+    Utils.qs("#github-add-form").addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      Actions.submitGithubAddInput(Utils.qs("#github-add-dialog-input").value, { errorSelector: "#github-add-dialog-error", closeDialog: true });
+    });
+    Utils.qs("#github-add-dialog-input").addEventListener("input", function () { Utils.qs("#github-add-dialog-error").hidden = true; });
+
     Utils.qs("#confirm-cancel").addEventListener("click", function () { Components.Dialogs.resolveConfirm(false); });
     Utils.qs("#confirm-ok").addEventListener("click", function () { Components.Dialogs.resolveConfirm(true); });
 

@@ -547,6 +547,56 @@ Row 20 (new, Round 42 - APP-UPDATE-SPEC.md section 3.1; a NEW, SEPARATE
        the same Settings screen is exactly the kind of collision a
        below-average-tech-savvy player cannot parse.
 
+Row 21 (new, Round 47 - GITHUB-SOURCE-SPEC.md sections 4.1-4.3/5.1; a NEW,
+  SEPARATE settings-group, id="settings-github", titled "GitHub addons" -
+  placed inside the same Advanced disclosure the removed CurseForge API
+  key field used to live in, and where the protocol-handler control
+  (#settings-protocol-control) sits today; listed here at the end of this
+  row list rather than renumbering every row above it, per this file's
+  own no-renumbering convention for a later addition - see Row 19/Row
+  20's identical treatment for Round 33/Round 42)
+  key: githubToken (string, $null default; the ONE settings.json field
+       that is a secret - never returned by GET /api/settings, see "view
+       fields" below)
+  control: password-style text input ("Paste your token" placeholder,
+       autocomplete off) + a show/hide icon button that toggles the
+       input's own type between password/text + Save + Remove (Remove
+       hidden/disabled when no token is currently saved)
+  default: empty (no token saved)
+  label: "Token" (with an info-tip icon carrying the same text as the
+       card's own intro paragraph - see tooltip below)
+  helper line: a status line above the buttons, NOT persisted UI state -
+       computed live from the view fields on every render: "No token
+       saved." when hasGithubToken is false, else "Token saved, ending in
+       <githubTokenHint>." The input's own placeholder also changes to
+       "Paste a new token to replace it" once a token is saved (still
+       shows the real value's length as 0 - the input is never
+       pre-filled with anything, matching the "never returned" contract).
+  tooltip (also the card's own intro paragraph, verbatim, per FIXED
+       DECISION 4): "Some guilds share addons as private GitHub releases
+       and give you a token. It stays on this PC and is only ever sent to
+       GitHub."
+  Save behavior: with the input empty, Save is a no-op with an inline
+       nudge ("Paste a token first, or use Remove.") rather than silently
+       clearing - clearing is Remove's job alone. With a non-empty value,
+       PUTs {githubToken: <value>}.
+  Remove behavior: PUTs {githubToken: ""} - the server-side "empty string
+       clears it" contract (view fields below both go to false/null).
+  view fields (GET/PUT response only, never the raw token): hasGithubToken
+       (bool) and githubTokenHint (string|null - exactly the token's last
+       4 characters, or the whole value when 4 characters or fewer; null
+       when no token is set).
+  prior location: n/a (new)
+  see also: a second, always-visible row directly below the token field
+       ("Add an addon from GitHub" - a plain text input, "github.com/
+       owner/repo" placeholder, + Add button) is not given its own
+       numbered row here since it holds no persisted setting of its own
+       (it posts a one-off add job) - its exact copy/validation is fully
+       specified in GITHUB-SOURCE-SPEC.md section 5.3/5.5, not duplicated
+       here. "Get new addons" gets a matching small "From a GitHub link"
+       entry opening the identical add flow (5.4) - also not its own row
+       here for the same reason.
+
 Footer line (About), directly below the Advanced disclosure, OUTSIDE any
 bordered box, no <h3> heading - three items separated by " . ", each its
 own small span so a tooltip icon can still attach per item:

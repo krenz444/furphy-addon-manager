@@ -239,13 +239,14 @@
       return !q(win, "#flavour-switcher");
     });
 
-    // Update all: of the default mock roster, Auctionator and Simple Damage
-    // Meter both have an update and are NOT ignored; Bagnon also has one but
-    // is ignoreUpdates:true, so it must be excluded from the count - button
-    // visible with count 2, never 3.
+    // Update all: of the default mock roster, Auctionator, Simple Damage
+    // Meter, and (Round 47) the GitHub-sourced TimelineReminders fixture all
+    // have an update and are NOT ignored; Bagnon also has one but is
+    // ignoreUpdates:true, so it must be excluded from the count - button
+    // visible with count 3, never 4.
     checkTry("Update all visible, count excludes ignored addons", function () {
       const btn = q(win, "#btn-update-all");
-      return visible(btn) && /\(2\)/.test(text(btn));
+      return visible(btn) && /\(3\)/.test(text(btn));
     });
 
     // Drawer real name, never "Project N" (UX-SPEC.md 3.5/11).
@@ -1161,6 +1162,9 @@
       "More about Open CurseForge install links in Furphy",
       "More about Available in the Furphy desktop window",
       "More about Show only search results on CurseForge",
+      // Round 47 (GITHUB-SOURCE-SPEC.md section 5.1): the GitHub addons
+      // card's own token-field tooltip.
+      "More about Token",
       "More about Also include experimental versions",
       "More about World of Warcraft folder",
       "More about AddOns folder",
@@ -1278,11 +1282,12 @@
       return /\S/.test(text(q(win, "#about-version"))) && /\S/.test(text(q(win, "#about-client-build"))) && /\S/.test(text(q(win, "#about-uptime")));
     });
 
-    // ---- Row count: Advanced collapses to 5 groups at 1 flavour/no PTR
-    // (CurseForge, Also include experimental versions, Game folders,
-    // Folders Furphy doesn't manage yet, Backup & troubleshooting).
-    checkTry("Advanced holds exactly 5 VISIBLE top-level .settings-group boxes on a single-flavour, no-PTR mock (6th, WoW versions, exists in the DOM but stays [hidden] here)", function () {
-      return qa(win, ".settings-advanced-body > .settings-group").filter(visible).length === 5;
+    // ---- Row count: Advanced collapses to 6 groups at 1 flavour/no PTR
+    // (CurseForge, GitHub addons (Round 47), Also include experimental
+    // versions, Game folders, Folders Furphy doesn't manage yet, Backup &
+    // troubleshooting).
+    checkTry("Advanced holds exactly 6 VISIBLE top-level .settings-group boxes on a single-flavour, no-PTR mock (7th, WoW versions, exists in the DOM but stays [hidden] here)", function () {
+      return qa(win, ".settings-advanced-body > .settings-group").filter(visible).length === 6;
     });
     // DISTRIBUTION-SPEC.md section 3.2 adds a 4th sub-group (Row 20,
     // Uninstall) to this same box, after Diagnostics.
@@ -2570,11 +2575,17 @@
             const sawRaw = resultRows.some(function (r) { return /\bAdopted\b/.test(text(r)); });
             return sawFriendly && !sawRaw;
           });
-          await wait(200);
-          checkTry("toast reads the plain, singular 'Now keeping 1 addon up to date - nothing was downloaded or changed.'", function () {
-            const toasts = qa(win, "#toast-container .toast-body").map(text);
-            return toasts.indexOf("Now keeping 1 addon up to date - nothing was downloaded or changed.") !== -1;
-          });
+          // Round 47 gate flake: the toast is raised a tick after the job
+          // settles, and a fixed 200 ms wait lost the race once under the
+          // full gate (it passed standalone every time). Poll for it.
+          const expectedToast = "Now keeping 1 addon up to date - nothing was downloaded or changed.";
+          const toastDeadline = Date.now() + 3000;
+          let sawToast = false;
+          while (Date.now() < toastDeadline) {
+            if (qa(win, "#toast-container .toast-body").map(text).indexOf(expectedToast) !== -1) { sawToast = true; break; }
+            await wait(80);
+          }
+          check("toast reads the plain, singular 'Now keeping 1 addon up to date - nothing was downloaded or changed.'", sawToast);
           checkTry("no 'adopt'/'take over'/'reinstall' wording in that toast", function () {
             const toasts = qa(win, "#toast-container .toast-body").map(function (el) { return text(el).toLowerCase(); });
             return !toasts.some(function (t) { return /\badopt/.test(t) || t.indexOf("take over") !== -1 || t.indexOf("reinstall") !== -1; });
@@ -2617,6 +2628,309 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Round 47 (GITHUB-SOURCE-SPEC.md section 7.4): GitHub as a third addon
+  // source - the Settings card (token save/remove, show/hide, never
+  // echoing the raw value into the DOM outside the input), the add flow's
+  // shared parser (every accepted input form converging on the same
+  // {kind:'add', source:'github', repo:'owner/repo'} POST, garbage
+  // rejected inline with no job posted), the mock GitHub addon's source
+  // badge, and - the deepest fix (finding I/10) - the drawer opened via
+  // the REAL click path resolving tracked/source correctly and never
+  // firing the CurseForge-keyless enrichment call.
+  //
+  // Each add-flow check below loads its OWN fresh frame rather than
+  // reusing one across several submissions: Actions.startJob's own
+  // Store.isBusy() gate blocks a second "add" while the mock's ~6s
+  // simulated job from the first one is still "running", and Actions is
+  // not itself exposed on window.__furphyTest (only App/Store/Views/Mock/
+  // Components are) - a fresh frame per submission sidesteps both issues
+  // far more cheaply than waiting out each simulated job in turn.
+  // ------------------------------------------------------------------
+  function interceptRequests(win) {
+    const mock = win.__furphyTest && win.__furphyTest.Mock;
+    const captured = [];
+    if (mock) {
+      const origHandle = mock.handle;
+      mock.handle = function (method, path, body) {
+        captured.push({ method: method, path: path, body: body });
+        return origHandle.call(mock, method, path, body);
+      };
+      captured._restore = function () { mock.handle = origHandle; };
+    } else {
+      captured._restore = function () { };
+    }
+    return captured;
+  }
+
+  function lastPost(captured, pathPrefix) {
+    return captured.filter(function (c) { return c.method === "POST" && typeof c.path === "string" && c.path.indexOf(pathPrefix) === 0; }).pop();
+  }
+  function lastPut(captured, pathPrefix) {
+    return captured.filter(function (c) { return c.method === "PUT" && typeof c.path === "string" && c.path.indexOf(pathPrefix) === 0; }).pop();
+  }
+
+  const GITHUB_ADD_ERROR_TEXT = "Paste a github.com/owner/repo link, or type owner/repo.";
+
+  async function phaseGithubSource() {
+    beginPhase("Round 47: GitHub as a third addon source (GITHUB-SOURCE-SPEC.md section 5)");
+
+    // ---- Settings card: exact intro/tooltip text, token field starts
+    // password, show/hide toggles type + aria-pressed, no token saved
+    // initially. ----
+    {
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+
+      checkTry("GitHub addons card shows the exact intro/tooltip text (FIXED DECISION 4)", function () {
+        return text(q(win, "#settings-github")).indexOf("Some guilds share addons as private GitHub releases and give you a token. It stays on this PC and is only ever sent to GitHub.") !== -1;
+      });
+      checkTry("token input starts as type=password", function () {
+        return q(win, "#github-token-input").type === "password";
+      });
+      checkTry("no token saved initially: plain status text, Remove hidden", function () {
+        return text(q(win, "#github-token-status")) === "No token saved." && q(win, "#github-token-remove").hidden === true;
+      });
+
+      const showBtn = q(win, "#github-token-show");
+      const tokenInput = q(win, "#github-token-input");
+      await clickAndSettle(win, showBtn, 60);
+      checkTry("show/hide toggle flips the input to type=text and aria-pressed=true", function () {
+        return tokenInput.type === "text" && showBtn.getAttribute("aria-pressed") === "true";
+      });
+      await clickAndSettle(win, showBtn, 60);
+      checkTry("clicking again flips back to type=password and aria-pressed=false", function () {
+        return tokenInput.type === "password" && showBtn.getAttribute("aria-pressed") === "false";
+      });
+
+      // ---- Save: PUT /api/settings with body.githubToken exactly what
+      // was typed; the raw value never echoes anywhere else in the DOM;
+      // the saved hint shows only the last four characters. ----
+      const TEST_TOKEN = "github_pat_TESTONLY_0000";
+      const captured = interceptRequests(win);
+      tokenInput.value = TEST_TOKEN;
+      await clickAndSettle(win, q(win, "#github-token-save"), 250);
+      checkTry("Save calls PUT /api/settings with body.githubToken equal to exactly what was typed", function () {
+        const put = lastPut(captured, "/api/settings");
+        return !!put && put.body && put.body.githubToken === TEST_TOKEN;
+      });
+      checkTry("the full token never echoes into the DOM outside the input, and the saved hint shows only the last four characters", function () {
+        const bodyText = win.document.body.textContent || "";
+        if (bodyText.indexOf(TEST_TOKEN) !== -1) return false;
+        return text(q(win, "#github-token-status")).indexOf("0000") !== -1;
+      });
+      checkTry("Remove becomes visible once a token is saved", function () {
+        return q(win, "#github-token-remove").hidden === false;
+      });
+
+      // ---- Remove: PUTs {githubToken: ""} exactly, and the card reverts
+      // to its no-token state. ----
+      captured.length = 0;
+      await clickAndSettle(win, q(win, "#github-token-remove"), 250);
+      checkTry("Remove calls PUT /api/settings with body {githubToken: \"\"} exactly", function () {
+        const put = lastPut(captured, "/api/settings");
+        return !!put && put.body && put.body.githubToken === "";
+      });
+      checkTry("after Remove, status reverts to 'No token saved.' and Remove hides again", function () {
+        return text(q(win, "#github-token-status")) === "No token saved." && q(win, "#github-token-remove").hidden === true;
+      });
+
+      captured._restore();
+      checkTry("no console errors (GitHub Settings card)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Round 48 regression: a background poll-driven repaint must not
+    // wipe an in-progress, unsaved paste in the token field. The idle poll
+    // (App.startIdlePolling -> scheduleIdlePoll -> reloadState) repaints
+    // Settings through the exact same Views.settings.render() -> renderGithub
+    // path exercised directly here - a live capture (value-setter trap)
+    // confirmed that path, not a separate one, was doing the wiping, so
+    // calling render() straight is a faithful, deterministic stand-in for
+    // waiting out real poll ticks. ----
+    {
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      const tokenInput = q(win, "#github-token-input");
+      const DRAFT_TOKEN = "github_pat_TESTONLY_DRAFT0";
+      tokenInput.value = DRAFT_TOKEN;
+      tokenInput.dispatchEvent(new win.Event("input", { bubbles: true }));
+
+      // Two repaints, echoing the two live-captured wipes ~5s apart.
+      win.__furphyTest.Views.settings.render();
+      win.__furphyTest.Views.settings.render();
+      checkTry("a background Settings repaint (idle-poll shape) does not wipe an unsaved, in-progress token paste", function () {
+        return tokenInput.value === DRAFT_TOKEN;
+      });
+
+      // The preserved draft still saves correctly, and the field clears
+      // once (and only once) that save actually lands.
+      const captured = interceptRequests(win);
+      await clickAndSettle(win, q(win, "#github-token-save"), 250);
+      checkTry("Save still saves the preserved draft, and the field clears once it lands", function () {
+        const put = lastPut(captured, "/api/settings");
+        return !!put && put.body && put.body.githubToken === DRAFT_TOKEN && tokenInput.value === "";
+      });
+      captured._restore();
+
+      // A repaint AFTER a successful save (e.g. the very next idle poll)
+      // must not bring anything back - the field is genuinely settled now,
+      // not just mid-edit.
+      win.__furphyTest.Views.settings.render();
+      checkTry("a repaint right after a successful Save leaves the field empty (no stale re-fill)", function () {
+        return tokenInput.value === "";
+      });
+
+      checkTry("no console errors (Round 48 token-field dirty-guard regression)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Add flow, inline entry point (#github-add-input, Settings
+    // card): every accepted form normalizes to the SAME owner/repo and
+    // posts the same job shape - fresh frame per submission (see the
+    // phase-level comment above for why). ----
+    const INLINE_FORMS = [
+      ["bart-dev-wow/AuraUpdater", "bart-dev-wow/AuraUpdater"],
+      ["github.com/bart-dev-wow/AuraUpdater", "bart-dev-wow/AuraUpdater"],
+      ["https://www.github.com/bart-dev-wow/AuraUpdater.git", "bart-dev-wow/AuraUpdater"]
+    ];
+    for (let i = 0; i < INLINE_FORMS.length; i++) {
+      const raw = INLINE_FORMS[i][0];
+      const expectedRepo = INLINE_FORMS[i][1];
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      const captured = interceptRequests(win);
+      q(win, "#github-add-input").value = raw;
+      await clickAndSettle(win, q(win, "#github-add-submit"), 200);
+      checkTry("inline Add normalizes '" + raw + "' to {kind:'add',source:'github',repo:'" + expectedRepo + "'}", function () {
+        const post = lastPost(captured, "/api/jobs");
+        return !!post && post.body && post.body.kind === "add" && post.body.source === "github" && post.body.repo === expectedRepo;
+      });
+      captured._restore();
+      checkTry("no console errors (inline Add, '" + raw + "')", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Garbage input (including the path-traversal shapes from REVIEW
+    // FOLD-IN finding A/1) shows the exact inline error, with NO job
+    // posted - both the bare and the full-link form of the same
+    // traversal attempt. ----
+    const INLINE_GARBAGE = ["someuser/..", "github.com/someuser/..", "not a repo at all"];
+    for (let i = 0; i < INLINE_GARBAGE.length; i++) {
+      const raw = INLINE_GARBAGE[i];
+      const win = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(win, 8000);
+      const captured = interceptRequests(win);
+      q(win, "#github-add-input").value = raw;
+      await clickAndSettle(win, q(win, "#github-add-submit"), 200);
+      checkTry("inline Add rejects garbage '" + raw + "' with the exact inline error and posts no job", function () {
+        const posted = !!lastPost(captured, "/api/jobs");
+        const err = q(win, "#github-add-error");
+        return !posted && !err.hidden && text(err) === GITHUB_ADD_ERROR_TEXT;
+      });
+      captured._restore();
+    }
+
+    // ---- Add flow, dialog entry point (#github-add-dialog-input) -
+    // proves the SAME parser/behavior applies there too (opened directly
+    // via the exposed Components hook, same as phaseWagoSearchRace's own
+    // use of window.__furphyTest.Mock - a separate check right after this
+    // block still proves the real "From a GitHub link" button wiring). ----
+    {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      win.__furphyTest.Components.Dialogs.openGithubAdd();
+      await wait(200);
+      const captured = interceptRequests(win);
+      q(win, "#github-add-dialog-input").value = "bart-dev-wow/TimelineReminders";
+      await clickAndSettle(win, q(win, "#github-add-dialog-submit"), 300);
+      checkTry("dialog Add normalizes 'bart-dev-wow/TimelineReminders' to {kind:'add',source:'github',repo:'bart-dev-wow/TimelineReminders'}, and closes the dialog", function () {
+        const post = lastPost(captured, "/api/jobs");
+        const posted = !!post && post.body && post.body.kind === "add" && post.body.source === "github" && post.body.repo === "bart-dev-wow/TimelineReminders";
+        return posted && q(win, "#dialog-github-add").hidden === true;
+      });
+      captured._restore();
+    }
+    {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      win.__furphyTest.Components.Dialogs.openGithubAdd();
+      await wait(200);
+      const captured = interceptRequests(win);
+      q(win, "#github-add-dialog-input").value = "someuser/..";
+      await clickAndSettle(win, q(win, "#github-add-dialog-submit"), 200);
+      checkTry("dialog Add rejects garbage 'someuser/..' with the exact inline error (in the dialog's own error box) and posts no job", function () {
+        const posted = !!lastPost(captured, "/api/jobs");
+        const err = q(win, "#github-add-dialog-error");
+        return !posted && !err.hidden && text(err) === GITHUB_ADD_ERROR_TEXT;
+      });
+      captured._restore();
+    }
+
+    // ---- Entry point 2's real wiring: "From a GitHub link" in Get new
+    // addons actually opens the same dialog (not just reachable by
+    // calling the hook directly, as the two blocks just above do). ----
+    {
+      const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+      await waitForReady(win, 8000);
+      const link = q(win, "#btn-browse-add-github-link");
+      checkTry("'From a GitHub link' entry point exists in Get new addons", function () { return !!link; });
+      if (link) {
+        await clickAndSettle(win, link, 200);
+        checkTry("clicking it opens dialog-github-add", function () { return q(win, "#dialog-github-add").hidden === false; });
+      }
+      checkTry("no console errors (GitHub add flow)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- The mock GitHub addon record (5.8): source badge in My Addons,
+    // and - the deepest fix, finding I/10 - opening its drawer via the
+    // REAL click path (never renderGithubVersions() directly) correctly
+    // resolves tracked/source and never fires the CurseForge-keyless
+    // enrichment call, before the Versions tab is even checked. ----
+    {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      const rows = qa(win, "#myaddons-tbody tr");
+      const ghRow = rows.filter(function (r) { return /TimelineReminders/.test(text(r)); })[0];
+      if (!ghRow) {
+        check("mock GitHub addon row exists with an is-github source badge", false, "TimelineReminders row not found");
+      } else {
+        checkTry("mock GitHub addon row shows a 'GitHub' source badge with class is-github", function () {
+          const badge = ghRow.querySelector(".source-badge.is-github");
+          return !!badge && text(badge) === "GitHub";
+        });
+
+        const nameCell = ghRow.querySelector(".addon-name-text") || ghRow;
+        await clickAndSettle(win, nameCell, 300);
+
+        checkTry("opening the drawer via the real row click resolves tracked:true (not the addonByProjectId regression)", function () {
+          return win.__furphyTest.Store.state.drawer.tracked === true;
+        });
+        checkTry("drawer source is exactly 'github', not 'cf-keyless'", function () {
+          return win.__furphyTest.Store.state.drawer.source === "github";
+        });
+        checkTry("no CurseForge-keyless enrichment request (/api/cf/enrich) ever fired for this GitHub addon", function () {
+          const log = (win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+          return !log.some(function (e) { return typeof e.path === "string" && e.path.indexOf("/api/cf/enrich") === 0; });
+        });
+
+        const versionsTab = q(win, '.drawer-tab[data-tab="versions"]');
+        await clickAndSettle(win, versionsTab, 200);
+        checkTry("Versions tab shows the minimal Installed 'v454' / Latest 'v455' / Update rows from 5.7", function () {
+          const panelText = text(q(win, "#drawer-panel-versions"));
+          return panelText.indexOf("Installed") !== -1 && panelText.indexOf("v454") !== -1 &&
+            panelText.indexOf("Latest") !== -1 && panelText.indexOf("v455") !== -1 &&
+            panelText.indexOf("Update") !== -1;
+        });
+        checkTry("Versions tab never attempted /api/addons/.../files (the CF/Wago-only endpoint)", function () {
+          const log = (win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+          return !log.some(function (e) { return typeof e.path === "string" && /\/api\/addons\/.+\/files$/.test(e.path); });
+        });
+
+        const closeBtn = q(win, "#drawer-close");
+        if (closeBtn) await clickAndSettle(win, closeBtn, 150);
+      }
+      checkTry("no console errors (GitHub addon badge/drawer)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+  }
+
   async function main() {
     await phaseDefault();
     await phaseLaunchPerf();
@@ -2642,6 +2956,7 @@
     await phaseAppUpdates();
     await phaseAdoptSpaCoverage();
     await phaseAdoptInPlaceFlow();
+    await phaseGithubSource();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

@@ -216,10 +216,38 @@ function Invoke-LogRotationIfNeeded {
     }
 }
 
+function Get-RedactedLogText {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 4.4/6.2): defense-in-depth scrub
+      applied at the log/error CHOKE POINTS (Write-ServerLog here; Write-Log
+      in addon-sync.ps1 carries its own duplicated copy of this exact
+      function, since the two files share no dependency) so an accidental
+      future interpolation of a raw githubToken value into any message
+      string - not something this design intentionally does anywhere; every
+      GitHub-related message this round writes references $Record.repo,
+      $displayLabel, or fixed text, never the token itself - still never
+      reaches disk. Matches both real GitHub PAT formats (github_pat_...
+      fine-grained, ghp_... classic) plus their close variants (gho_, ghu_,
+      ghs_, ghr_ - GitHub's other OAuth/app token prefixes, redacted the
+      same way even though this app never issues or stores those shapes,
+      since a player could in principle paste one into the same field).
+    #>
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Text }
+    # Floor is {8,}, not a stricter number, so the project's own mandated
+    # test fixture literal "github_pat_TESTONLY_0000" (13-char suffix) is
+    # still caught by this same net - see Server.GithubTokenRedaction.Tests.ps1.
+    # A real fine-grained PAT's suffix is 82+ chars and a classic ghp_
+    # token's is 36, both comfortably clear either floor either way.
+    $Text = $Text -replace '\bgithub_pat_[A-Za-z0-9_]{8,}', 'github_pat_***REDACTED***'
+    $Text = $Text -replace '\bgh[pousr]_[A-Za-z0-9]{8,}', 'gh?_***REDACTED***'
+    return $Text
+}
+
 function Write-ServerLog {
     param([string]$Message)
 
-    $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Message
+    $line = Get-RedactedLogText ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Message)
     try {
         Invoke-LogRotationIfNeeded -Path $Script:ServerLogPath
         Add-Content -LiteralPath $Script:ServerLogPath -Value $line -Encoding UTF8 -ErrorAction Stop
@@ -1432,6 +1460,14 @@ function Get-DefaultSettings {
         schemaVersion              = 2
         activeFlavour              = 'retail'
         showTestRealms             = $false
+        # Round 47 (GITHUB-SOURCE-SPEC.md 4.1): the shared GitHub personal
+        # access token some guilds hand out for private-release addons.
+        # Plain text on disk, same as every other settings.json field - this
+        # is the SAME trust boundary the old one-off script already used (a
+        # config file on the player's own PC). Never returned by GET
+        # /api/settings - see Get-SettingsView. $null (not "") when never
+        # set.
+        githubToken                = $null
     }
 }
 
@@ -1528,6 +1564,12 @@ function Get-Settings {
         if ($null -ne $obj.schemaVersion) { $result.schemaVersion = [int]$obj.schemaVersion }
         if ($null -ne $obj.activeFlavour) { $result.activeFlavour = [string]$obj.activeFlavour }
         if ($null -ne $obj.showTestRealms) { $result.showTestRealms = [bool]$obj.showTestRealms }
+        # Round 47 (GITHUB-SOURCE-SPEC.md 4.1): githubToken is additive-only
+        # (no migration rewrite needed, unlike the cfApiKey/autoUpdateOnLaunch
+        # removals below) - a pre-1.27.0 settings.json simply lacks the key
+        # and falls through to Get-DefaultSettings' $null default via the
+        # same "$null -ne" tolerance every other field here already uses.
+        if ($null -ne $obj.githubToken) { $result.githubToken = [string]$obj.githubToken }
         # Round 16 (E22, 2026-09-04, at Eric's explicit request): the
         # CurseForge API key feature is removed entirely. An existing
         # settings.json from before this round may still carry a stored
@@ -1630,6 +1672,19 @@ function Get-SettingsView {
         schemaVersion     = $Settings.schemaVersion
         activeFlavour     = $Settings.activeFlavour
         showTestRealms    = $Settings.showTestRealms
+        # Round 47 (GITHUB-SOURCE-SPEC.md 4.2): githubToken is the one
+        # settings.json field that IS a secret - unlike every other field
+        # returned above unmasked, the raw value never leaves this process.
+        # hasGithubToken/githubTokenHint let the SPA show "a token is saved,
+        # ending in ...ab12" without ever round-tripping the real value back
+        # to the browser.
+        hasGithubToken  = [bool](-not [string]::IsNullOrWhiteSpace($Settings.githubToken))
+        githubTokenHint = $(
+            $t = $Settings.githubToken
+            if ([string]::IsNullOrWhiteSpace($t)) { $null }
+            elseif ($t.Length -le 4) { $t }
+            else { $t.Substring($t.Length - 4) }
+        )
     }
 }
 
@@ -2883,6 +2938,21 @@ function Start-Job {
         $Params = Add-Member -InputObject $Params -NotePropertyName 'projectId' -NotePropertyValue ('wago:' + [string]$Params.slug) -Force -PassThru
     }
 
+    # Round 47 (GITHUB-SOURCE-SPEC.md 4.6): a NEW GitHub add/install (no
+    # existing record yet) is posted as {source:'github', repo} - normalize
+    # into the same "github:owner/repo" -Add/-Only token
+    # ConvertTo-TargetToken's github branch already parses, mirroring the
+    # wago branch immediately above 1:1. From this point on, Build-CliArgs's
+    # existing 'add'/'install' cases need no changes at all - they already
+    # just [string]-cast Params.projectId/fileId generically. An ADD/INSTALL
+    # targeting an ALREADY-TRACKED GitHub addon (the kebab menu's
+    # "Update now") instead posts projectId directly as "github:owner/repo"
+    # (the record's own identity string) - needs no normalization branch at
+    # all, already covered by the generic [string]-cast below.
+    if (($cliKind -eq 'add' -or $cliKind -eq 'install') -and $Params -and $Params.source -and (([string]$Params.source).ToLowerInvariant() -eq 'github') -and $Params.repo) {
+        $Params = Add-Member -InputObject $Params -NotePropertyName 'projectId' -NotePropertyValue ('github:' + [string]$Params.repo) -Force -PassThru
+    }
+
     try {
         $cliArgs = Build-CliArgs -Kind $cliKind -Params $Params
     } catch {
@@ -3485,6 +3555,11 @@ function Get-UpdateAvailableKeyForRecord {
     if ($Record.source -eq 'wago' -and $Record.slug) {
         return 'wago:' + $Record.slug
     }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 4.7): same pattern as the wago branch
+    # above - a GitHub-sourced record has no numeric projectId either.
+    if ($Record.source -eq 'github' -and $Record.repo) {
+        return 'github:' + $Record.repo.ToLowerInvariant()
+    }
     return $null
 }
 
@@ -3502,6 +3577,12 @@ function Get-UpdateAvailableKeyForRow {
     }
     if ($Row.wagoSlug) {
         return 'wago:' + $Row.wagoSlug
+    }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 4.7): mirrors the wagoSlug branch
+    # above - the CLI's own -Json result-row shape carries `repo` for a
+    # GitHub-sourced row the same way it carries `wagoSlug` for a Wago one.
+    if ($Row.repo) {
+        return 'github:' + ([string]$Row.repo).ToLowerInvariant()
     }
     return $null
 }
@@ -7317,6 +7398,11 @@ function Handle-JobsPost {
     # yet) is posted as {source:'wago', slug} instead of projectId - either
     # is accepted here.
     $hasWagoSourceSlug = [bool]($body.source -and $body.slug)
+    # Round 47 (GITHUB-SOURCE-SPEC.md 4.5): a NEW GitHub add (no existing
+    # record, so no projectId-equivalent key yet) is posted as
+    # {source:'github', repo} instead of projectId - mirrors
+    # $hasWagoSourceSlug immediately above exactly.
+    $hasGithubSourceRepo = [bool]($body.source -and $body.repo -and (([string]$body.source).ToLowerInvariant() -eq 'github'))
     # E18: bulk adopt (the Welcome dialog's "Adopt all") posts projectIds
     # (array of already-normalized tokens) instead of a single projectId -
     # same three-way either/or as 'remove' below.
@@ -7403,9 +7489,10 @@ function Handle-JobsPost {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: slug required' }
         return
     }
-    # $hasWagoSourceSlug/$hasMultiAdd were already computed above, alongside
-    # the flavour-gate skip decision that also needs them.
-    if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug) -and (-not $hasMultiAdd)) {
+    # $hasWagoSourceSlug/$hasGithubSourceRepo/$hasMultiAdd were already
+    # computed above, alongside the flavour-gate skip decision that also
+    # needs them.
+    if ($kind -eq 'add' -and (-not $body.projectId) -and (-not $hasWagoSourceSlug) -and (-not $hasGithubSourceRepo) -and (-not $hasMultiAdd)) {
         Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: projectId or projectIds required' }
         return
     }
@@ -7481,6 +7568,29 @@ function Handle-JobsPost {
                 Send-Json -Context $Context -StatusCode 400 -Body @{ error = "bad request: folder not found: $adoptFolderName" }
                 return
             }
+        }
+    }
+
+    if ($hasGithubSourceRepo) {
+        # Round 47 (GITHUB-SOURCE-SPEC.md 4.5): same regex AND traversal
+        # guard as addon-sync.ps1's own ConvertTo-TargetToken
+        # github.com/owner/repo branch and the SPA's parseGithubRepoInput -
+        # must match all three exactly; a future edit to one is a visible
+        # prompt to check the others. The SPA is expected to normalize a
+        # pasted link/owner-repo string before ever posting, so this is a
+        # defensive re-check against a hand-crafted request or a future
+        # non-SPA caller, not the primary validation path.
+        $repoText = [string]$body.repo
+        if ($repoText -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/([A-Za-z0-9._-]{1,100})$') {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: repo must look like owner/repo' }
+            return
+        }
+        # A repo segment made entirely of dots ("." or "..") passes the
+        # regex above cleanly but is not a safe folder name once it reaches
+        # the CLI's filesystem code - reject it here too.
+        if ($Matches[1] -match '^\.+$') {
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'bad request: repo must look like owner/repo' }
+            return
         }
     }
 
@@ -7948,6 +8058,32 @@ function Handle-SettingsPut {
     }
     if ($null -ne $body.showTestRealms) {
         $settings.showTestRealms = ConvertTo-SettingsBool $body.showTestRealms
+    }
+    # Round 47 (GITHUB-SOURCE-SPEC.md 4.3): githubToken is the one settings
+    # field with CLEAR semantics - every other field here can only ever be
+    # overwritten, never unset, because none of them has an "absent" state
+    # distinct from a default value. A secret needs an explicit way to go
+    # back to "not set" without inventing a new null-vs-absent JSON
+    # convention: an EMPTY string clears it (the Settings card's Remove
+    # button PUTs {githubToken:""}), a non-empty string sets it, and
+    # OMITTING the field (as every normal PUT that only touches OTHER
+    # settings already does) leaves it untouched - identical to every other
+    # field's own "only present fields are read" contract, just with one
+    # more meaningful value (empty string) inside that already-present case.
+    if ($null -ne $body.githubToken) {
+        $tok = [string]$body.githubToken
+        if ($tok.Trim().Length -eq 0) {
+            $settings.githubToken = $null
+        } elseif ($tok.Length -gt 512) {
+            # 512 is a generous defense-in-depth cap (a real GitHub PAT is
+            # well under 100 characters either format) - matches the spirit
+            # of hostTheme's own 12-color/32-char caps rather than any real
+            # GitHub-side limit.
+            Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'githubToken is too long' }
+            return
+        } else {
+            $settings.githubToken = $tok
+        }
     }
 
     try {
@@ -10377,7 +10513,7 @@ $Script:AppName = 'Furphy Addon Manager'
 # e.g. "1.0.0") - so package.ps1's zip name and this server's own /api/ping
 # report can never drift apart. Falls back to the last-known default when the
 # file is missing (a dev checkout that predates E18) or unreadable.
-$Script:Version = '1.26.0'
+$Script:Version = '1.27.0'
 $Script:VersionPath = Join-Path -Path $Script:Root -ChildPath 'VERSION'
 if (Test-Path -LiteralPath $Script:VersionPath) {
     try {

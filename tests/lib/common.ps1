@@ -768,6 +768,67 @@ function New-GitHubReleaseFixtureShaSidecar {
     return $realHash
 }
 
+function New-GitHubZipballFixtureZip {
+    <#
+      Round 47 (GITHUB-SOURCE-SPEC.md 7.2/3.6.2/3.6.3). Builds a raw
+      GitHub-zipball-shaped zip at -DestinationZipPath: ONE top-level
+      directory named "<Owner>-<RepoName>-<ShaSuffix>" (matching a real
+      GitHub zipball's own wrapper-directory shape), so
+      ConvertTo-NormalizedGithubZip's own wrapper-detection logic can be
+      exercised end to end against a real, network-shaped fixture, not
+      just the unit test's hand-built zips.
+
+      -RootToc: the wrapper directory's OWN root holds the .toc file
+        directly (the "root-.toc" case - decision 1's own "the folder is
+        named after the repo" branch). Default (off): the wrapper
+        directory holds ONE subfolder (named -FolderName, default =
+        -RepoName) which itself holds the .toc (the normal, subfolder
+        case) - both of 7.1's zipball-normalization scenarios get a real
+        fixture this way, selected by this one switch.
+      -TocVersion: the "## Version: ..." line written into the .toc
+        (default 'v1') - set this to the release's own tag text so a
+        caller can assert the installed addon's version matches.
+
+      Returns -DestinationZipPath.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$DestinationZipPath,
+        [Parameter(Mandatory = $true)][string]$Owner,
+        [Parameter(Mandatory = $true)][string]$RepoName,
+        [Parameter(Mandatory = $true)][string]$ShaSuffix,
+        [switch]$RootToc,
+        [string]$FolderName,
+        [string]$TocVersion = 'v1'
+    )
+
+    if (-not $FolderName) { $FolderName = $RepoName }
+
+    $stageDir = New-TempRoot -Name 'github-zipball-stage'
+    $wrapperName = "$Owner-$RepoName-$ShaSuffix"
+    $wrapperDir = Join-Path -Path $stageDir -ChildPath $wrapperName
+    New-Item -ItemType Directory -Path $wrapperDir -Force | Out-Null
+
+    $tocText = "## Interface: 110000`r`n## Title: $FolderName`r`n## Version: $TocVersion`r`n"
+    if ($RootToc) {
+        [System.IO.File]::WriteAllText((Join-Path $wrapperDir "$RepoName.toc"), $tocText, (New-Object System.Text.UTF8Encoding($false)))
+    } else {
+        $subDir = Join-Path -Path $wrapperDir -ChildPath $FolderName
+        New-Item -ItemType Directory -Path $subDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $subDir "$FolderName.toc"), $tocText, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    if (Test-Path -LiteralPath $DestinationZipPath) { Remove-Item -LiteralPath $DestinationZipPath -Force }
+    $destDir = Split-Path -Path $DestinationZipPath -Parent
+    if ($destDir -and -not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    Push-Location $stageDir
+    try {
+        Compress-Archive -Path '.\*' -DestinationPath $DestinationZipPath -Force
+    } finally {
+        Pop-Location
+    }
+    return $DestinationZipPath
+}
+
 function Start-GitHubReleaseStubServer {
     <#
       Starts the real GitHubReleaseStubServer.ps1 subprocess, after
@@ -777,7 +838,10 @@ function Start-GitHubReleaseStubServer {
       how existing tests already point FURPHY_TEST_WAGO_BASEURL at the
       Wago stub) - Start-Process inherits the current process's
       environment, so this reaches a spawned -AppUpdateOnly/
-      -MaintenanceOnly child the same way.
+      -MaintenanceOnly child the same way. For a CLI-only test
+      (addon-sync.ps1 directly, GITHUB-SOURCE-SPEC.md section 3), pass the
+      same base URL via Invoke-CliProcess/-CliJson's own
+      -EnvironmentOverrides instead - no server involved at all.
 
       -TagName: the release's tag_name (e.g. 'v1.23.0'; keep the leading
         'v', matching a real GitHub tag - the zip/sha asset names below
@@ -807,11 +871,33 @@ function Start-GitHubReleaseStubServer {
         pair, for the "release with EXTRA unrelated assets present" case
         (section 12's "must still pick the right two by exact name").
 
-      Returns {Process; Port; BaseUrl; ManifestPath; TagName; ZipPath;
-      ShaPath; ZipAssetName; ShaAssetName; ZipHash} - stop with
-      Stop-GitHubReleaseStubServer. Every file this creates lives under a
-      New-TempRoot folder, so plain Remove-TempRoots at the end of a test
-      file cleans it up same as everything else.
+      Round 47 (GITHUB-SOURCE-SPEC.md 7.2) additions, all optional, all
+      defaulting to today's exact self-update-fixture behavior:
+      -Owner / -RepoName: which /repos/<owner>/<repoName>/releases/latest
+        path the stub answers on - default 'krenz444'/
+        'furphy-addon-manager' (the original hardcoded self-update path,
+        so an existing caller that never sets these is unaffected).
+      -RequireToken / -ExpectedToken: the private-repo simulation
+        (GITHUB-SOURCE-SPEC.md 3.5) - when -RequireToken is set, the
+        releases/latest, asset-by-id, and zipball routes all 404 unless
+        the request's "Authorization: Bearer <token>" header matches
+        -ExpectedToken exactly (missing OR wrong token -> the SAME 404,
+        matching real GitHub's own behavior).
+      -ZipballAvailable / -ZipballRootToc / -ZipballShaSuffix /
+        -ZipballFolderName: the "no .zip asset, fall back to the
+        zipball" path (3.6.2/3.6.3) - -ZipballAvailable adds
+        zipball_url to the release JSON and serves a real
+        New-GitHubZipballFixtureZip-built zip from the new zipball
+        route; -ZipballRootToc selects that fixture's root-.toc layout
+        instead of the default subfolder layout (see that function's own
+        doc comment for both shapes).
+
+      Returns {Process; Port; BaseUrl; ManifestPath; Owner; RepoName;
+      TagName; ZipPath; ShaPath; ZipAssetName; ShaAssetName; ZipHash;
+      ZipballFilePath} - stop with Stop-GitHubReleaseStubServer. Every
+      file this creates lives under a New-TempRoot folder, so plain
+      Remove-TempRoots at the end of a test file cleans it up same as
+      everything else.
     #>
     param(
         [int]$Port,
@@ -828,11 +914,19 @@ function Start-GitHubReleaseStubServer {
         [switch]$TamperSha256,
         [switch]$OmitZipAsset,
         [switch]$OmitShaAsset,
-        [array]$ExtraAssets = @()
+        [array]$ExtraAssets = @(),
+        [string]$Owner = 'krenz444',
+        [string]$RepoName = 'furphy-addon-manager',
+        [bool]$RequireToken = $false,
+        [string]$ExpectedToken,
+        [bool]$ZipballAvailable = $false,
+        [switch]$ZipballRootToc,
+        [string]$ZipballShaSuffix = 'a1b2c3d',
+        [string]$ZipballFolderName
     )
 
     if (-not $Port) { $Port = Get-FreeStaticPort }
-    if (-not $HtmlUrl) { $HtmlUrl = "https://github.com/krenz444/furphy-addon-manager/releases/tag/$TagName" }
+    if (-not $HtmlUrl) { $HtmlUrl = "https://github.com/$Owner/$RepoName/releases/tag/$TagName" }
 
     $tagNoV = $TagName.TrimStart('v', 'V')
     $zipName = "FurphyAddonManager-$tagNoV.zip"
@@ -855,14 +949,58 @@ function Start-GitHubReleaseStubServer {
     foreach ($extra in @($ExtraAssets)) {
         $extraName = [string]$extra.name
         $extraPath = Join-Path -Path $assetsDir -ChildPath $extraName
-        [System.IO.File]::WriteAllText($extraPath, [string]$extra.content, (New-Object System.Text.UTF8Encoding($false)))
+        # Round 47 addition: -ExtraAssets originally only ever wrote text
+        # content (the self-update fixture's own "extra unrelated asset"
+        # cases are all plain text). GITHUB-SOURCE-SPEC.md 7.1's
+        # CLI.GithubAssetSelect.Tests.ps1 needs a SECOND, real, installable
+        # zip asset (bytes, not text) alongside the main one to prove asset
+        # selection prefers a repo-name match over an earlier-listed
+        # non-matching asset - so a byte-array .content now writes the raw
+        # bytes verbatim instead of being stringified first. Every existing
+        # caller still passes a plain string and is unaffected.
+        #
+        # Checks BOTH [byte[]] and "a [byte]-only [object[]]" - confirmed
+        # LIVE while writing this: a helper function that returns a
+        # [byte[]] via the pipeline (`return [System.IO.File]::ReadAllBytes(...)`,
+        # never `,` -prefixed or `Write-Output -NoEnumerate`) has that
+        # array UNROLLED element-by-element onto the pipeline and
+        # RE-COLLECTED by the caller as a generic System.Object[] - the
+        # classic PS 5.1 "a function's own return silently unwraps an
+        # array" trap. A caller building -ExtraAssets content from exactly
+        # such a helper (easy to get wrong, hard to notice - the byte
+        # VALUES survive perfectly, only the array's own CLR type changes)
+        # would otherwise silently fall into the text branch below and
+        # write "80 75 3 4 32 0 ..." (each byte's decimal text, space
+        # -joined) instead of the real bytes - a corrupt file that is
+        # still fully downloadable, just not a valid zip anymore.
+        $isByteArray = ($extra.content -is [byte[]]) -or (($extra.content -is [array]) -and ($extra.content.Count -gt 0) -and ($extra.content[0] -is [byte]))
+        if ($isByteArray) {
+            [System.IO.File]::WriteAllBytes($extraPath, [byte[]]$extra.content)
+        } else {
+            [System.IO.File]::WriteAllText($extraPath, [string]$extra.content, (New-Object System.Text.UTF8Encoding($false)))
+        }
         $releaseAssets.Add([PSCustomObject]@{ name = $extraName })
         $downloadableAssets.Add([PSCustomObject]@{ name = $extraName; filePath = $extraPath })
+    }
+
+    # Round 47 (7.2): the zipball fixture is built HERE (never by the stub
+    # script itself, same "wrapper builds files, dumb server just serves
+    # them" split as every other asset above) only when a caller opts in.
+    $zipballFilePath = $null
+    if ($ZipballAvailable) {
+        $zipballFilePath = Join-Path -Path $assetsDir -ChildPath 'zipball.zip'
+        New-GitHubZipballFixtureZip -DestinationZipPath $zipballFilePath -Owner $Owner -RepoName $RepoName -ShaSuffix $ZipballShaSuffix -RootToc:$ZipballRootToc -FolderName $ZipballFolderName -TocVersion $TagName | Out-Null
     }
 
     $manifest = [PSCustomObject]@{
         tagName                    = $TagName
         htmlUrl                    = $HtmlUrl
+        owner                      = $Owner
+        repoName                   = $RepoName
+        requireToken               = $RequireToken
+        expectedToken              = $ExpectedToken
+        zipballAvailable           = $ZipballAvailable
+        zipballFilePath            = $zipballFilePath
         releaseStatus              = $ReleaseStatus
         retryAfterSeconds          = $(if ($RetryAfterSeconds -gt 0) { $RetryAfterSeconds } else { $null })
         rateLimitResetEpochSeconds = $(if ($RateLimitResetEpochSeconds -gt 0) { $RateLimitResetEpochSeconds } else { $null })
@@ -892,16 +1030,19 @@ function Start-GitHubReleaseStubServer {
     }
 
     return [PSCustomObject]@{
-        Process      = $proc
-        Port         = $Port
-        BaseUrl      = "http://127.0.0.1:$Port"
-        ManifestPath = $manifestPath
-        TagName      = $TagName
-        ZipPath      = $zipPath
-        ShaPath      = $shaPath
-        ZipAssetName = $zipName
-        ShaAssetName = $shaName
-        ZipHash      = $realHash
+        Process         = $proc
+        Port            = $Port
+        BaseUrl         = "http://127.0.0.1:$Port"
+        ManifestPath    = $manifestPath
+        Owner           = $Owner
+        RepoName        = $RepoName
+        TagName         = $TagName
+        ZipPath         = $zipPath
+        ShaPath         = $shaPath
+        ZipAssetName    = $zipName
+        ShaAssetName    = $shaName
+        ZipHash         = $realHash
+        ZipballFilePath = $zipballFilePath
     }
 }
 
@@ -1656,7 +1797,13 @@ function Invoke-Api {
     }
 
     $ok = ($status -ge 200 -and $status -lt 300)
-    return [PSCustomObject]@{ Ok = $ok; StatusCode = $status; Body = $parsedBody; Error = $errorMessage }
+    # RawText (Round 47 addition): the exact response body text, before
+    # ConvertFrom-Json - lets a caller assert a literal substring (e.g. "this
+    # secret string never appears in the raw wire response") without
+    # relying on a parsed-then-reserialized round-trip to preserve it
+    # faithfully. Purely additive - every existing caller reads only
+    # Ok/StatusCode/Body/Error and is unaffected.
+    return [PSCustomObject]@{ Ok = $ok; StatusCode = $status; Body = $parsedBody; Error = $errorMessage; RawText = $text }
 }
 
 function Invoke-ApiConcurrentPair {
