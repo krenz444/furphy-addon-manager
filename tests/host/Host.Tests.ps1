@@ -1428,6 +1428,63 @@ Describe 'Host FormatNextCheck DST handling (long-run:tray-next-check-dst-two-da
     }
 }
 
+Describe 'Host tray wait is measured on the wall clock (Round 48, audit MEDIUM 6)' -Tags 'Host' {
+    <#
+      WaitHandle.WaitAny's timeout does not advance while the PC is
+      suspended, so the tray's old "count slices down" wait pushed the daily
+      check later by every minute the machine slept. WaitForNextCycle now
+      compares UtcNow against a deadline each slice; the decision itself is
+      the pure static TrayForm.NextWaitSliceSeconds, driven here through
+      reflection (no process launched, no window shown) with simulated
+      clocks - a "slept through the deadline" resume is just a nowUtc far
+      past it.
+    #>
+    function Get-NextWaitSliceMethod {
+        # (explicit throws, not Should: a Pester assertion's output would
+        # become part of this function's return value)
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $trayFormType = $asm.GetType('Furphy.TrayForm')
+        if ($null -eq $trayFormType) { throw 'Furphy.TrayForm not found in FurphyHost.exe' }
+        $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+        $method = $trayFormType.GetMethod('NextWaitSliceSeconds', $flags, $null,
+            @([datetime], [datetime], [int], [int]), $null)
+        if ($null -eq $method) { throw 'TrayForm.NextWaitSliceSeconds not found (private static, 4 args)' }
+        return $method
+    }
+
+    It 'waits in slices of at most the cap while the deadline is still ahead' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-NextWaitSliceMethod
+        $now = [datetime]::SpecifyKind([datetime]'2026-10-14T12:00:00', 'Utc')
+        $deadline = $now.AddSeconds(600)
+        $m.Invoke($null, @($deadline, $now, 600, 60)) | Should Be 60
+        $m.Invoke($null, @($deadline, $now.AddSeconds(570), 600, 60)) | Should Be 30
+        $m.Invoke($null, @($deadline, $now.AddSeconds(599.2), 600, 60)) | Should Be 1
+    }
+
+    It 'a machine that slept through the deadline wakes into "run the cycle now" (0), however long it slept' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-NextWaitSliceMethod
+        $now = [datetime]::SpecifyKind([datetime]'2026-10-14T22:00:00', 'Utc')
+        $deadline = $now.AddHours(24)
+        # Resumed 9 hours into a 24h wait: still ahead - keeps waiting.
+        $m.Invoke($null, @($deadline, $now.AddHours(9), 86400, 60)) | Should Be 60
+        # Resumed after the deadline passed while asleep: due immediately.
+        $m.Invoke($null, @($deadline, $now.AddHours(24), 86400, 60)) | Should Be 0
+        $m.Invoke($null, @($deadline, $now.AddHours(30), 86400, 60)) | Should Be 0
+    }
+
+    It 'a clock stepped backwards can never stretch the wait beyond what was asked for' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-NextWaitSliceMethod
+        $now = [datetime]::SpecifyKind([datetime]'2026-10-14T12:00:00', 'Utc')
+        # Asked for 600s; the clock then jumps back an hour, so the raw
+        # deadline is 4200s away - capped to the 600s requested.
+        $deadline = $now.AddSeconds(4200)
+        $m.Invoke($null, @($deadline, $now, 600, 100000)) | Should Be 600
+    }
+}
+
 Describe 'Host MinimumSize DPI floor (regression-guards:host-minimumsize-floor-no-guard-test)' -Tags 'Host' {
     <#
       regression-guards:host-minimumsize-floor-no-guard-test - Round 32

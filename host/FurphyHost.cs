@@ -5793,14 +5793,23 @@ boot();
         // 60s costs only a few extra disk reads of a file that essentially
         // never changes mid-wait - not worth trading away the "notices
         // within a minute" contract.
+        //
+        // Round 48 (audit MEDIUM 6): the wait is measured against a WALL-CLOCK
+        // deadline, not by counting slices down. WaitHandle.WaitAny's timeout
+        // is measured in time the machine was awake - it does not advance
+        // while the PC sleeps or hibernates - so the old "subtract each
+        // slice" countdown pushed a daily check later by every minute the
+        // machine slept (a laptop closed overnight checked ~8 hours late).
+        // Re-reading UtcNow each slice means a resume notices the deadline
+        // has passed within one slice (<= 60s) and runs the cycle.
         private bool WaitForNextCycle(int totalSeconds)
         {
             WaitHandle[] handles = new WaitHandle[] { _stopEvent, _manualTrigger };
-            int remaining = totalSeconds;
+            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(totalSeconds);
             while (true)
             {
-                int slice = remaining < 60 ? remaining : 60;
-                if (slice < 1) slice = 1;
+                int slice = NextWaitSliceSeconds(deadlineUtc, DateTime.UtcNow, totalSeconds, 60);
+                if (slice <= 0) return false;
                 int idx = WaitHandle.WaitAny(handles, slice * 1000);
                 if (idx == 0)
                 {
@@ -5818,9 +5827,25 @@ boot();
                     LogHost("[tray] background updates turned off - exiting");
                     return true;
                 }
-                remaining -= slice;
-                if (remaining <= 0) return false;
             }
+        }
+
+        // Seconds to block before WaitForNextCycle's next stop/settings
+        // check: the time left to the wall-clock deadline, never more than
+        // the total originally requested (so a clock stepped BACKWARDS cannot
+        // stretch the wait), capped at maxSliceSeconds, and at least 1 while
+        // any time is left. 0 means the deadline has passed - which includes
+        // time spent suspended. Pure so a test can drive it through
+        // reflection without a window or a real clock.
+        private static int NextWaitSliceSeconds(DateTime deadlineUtc, DateTime nowUtc, int totalSeconds, int maxSliceSeconds)
+        {
+            double left = (deadlineUtc - nowUtc).TotalSeconds;
+            if (left > totalSeconds) left = totalSeconds;
+            if (left <= 0) return 0;
+            int whole = (int)Math.Ceiling(left);
+            if (whole > maxSliceSeconds) whole = maxSliceSeconds;
+            if (whole < 1) whole = 1;
+            return whole;
         }
 
         private void FinalizeExit()

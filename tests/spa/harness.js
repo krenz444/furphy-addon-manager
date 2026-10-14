@@ -2931,6 +2931,259 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Round 48 (audit MEDIUM 3): Sanitize.render must never throw on
+  // upstream HTML/markdown it does not recognise. The old unwrap-then-
+  // re-clean loop hit removeChild() on an already-moved node (a
+  // NotFoundError) for two sibling unknown tags, or one unknown tag
+  // followed by a comment - and that exception aborted the whole
+  // overview/changelog render. Sanitize/Markdown are script-scope consts
+  // inside the iframe (not window properties), so they are read through
+  // the frame's own indirect eval, which sees the global lexical scope.
+  // ------------------------------------------------------------------
+  async function phaseSanitizer() {
+    beginPhase("Round 48: Sanitize.render survives sibling/nested unknown tags");
+    const win = await loadFrame("?mock=1&test=1");
+    await waitForReady(win, 8000);
+
+    const S = win.eval("Sanitize");
+    const M = win.eval("Markdown");
+    function render(html) {
+      const d = win.document.createElement("div");
+      S.render(d, html);
+      return d;
+    }
+    function renders(name, html, expected) {
+      try {
+        const out = render(html).innerHTML;
+        check(name, out === expected, "got: " + out);
+      } catch (e) {
+        check(name, false, "threw: " + (e && e.name ? e.name + ": " : "") + (e && e.message ? e.message : e));
+      }
+    }
+
+    // The exact shapes that used to throw NotFoundError.
+    renders("two sibling unknown tags are unwrapped, text kept",
+      "<p>a<font>1</font>b<font>2</font>c</p>", "<p>a1b2c</p>");
+    renders("an unknown tag followed by a comment does not throw",
+      "<p><font>x</font><!-- c --></p>", "<p>x</p>");
+    renders("three sibling unknown tags at the top level",
+      "<marquee>one</marquee><blink>two</blink><center>three</center>", "onetwothree");
+    renders("unknown wrapper around several siblings keeps allowed children in order",
+      "<section><p>one</p><aside>two</aside><p>three</p></section>", "<p>one</p>two<p>three</p>");
+    renders("nested unknown tags collapse and neighbouring allowed tags survive",
+      "<font><font>deep</font></font><b>ok</b>", "deep<b>ok</b>");
+    renders("two <figure> blocks (unknown wrapper, allowed child) both survive",
+      "<figure><img src=\"https://example.test/a.png\"></figure><figure><img src=\"https://example.test/b.png\"></figure>",
+      "<img src=\"https://example.test/a.png\" loading=\"lazy\"><img src=\"https://example.test/b.png\" loading=\"lazy\">");
+
+    // Headings 5/6 and the inline/definition tags are real content now.
+    renders("h5 and h6 are kept", "<h5>One</h5><h6>Two</h6>", "<h5>One</h5><h6>Two</h6>");
+    renders("sup/sub/del/dl/dt/dd are kept",
+      "<p>x<sup>2</sup> H<sub>2</sub>O <del>old</del></p><dl><dt>t</dt><dd>d</dd></dl>",
+      "<p>x<sup>2</sup> H<sub>2</sub>O <del>old</del></p><dl><dt>t</dt><dd>d</dd></dl>");
+
+    // Safety is unchanged by the restructure.
+    renders("a script nested inside an unknown wrapper is still dropped",
+      "<font>hi<script>window.__pwned = 1</script></font>", "hi");
+    checkTry("...and never executed", function () { return win.__pwned === undefined; });
+    renders("javascript: links lose their href; event attributes are stripped",
+      "<a href=\"javascript:alert(1)\" onclick=\"alert(2)\">t</a>", "<a>t</a>");
+    renders("http(s) links get target/rel and the normalised href",
+      "<a href=\"https://example.test/x\">t</a>",
+      "<a href=\"https://example.test/x\" target=\"_blank\" rel=\"noopener noreferrer\">t</a>");
+    renders("a non-http image is dropped",
+      "<p>a<img src=\"data:text/html,x\">b</p>", "<p>ab</p>");
+
+    // The path the app actually takes for Wago text: markdown -> sanitize.
+    checkTry("markdown with a level-5 heading renders through Sanitize as <h5>", function () {
+      return render(M.toHtml("##### Five\n\ntext")).innerHTML.indexOf("<h5>Five</h5>") !== -1;
+    });
+
+    checkTry("no console errors (sanitizer phase)", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
+  // ------------------------------------------------------------------
+  // Round 48 (audit HIGH 2 / MEDIUM 4 / usability U1), SPA side:
+  //   - a Wago card for an addon already tracked from CurseForge says
+  //     "Installed" (card AND drawer) instead of offering a conflicting
+  //     second install; the id -> slug link is learned lazily and cached;
+  //   - "Pin current version" works for a GitHub addon (its pin is the tag);
+  //   - the Add dialog takes CurseForge page links and GitHub links.
+  // Each submission uses its own fresh frame (Actions.startJob's busy gate
+  // blocks a second job while the mock's simulated one is still running).
+  // ------------------------------------------------------------------
+  async function phaseRound48Spa() {
+    beginPhase("Round 48: cross-source Installed state, GitHub pin, Add dialog links");
+
+    // ---- Wago grid + drawer: Details! Damage Meter is tracked from
+    // CurseForge (mock record carries toc X-Wago-ID DTL001, which the
+    // mock Wago endpoint resolves to details-damage-meter-standalone).
+    {
+      // Earlier phases already browsed Wago in this same origin, so the
+      // persisted id -> slug cache is warm; forget it so THIS load has to
+      // resolve DTL001 itself (the lazy resolver is what is under test).
+      try { localStorage.removeItem("addonSync.wagoSlugById.v1"); } catch (e) { /* storage unavailable - the cache is simply cold */ }
+      const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+      await waitForReady(win, 8000);
+      await wait(1800); // grid fetch + the lazy id -> slug resolution + re-render
+
+      function cardFor(name) {
+        return qa(win, "#browse-grid .browse-row").filter(function (r) { return text(r.querySelector(".browse-row-title")) === name; })[0];
+      }
+      const detailsCard = cardFor("Details! Damage Meter");
+      checkTry("the Wago card for an addon tracked from CurseForge shows a disabled 'Installed' button", function () {
+        const btn = detailsCard && detailsCard.querySelector(".browse-row-action button");
+        return !!btn && btn.disabled === true && /Installed/.test(text(btn));
+      });
+      checkTry("...whose tooltip says it came from CurseForge", function () {
+        const btn = detailsCard && detailsCard.querySelector(".browse-row-action button");
+        return !!btn && btn.title === "Already installed from CurseForge";
+      });
+      checkTry("an addon tracked nowhere still offers an enabled 'Install'", function () {
+        const card = cardFor("Deadly Boss Mods (DBM)");
+        const btn = card && card.querySelector(".browse-row-action button");
+        return !!btn && btn.disabled === false && text(btn) === "Install";
+      });
+      checkTry("the resolved id -> slug link is remembered (Store.state.wagoSlugById)", function () {
+        return win.__furphyTest.Store.state.wagoSlugById["dtl001"] === "details-damage-meter-standalone";
+      });
+      checkTry("the Wago addon endpoint was asked for the record's id exactly once (one request, never per render)", function () {
+        const log = (win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+        return log.filter(function (e) { return e.path === "/api/wago/addons/DTL001"; }).length === 1;
+      });
+      checkTry("a record with no toc Wago id is never asked about", function () {
+        const log = (win.__furphyTest.Mock && win.__furphyTest.Mock.requestLog) || [];
+        return !log.some(function (e) { return e.path === "/api/wago/addons/undefined" || e.path === "/api/wago/addons/null" || e.path === "/api/wago/addons/"; });
+      });
+
+      if (detailsCard) {
+        await clickAndSettle(win, detailsCard, 400);
+        checkTry("the drawer opened from that card also shows 'Installed', not 'Install'", function () {
+          const btn = q(win, "#drawer-header .drawer-primary-action button");
+          return !!btn && btn.disabled === true && /Installed/.test(text(btn));
+        });
+        const closeBtn = q(win, "#drawer-close");
+        if (closeBtn) await clickAndSettle(win, closeBtn, 150);
+      }
+      checkTry("no console errors (cross-source Wago grid)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- GitHub: "Pin current version" posts the installed TAG, and the
+    // record ends pinned. ----
+    {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      const captured = interceptRequests(win);
+      const ghRow = qa(win, "#myaddons-tbody tr").filter(function (r) { return /TimelineReminders/.test(text(r)); })[0];
+      const kebab = ghRow && ghRow.querySelector('button[aria-label="More actions"]');
+      if (!kebab) {
+        check("GitHub row has a kebab menu", false, "TimelineReminders row/kebab not found");
+      } else {
+        await clickAndSettle(win, kebab, 150);
+        const pinItem = qa(win, ".dropdown-item").filter(function (b) { return text(b) === "Pin current version"; })[0];
+        checkTry("the GitHub kebab offers 'Pin current version'", function () { return !!pinItem; });
+        if (pinItem) {
+          await clickAndSettle(win, pinItem, 200);
+          const posted = lastPost(captured, "/api/jobs");
+          checkTry("it posts an install job whose fileId is the installed tag (not null)", function () {
+            return !!posted && posted.body.kind === "install" && posted.body.projectId === "github:bart-dev-wow/TimelineReminders" && posted.body.fileId === "v454";
+          });
+          const job = await waitForJobDone(win, "install", 9000);
+          checkTry("the job finishes", function () { return !!job; });
+          // The job's own "done" lands before the follow-up /api/state
+          // refresh that carries the new pin - poll for it.
+          let rec = null;
+          for (let i = 0; i < 30; i++) {
+            rec = win.__furphyTest.Store.state.addons.filter(function (a) { return a.repo === "bart-dev-wow/TimelineReminders"; })[0];
+            if (rec && rec.pinnedFileId === "v454") break;
+            await wait(100);
+          }
+          check("the record is pinned to that tag and still has no numeric file id",
+            !!rec && rec.pinnedFileId === "v454" && (rec.fileId === null || rec.fileId === undefined),
+            rec ? ("pinnedFileId=" + rec.pinnedFileId + " fileId=" + rec.fileId) : "record not found");
+        }
+      }
+      captured._restore();
+      checkTry("no console errors (GitHub pin)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Add dialog: each accepted shape posts the right job. ----
+    async function submitAdd(value) {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      const captured = interceptRequests(win);
+      const addBtn = q(win, "#btn-add-addon");
+      await clickAndSettle(win, addBtn, 200);
+      const input = q(win, "#add-addon-input");
+      input.value = value;
+      q(win, "#add-addon-form").dispatchEvent(new win.Event("submit", { cancelable: true, bubbles: true }));
+      await wait(500);
+      return { win: win, captured: captured };
+    }
+
+    {
+      const r = await submitAdd("https://www.curseforge.com/wow/addons/Some-New-Addon/files/123");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a CurseForge page link posts add-by-slug with the lower-cased slug", function () {
+        return !!posted && posted.body.kind === "add-by-slug" && posted.body.slug === "some-new-addon";
+      });
+      checkTry("...and the dialog closes", function () { return q(r.win, "#dialog-add").hidden === true; });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("https://github.com/acme/NewThing");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a GitHub link posts an add with source github and the owner/repo", function () {
+        return !!posted && posted.body.kind === "add" && posted.body.source === "github" && posted.body.repo === "acme/NewThing";
+      });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("acme/BareRepo");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a bare owner/repo posts a GitHub add too", function () {
+        return !!posted && posted.body.source === "github" && posted.body.repo === "acme/BareRepo";
+      });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("https://www.curseforge.com/projects/25301");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a curseforge.com/projects/<id> link posts a plain add of that numeric id", function () {
+        return !!posted && posted.body.kind === "add" && Number(posted.body.projectId) === 25301;
+      });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("1521253");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a plain ID number still posts an add (unchanged)", function () {
+        return !!posted && posted.body.kind === "add" && Number(posted.body.projectId) === 1521253;
+      });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("https://addons.wago.io/addons/some-wago-thing");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("a wago.io link still posts a Wago add (unchanged)", function () {
+        return !!posted && posted.body.source === "wago" && posted.body.slug === "some-wago-thing";
+      });
+      r.captured._restore();
+    }
+    {
+      const r = await submitAdd("hello there");
+      const posted = lastPost(r.captured, "/api/jobs");
+      checkTry("unrecognised text posts nothing and shows the three-source hint", function () {
+        const err = q(r.win, "#add-addon-error");
+        return !posted && !!err && err.hidden === false && err.textContent === "Paste a CurseForge, Wago or GitHub link, or type a CurseForge ID number.";
+      });
+      checkTry("...and the dialog stays open", function () { return q(r.win, "#dialog-add").hidden === false; });
+      r.captured._restore();
+    }
+    checkTry("no console errors (Add dialog)", function () { return currentPhase.consoleErrors.length === 0; });
+  }
+
   async function main() {
     await phaseDefault();
     await phaseLaunchPerf();
@@ -2957,6 +3210,8 @@
     await phaseAdoptSpaCoverage();
     await phaseAdoptInPlaceFlow();
     await phaseGithubSource();
+    await phaseSanitizer();
+    await phaseRound48Spa();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

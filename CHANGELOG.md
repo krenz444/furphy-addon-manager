@@ -1,5 +1,68 @@
 # Furphy Addon Manager - changelog
 
+## Round 48 (unreleased: the 2026-10-14 audit's bug fixes)
+
+Fixes from a read-only audit of 1.27.0 (usability / reliability / bugs). No
+`VERSION` bump here - cutting 1.27.1 is a separate decision. Behaviour the
+player can notice is listed first.
+
+**An addon can no longer end up installed twice from two sources.** The Wago
+grid (and its drawer) now says "Installed" for an addon that is already
+tracked from CurseForge or GitHub - matched through the `.toc`'s Wago id,
+resolved to a Wago page slug once and remembered - instead of offering a
+second install that fought the first over the same folders. As a safety net a
+CurseForge or Wago install now refuses, before touching disk, to install over
+a folder a different tracked addon owns (the check GitHub installs always
+had): the row fails with "Another addon already uses these folders - remove
+one of the two first". Removing an addon, and the stale-folder cleanup after
+an update, never delete a folder another tracked addon still lists.
+
+**A failed update leaves the addon exactly as it was.** The folder swap used
+to delete each old folder and then move the new one in: a locked file
+(antivirus, an indexer, an open editor) could leave a half-deleted folder, or
+a mix of new and old folders. Each folder is now renamed aside and the new one
+moved in; the old copies are deleted only once every folder is in place, and
+any failure puts everything back. (A plain `Move-Item` is NOT safe for this -
+with a locked file inside it moves the files it can reach and leaves the rest
+behind, so the swap uses a single directory rename.) A swap a killed run never
+finished is recovered or swept the next time that folder is installed, and
+`-Scan` never offers the leftover as an untracked addon.
+
+**GitHub addons: Pin and Roll back now stick.** A rollback was undone by the
+very next sync and "Pin current version" failed with a raw "fileId required"
+error. A GitHub record's pin is its release tag (`pinnedFileId`, a string):
+a pinned record makes no network call while it is on that tag, fetches that
+tag's release (`releases/tags/<tag>`) when it is not, and a rollback pins the
+tag it restores. A pinned tag whose release was deleted is reported plainly
+("The pinned version isn't on GitHub any more - unpin it...").
+
+**Addon descriptions no longer fail to render.** The sanitizer threw on two
+sibling unknown tags (`<sup>`, `<h5>`, `<figure>`, `<font>`...) or an unknown
+tag followed by a comment, which aborted the whole overview/changelog render.
+It now cleans each subtree before unwrapping it; `h5`/`h6`/`sup`/`sub`/`s`/
+`del`/`dl`/`dt`/`dd` are allowed.
+
+**The daily background check no longer slips when the PC sleeps.** The tray
+counted its wait down in slices of time the machine was awake; it now compares
+the wall clock to a deadline each slice, so a resume after the deadline runs
+the check within a minute.
+
+**"Add addon" takes any link.** CurseForge page links (and
+`curseforge.com/projects/<id>`, `curseforge://install?addonId=...`), GitHub
+links and bare `owner/repo` all work from the one dialog, alongside the ID
+number and wago.io links it already took. A CurseForge slug the catalogue
+cannot match fails with "Couldn't find that addon - try its ID number...".
+
+**Tests.** The suite could not pass from a clean checkout (the multi-flavour
+fixture `fixtures\wowroot` was never committed); it is restored,
+`deploy.ps1` mirrors `fixtures\`, the GitHub-stub and test-server launchers
+quote their paths (they broke under `...(x86)\...` roots), and
+`run-all.ps1 -Only a,b` works under `-File`. New:
+`tests\unit\Cli.FolderOwnershipAndSwap.Tests.ps1`, a sanitizer phase and a
+Round 48 phase in `tests\spa\harness.js`, a wall-clock-wait reflection test in
+`tests\host\Host.Tests.ps1`, and a `releases/tags/<tag>` route in the GitHub
+release stub.
+
 ## Round 47 (1.27.0: guild addons on GitHub update like everything else)
 
 GitHub joins CurseForge and Wago Addons as a third addon source, dispatched

@@ -456,15 +456,19 @@ Describe 'Install-AddonPackage - folder swap failure integrity (failure-modes:si
         (Get-Content -LiteralPath $existingFile -Raw) | Should Be 'OLD-VERSION'
     }
 
-    It 'a partial swap (one of two folders locked) still throws overall - never silently reports the addon as fully updated' {
+    It 'a partial swap (one of two folders locked) throws overall AND rolls the swapped folder back - never a mix of new and old (Round 48)' {
         # failure-modes:silent-fake-success-on-locked-addons-folder's
         # "partial" case: a real multi-folder addon where only SOME
         # top-level folders fail to swap. The pre-fix code only ever
         # checked Count -eq 0, which this scenario would have sailed past
-        # (Count would have been >= 1). Also documents the accepted
-        # tradeoff: folders that CAN swap still do (maximum forward
-        # progress), but the function still throws so the caller never
-        # persists the update as a clean success.
+        # (Count would have been >= 1). Round 48 (audit MEDIUM 5) CHANGES
+        # the old accepted tradeoff ("folders that CAN swap still do -
+        # maximum forward progress"): a package's folders are versioned
+        # together, so a new core beside an old options folder is worse
+        # than the whole addon staying on the old version. The swap is now
+        # all-or-nothing - the function throws (so the caller never
+        # persists the update as a clean success) AND every folder it had
+        # already swapped is put back.
         $root = New-TempRoot -Name 'swap-locked-partial'
         $staging = Join-Path $root 'staging'
         $addons = Join-Path $root 'addons'
@@ -504,12 +508,13 @@ Describe 'Install-AddonPackage - folder swap failure integrity (failure-modes:si
             $lockStream.Dispose()
         }
 
-        # FolderA (unlocked) made forward progress and swapped to the new
-        # content, but FolderB (locked) is untouched - and the overall
-        # function still threw, so no caller can mistake this for a clean
-        # "Updated" result.
-        (Get-Content -LiteralPath (Join-Path $addons 'FolderA\FolderA.toc') -Raw) | Should Be 'FolderA-NEW'
+        # FolderA (unlocked) WAS swapped, then rolled back when FolderB
+        # (locked) could not be - both are the old version again, no
+        # ".furphy-old-*" leftover remains - and the overall function threw,
+        # so no caller can mistake this for a clean "Updated" result.
+        (Get-Content -LiteralPath (Join-Path $addons 'FolderA\FolderA.toc') -Raw) | Should Be 'A-OLD'
         (Get-Content -LiteralPath $lockedFile -Raw) | Should Be 'B-OLD'
+        @(Get-ChildItem -LiteralPath $addons -Directory -Force | Where-Object { $_.Name -match '\.furphy-old-' }).Count | Should Be 0
     }
 
     It 'a TRANSIENTLY locked file is retried and the swap succeeds once the lock is released within the retry budget (RETRY-ON-LOCK, GAME-MODE-SPEC.md section 7.4)' {

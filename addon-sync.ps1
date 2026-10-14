@@ -125,6 +125,12 @@
    dependencies/backups/-Status/-Scan) applies identically regardless of
    source; addons.json records gain source/wagoId/slug/curseId fields.
 
+ GITHUB (Round 47/48): a target may also be "owner/repo", "github:owner/repo"
+   or a github.com URL. For a GitHub record -FileId names a release TAG (e.g.
+   -Only github:owner/repo -FileId v1.2.3): that tag is installed and pinned
+   (pinnedFileId holds the tag), and -Rollback pins the tag it restores, so
+   a later sync keeps it until -Unpin.
+
  EXAMPLES:
    addon-sync.ps1 -Quiet
    addon-sync.ps1 -Add 12345,67890
@@ -1380,6 +1386,267 @@ function Get-WagoDownloadedZip {
 # Install / extraction
 # =====================================================================
 
+# =====================================================================
+# Folder swap + ownership helpers (Round 48: audit MEDIUM 5 / HIGH 2)
+# =====================================================================
+
+function Test-IsSwapAsideName {
+    <#
+      True for a folder name of the exact shape Move-FolderIntoPlace gives an
+      old addon folder while a swap is in flight: "<Folder>.furphy-old-<8 hex>".
+      WoW only loads a folder whose .toc is named after the folder, so such a
+      folder is inert; -Scan uses this to never offer one as an "untracked
+      addon", and Restore-InterruptedFolderSwap sweeps any a killed run left.
+    #>
+    param([string]$Name)
+
+    if ([string]::IsNullOrEmpty($Name)) { return $false }
+    return ($Name -match '\.furphy-old-[0-9a-f]{8}$')
+}
+
+function Move-DirectoryAtomic {
+    <#
+      Moves a folder as ONE operation. On the same volume that is a single
+      rename ([System.IO.Directory]::Move -> MoveFileEx): it either happens
+      completely or not at all, and it fails up front, touching no file, when
+      anything inside the folder is held open. Verified empirically on
+      Windows 11 / PowerShell 5.1: Move-Item on the same folder is NOT
+      atomic - when a file inside is locked it moves the files it can reach
+      into the destination and leaves the locked one behind, splitting the
+      addon across two folders. A cross-volume move cannot be a rename, so it
+      falls back to Move-Item (a copy then delete); the caller treats that
+      destination as disposable on failure. Throws on any failure.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestPath
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {
+        Move-Item -LiteralPath $SourcePath -Destination $DestPath -ErrorAction Stop
+        return
+    }
+    $sourceRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($SourcePath))
+    $destRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($DestPath))
+    if ([string]::Equals($sourceRoot, $destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        [System.IO.Directory]::Move($SourcePath, $DestPath)
+    } else {
+        Move-Item -LiteralPath $SourcePath -Destination $DestPath -ErrorAction Stop
+    }
+}
+
+function Move-FolderIntoPlace {
+    <#
+      One folder of a package swap, as an undoable step: if $DestPath already
+      exists it is renamed aside ("<Dest>.furphy-old-<8 hex>", same parent, so
+      an atomic rename - see Move-DirectoryAtomic), then $SourcePath is moved
+      to $DestPath. Any failure puts everything back exactly as it was (the
+      partially placed new folder removed, the old one renamed back) and
+      reports it - it never throws and never leaves the destination
+      half-deleted.
+
+      Why rename instead of Remove-Item -Recurse first: deleting a folder tree
+      with a locked file in it removes whatever files are NOT locked before
+      it fails, leaving a broken half of the old addon in AddOns. The atomic
+      rename fails up front instead, without touching a single file.
+
+      Returns { Ok; Aside; Error }: Aside is the path the old folder now sits
+      at (null when there was none), for the caller to delete on commit or to
+      hand to Undo-FolderPlacement on rollback.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestPath
+    )
+
+    $aside = $null
+    $asideTaken = $false
+    try {
+        if (Test-Path -LiteralPath $DestPath) {
+            $aside = '{0}.furphy-old-{1}' -f $DestPath, ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            Move-DirectoryAtomic -SourcePath $DestPath -DestPath $aside
+            $asideTaken = $true
+        }
+        Move-DirectoryAtomic -SourcePath $SourcePath -DestPath $DestPath
+        return [PSCustomObject]@{ Ok = $true; Aside = $(if ($asideTaken) { $aside } else { $null }); Error = $null }
+    } catch {
+        $err = $_
+        if ($asideTaken) {
+            try {
+                # A cross-volume move can leave a partial copy at $DestPath.
+                if (Test-Path -LiteralPath $DestPath) { Remove-Item -LiteralPath $DestPath -Recurse -Force -ErrorAction Stop }
+                Move-DirectoryAtomic -SourcePath $aside -DestPath $DestPath
+            } catch {
+                Write-Log -Level 'ERROR' -Message "Could not put the previous folder back after a failed swap - it is still at '$aside': $($_.Exception.Message)"
+            }
+        }
+        return [PSCustomObject]@{ Ok = $false; Aside = $null; Error = $err }
+    }
+}
+
+function Undo-FolderPlacement {
+    <#
+      Reverses one successful Move-FolderIntoPlace: removes the folder now at
+      $DestPath and renames $Aside (if there was one) back. Used to roll a
+      whole multi-folder package back when a later folder fails, so an addon
+      is never left as a mix of new and old folders. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$DestPath,
+        $Aside
+    )
+
+    try {
+        if (Test-Path -LiteralPath $DestPath) { Remove-Item -LiteralPath $DestPath -Recurse -Force -ErrorAction Stop }
+        if ($Aside -and (Test-Path -LiteralPath $Aside)) { Move-DirectoryAtomic -SourcePath $Aside -DestPath $DestPath }
+    } catch {
+        $where = if ($Aside) { " - the previous version is still at '$Aside'" } else { '' }
+        Write-Log -Level 'ERROR' -Message "Could not roll back folder '$DestPath'$where : $($_.Exception.Message)"
+    }
+}
+
+function Restore-InterruptedFolderSwap {
+    <#
+      Recovery for a swap that never finished (the process was killed between
+      the two renames): for the named folder, a leftover "<Name>.furphy-old-*"
+      sibling is either the ONLY surviving copy (the folder itself is missing
+      -> the newest one is renamed back) or a stale leftover (the folder
+      exists -> deleted). Best-effort and silent when there is nothing to do;
+      called for every folder an install is about to replace.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AddonsPath,
+        [Parameter(Mandatory = $true)][string]$FolderName
+    )
+
+    try {
+        $pattern = '^' + [regex]::Escape($FolderName) + '\.furphy-old-[0-9a-f]{8}$'
+        $asides = @(Get-ChildItem -LiteralPath $AddonsPath -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $pattern } |
+            Sort-Object -Property LastWriteTimeUtc -Descending)
+        if ($asides.Count -eq 0) { return }
+
+        $destPath = Join-Path -Path $AddonsPath -ChildPath $FolderName
+        $first = 0
+        if (-not (Test-Path -LiteralPath $destPath)) {
+            Move-DirectoryAtomic -SourcePath $asides[0].FullName -DestPath $destPath
+            Write-Log -Level 'WARN' -Message "Restored folder '$FolderName' from an interrupted earlier update ('$($asides[0].Name)')"
+            $first = 1
+        }
+        for ($i = $first; $i -lt $asides.Count; $i++) {
+            try {
+                Remove-Item -LiteralPath $asides[$i].FullName -Recurse -Force -ErrorAction Stop
+                Write-Log -Level 'INFO' -Message "Removed leftover '$($asides[$i].Name)' from an earlier update"
+            } catch {
+                Write-Log -Level 'WARN' -Message "Could not remove leftover '$($asides[$i].Name)': $($_.Exception.Message)"
+            }
+        }
+    } catch {
+        Write-Log -Level 'WARN' -Message "Could not check '$FolderName' for an interrupted update: $($_.Exception.Message)"
+    }
+}
+
+function Get-FoldersOwnedByOtherRecords {
+    <#
+      Case-insensitive set (lowercased names) of every AddOns folder recorded
+      under any record of $Config OTHER than $Record. Install-AddonPackage and
+      Remove-AddonByTarget treat these as off limits: a record must never
+      delete a folder another tracked addon still needs (a shared library
+      folder, or an addon that was added twice from two sources). Returned
+      with -NoEnumerate so an empty set stays a set.
+    #>
+    param(
+        $Config,
+        $Record
+    )
+
+    # NOTE: $Config is the main loop's List[object]; never wrap it in @() -
+    # on this PowerShell 5.1 build @(<List[object]>) throws "Argument types
+    # do not match" (found live while writing this). Plain foreach only.
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    if ($null -ne $Config) {
+        foreach ($item in $Config) {
+            if ($null -eq $item) { continue }
+            if ([object]::ReferenceEquals($item, $Record)) { continue }
+            foreach ($f in $item.folders) {
+                if ($f) { [void]$set.Add(([string]$f).ToLowerInvariant()) }
+            }
+        }
+    }
+    Write-Output -NoEnumerate $set
+}
+
+function Get-ClaimedFolderOwner {
+    <#
+      Owner identity string for $Folder in a claimed-folders map (the
+      Dictionary built once per run in Main, or any IDictionary a test
+      passes), or $null. Never throws.
+    #>
+    param($ClaimedFolders, [string]$Folder)
+
+    if (-not $ClaimedFolders -or [string]::IsNullOrEmpty($Folder)) { return $null }
+    try {
+        # Dictionary[string,string] (what Main builds, case-insensitive) or a
+        # plain hashtable (tests). Not IDictionary.Contains: PowerShell cannot
+        # see that explicit interface member on a generic Dictionary.
+        if ($ClaimedFolders -is [System.Collections.Generic.Dictionary[string,string]]) {
+            $owner = $null
+            if ($ClaimedFolders.TryGetValue($Folder, [ref]$owner)) { return [string]$owner }
+        } elseif ($ClaimedFolders -is [hashtable]) {
+            if ($ClaimedFolders.ContainsKey($Folder)) { return [string]$ClaimedFolders[$Folder] }
+        }
+    } catch { }
+    return $null
+}
+
+function Format-FolderOwnerLabel {
+    <# "2382" -> "CurseForge project 2382", "wago:x" -> "Wago addon x", "github:o/r" -> "GitHub repo o/r" - for log/user-facing text only. #>
+    param([string]$Identity)
+
+    if ([string]::IsNullOrEmpty($Identity)) { return 'another tracked addon' }
+    if ($Identity -match '^\d+$') { return "CurseForge project $Identity" }
+    if ($Identity -match '^(?i)wago:(.+)$') { return "Wago addon $($Matches[1])" }
+    if ($Identity -match '^(?i)github:(.+)$') { return "GitHub repo $($Matches[1])" }
+    return $Identity
+}
+
+function Find-PackageFolderConflicts {
+    <#
+      Pre-install guard shared by the CurseForge, Wago and GitHub sync paths
+      (GITHUB-SOURCE-SPEC.md 3.3a, extended to every source in Round 48):
+      lists the folders a downloaded package WOULD install (top-level folders
+      holding a .toc - exactly Install-AddonPackage's own criterion) that a
+      DIFFERENT tracked record already owns, without extracting anything.
+      A record's own folders never conflict with itself (an update re-claims
+      them; a pre-existing duplicate keeps working). Returns a List[object] of
+      { Folder; Owner }, empty when there is no conflict - and also empty
+      (never throws) when $ClaimedFolders is $null or the zip is unreadable,
+      so the guard can only ever add a refusal, never break a sync.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        $OwnFolders,
+        $ClaimedFolders,
+        [string]$OwnerIdentity
+    )
+
+    $conflicts = New-Object 'System.Collections.Generic.List[object]'
+    if ($ClaimedFolders) {
+        $own = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($f in $OwnFolders) {
+            if ($f) { [void]$own.Add(([string]$f).ToLowerInvariant()) }
+        }
+        foreach ($top in (Get-ZipTopLevelFolderNames -ZipPath $ZipPath -TocOnly)) {
+            if ($own.Contains($top.ToLowerInvariant())) { continue }
+            $owner = Get-ClaimedFolderOwner -ClaimedFolders $ClaimedFolders -Folder $top
+            if ($owner -and ($owner -ne $OwnerIdentity)) {
+                $conflicts.Add([PSCustomObject]@{ Folder = $top; Owner = $owner })
+            }
+        }
+    }
+    Write-Output -NoEnumerate $conflicts
+}
+
 function Install-AddonPackage {
     <#
       Extracts a downloaded zip, validates it, swaps its top-level folders
@@ -1391,6 +1658,16 @@ function Install-AddonPackage {
       failure-modes:silent-fake-success-on-locked-addons-folder), so a
       caller's ordinary exception handling is always what decides the
       outcome and a partial/failed swap can never be mistaken for success.
+
+      Round 48 (audit MEDIUM 5): the swap is now TRANSACTIONAL. Each folder
+      is renamed aside and the new one moved in (Move-FolderIntoPlace); the
+      old folders are only deleted once EVERY folder is in place, and if any
+      folder fails after its retries every folder already swapped is rolled
+      back (Undo-FolderPlacement). A failed update therefore leaves the addon
+      exactly as it was - the previous version intact - instead of the old
+      per-folder delete-then-move, which could leave a half-deleted folder or
+      a mix of new and old folders. -ProtectedFolders (names owned by OTHER
+      tracked records) are never deleted by the stale-folder cleanup below.
 
       GAME-MODE-SPEC.md section 7.4 (RETRY-ON-LOCK: added, now REQUIRED per
       this round's task brief, not just the spec's own "recommended"
@@ -1418,7 +1695,11 @@ function Install-AddonPackage {
         [Parameter(Mandatory = $true)]$ProjectId,
         [Parameter(Mandatory = $true)][string]$StagingPath,
         [Parameter(Mandatory = $true)][string]$AddonsPath,
-        $PreviousFolders
+        $PreviousFolders,
+        # Round 48: folder names (any case) that belong to OTHER tracked
+        # records - see the doc comment above. $null/omitted = no protection
+        # (every pre-Round-48 caller and test is unchanged).
+        $ProtectedFolders = $null
     )
 
     $extractDir = Join-Path -Path $StagingPath -ChildPath ([string]$ProjectId)
@@ -1467,54 +1748,78 @@ function Install-AddonPackage {
     # ground truth and replaces the Test-Path check entirely.
     # RETRY-ON-LOCK: added (GAME-MODE-SPEC.md section 7.4) - see this
     # function's own doc comment above for the full rationale.
+    # Round 48: a swap a killed run never finished - restore or sweep it
+    # before this one starts, so the rename-aside below never meets a
+    # leftover from last time.
+    foreach ($folderName in $candidateFolders) {
+        Restore-InterruptedFolderSwap -AddonsPath $AddonsPath -FolderName $folderName
+    }
+
+    $protectedSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($p in $ProtectedFolders) {
+        if ($p) { [void]$protectedSet.Add(([string]$p).ToLowerInvariant()) }
+    }
+
     $installedFolders = New-Object 'System.Collections.Generic.List[object]'
-    $failedFolders = New-Object 'System.Collections.Generic.List[object]'
+    $placements = New-Object 'System.Collections.Generic.List[object]'
+    $failedFolder = $null
     foreach ($folderName in $candidateFolders) {
         $sourcePath = Join-Path -Path $extractDir -ChildPath $folderName
         $destPath = Join-Path -Path $AddonsPath -ChildPath $folderName
-        $swapSucceeded = $false
-        $lastSwapError = $null
+        $placed = $null
         for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                if (Test-Path -LiteralPath $destPath) {
-                    Remove-Item -LiteralPath $destPath -Recurse -Force
-                }
-                Move-Item -LiteralPath $sourcePath -Destination $destPath -Force
-                $swapSucceeded = $true
-                break
-            } catch {
-                $lastSwapError = $_
-                if ($attempt -lt 3) {
-                    Write-Log -Level 'WARN' -Message "Folder '$folderName' locked for project $ProjectId (attempt $attempt of 3), retrying in 150ms: $($_.Exception.Message)"
-                    Start-Sleep -Milliseconds 150
-                }
+            $placed = Move-FolderIntoPlace -SourcePath $sourcePath -DestPath $destPath
+            if ($placed.Ok) { break }
+            if ($attempt -lt 3) {
+                Write-Log -Level 'WARN' -Message "Folder '$folderName' locked for project $ProjectId (attempt $attempt of 3), retrying in 150ms: $($placed.Error.Exception.Message)"
+                Start-Sleep -Milliseconds 150
             }
         }
-        if ($swapSucceeded) {
+        if ($placed.Ok) {
+            $placements.Add([PSCustomObject]@{ Name = $folderName; Dest = $destPath; Aside = $placed.Aside })
             $installedFolders.Add($folderName)
         } else {
-            $failedFolders.Add($folderName)
-            Write-Log -Level 'ERROR' -Message "Failed to install folder '$folderName' for project $ProjectId after 3 attempt(s): $($lastSwapError.Exception.Message)"
+            $failedFolder = $folderName
+            Write-Log -Level 'ERROR' -Message "Failed to install folder '$folderName' for project $ProjectId after 3 attempt(s): $($placed.Error.Exception.Message)"
+            break
         }
     }
 
-    if ($failedFolders.Count -gt 0) {
-        # Never report even a PARTIAL swap as success: some callers only
-        # checked for Count -eq 0 before this fix, which missed a package
-        # with 2+ top-level folders where only some failed to swap. Throwing
-        # here (rather than returning the partial list) means every caller's
-        # existing try/catch or outer exception handling treats this
+    if ($failedFolder) {
+        # Never report even a PARTIAL swap as success (a package with 2+
+        # top-level folders where only some could be swapped), and - since
+        # Round 48 - never leave one in place either: every folder already
+        # swapped is rolled back, newest first, so the addon is exactly the
+        # version it was before this call. Throwing (rather than returning a
+        # partial list) means every caller's existing try/catch treats this
         # uniformly as a failed install/update - the record's
-        # fileId/version/fileName never get overwritten to claim a version
-        # that isn't actually fully on disk. Deliberately skips the stale-
-        # folder cleanup below too: with the swap incomplete, deciding which
-        # of $PreviousFolders is genuinely "no longer part of this project"
-        # vs. "failed to swap and is still needed" can't be done safely here.
-        throw "Failed to install $($failedFolders.Count) of $($candidateFolders.Count) folder(s) for project ${ProjectId}: $($failedFolders -join ', ')"
+        # fileId/version/fileName never claim a version that isn't fully on
+        # disk. The stale-folder cleanup below is skipped too.
+        for ($i = $placements.Count - 1; $i -ge 0; $i--) {
+            Undo-FolderPlacement -DestPath $placements[$i].Dest -Aside $placements[$i].Aside
+        }
+        throw "Failed to install $($candidateFolders.Count) folder(s) for project ${ProjectId}: '$failedFolder' could not be replaced, so no folder of this addon was changed"
+    }
+
+    # Commit: every new folder is in place, so the old copies can go. A
+    # failure here is only untidiness (the next run's
+    # Restore-InterruptedFolderSwap sweeps it), never a failed install.
+    foreach ($placement in $placements) {
+        if ($placement.Aside) {
+            try {
+                Remove-Item -LiteralPath $placement.Aside -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Log -Level 'WARN' -Message "Could not remove the previous copy of folder '$($placement.Name)' for project $ProjectId (it will be cleaned up next run): $($_.Exception.Message)"
+            }
+        }
     }
 
     foreach ($oldFolder in $PreviousFolders) {
         if (-not $installedFolders.Contains($oldFolder)) {
+            if ($protectedSet.Contains(([string]$oldFolder).ToLowerInvariant())) {
+                Write-Log -Level 'INFO' -Message "Kept folder '$oldFolder' - no longer part of project $ProjectId but still tracked by another addon"
+                continue
+            }
             $oldPath = Join-Path -Path $AddonsPath -ChildPath $oldFolder
             if (Test-Path -LiteralPath $oldPath) {
                 try {
@@ -2083,7 +2388,10 @@ function Invoke-RollbackForRecord {
         # dependency/cross-source-id reads target (default 'retail'
         # preserves today's only code path byte-for-byte).
         [string]$Flavor = 'retail',
-        $InstalledInterface = $null
+        $InstalledInterface = $null,
+        # Round 48: folder names owned by OTHER tracked records - the
+        # stale-folder cleanup never deletes one (see Install-AddonPackage).
+        $ProtectedFolders = $null
     )
 
     # E12: source-generic identity key for backup-folder/staging paths and log
@@ -2119,7 +2427,7 @@ function Invoke-RollbackForRecord {
     }
 
     try {
-        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
+        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders -ProtectedFolders $ProtectedFolders
     } catch {
         Write-Log -Level 'ERROR' -Message "Rollback failed installing backup for project $backupKey ($displayLabel) : $($_.Exception.Message)"
         return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version }
@@ -2168,9 +2476,12 @@ function Invoke-RollbackForRecord {
     # rollback function is shared by every source, so the swap itself must
     # branch: a GitHub record swaps installedTag (which previousFileId
     # already holds the OLD value of, per Sync-SingleGithubAddon's own
-    # bookkeeping) rather than fileId, and never touches pinnedFileId -
-    # Sync-SingleGithubAddon never reads it (GitHub has no per-file pin
-    # concept, unlike CurseForge/Wago's channel-based pinning).
+    # bookkeeping) rather than fileId.
+    # Round 48 (audit MEDIUM 4): a GitHub rollback now PINS the restored tag
+    # (pinnedFileId = that tag string, exactly as the CurseForge/Wago branch
+    # below pins its restored file id) - Sync-SingleGithubAddon reads the
+    # pin, so the next sync no longer reinstalls the latest release over the
+    # version the player just rolled back to.
     if ($Record.source -eq 'github') {
         $Record.installedTag = $prevFileId
         $Record.version = $Record.previousVersion
@@ -2178,6 +2489,7 @@ function Invoke-RollbackForRecord {
         $Record.previousFileId = $replacedFileId
         $Record.previousVersion = $replacedVersion
         $Record.previousFileName = $replacedFileName
+        $Record.pinnedFileId = $prevFileId
     } else {
         $Record.fileId = $prevFileId
         $Record.version = $Record.previousVersion
@@ -3648,7 +3960,11 @@ function Sync-SingleAddon {
         # sync - see 3.3a's own note on why the folder-claim guard is
         # GitHub-only for now).
         [string]$GithubToken = $null,
-        $ClaimedFolders = $null
+        $ClaimedFolders = $null,
+        # Round 48: folder names owned by OTHER tracked records (see
+        # Get-FoldersOwnedByOtherRecords) - Install-AddonPackage never
+        # deletes one of them as a "stale" folder. $null = no protection.
+        $ProtectedFolders = $null
     )
 
     # E12: a Wago-sourced record is processed by its own function rather
@@ -3656,16 +3972,19 @@ function Sync-SingleAddon {
     # below - see Sync-SingleWagoAddon's own doc comment for why. Every
     # caller of Sync-SingleAddon (the main sync loop) is unchanged; this
     # dispatch is the only new code path they see.
+    # Round 48: -ClaimedFolders/-ProtectedFolders are threaded through so a
+    # Wago install gets the same folder-ownership guard GitHub always had.
     if ($Record.source -eq 'wago') {
-        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface
+        return Sync-SingleWagoAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $DefaultMaxReleaseType -FileIdOverride $FileIdOverride -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface -ClaimedFolders $ClaimedFolders -ProtectedFolders $ProtectedFolders
     }
     # Round 47 (GITHUB-SOURCE-SPEC.md 3.2): a GitHub-sourced record is
     # likewise processed by its own function - same reasoning as the Wago
-    # dispatch just above. DefaultMaxReleaseType/FileIdOverride are accepted
-    # but ignored by the GitHub path (GitHub has no release-type/alpha-beta
-    # concept and no per-file pin id).
+    # dispatch just above. DefaultMaxReleaseType is accepted but ignored by
+    # the GitHub path (GitHub has no release-type/alpha-beta concept).
+    # Round 48: -FileIdOverride is now the GitHub PIN - a release tag
+    # string (see Sync-SingleGithubAddon).
     if ($Record.source -eq 'github') {
-        return Sync-SingleGithubAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface -GithubToken $GithubToken -ClaimedFolders $ClaimedFolders
+        return Sync-SingleGithubAddon -Record $Record -AddonsPath $AddonsPath -StagingPath $StagingPath -BackupsPath $BackupsPath -Force:$Force -DryRun:$DryRun -ExplicitTarget:$ExplicitTarget -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -Flavor $Flavor -InstalledInterface $InstalledInterface -GithubToken $GithubToken -ClaimedFolders $ClaimedFolders -FileIdOverride $FileIdOverride -ProtectedFolders $ProtectedFolders
     }
 
     $cfMapping = Get-CfFlavourMapping -Flavor $Flavor -InstalledInterface $InstalledInterface
@@ -3903,6 +4222,17 @@ function Sync-SingleAddon {
 
         $currentPhase = 'installing'
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
+        # Round 48 (audit HIGH 2): refuse BEFORE touching disk when this
+        # package would install over a folder a DIFFERENT tracked record
+        # owns (the same addon already tracked from another source, or a
+        # real folder-name clash) - the guard GitHub installs always had.
+        $folderConflicts = Find-PackageFolderConflicts -ZipPath $zipPath -OwnFolders $Record.folders -ClaimedFolders $ClaimedFolders -OwnerIdentity ([string]$projectId)
+        if ($folderConflicts.Count -gt 0) {
+            $currentPhase = 'installing-folder-conflict'
+            $c = $folderConflicts[0]
+            Write-Log -Level 'ERROR' -Message "Project $projectId ($displayLabel): folder '$($c.Folder)' is already used by $(Format-FolderOwnerLabel -Identity $c.Owner) - nothing was installed. Remove one of the two addons in Furphy first."
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+        }
         # ADOPT-SPEC.md 2.6: an adopted record's very first real install ever
         # touches folders the player installed themselves, with no prior
         # Furphy-made backup to fall back to - snapshot them before the
@@ -3911,7 +4241,7 @@ function Sync-SingleAddon {
         if ($isNewInstall -and $Record.adopted) {
             Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $projectId
         }
-        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $projectId -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
+        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $projectId -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders -ProtectedFolders $ProtectedFolders
 
         if ($newFolders.Count -eq 0) {
             Write-Log -Level 'ERROR' -Message "Install produced zero usable folders for project $projectId ($displayLabel)"
@@ -4054,7 +4384,11 @@ function Sync-SingleWagoAddon {
         [int]$ProgressIndex = 0,
         # FLAVORS-SPEC S4.6: see Sync-SingleAddon's identical params for why.
         [string]$Flavor = 'retail',
-        $InstalledInterface = $null
+        $InstalledInterface = $null,
+        # Round 48: see Sync-SingleAddon's identical params - the Wago path
+        # gets the same folder-ownership guard and stale-folder protection.
+        $ClaimedFolders = $null,
+        $ProtectedFolders = $null
     )
 
     $cfMapping = Get-CfFlavourMapping -Flavor $Flavor -InstalledInterface $InstalledInterface
@@ -4236,11 +4570,19 @@ function Sync-SingleWagoAddon {
         $currentPhase = 'installing'
         Write-ProgressStep -Total $ProgressTotal -Index $ProgressIndex -Addon $displayLabel -Phase 'installing'
         $backupKey = Get-RecordBackupKey -Record $Record
+        # Round 48 (audit HIGH 2): see Sync-SingleAddon's identical guard.
+        $folderConflicts = Find-PackageFolderConflicts -ZipPath $zipPath -OwnFolders $Record.folders -ClaimedFolders $ClaimedFolders -OwnerIdentity "wago:$slug"
+        if ($folderConflicts.Count -gt 0) {
+            $currentPhase = 'installing-folder-conflict'
+            $c = $folderConflicts[0]
+            Write-Log -Level 'ERROR' -Message "wago:$slug ($displayLabel): folder '$($c.Folder)' is already used by $(Format-FolderOwnerLabel -Identity $c.Owner) - nothing was installed. Remove one of the two addons in Furphy first."
+            return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+        }
         # ADOPT-SPEC.md 2.6: see Sync-SingleAddon's identical call for why.
         if ($isNewInstall -and $Record.adopted) {
             Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $backupKey
         }
-        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
+        $newFolders = Install-AddonPackage -ZipPath $zipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders -ProtectedFolders $ProtectedFolders
 
         if ($newFolders.Count -eq 0) {
             Write-Log -Level 'ERROR' -Message "Install produced zero usable folders for wago:$slug ($displayLabel)"
@@ -4331,8 +4673,19 @@ function Get-ZipTopLevelFolderNames {
       returns an empty list on any read failure so the caller's guard
       degrades to "nothing to check" rather than aborting an otherwise-valid
       install.
+
+      Round 48: -TocOnly restricts the result to top-level folders that hold
+      a *.toc file directly inside them - exactly the folders
+      Install-AddonPackage would install (it skips a toc-less folder and any
+      loose top-level file) - so the shared pre-install conflict guard
+      (Find-PackageFolderConflicts) never refuses over a folder the package
+      would not have installed anyway (a "Screenshots" or "docs" folder).
+      Without the switch the list is every top-level directory, unchanged.
     #>
-    param([Parameter(Mandatory = $true)][string]$ZipPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [switch]$TocOnly
+    )
 
     $names = New-Object 'System.Collections.Generic.List[object]'
     $archive = $null
@@ -4340,12 +4693,22 @@ function Get-ZipTopLevelFolderNames {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
         $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+        $withToc = New-Object 'System.Collections.Generic.HashSet[string]'
+        if ($TocOnly) {
+            foreach ($entry in $archive.Entries) {
+                $parts = ($entry.FullName -replace '\\', '/') -split '/'
+                if (($parts.Count -eq 2) -and ($parts[0].Length -gt 0) -and ($parts[1] -match '(?i)\.toc$')) {
+                    [void]$withToc.Add($parts[0].ToLowerInvariant())
+                }
+            }
+        }
         foreach ($entry in $archive.Entries) {
             $normalized = ($entry.FullName -replace '\\', '/')
             $slashIndex = $normalized.IndexOf('/')
             if ($slashIndex -gt 0) {
                 $top = $normalized.Substring(0, $slashIndex)
                 $topKey = $top.ToLowerInvariant()
+                if ($TocOnly -and (-not $withToc.Contains($topKey))) { continue }
                 if ($top.Length -gt 0 -and $seen.Add($topKey)) {
                     $names.Add($top)
                 }
@@ -4476,7 +4839,16 @@ function Sync-SingleGithubAddon {
         # pre-install step below refuse to adopt/install over a folder a
         # DIFFERENT tracked addon already owns, the same protection -Adopt's
         # own $ownedFoldersForAdopt guard gives the general adopt flow.
-        $ClaimedFolders = $null
+        $ClaimedFolders = $null,
+        # Round 48 (audit MEDIUM 4): a GitHub record has no numeric file id,
+        # so its PIN is a release TAG string - carried in the same
+        # pinnedFileId field CurseForge/Wago use. -FileIdOverride is the tag
+        # an explicit "-Only github:o/r -FileId <tag>" (the Pin / install
+        # job) names; absent it, a record's stored pinnedFileId applies.
+        $FileIdOverride = $null,
+        # Round 48: folder names owned by OTHER tracked records - the
+        # stale-folder cleanup in Install-AddonPackage never deletes one.
+        $ProtectedFolders = $null
     )
 
     $displayLabel = $Record.name
@@ -4502,6 +4874,29 @@ function Sync-SingleGithubAddon {
         if ([string]::IsNullOrWhiteSpace($repoNameOnly) -or ($repoNameOnly -match '^\.+$') -or ($repoNameOnly -match '[\\/]')) {
             Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): repo name is not a safe folder name, refusing to adopt or install"
             return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = 'checking' }
+        }
+
+        # Round 48 (audit MEDIUM 4): the pin. A GitHub record's pin is a
+        # release TAG (pinnedFileId, a string - there is no numeric file id
+        # on this source). Mirrors Sync-SingleAddon's pin handling: already on
+        # the pinned tag (and not -Force) -> 'Pinned', with NO network call;
+        # otherwise the pinned tag's own release is fetched below instead of
+        # "latest". Before this, a rollback or "Pin current version" on a
+        # GitHub addon was silently undone by the very next sync (nothing on
+        # this path ever read pinnedFileId), and Pin failed with a raw
+        # "fileId required" error.
+        $pinTarget = $null
+        if ($FileIdOverride) {
+            $pinTarget = [string]$FileIdOverride
+        } elseif ($Record.pinnedFileId) {
+            $pinTarget = [string]$Record.pinnedFileId
+        }
+        if ($pinTarget -and (-not $Force) -and $Record.installedTag -and ([string]$Record.installedTag -eq $pinTarget)) {
+            if (-not $DryRun) {
+                $Record.pinnedFileId = $pinTarget
+            }
+            Write-Log -Level 'INFO' -Message "Pinned: github:$($Record.repo) ($displayLabel) already on tag $pinTarget"
+            return [PSCustomObject]@{ Status = 'Pinned'; Name = $displayLabel; Version = $Record.version }
         }
 
         # 3.7: adopt-in-place fast path - runs ONLY when this record has
@@ -4554,13 +4949,28 @@ function Sync-SingleGithubAddon {
         }
 
         # 3.5: release lookup - headers, auth, 404-with-token vs without,
-        # rate-limit backoff.
-        $releaseUri = "$script:GitHubBaseUrl/repos/$($Record.repo)/releases/latest"
+        # rate-limit backoff. Round 48: a pinned record looks up ITS tag's
+        # release (releases/tags/<tag>) instead of the latest one.
+        if ($pinTarget) {
+            $releaseUri = "$script:GitHubBaseUrl/repos/$($Record.repo)/releases/tags/$([System.Uri]::EscapeDataString($pinTarget))"
+        } else {
+            $releaseUri = "$script:GitHubBaseUrl/repos/$($Record.repo)/releases/latest"
+        }
         try {
             $resp = Invoke-GithubRequest -Uri $releaseUri -Accept 'application/vnd.github+json' -GithubToken $GithubToken
             $release = $resp.Content | ConvertFrom-Json -ErrorAction Stop
         } catch {
             $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
+            if (($statusCode -eq 404) -and $pinTarget) {
+                # Round 48: the lookup was for the PINNED tag specifically
+                # (releases/tags/<tag>) - the tag's release was deleted, or
+                # the token no longer reaches it. Not the "paste a token"
+                # case below: the repo itself answered for this record
+                # before. Its own phase so the SPA can say so plainly.
+                $currentPhase = 'checking-pinned-missing'
+                Write-Log -Level 'ERROR' -Message "GitHub addon $($Record.repo) ($displayLabel): GitHub has no release tagged '$pinTarget' (it was removed, or the token currently in Settings cannot see it). Unpin it to follow the latest release again."
+                return [PSCustomObject]@{ Status = 'Failed'; Name = $displayLabel; Version = $Record.version; FailPhase = $currentPhase }
+            }
             if ($statusCode -eq 404) {
                 # GitHub returns 404 (never 403) for a private repo whether
                 # the request carried no token, an expired/rotated token, or
@@ -4709,7 +5119,7 @@ function Sync-SingleGithubAddon {
         if ($Record.adopted) {
             Save-PreAdoptBackupZip -AddonsPath $AddonsPath -Folders $Record.folders -BackupsRoot $BackupsPath -ProjectId $backupKey
         }
-        $newFolders = Install-AddonPackage -ZipPath $installZipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders
+        $newFolders = Install-AddonPackage -ZipPath $installZipPath -ProjectId $backupKey -StagingPath $StagingPath -AddonsPath $AddonsPath -PreviousFolders $Record.folders -ProtectedFolders $ProtectedFolders
 
         if ($newFolders.Count -eq 0) {
             Write-Log -Level 'ERROR' -Message "Install produced zero usable folders for github:$($Record.repo) ($displayLabel)"
@@ -4744,6 +5154,12 @@ function Sync-SingleGithubAddon {
         $Record.assetName = $assetName
         $Record.installedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         $Record.folders = $newFolders.ToArray()
+        # Round 48: installing under a pin (a rollback, an explicit "-FileId
+        # <tag>", or an already-pinned record) records the pin, same as the
+        # CurseForge/Wago paths do.
+        if ($pinTarget) {
+            $Record.pinnedFileId = $selectedTag
+        }
 
         # 3.3 step 13: GitHub gives no game-version metadata at all;
         # latestFileDate is the release's own published_at, straight from
@@ -4857,7 +5273,16 @@ function Remove-AddonByTarget {
     $matchLabel = if ($match.source -eq 'wago') { "wago:$($match.slug)" } elseif ($match.source -eq 'github') { "github:$($match.repo)" } else { "project $($match.projectId)" }
 
     if (-not $DryRun) {
+        # Round 48 (audit HIGH 2): never delete a folder another tracked
+        # record still lists - a library folder two addons share, or the
+        # same addon that ended up tracked from two sources. Removing one
+        # record used to wipe the other's folders out from under it.
+        $sharedWithOthers = Get-FoldersOwnedByOtherRecords -Config $Config -Record $match
         foreach ($folderName in $match.folders) {
+            if ($sharedWithOthers.Contains(([string]$folderName).ToLowerInvariant())) {
+                Write-Log -Level 'INFO' -Message "Kept folder '$folderName' while removing $matchLabel - another tracked addon still uses it"
+                continue
+            }
             $folderPath = Join-Path -Path $AddonsPath -ChildPath $folderName
             if (Test-Path -LiteralPath $folderPath) {
                 try {
@@ -5658,6 +6083,11 @@ try {
             if ($ownedFolders.Contains($dir.Name.ToLowerInvariant())) {
                 continue
             }
+            # Round 48: the old copy of a folder mid-swap (or left by a
+            # killed update) is Furphy's own scratch, never an addon to adopt.
+            if (Test-IsSwapAsideName -Name $dir.Name) {
+                continue
+            }
             $info = Get-FolderTocInfo -FolderPath $dir.FullName -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
             $untracked.Add([PSCustomObject]@{
                     folder  = $dir.Name
@@ -6074,7 +6504,8 @@ try {
                 }
             }
             if ($match) {
-                $rollbackResult = Invoke-RollbackForRecord -Record $match -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsRoot $script:BackupsPath -DryRun:$DryRun -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface
+                $rollbackProtected = Get-FoldersOwnedByOtherRecords -Config $config -Record $match
+                $rollbackResult = Invoke-RollbackForRecord -Record $match -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsRoot $script:BackupsPath -DryRun:$DryRun -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface -ProtectedFolders $rollbackProtected
                 $rollbackFileId = $match.fileId
                 if (Get-Member -InputObject $rollbackResult -Name 'FileId' -MemberType NoteProperty) {
                     $rollbackFileId = $rollbackResult.FileId
@@ -6204,7 +6635,12 @@ try {
         }
         Write-ProgressStep -Total $toSync.Count -Index $progressIndex -Addon $progressLabel -Phase 'checking'
 
-        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface -GithubToken $settings.githubToken -ClaimedFolders $claimedFolders
+        # Round 48: folders other tracked records own - never deleted as
+        # "stale" by this record's install (computed per record, from the
+        # live config, so it also covers a record updated earlier this run).
+        $protectedForRecord = Get-FoldersOwnedByOtherRecords -Config $config -Record $record
+
+        $rowResult = Sync-SingleAddon -Record $record -AddonsPath $effectiveAddonsPath -StagingPath $script:StagingPath -BackupsPath $script:BackupsPath -Force:$Force -DryRun:$DryRun -DefaultMaxReleaseType $defaultMaxReleaseType -FileIdOverride $fileIdOverrideForRecord -ExplicitTarget:$isExplicit -ProgressTotal $toSync.Count -ProgressIndex $progressIndex -Flavor $effectiveFlavor -InstalledInterface $effectiveInstalledInterface -GithubToken $settings.githubToken -ClaimedFolders $claimedFolders -ProtectedFolders $protectedForRecord
 
         # For a real (non-DryRun) Installed/Updated row, Sync-SingleAddon
         # mutates $record.fileId in place before returning, so $record.fileId

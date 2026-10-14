@@ -48,6 +48,11 @@
           zipball_url when manifest.zipballAvailable is set (omitted
           entirely otherwise, so the JSON shape for every existing
           caller is unchanged).
+   GET /repos/<owner>/<repoName>/releases/tags/<tag>
+       -> Round 48: the lookup a PINNED GitHub record makes. When <tag> is
+          manifest.tagName it behaves exactly like releases/latest above
+          (same User-Agent / token / releaseStatus gates, same release
+          JSON); any other tag is 404, as on real GitHub.
    GET /repos/<owner>/<repoName>/releases/assets/<name>
        -> Round 47: the asset-by-id download path (3.6.1) - same
           User-Agent/token gates as releases/latest, same underlying file
@@ -120,6 +125,12 @@ $Script:ZipballAvailable = $false
 if ($null -ne $manifest.zipballAvailable) { $Script:ZipballAvailable = [bool]$manifest.zipballAvailable }
 
 $Script:ReleasesLatestPath = "/repos/$Script:Owner/$Script:RepoName/releases/latest"
+# Round 48: GET /repos/<owner>/<repo>/releases/tags/<manifest.tagName> answers
+# exactly like releases/latest (same gates, same release JSON) - the lookup a
+# PINNED GitHub record makes. Any other tag 404s, like real GitHub does for a
+# tag with no release.
+$Script:ReleasesTagPath = "/repos/$Script:Owner/$Script:RepoName/releases/tags/$([System.Uri]::EscapeDataString([string]$manifest.tagName))"
+$Script:ReleasesTagPrefix = "/repos/$Script:Owner/$Script:RepoName/releases/tags/"
 $Script:AssetByIdPrefix = "/repos/$Script:Owner/$Script:RepoName/releases/assets/"
 $Script:ZipballPath = "/repos/$Script:Owner/$Script:RepoName/zipball/$($manifest.tagName)"
 
@@ -257,7 +268,13 @@ try {
             $Script:RequestLog.Add($logEntry)
             Write-StubLog "$($request.HttpMethod) $path (UA=$hasUserAgent, Auth=$($authInfo.HasAuthorization))"
 
-            if ($path -eq $Script:ReleasesLatestPath) {
+            # Round 48: a tag other than the manifest's one has no release.
+            if ($path.StartsWith($Script:ReleasesTagPrefix) -and ($path -ne $Script:ReleasesTagPath)) {
+                Send-StubJson -Response $response -StatusCode 404 -Body @{ message = 'Not Found' }
+                continue
+            }
+
+            if (($path -eq $Script:ReleasesLatestPath) -or ($path -eq $Script:ReleasesTagPath)) {
                 $requireUa = $true
                 if ($null -ne $manifest.requireUserAgent) { $requireUa = [bool]$manifest.requireUserAgent }
                 if ($requireUa -and -not $hasUserAgent) {

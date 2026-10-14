@@ -2359,3 +2359,34 @@ mechanism before folding - see 10.2. Referenced below as "letter/number"
   folded as a corrected 3.5/6.1 rewrite instead, plus a test requirement
   that proves the verified behavior (6.3/7.3) rather than code that
   guards against a non-issue.
+
+
+---
+
+## Round 48 amendment (2026-10-14 audit) - pin, rollback, folder ownership
+
+Supersedes the statements above that GitHub "has no per-file pin id" and
+that a GitHub rollback "never touches pinnedFileId".
+
+- **The pin is a tag.** `pinnedFileId` on a GitHub record holds a release tag
+  string. `-Only github:o/r -FileId <tag>` (or `-Add ... -FileId <tag>`)
+  installs and pins that tag; `-Rollback` pins the tag it restores;
+  `-Unpin` clears it (the generic config-only path, unchanged).
+- **Sync honours it** (`Sync-SingleGithubAddon`): already on the pinned tag
+  and not `-Force` -> status `Pinned`, no network call; otherwise the lookup
+  is `GET /repos/<repo>/releases/tags/<tag>` (not `/releases/latest`), then
+  the same asset-selection/install path. Not-installed-yet + pin = an
+  install of that tag. A 404 on the tag lookup is
+  `FailPhase: checking-pinned-missing` (the SPA: "The pinned version isn't
+  on GitHub any more - unpin it to follow the latest release"), distinct
+  from the "needs a token" 404 of an unpinned lookup.
+- **SPA:** "Pin current version" posts `{kind:"install", projectId:
+  "github:owner/repo", fileId:<installedTag>}`; with no known tag (adopted
+  as `unknown`) it asks the player to update once first.
+- **Folder ownership applies to every source** (audit HIGH 2): CurseForge and
+  Wago installs run the same pre-install `Find-PackageFolderConflicts` guard
+  as 3.3a (`FailPhase: installing-folder-conflict`); a record's own folders
+  never conflict with itself; `-Remove` and the stale-folder cleanup skip
+  folders another record still lists (`Get-FoldersOwnedByOtherRecords`).
+- **Install swap is transactional** (`Install-AddonPackage`, audit MEDIUM 5):
+  see CHANGELOG Round 48; it applies to GitHub installs unchanged.

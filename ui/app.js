@@ -411,7 +411,7 @@ const Mock = (function () {
     // the drawer's Overview dependency list and the row's "Missing: n" chip
     // without a real server - DetailsFramework isn't itself a mock addon, so
     // it shows up missing; Bagnon is (installed), so it shows up satisfied.
-    { name: "Details! Damage Meter", projectId: 25301, fileId: 220, version: "18.2", fileName: "Details-18.2.zip", installedAt: new Date(Date.now() - 26 * 3600e3).toISOString(), folders: ["Details"], author: "Tercioo", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null, requiredDeps: ["DetailsFramework"], optionalDeps: ["Bagnon"], missingDeps: ["DetailsFramework"], missingOptionalDeps: [] },
+    { name: "Details! Damage Meter", projectId: 25301, fileId: 220, version: "18.2", fileName: "Details-18.2.zip", installedAt: new Date(Date.now() - 26 * 3600e3).toISOString(), folders: ["Details"], author: "Tercioo", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null, wagoId: "DTL001", requiredDeps: ["DetailsFramework"], optionalDeps: ["Bagnon"], missingDeps: ["DetailsFramework"], missingOptionalDeps: [] },
     { name: "BigWigs Bossmods", projectId: 33818, fileId: 305, version: "424.3", fileName: "BigWigs-424.3.zip", installedAt: new Date(Date.now() - 9 * 24 * 3600e3).toISOString(), folders: ["BigWigs"], author: "Ammo", ignoreUpdates: false, pinnedFileId: 305, releaseType: null, updateAvailable: null, tocInterfaces: [120007], compat: "stale-minor", latestGameVersions: ["12.0.7"], latestFileDate: new Date(Date.now() - 9 * 24 * 3600e3).toISOString() },
     { name: "Bagnon", projectId: 24560, fileId: 88, version: "10.6", fileName: "Bagnon-10.6.zip", installedAt: new Date(Date.now() - 40 * 24 * 3600e3).toISOString(), folders: ["Bagnon"], author: "Tuller", ignoreUpdates: true, pinnedFileId: null, releaseType: null, previousFileId: 85, previousVersion: "10.5", updateAvailable: { fileId: 91, version: "10.9" } },
     { name: "BonusRollConfirm", projectId: 1521253, fileId: 8720783, version: "1.0.2", fileName: "BonusRollConfirm-1.0.2.zip", installedAt: new Date(Date.now() - 400 * 24 * 3600e3).toISOString(), folders: ["BonusRollConfirm"], author: "krenz", ignoreUpdates: false, pinnedFileId: null, releaseType: null, updateAvailable: null },
@@ -851,7 +851,19 @@ const Mock = (function () {
         });
       } else if (kind === "install") {
         const a = addons.find(function (x) { return mockKey(x) === params.projectId; });
-        if (a) {
+        if (a && a.source === "github") {
+          // Round 48 (audit MEDIUM 4): a GitHub record's version identity
+          // and pin are its release TAG (installedTag / pinnedFileId, both
+          // strings); fileId stays null forever on this source.
+          a.pinnedFileId = params.fileId;
+          if (a.installedTag !== params.fileId) {
+            a.installedTag = params.fileId; a.version = params.fileId; a.installedAt = new Date().toISOString();
+            job.results = [{ status: "Updated", name: a.name, version: a.version, projectId: null, fileId: null, wagoSlug: null, repo: a.repo }];
+          } else {
+            job.results = [{ status: "Pinned", name: a.name, version: a.version, projectId: null, fileId: null, wagoSlug: null, repo: a.repo }];
+          }
+          if (a.updateAvailable && a.updateAvailable.version === a.version) a.updateAvailable = null;
+        } else if (a) {
           a.pinnedFileId = params.fileId;
           if (a.fileId !== params.fileId) { a.fileId = params.fileId; a.installedAt = new Date().toISOString(); job.results = [{ status: "Updated", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }]; }
           else { job.results = [{ status: "Pinned", name: a.name, version: a.version, projectId: a.projectId, fileId: a.fileId }]; }
@@ -1088,6 +1100,27 @@ const Mock = (function () {
 
   function runJob(kind, params, flavourId) {
     if (currentJob && currentJob.state === "running") return null;
+    // Round 48 (audit U1): mirrors Start-Job's own add-by-slug handling -
+    // the slug is resolved against the CurseForge catalogue fixture, and a
+    // hit is simply an ordinary add of that project id; no hit is a job
+    // that finishes "failed" with the server's own 404-style error text.
+    if (kind === "add-by-slug") {
+      const slugWanted = String((params && params.slug) || "").toLowerCase();
+      const hit = cfCatalogueMock.find(function (e) { return String(e.slug || "").toLowerCase() === slugWanted; });
+      if (hit) {
+        return runJob("add", { projectId: hit.id }, flavourId);
+      }
+      const failedId = String(nextJobId++);
+      const failedJob = {
+        id: failedId, kind: "add-by-slug", flavour: flavourId || "retail", params: params || {}, state: "failed",
+        startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode: 404,
+        log: [], results: [], error: "No CurseForge addon found for slug '" + slugWanted + "' (404)", progress: null,
+        gameRunningAtStart: mockGameRunningNow()
+      };
+      jobs.unshift(failedJob);
+      if (jobs.length > 20) jobs.length = 20;
+      return failedJob;
+    }
     const id = String(nextJobId++);
     const job = {
       // FLAVORS-SPEC.md CS-F4/S5.4: every job carries its own flavour - the
@@ -1535,7 +1568,12 @@ const Mock = (function () {
       if (p === "/api/wago/categories") return { data: wagoCategoriesMock };
       const wagoAddonMatch = p.match(/^\/api\/wago\/addons\/([^/]+)$/);
       if (wagoAddonMatch) {
-        const slug = decodeURIComponent(wagoAddonMatch[1]);
+        // Round 48: Wago serves an addon page under its id as well as its
+        // slug (and answers with addon.slug) - the SPA resolves a tracked
+        // record's toc X-Wago-ID this way (Views.browse.resolveTrackedWagoSlugs).
+        const wagoIdAliases = { DTL001: "details-damage-meter-standalone" };
+        const requested = decodeURIComponent(wagoAddonMatch[1]);
+        const slug = wagoIdAliases[requested] || requested;
         const found = wagoBrowsePool.find(function (x) { return x.slug === slug; }) || { slug: slug, name: slug };
         return {
           addon: { id: "MOCK" + slug, slug: slug, display_name: found.name, summary: "A tidy little Wago addon.", thumbnail_image: "", categories: [{ id: 1, display_name: "Utility" }], website: "", source_url: "", is_unlisted: false },
@@ -1892,7 +1930,7 @@ const Utils = (function () {
    it is ever inserted into the DOM.
    ========================================================================== */
 const Sanitize = (function () {
-  const ALLOWED_TAGS = { P: 1, BR: 1, B: 1, STRONG: 1, I: 1, EM: 1, U: 1, UL: 1, OL: 1, LI: 1, A: 1, IMG: 1, H1: 1, H2: 1, H3: 1, H4: 1, BLOCKQUOTE: 1, CODE: 1, PRE: 1, SPAN: 1, DIV: 1, TABLE: 1, THEAD: 1, TBODY: 1, TR: 1, TD: 1, TH: 1, HR: 1, SMALL: 1 };
+  const ALLOWED_TAGS = { P: 1, BR: 1, B: 1, STRONG: 1, I: 1, EM: 1, U: 1, UL: 1, OL: 1, LI: 1, A: 1, IMG: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, BLOCKQUOTE: 1, CODE: 1, PRE: 1, SPAN: 1, DIV: 1, TABLE: 1, THEAD: 1, TBODY: 1, TR: 1, TD: 1, TH: 1, HR: 1, SMALL: 1, SUP: 1, SUB: 1, S: 1, DEL: 1, DL: 1, DT: 1, DD: 1 };
   const ALLOWED_ATTRS = { A: ["href", "title"], IMG: ["src", "alt", "title"] };
 
   function safeUrl(url) {
@@ -1904,6 +1942,10 @@ const Sanitize = (function () {
   }
 
   function clean(node) {
+    // Iterates a SNAPSHOT of node's children; every branch below only ever
+    // touches the child it is currently on (removing it, or replacing it
+    // with its own already-cleaned children), so every other snapshot entry
+    // is still a live child of `node` when its turn comes.
     Array.prototype.slice.call(node.childNodes).forEach(function (child) {
       if (child.nodeType === Node.TEXT_NODE) return;
       if (child.nodeType !== Node.ELEMENT_NODE) { node.removeChild(child); return; }
@@ -1913,10 +1955,17 @@ const Sanitize = (function () {
         return;
       }
       if (!ALLOWED_TAGS[tag]) {
-        // Unwrap unknown tags: keep their children, drop the wrapper.
+        // Unwrap unknown tags: clean the subtree FIRST, then hoist its
+        // (now safe) children in place of the wrapper. Round 48: this used
+        // to hoist and then re-run clean(node) over the whole parent while
+        // the loop kept walking its stale snapshot, so a second unknown
+        // sibling (two <sup>, <h5>, <figure>... or one followed by a
+        // comment) was moved by the nested pass and then hit
+        // removeChild() on a node that was no longer a child -
+        // NotFoundError, which aborted the whole overview/changelog render.
+        clean(child);
         while (child.firstChild) node.insertBefore(child.firstChild, child);
         node.removeChild(child);
-        clean(node);
         return;
       }
       // Strip every attribute except the small allowlist for this tag.
@@ -2288,8 +2337,35 @@ const Store = (function () {
     return "wago";
   }
 
+  // Round 48 (audit HIGH 2): a tracked CurseForge/GitHub record knows its
+  // Wago page only by the toc's X-Wago-ID - an opaque id - while a Wago
+  // browse card carries only the page SLUG. Wago serves a page under either
+  // (GET /api/wago/addons/<id> answers with addon.slug), so the id -> slug
+  // pairs are resolved once, lazily (Views.browse.resolveTrackedWagoSlugs)
+  // and remembered here so the Wago grid can show "Installed" for an addon
+  // that is already tracked from another source instead of offering a
+  // second, conflicting install. Ids never change, so the persisted copy
+  // never needs invalidating; a storage failure just means re-resolving.
+  const WAGO_SLUG_CACHE_KEY = "addonSync.wagoSlugById.v1";
+  function loadWagoSlugCache() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(WAGO_SLUG_CACHE_KEY) || "null");
+      if (raw && typeof raw === "object") {
+        const out = {};
+        Object.keys(raw).forEach(function (k) { if (typeof raw[k] === "string" && raw[k]) out[k] = raw[k]; });
+        return out;
+      }
+    } catch (e) { /* storage unavailable/corrupt - start empty */ }
+    return {};
+  }
+  function saveWagoSlugCache() {
+    try { localStorage.setItem(WAGO_SLUG_CACHE_KEY, JSON.stringify(state.wagoSlugById)); } catch (e) { /* not persisted - still applies for this load */ }
+  }
+
   const state = {
     view: "myaddons",          // 'myaddons' | 'browse' | 'settings'
+    // Round 48: lowercased X-Wago-ID -> lowercased Wago page slug, see above.
+    wagoSlugById: loadWagoSlugCache(),
     online: null,               // null = unknown yet, else true/false
     loadingState: true,
     stateError: null,
@@ -2525,6 +2601,59 @@ const Store = (function () {
     return state.addons.find(function (a) { return a.projectId === key; });
   }
 
+  // Round 48 (audit HIGH 2): the tracked record, of ANY source, that a
+  // browse entry would duplicate - or undefined. addonByProjectId above only
+  // answers "is this exact key tracked", so a Wago card for an addon that is
+  // already tracked from CurseForge (26 of 34 records on the maintainer's own
+  // install carry a wagoId) used to offer a second, conflicting install that
+  // fought the first one over the same folders. Matches, in order: the exact
+  // key; for a Wago entry, a record of another source whose toc X-Wago-ID is
+  // the card's slug or whose resolved id -> slug mapping is; for a
+  // CurseForge entry, a record of another source whose toc named this
+  // project (curseId).
+  function trackedForBrowseEntry(entry) {
+    if (!entry) return undefined;
+    const direct = addonByProjectId(entry.key);
+    if (direct) return direct;
+    if (entry.source === "wago") {
+      const slug = String(entry.slug || "").toLowerCase();
+      if (!slug) return undefined;
+      return state.addons.find(function (a) {
+        if (a.source === "wago" || !a.wagoId) return false;
+        const wid = String(a.wagoId).toLowerCase();
+        return wid === slug || state.wagoSlugById[wid] === slug;
+      });
+    }
+    if (entry.id === null || entry.id === undefined) return undefined;
+    const pid = String(entry.id);
+    return state.addons.find(function (a) {
+      const isCf = !a.source || a.source === "curseforge";
+      return !isCf && a.curseId && String(a.curseId) === pid;
+    });
+  }
+
+  // Records whose Wago page slug is still unknown: a non-Wago record with a
+  // toc wagoId that is not in the cache (and is not itself already a slug-
+  // shaped match candidate, which trackedForBrowseEntry handles directly).
+  function wagoIdsNeedingSlug() {
+    const seen = {};
+    const out = [];
+    state.addons.forEach(function (a) {
+      if (a.source === "wago" || !a.wagoId) return;
+      const wid = String(a.wagoId).toLowerCase();
+      if (seen[wid] || state.wagoSlugById[wid]) return;
+      seen[wid] = true;
+      out.push(String(a.wagoId));
+    });
+    return out;
+  }
+
+  function rememberWagoSlug(wagoId, slug) {
+    if (!wagoId || !slug) return;
+    state.wagoSlugById[String(wagoId).toLowerCase()] = String(slug).toLowerCase();
+    saveWagoSlugCache();
+  }
+
   // True while a running job plausibly affects this project (drives "Installing..." chips).
   function jobActingOn(projectId) {
     const j = state.job;
@@ -2647,7 +2776,7 @@ const Store = (function () {
   }
 
   return {
-    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor,
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, trackedForBrowseEntry: trackedForBrowseEntry, wagoIdsNeedingSlug: wagoIdsNeedingSlug, rememberWagoSlug: rememberWagoSlug, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor,
     isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons,
     hasMultipleFlavours: hasMultipleFlavours, visibleFlavours: visibleFlavours
   };
@@ -3976,6 +4105,14 @@ Components.Drawer = (function () {
       return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"]);
     }
     if (d.source === "wago") {
+      // Round 48 (audit HIGH 2): the same addon may already be tracked from
+      // another source (see Store.trackedForBrowseEntry) - never offer the
+      // conflicting second install.
+      const other = Store.trackedForBrowseEntry({ source: "wago", key: pid, slug: d.slug });
+      if (other) {
+        const via = other.source === "github" ? "GitHub" : "CurseForge";
+        return Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true, title: "Already installed from " + via }, [Utils.icon("check-circle"), "Installed"]);
+      }
       return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatestWago(d.slug, (d.wagoAddon && d.wagoAddon.addon) ? d.wagoAddon.addon.display_name : null); } }, ["Install"]);
     }
     return Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.installLatest(pid, fallbackName); } }, ["Install"]);
@@ -4630,6 +4767,13 @@ Components.JobPanel = (function () {
     // specific counterpart). Text is VERBATIM per the fixed decision.
     if (failPhase === "checking-needs-token") return "This addon needs a GitHub token - paste it in Settings > GitHub addons.";
     if (failPhase === "checking-network-github") return "Couldn't check for updates - GitHub might be having trouble";
+    // Round 48 (audit MEDIUM 4): a pinned GitHub tag whose release is gone
+    // (or no longer visible to the saved token) - the fix is to unpin.
+    if (failPhase === "checking-pinned-missing") return "The pinned version isn't on GitHub any more - unpin it to follow the latest release";
+    // Round 48 (audit HIGH 2): the download would have replaced a folder
+    // another tracked addon (usually the same addon from another source)
+    // already uses; nothing was changed.
+    if (failPhase === "installing-folder-conflict") return "Another addon already uses these folders - remove one of the two first";
     if (failPhase === "checking") return "No matching version found";
     if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
     return "Something went wrong";
@@ -4661,6 +4805,9 @@ Components.JobPanel = (function () {
   function wholeJobFailureReason(job) {
     if (Store.state.online === false) return "Couldn't reach CurseForge — check your connection";
     const err = ((job && job.error) || "").toLowerCase();
+    // Round 48 (audit U1): a pasted CurseForge page link the catalogue could
+    // not match - say what to do instead of "Something went wrong".
+    if (job && job.kind === "add-by-slug") return "Couldn't find that addon - try its ID number from its CurseForge page";
     if (err.indexOf("json") !== -1 || err.indexOf("parse") !== -1) return "Something went wrong reading the results";
     if (err.indexOf("exit") !== -1 || err.indexOf("code") !== -1) return "Something went wrong running the update";
     return "Something went wrong";
@@ -5466,6 +5613,18 @@ const Actions = (function () {
   function pinCurrent(projectId) {
     const addon = Store.addonByProjectId(projectId);
     if (!addon) return;
+    // Round 48 (audit MEDIUM 4): a GitHub record has no numeric file id
+    // (fileId is always null) - its version identity, and so its pin, is the
+    // release TAG. "Pin current version" used to post fileId:null and the
+    // server answered with a raw "fileId required" error.
+    if (addon.source === "github") {
+      const tag = addon.installedTag;
+      if (!tag || tag === "unknown") {
+        Components.Toast.show("Update this addon once before pinning it - Furphy doesn't know its version yet.", "warning");
+        return;
+      }
+      return installVersion(projectId, tag, "Pinning " + addon.name);
+    }
     return installVersion(projectId, addon.fileId, "Pinning " + addon.name);
   }
 
@@ -5483,6 +5642,11 @@ const Actions = (function () {
   function installLatest(projectId, name) { return startJob("add", { projectId: Utils.normalizeId(projectId) }, "Installing " + (name || "addon")); }
   function addWithVersion(projectId, fileId) { return startJob("add", { projectId: Utils.normalizeId(projectId), fileId: fileId }, "Installing addon"); }
   function addByProjectId(projectId) { return startJob("add", { projectId: Utils.normalizeId(projectId) }, "Adding addon"); }
+  // Round 48 (audit U1): a pasted CurseForge page link carries a slug, not
+  // an id - the server's add-by-slug job (the desktop window's own Install-
+  // link interception uses it too) resolves it against the CurseForge
+  // catalogue and then runs the ordinary add.
+  function addByCurseForgeSlug(slug) { return startJob("add-by-slug", { slug: slug }, "Adding addon"); }
 
   // E12 (Wago second source): a brand-new Wago add has no existing record
   // yet to derive a "wago:<slug>" key from, so these post {source:'wago',
@@ -5712,7 +5876,7 @@ const Actions = (function () {
     const errorBox = Utils.qs("#add-addon-error");
     function fail(msg) { errorBox.textContent = msg; errorBox.hidden = false; errorBox.className = "form-msg is-error"; }
 
-    if (!value) { fail("Paste a wago.io addon link, or type a CurseForge ID number."); return; }
+    if (!value) { fail("Paste an addon link from CurseForge, Wago or GitHub, or type a CurseForge ID number."); return; }
 
     if (/^\d+$/.test(value)) {
       Components.Dialogs.closeAdd();
@@ -5732,21 +5896,49 @@ const Actions = (function () {
       return;
     }
 
-    // Round 16 (E22, CurseForge key removal): resolving a curseforge.com
-    // page URL to its project id was always a key-gated CurseForge Core API
-    // call (/api/cf/resolve, now deleted along with the key feature) - a
-    // CurseForge addon can still be added by its numeric ID (shown on its
-    // CurseForge page) or, better, by clicking Install on that page inside
-    // Furphy's own CurseForge pane. Review fix (F1): name what the player
-    // just did when it's actually a CurseForge link (the dialog's own
-    // permanent hint above now says where the ID number lives, so this
-    // doesn't repeat that) - anything else unrecognized keeps the original,
-    // more general message.
-    if (/curseforge\.com/i.test(value)) {
-      fail("That looks like a CurseForge page link - type its ID number instead.");
+    // Round 48 (usability, audit U1): a CurseForge page link needs no ID
+    // number from the player. The slug in the URL goes to the server's
+    // existing add-by-slug job (the same path the desktop window's own
+    // Install-button interception uses), which resolves it against the
+    // CurseForge catalogue Furphy already keeps - no key, no scraping. Round
+    // 16 (E22) removed the old key-gated page-URL resolver and left only
+    // "type its ID number instead"; this is the keyless replacement.
+    const cfProjectMatch = value.match(/^https?:\/\/(?:www\.)?curseforge\.com\/projects\/(\d+)(?:[\/?#].*)?$/i);
+    if (cfProjectMatch) {
+      Components.Dialogs.closeAdd();
+      await addByProjectId(Number(cfProjectMatch[1]));
       return;
     }
-    fail("Type a numeric CurseForge ID, or paste a wago.io addon link.");
+    const cfPageMatch = value.match(/^https?:\/\/(?:www\.)?curseforge\.com\/wow\/addons\/([a-z0-9][a-z0-9_-]*)(?:[\/?#].*)?$/i);
+    if (cfPageMatch) {
+      Components.Dialogs.closeAdd();
+      await addByCurseForgeSlug(cfPageMatch[1].toLowerCase());
+      return;
+    }
+    // A curseforge:// install link (what the website's own Install button
+    // hands to the OS), pasted by hand: its addonId is the project id.
+    const cfProtocolMatch = value.match(/^curseforge:\/\/install\?(?:[^#]*&)?addonId=(\d+)(?:&[^#]*)?$/i);
+    if (cfProtocolMatch) {
+      Components.Dialogs.closeAdd();
+      await addByProjectId(Number(cfProtocolMatch[1]));
+      return;
+    }
+
+    // A GitHub link (or owner/repo), the same shapes Settings > GitHub
+    // addons and the "From a GitHub link" dialog already accept - one box
+    // takes all three sources now.
+    const ghRepo = parseGithubRepoInput(value);
+    if (ghRepo) {
+      Components.Dialogs.closeAdd();
+      await startJob("add", { source: "github", repo: ghRepo }, "Adding addon");
+      return;
+    }
+
+    if (/curseforge\.com/i.test(value)) {
+      fail("That CurseForge link isn't an addon page - open the addon's page and paste that link, or type its ID number.");
+      return;
+    }
+    fail("Paste a CurseForge, Wago or GitHub link, or type a CurseForge ID number.");
   }
 
   // Round 47 (GITHUB-SOURCE-SPEC.md section 5.3): the shared parser both
@@ -6573,6 +6765,47 @@ Views.browse = (function () {
     return name ? ("Search in " + name + "...") : "Search Wago addons...";
   }
 
+  function sourceWord(source) {
+    return source === "wago" ? "Wago" : (source === "github" ? "GitHub" : "CurseForge");
+  }
+
+  // Round 48 (audit HIGH 2): learns the Wago page slug of every tracked
+  // record that carries only a toc X-Wago-ID (see Store.wagoSlugById), one
+  // request at a time, so the grid above can tell that a card is an addon
+  // the player already has from another source. Best-effort and quiet: runs
+  // after a grid fetch, never blocks it, stops at the first transport
+  // failure (retried on the next fetch), remembers an id Wago does not know
+  // for the rest of this page load, and re-renders the grid once, at the
+  // end, only if it actually learned something.
+  let wagoSlugResolveRunning = false;
+  const wagoSlugResolveFailed = {};
+  async function resolveTrackedWagoSlugs() {
+    if (wagoSlugResolveRunning) return;
+    wagoSlugResolveRunning = true;
+    let learned = false;
+    try {
+      const pending = Store.wagoIdsNeedingSlug().filter(function (id) { return !wagoSlugResolveFailed[id.toLowerCase()]; });
+      for (let i = 0; i < pending.length && i < 60; i++) {
+        const id = pending[i];
+        try {
+          const res = await Api.wagoAddon(id);
+          if (res && res.addon && res.addon.slug) {
+            Store.rememberWagoSlug(id, res.addon.slug);
+            learned = true;
+          } else {
+            wagoSlugResolveFailed[id.toLowerCase()] = true;
+          }
+        } catch (err) {
+          if (err && err.status === 404) { wagoSlugResolveFailed[id.toLowerCase()] = true; continue; }
+          break; // transport/upstream trouble - try again on the next fetch
+        }
+      }
+    } finally {
+      wagoSlugResolveRunning = false;
+    }
+    if (learned && Store.state.view === "browse" && Store.state.browse.tab === "wago") renderWagoResults();
+  }
+
   // The one fetch function behind every Wago interaction - search typing,
   // a sort tab, a category chip, and Load more all funnel through this
   // with reset=true (fresh page 1, replacing results) or reset=false
@@ -6617,6 +6850,7 @@ Views.browse = (function () {
       w.error = err;
     }
     renderWagoResults();
+    resolveTrackedWagoSlugs();
   }
 
   // Kept as a stable name for external callers (the input handler below,
@@ -6878,10 +7112,19 @@ Views.browse = (function () {
   // source actually supplied it, never a blank slot; the Gaining tab adds
   // a leading rank number (GRAFT 4) and a delta badge next to the name.
   function resultCard(entry) {
-    const tracked = !!Store.addonByProjectId(entry.key);
+    // Round 48 (audit HIGH 2): "tracked" means tracked from ANY source, not
+    // just this card's own - see Store.trackedForBrowseEntry. An addon that
+    // is already installed from CurseForge must not offer a second install
+    // from Wago over the same folders.
+    const trackedAddon = Store.trackedForBrowseEntry(entry);
+    const tracked = !!trackedAddon;
+    const trackedElsewhere = tracked && (trackedAddon.source || "curseforge") !== entry.source;
     const busy = Store.jobActingOn(entry.key);
     const btn = tracked
-      ? Utils.el("button", { type: "button", class: "btn btn-outline", disabled: true }, [Utils.icon("check-circle"), "Installed"])
+      ? Utils.el("button", {
+          type: "button", class: "btn btn-outline", disabled: true,
+          title: trackedElsewhere ? ("Already installed from " + sourceWord(trackedAddon.source)) : null
+        }, [Utils.icon("check-circle"), "Installed"])
       // Review fix: was btn-accent. Round 34 removed the sidebar's accent
       // CTA entirely, so nothing in the app is accent-colored any more
       // (UX-SPEC.md section 1/2.3).

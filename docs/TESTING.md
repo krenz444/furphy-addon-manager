@@ -369,6 +369,37 @@ use, this time for GitHub Releases:
   DisplayVersion, live tray pid, the real Desktop, and the real
   `curseforge://` registry key) confirming byte-identical state.
 
+## Round 48: audit fixes (`tests\unit\Cli.FolderOwnershipAndSwap.Tests.ps1` and friends)
+
+No new production hook. What the tests lean on:
+
+- **`fixtures\wowroot`** - the synthetic 4-flavour WoW folder
+  (FLAVORS-SPEC.md section 8) is part of the repo and `deploy.ps1` mirrors
+  `fixtures\` (it used to live only in the scratch build root and was lost).
+  It holds one zero-byte `_ptr_\Interface\AddOns\.gitkeep` because git cannot
+  track an empty folder; `Copy-Fixture` strips it from every copy so a test's
+  `_ptr_` AddOns is truly empty. `Assert-FixturePristine` lists the other 12.
+- **Swap tests** hold a `FileShare.Read` handle on a file inside the folder
+  being replaced (what an antivirus scanner looks like to the swap). A plain
+  `Move-Item` of such a folder is NOT atomic - it moves the files it can reach
+  and leaves the locked one behind - which is why `Install-AddonPackage`
+  renames with `[System.IO.Directory]::Move` (`Move-DirectoryAtomic`).
+  Do not assert on `Move-Item` behaviour here.
+- **`@($someList)` throws** "Argument types do not match" on this
+  PowerShell 5.1 build when `$someList` is a `List[object]` (every record
+  list in this codebase); iterate with `foreach`, never wrap.
+- **`TrayForm.NextWaitSliceSeconds`** (`host\FurphyHost.cs`, private static,
+  pure) is the tray wait's whole decision, driven by reflection in
+  `tests\host\Host.Tests.ps1` with simulated clocks - no window, no process.
+- **GitHub release stub**: `GET .../releases/tags/<tag>` answers like
+  `releases/latest` for the manifest's own tag and 404s for any other
+  (the lookup a pinned record makes); `Get-GitHubReleaseStubRequests` shows
+  which of the two a test's sync actually used.
+- **SPA harness**: the sanitizer is read through the frame's indirect eval
+  (`win.eval("Sanitize")`, script-scope consts are not window properties);
+  the Wago grid test clears `addonSync.wagoSlugById.v1` first because earlier
+  phases of the same origin warm that cache.
+
 ## Running the suite
 
 One entry point, `tests\run-all.ps1`, runs every layer below in order,
