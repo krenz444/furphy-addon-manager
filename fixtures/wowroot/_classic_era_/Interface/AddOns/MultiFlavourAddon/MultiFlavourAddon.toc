@@ -1,0 +1,7 @@
+## Interface: 110207
+## Title: Multi Flavour Addon
+## Notes: Synthetic test fixture. Mainline-tagged bare file.
+## Version: 1.0.0
+## X-Flavor: Mainline
+
+MultiFlavourAddon.lua

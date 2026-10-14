@@ -1,0 +1,6 @@
+## Interface: 50504
+## Title: Fake Addon
+## Notes: Synthetic test fixture. SHOULD be picked for Classic (Mists-era client).
+## Version: 1.0.0
+
+FakeAddon.lua

@@ -215,6 +215,25 @@ if ((-not $NoPush) -and $RepoPath -and (Test-Path -LiteralPath (Join-Path $RepoP
         "copied tests\ ($((Get-ChildItem -LiteralPath $testsDst -File -Recurse | Measure-Object).Count) files, sources only)"
     }
 
+    # Test fixtures: tests\lib\common.ps1 resolves <build root>\fixtures\wowroot
+    # (a synthetic 4-flavour WoW folder, FLAVORS-SPEC section 8) for the unit,
+    # integration and fixture-acceptance layers. This used to be left out of
+    # the mirror, so it only ever existed in the scratch build root - and was
+    # lost when that folder was cleaned, which made every fixture-backed test
+    # (and therefore the step-0 gate above) fail. Same clear-then-copy
+    # pattern as tests\ above; skipped entirely when the build root has no
+    # fixtures\ (never deletes the repo's copy on a fixture-less source).
+    $fixturesSrc = Join-Path $Source 'fixtures'
+    if (Test-Path -LiteralPath $fixturesSrc -PathType Container) {
+        $fixturesDst = Join-Path $RepoPath 'fixtures'
+        if (Test-Path -LiteralPath $fixturesDst) { Remove-Item -LiteralPath $fixturesDst -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $fixturesDst | Out-Null
+        Get-ChildItem -LiteralPath $fixturesSrc -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $fixturesDst -Recurse -Force
+        }
+        "copied fixtures\ ($((Get-ChildItem -LiteralPath $fixturesDst -File -Recurse -Force | Measure-Object).Count) files)"
+    }
+
     Push-Location $RepoPath
     # git writes progress to stderr; under $ErrorActionPreference = 'Stop' PowerShell 5.1 would turn
     # that into a terminating error, so relax it for this block and rely on exit codes instead.

@@ -182,7 +182,12 @@ if ($effectiveNoNetwork) { $excludeTags.Add('Network') }
 if ($effectiveNoTray) { $excludeTags.Add('Tray') }
 
 if ($Only -and @($Only).Count -gt 0) {
-    $layersToRun = @($Only | ForEach-Object { $_.ToString().ToLowerInvariant() })
+    # `powershell -File run-all.ps1 -Only static,unit` hands a [string[]]
+    # parameter ONE token ("static,unit") - -File never splits on commas
+    # (only an in-process call or -Command builds a real array) - so every
+    # element is also split on commas and blanks are dropped; both call
+    # shapes then name the same layers.
+    $layersToRun = @($Only | ForEach-Object { $_.ToString().ToLowerInvariant() -split '[,\s]+' } | Where-Object { $_ })
     foreach ($l in $layersToRun) {
         if ($Script:AllLayers -notcontains $l) {
             Write-Host "FATAL: -Only names an unknown layer '$l' (known: $($Script:AllLayers -join ', '))" -ForegroundColor Red

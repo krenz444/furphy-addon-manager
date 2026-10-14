@@ -1,0 +1,6 @@
+## Interface: 120100
+## Title: Fake Addon (bare decoy)
+## Notes: Synthetic test fixture. Bare file is a DECOY - must NOT be picked for Classic.
+## Version: 1.0.0
+
+FakeAddon.lua

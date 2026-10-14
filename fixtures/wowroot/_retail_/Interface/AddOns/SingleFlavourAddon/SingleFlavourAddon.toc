@@ -1,0 +1,6 @@
+## Interface: 120100
+## Title: Single Flavour Addon
+## Notes: Synthetic test fixture (FLAVORS-SPEC section 8). No suffix, no X-Flavor.
+## Version: 1.0.0
+
+SingleFlavourAddon.lua

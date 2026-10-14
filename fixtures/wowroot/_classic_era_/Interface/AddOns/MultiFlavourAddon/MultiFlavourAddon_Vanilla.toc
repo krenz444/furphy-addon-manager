@@ -1,0 +1,7 @@
+## Interface: 11508
+## Title: Multi Flavour Addon
+## Notes: Synthetic test fixture. SHOULD be picked for classic_era (X-Flavor: Vanilla).
+## Version: 1.0.0
+## X-Flavor: Vanilla
+
+MultiFlavourAddon.lua

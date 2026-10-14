@@ -1,0 +1,6 @@
+## Interface: 11504
+## Title: Pre-Existing Era Addon
+## Notes: Synthetic test fixture. No suffix; simulates a real pre-existing folder for take-over/scan testing.
+## Version: 1.0.0
+
+PreExistingEraAddon.lua

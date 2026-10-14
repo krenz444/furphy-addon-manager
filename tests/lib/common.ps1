@@ -122,6 +122,20 @@ function Copy-Fixture {
     foreach ($item in $items) {
         Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force
     }
+    # git cannot track an empty folder, so fixtures\wowroot\_ptr_\Interface\
+    # AddOns (which must exist and be EMPTY - FLAVORS-SPEC section 8's
+    # "detected, not offered by default" PTR case) carries a zero-byte
+    # .gitkeep in the repo. Strip it from the COPY so a test's copy of the
+    # fixture is exactly the tree the spec describes, with a truly empty
+    # AddOns folder. Only the copied items are touched, never a
+    # caller-supplied $Destination's other contents.
+    foreach ($item in $items) {
+        $copied = Join-Path -Path $Destination -ChildPath $item.Name
+        if (Test-Path -LiteralPath $copied -PathType Container) {
+            Get-ChildItem -LiteralPath $copied -Recurse -Force -File -Filter '.gitkeep' -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
     return $Destination
 }
 
@@ -211,6 +225,11 @@ function Assert-FixturePristine {
       COPY, to prove the real checked-in fixture was never touched by
       mistake. Returns $true/$false; does not itself write to the results
       collector (callers pass the bool to Add-Result).
+
+      The 12 files below are the whole fixture; the only other entry is the
+      zero-byte _ptr_\Interface\AddOns\.gitkeep placeholder (see
+      Copy-Fixture), which is deliberately not listed because Copy-Fixture
+      strips it from every copy.
     #>
     $expected = @(
         '.build.info',
@@ -1017,10 +1036,15 @@ function Start-GitHubReleaseStubServer {
     $argList.Add('-NoProfile')
     $argList.Add('-ExecutionPolicy')
     $argList.Add('Bypass')
+    # Start-Process joins -ArgumentList elements with bare spaces, so every
+    # path is quoted here (ConvertTo-Win32QuotedArg) - an unquoted
+    # "...\furphy-audit (x86)\tests\..." build root was split into several
+    # argv tokens and the stub never came up (found 2026-10-14; the
+    # standing "test in a path with spaces and parentheses" rule).
     $argList.Add('-File')
-    $argList.Add($scriptPath)
+    $argList.Add((ConvertTo-Win32QuotedArg -Value $scriptPath))
     $argList.Add('-Port'); $argList.Add([string]$Port)
-    $argList.Add('-ManifestPath'); $argList.Add($manifestPath)
+    $argList.Add('-ManifestPath'); $argList.Add((ConvertTo-Win32QuotedArg -Value $manifestPath))
 
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList.ToArray() -WindowStyle Hidden -PassThru
 
@@ -1465,13 +1489,20 @@ function Start-TestServer {
     $argList.Add('-NoProfile')
     $argList.Add('-ExecutionPolicy')
     $argList.Add('Bypass')
+    # Every path/value is quoted (ConvertTo-Win32QuotedArg): Start-Process
+    # joins -ArgumentList elements with bare spaces, so an unquoted -Root
+    # under a build root such as "...\furphy (x86)\tests\.tmp\..." was split
+    # into several argv tokens and the server started mis-rooted. Quoting
+    # a "-Switch" token is harmless (the quotes are consumed by
+    # CommandLineToArgvW before PowerShell binds parameters - the same way
+    # addon-server.ps1's own New-CliProcessArgs quotes every element).
     $argList.Add('-File')
-    $argList.Add($ScriptPath)
+    $argList.Add((ConvertTo-Win32QuotedArg -Value $ScriptPath))
     $argList.Add('-Port'); $argList.Add([string]$Port)
-    $argList.Add('-Root'); $argList.Add($Root)
+    $argList.Add('-Root'); $argList.Add((ConvertTo-Win32QuotedArg -Value $Root))
     $argList.Add('-IdleMinutes'); $argList.Add([string]$IdleMinutes)
-    if ($WowRoot) { $argList.Add('-WowRoot'); $argList.Add($WowRoot) }
-    foreach ($a in $ExtraArgs) { $argList.Add($a) }
+    if ($WowRoot) { $argList.Add('-WowRoot'); $argList.Add((ConvertTo-Win32QuotedArg -Value $WowRoot)) }
+    foreach ($a in $ExtraArgs) { $argList.Add((ConvertTo-Win32QuotedArg -Value ([string]$a))) }
 
     # Round-1-fixer (verifier findings 1 and 4): almost every caller of this
     # helper has zero interest in Wago at all, yet

@@ -1,0 +1,7 @@
+## Interface: 50503
+## Title: Multi Flavour Addon
+## Notes: Synthetic test fixture. Mists-tagged variant.
+## Version: 1.0.0
+## X-Flavor: Mists
+
+MultiFlavourAddon.lua
