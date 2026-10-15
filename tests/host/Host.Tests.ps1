@@ -1485,6 +1485,72 @@ Describe 'Host tray wait is measured on the wall clock (Round 48, audit MEDIUM 6
     }
 }
 
+Describe 'Host link and held-install policy (Round 49, audit LOW 9 and LOW 13b)' -Tags 'Host' {
+    <#
+      Two pure static decisions, driven through reflection (no process
+      launched, no window shown):
+        ExternalLinkPolicy.GetBrowserUrl - what a new-window request from
+          the Furphy page may open in the user's DEFAULT BROWSER (an
+          absolute http/https URL, normalised) or null (dropped);
+        CfInstallPolicy.NeedsConfirmation - an install the CurseForge pane's
+          own SCRIPT started (no user gesture) is held for a yes/no.
+    #>
+    function Get-PolicyMethod {
+        # (explicit throws, not Should: an assertion's output would become part of the return value)
+        param([string]$TypeName, [string]$MethodName, [type[]]$ParamTypes)
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $t = $asm.GetType($TypeName)
+        if ($null -eq $t) { throw "$TypeName not found in FurphyHost.exe" }
+        $flags = [System.Reflection.BindingFlags]'NonPublic, Public, Static'
+        $m = $t.GetMethod($MethodName, $flags, $null, $ParamTypes, $null)
+        if ($null -eq $m) { throw "$TypeName.$MethodName not found" }
+        return $m
+    }
+
+    function Get-BrowserUrl {
+        param([string]$Uri)
+        $m = Get-PolicyMethod -TypeName 'Furphy.ExternalLinkPolicy' -MethodName 'GetBrowserUrl' -ParamTypes @([string])
+        return $m.Invoke($null, @($Uri))
+    }
+
+    It 'an https or http link is opened in the browser, normalised' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        (Get-BrowserUrl -Uri 'https://example.test/a?b=1') | Should Be 'https://example.test/a?b=1'
+        (Get-BrowserUrl -Uri 'http://example.test') | Should Be 'http://example.test/'
+        (Get-BrowserUrl -Uri 'HTTPS://EXAMPLE.TEST/Path') | Should Be 'https://example.test/Path'
+        (Get-BrowserUrl -Uri '  https://example.test/x  ') | Should Be 'https://example.test/x'
+    }
+
+    It 'every other scheme, a relative or empty value is dropped (null)' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        foreach ($u in 'javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,x', 'file:///C:/Windows/win.ini',
+            'curseforge://install?addonId=1&fileId=2', 'about:blank', 'vbscript:msgbox(1)', 'ftp://example.test/x',
+            'ms-settings:privacy', '/relative/path', 'example.test/no-scheme', '', '   ') {
+            $r = Get-BrowserUrl -Uri $u
+            if ($null -ne $r) { throw "expected null for '$u' but got '$r'" }
+        }
+        (Get-BrowserUrl -Uri $null) | Should Be $null
+    }
+
+    It 'what reaches the shell has no space, quote or control character (nothing can add an argument)' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $r = Get-BrowserUrl -Uri ('https://example.test/a b"c' + [char]9 + 'd --app=http://evil')
+        $r | Should Not Be $null
+        ($r -match '[\s"]') | Should Be $false
+        ($r -match '^https://example\.test/') | Should Be $true
+    }
+
+    It 'a CurseForge install is held for a question only when the page''s own script started it' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-PolicyMethod -TypeName 'Furphy.CfInstallPolicy' -MethodName 'NeedsConfirmation' -ParamTypes @([bool], [bool])
+        # (isUserInitiated, selftestActive)
+        $m.Invoke($null, @($true, $false)) | Should Be $false    # a real click installs straight away, as before
+        $m.Invoke($null, @($false, $false)) | Should Be $true    # a script-started navigation is asked about
+        $m.Invoke($null, @($false, $true)) | Should Be $false    # --selftest drives it by script on purpose
+        $m.Invoke($null, @($true, $true)) | Should Be $false
+    }
+}
+
 Describe 'Host MinimumSize DPI floor (regression-guards:host-minimumsize-floor-no-guard-test)' -Tags 'Host' {
     <#
       regression-guards:host-minimumsize-floor-no-guard-test - Round 32

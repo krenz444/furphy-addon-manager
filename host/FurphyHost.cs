@@ -867,6 +867,52 @@ namespace Furphy
     }
 
     // ------------------------------------------------------------------
+    // Round 49 (audit LOW 9): what the host does with a new-window request
+    // from the Furphy page itself. Pure and static so a test can drive it
+    // through reflection without a window.
+    // ------------------------------------------------------------------
+    internal static class ExternalLinkPolicy
+    {
+        // The absolute http(s) URL a new-window request may open in the
+        // user's DEFAULT BROWSER, or null when it must be dropped: any other
+        // scheme (javascript:, file:, data:, curseforge:, an app protocol), a
+        // relative or malformed value, a host-less one. AbsoluteUri is what
+        // comes back - percent-encoded, no spaces/quotes/control characters -
+        // so nothing but a plain URL ever reaches the shell.
+        internal static string GetBrowserUrl(string uri)
+        {
+            if (string.IsNullOrEmpty(uri)) return null;
+            string trimmed = uri.Trim();
+            if (trimmed.Length == 0 || trimmed.Length > 4096) return null;
+            Uri parsed;
+            if (!Uri.TryCreate(trimmed, UriKind.Absolute, out parsed)) return null;
+            if (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps) return null;
+            if (string.IsNullOrEmpty(parsed.Host)) return null;
+            return parsed.AbsoluteUri;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Round 49 (audit LOW 13b): when an install started from the embedded
+    // CurseForge pane needs a yes/no from the person first.
+    // ------------------------------------------------------------------
+    internal static class CfInstallPolicy
+    {
+        // A click on the CurseForge page's own Install control reaches the
+        // host as a user-initiated navigation/new window and installs
+        // immediately, exactly as before. One the page's SCRIPT started on its
+        // own (an ad's redirect, a hidden frame, a timer) carries no user
+        // gesture and is held for a question instead of silently installing
+        // an addon nobody chose. --selftest drives the interception path with
+        // a script on purpose, so it is never asked.
+        internal static bool NeedsConfirmation(bool isUserInitiated, bool selftestActive)
+        {
+            if (selftestActive) return false;
+            return !isUserInitiated;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Main window.
     // ------------------------------------------------------------------
     internal class MainForm : Form
@@ -2903,12 +2949,48 @@ namespace Furphy
             _furphyWebView.CoreWebView2.WebMessageReceived +=
                 new EventHandler<CoreWebView2WebMessageReceivedEventArgs>(HostWebView_WebMessageReceived);
 
+            // Round 49 (audit LOW 9): the page's own target=_blank links
+            // (Wago website/source buttons, links inside upstream
+            // descriptions, the GitHub button) go to the user's default
+            // browser instead of opening as bare WebView2 popup windows.
+            _furphyWebView.CoreWebView2.NewWindowRequested +=
+                new EventHandler<CoreWebView2NewWindowRequestedEventArgs>(FurphyWebView_NewWindowRequested);
+
             // Contract F: sent once the moment this webview is ready, and
             // again on every page-sent {type:"hello"} (handled inline in
             // HostWebView_WebMessageReceived above).
             SendHostReady();
 
             StartGameCheckTimer();
+        }
+
+        // Round 49 (audit LOW 9): WebView2 opens a request nobody marked as
+        // handled in a separate popup window - no address bar, no tabs, and
+        // this page's own profile. Mark it handled and hand a plain http(s)
+        // link to the user's default browser; anything else (javascript:,
+        // file:, data:, an app protocol) is dropped. The policy itself is the
+        // pure ExternalLinkPolicy.GetBrowserUrl.
+        private void FurphyWebView_NewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
+        {
+            e.Handled = true;
+            string url = ExternalLinkPolicy.GetBrowserUrl(e.Uri);
+            if (url == null)
+            {
+                LogHost("new window request dropped (not an http/https link)");
+                return;
+            }
+            // Never launch a browser from a scripted --selftest run.
+            if (_options.SelftestActive) return;
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(url);
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                LogHost("could not open a link in the default browser: " + ex.Message);
+            }
         }
 
         private void CfWebView_InitCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -3132,6 +3214,11 @@ namespace Furphy
                 ApplyCfFocusToggle(freshCfFocus);
             }
 
+            // Round 49 (audit LOW 13b): read once, here on the UI thread - an
+            // install the page's own script started (no user gesture) is held
+            // for a yes/no below instead of running silently.
+            bool needsConfirm = CfInstallPolicy.NeedsConfirmation(e.IsUserInitiated, _options.SelftestActive);
+
             if (uri.StartsWith("curseforge://", StringComparison.OrdinalIgnoreCase))
             {
                 e.Cancel = true;
@@ -3146,7 +3233,11 @@ namespace Furphy
                 // FurphyHost.cs:4650). e.Cancel stays synchronous and
                 // unchanged; only the job-posting side effect moves off
                 // this thread.
-                ThreadPool.QueueUserWorkItem(delegate(object state) { HandleCurseforgeProtocol(uri); });
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    if (needsConfirm && !ConfirmCfInstall(uri)) { LogHost("install declined: " + uri); return; }
+                    HandleCurseforgeProtocol(uri);
+                });
                 return;
             }
 
@@ -3156,7 +3247,11 @@ namespace Furphy
                 e.Cancel = true;
                 // Same fix as the curseforge:// branch above - HandleSlugInstall
                 // also performs a synchronous PostJson call.
-                ThreadPool.QueueUserWorkItem(delegate(object state) { HandleSlugInstall(uri, slug, fileId); });
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    if (needsConfirm && !ConfirmCfInstall(uri)) { LogHost("install declined: " + uri); return; }
+                    HandleSlugInstall(uri, slug, fileId);
+                });
                 return;
             }
 
@@ -3174,17 +3269,30 @@ namespace Furphy
             {
                 return;
             }
+            // Round 49 (audit LOW 13b): same gate as CfWebView_NavigationStarting.
+            bool needsConfirm = CfInstallPolicy.NeedsConfirmation(e.IsUserInitiated, _options.SelftestActive);
             if (uri.StartsWith("curseforge://", StringComparison.OrdinalIgnoreCase))
             {
                 e.Handled = true;
-                HandleCurseforgeProtocol(uri);
+                // Off the UI thread, like the NavigationStarting path: the
+                // handler does synchronous HTTP and (when held) shows a
+                // question that must not run inside this WebView2 event.
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    if (needsConfirm && !ConfirmCfInstall(uri)) { LogHost("install declined: " + uri); return; }
+                    HandleCurseforgeProtocol(uri);
+                });
                 return;
             }
             string slug, fileId;
             if (TryParseInstallLink(uri, out slug, out fileId))
             {
                 e.Handled = true;
-                HandleSlugInstall(uri, slug, fileId);
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    if (needsConfirm && !ConfirmCfInstall(uri)) { LogHost("install declined: " + uri); return; }
+                    HandleSlugInstall(uri, slug, fileId);
+                });
                 return;
             }
             // Anything else that would have opened a separate popup window
@@ -3192,6 +3300,70 @@ namespace Furphy
             // single-window app.
             e.Handled = true;
             NavigateCf(uri);
+        }
+
+        // Round 49 (audit LOW 13b): the question put to the person before an
+        // install the CurseForge page's own script started (see
+        // CfInstallPolicy). Runs on a ThreadPool thread and marshals the
+        // MessageBox onto the UI thread with Invoke, so the caller simply
+        // waits for the answer. Anything that goes wrong (form closing, a
+        // dispose race) answers "no" - an install nobody confirmed never
+        // happens by accident. Default button is No.
+        private bool ConfirmCfInstall(string uri)
+        {
+            bool allowed = false;
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return false;
+                Invoke(new MethodInvoker(delegate
+                {
+                    string pageTitle = null;
+                    try
+                    {
+                        if (_cfWebView != null && _cfWebView.CoreWebView2 != null)
+                        {
+                            pageTitle = _cfWebView.CoreWebView2.DocumentTitle;
+                        }
+                    }
+                    catch { pageTitle = null; }
+                    if (pageTitle != null && pageTitle.Length > 80) pageTitle = pageTitle.Substring(0, 80) + "...";
+
+                    string text =
+                        "A CurseForge page you have open started an addon install by itself - you did not click Install.\n\n" +
+                        "Addon: " + DescribeCfInstallTarget(uri) + "\n" +
+                        (string.IsNullOrEmpty(pageTitle) ? "" : "Page: " + pageTitle + "\n") +
+                        "\nInstall it anyway?";
+                    DialogResult answer = MessageBox.Show(
+                        this, text, "Furphy Addon Manager",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+                    allowed = (answer == DialogResult.Yes);
+                }));
+            }
+            catch (ObjectDisposedException) { return false; }
+            catch (InvalidOperationException) { return false; }
+            catch (Exception ex)
+            {
+                LogHost("ConfirmCfInstall failed: " + ex.Message);
+                return false;
+            }
+            return allowed;
+        }
+
+        // What a held install is about, in words: "slug" (file N) for a
+        // curseforge.com install link, else the numeric CurseForge project
+        // (and file) from a curseforge://install?addonId=... deep link.
+        private static string DescribeCfInstallTarget(string uri)
+        {
+            string slug, fileId;
+            if (TryParseInstallLink(uri, out slug, out fileId))
+            {
+                return "\"" + slug + "\" (file " + fileId + ")";
+            }
+            string projectId = ExtractParam(uri, "addonId|projectId");
+            string file = ExtractParam(uri, "fileId");
+            string text = string.IsNullOrEmpty(projectId) ? "an addon that could not be identified" : "CurseForge project " + projectId;
+            if (!string.IsNullOrEmpty(file)) text += " (file " + file + ")";
+            return text;
         }
 
         private static readonly Regex InstallLinkRegex = new Regex(
