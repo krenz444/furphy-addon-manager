@@ -1,6 +1,6 @@
 # Furphy Addon Manager - changelog
 
-## Round 50 (unreleased: the tray tooltip that never left "Checking addons")
+## Round 50 (1.27.1: the tray tooltip that never left "Checking addons")
 
 **The tray icon's hover text now shows the result of the last check.** It used
 to keep saying "Checking addons (35 of 35)..." for the whole day after a cycle
@@ -13,11 +13,11 @@ the tooltip is now written at up to that length (and, should the framework's
 internals ever differ, cut to 63 rather than left stale). The tray menu's
 status line, Settings and `tray-state.json` were never affected.
 
-## Round 49 (unreleased: the 2026-10-14 audit's LOW items)
+## Round 49 (1.27.1: the 2026-10-14 audit's LOW items)
 
 The LOW findings the audit left after Round 48 (its item 11, the spaced-path
-test launchers, was fixed there). No `VERSION` bump - cutting 1.27.1 is a
-separate decision. Behaviour the player can notice is listed first.
+test launchers, was fixed there). Shipped in 1.27.1 together with Rounds 48 and
+50. Behaviour the player can notice is listed first.
 
 **"N updates ready" can no longer disagree with Update all.** An addon on
 "Ignoring updates" can still carry the version it is skipping - the row shows
@@ -89,11 +89,11 @@ root named like `furphy (x86)` (before this they failed there: msedge exited
 13 on every launch, four app-update Describes and the race test never saw
 their child process start).
 
-## Round 48 (unreleased: the 2026-10-14 audit's bug fixes)
+## Round 48 (1.27.1: the 2026-10-14 audit's bug fixes)
 
-Fixes from a read-only audit of 1.27.0 (usability / reliability / bugs). No
-`VERSION` bump here - cutting 1.27.1 is a separate decision. Behaviour the
-player can notice is listed first.
+Fixes from a read-only audit of 1.27.0 (usability / reliability / bugs).
+Shipped in 1.27.1 together with Rounds 49 and 50. Behaviour the player can
+notice is listed first.
 
 **An addon can no longer end up installed twice from two sources.** The Wago
 grid (and its drawer) now says "Installed" for an addon that is already
