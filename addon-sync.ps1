@@ -581,6 +581,132 @@ function Get-ExceptionStatusCode {
     return $code
 }
 
+# =====================================================================
+# Round 49 (audit LOW 12): transient-failure retry + per-host offline
+# short-circuit, shared by Invoke-CfRequest, Invoke-WagoRequest and
+# Invoke-GithubRequest below.
+#
+# Before: only each source's documented rate-limit codes were retried (CF
+# 429/403, Wago 429/503, GitHub 403/429) - one 502/504 from a CDN edge or one
+# dropped connection failed that addon outright - and a PC with no network
+# paid the full resolver/connect wait for EVERY tracked addon (35 ERROR lines
+# per run, some ~8 s each). Now:
+#   * a 5xx answer or a dropped/timed-out transport gets the same single
+#     retry the rate-limit codes always had;
+#   * after $script:ConnectivityBreakerThreshold consecutive "cannot reach
+#     this host" failures (name resolution, connect, timeout) in one run,
+#     every further request to THAT host fails immediately, so a whole run
+#     against an offline machine ends in seconds, not minutes. Any HTTP
+#     answer - even a 404 - proves the host is reachable and resets the
+#     streak. The state lives in this process only: the next run starts clean.
+# =====================================================================
+$script:ConnectivityBreakerThreshold = 3
+$script:HostFailureStreak = @{}
+
+function Get-UriHostKey {
+    <# The lowercase host name of -Uri ('' when it does not parse) - the key the offline breaker counts failures under. #>
+    param([string]$Uri)
+
+    try {
+        return ([System.Uri]$Uri).Host.ToLowerInvariant()
+    } catch {
+        return ''
+    }
+}
+
+function Get-ExceptionWebStatus {
+    <# The System.Net.WebExceptionStatus NAME of a transport-level failure ('NameResolutionFailure', 'ConnectFailure', 'Timeout', ...), or '' for anything else - an HTTP error answer (ProtocolError) and non-web exceptions both read as ''. #>
+    param($ErrorRecord)
+
+    try {
+        $ex = $null
+        if ($ErrorRecord) { $ex = $ErrorRecord.Exception }
+        while ($ex) {
+            if ($ex -is [System.Net.WebException]) {
+                $name = $ex.Status.ToString()
+                if ($name -eq 'ProtocolError') { return '' }
+                return $name
+            }
+            $ex = $ex.InnerException
+        }
+    } catch {
+        return ''
+    }
+    return ''
+}
+
+function Test-IsConnectivityFailure {
+    <# $true when -ErrorRecord says "this host cannot be reached right now" (no DNS answer, connect refused/unreachable, no answer in time) - never when the host answered with any HTTP status. #>
+    param($ErrorRecord)
+
+    if ((Get-ExceptionStatusCode -ErrorRecord $ErrorRecord) -gt 0) { return $false }
+    $status = Get-ExceptionWebStatus -ErrorRecord $ErrorRecord
+    return (@('NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'Timeout') -contains $status)
+}
+
+function Test-IsTransientFailure {
+    <# $true for the failures worth ONE more try after the usual short wait: a 5xx answer (500/502/503/504) or a transport that dropped or timed out mid-request. Name-resolution/connect failures are NOT transient here - they mean offline or blocked, and the breaker handles them. #>
+    param($ErrorRecord, [int]$StatusCode = 0)
+
+    if ($StatusCode -eq 500 -or $StatusCode -eq 502 -or $StatusCode -eq 503 -or $StatusCode -eq 504) { return $true }
+    if ($StatusCode -gt 0) { return $false }
+    $status = Get-ExceptionWebStatus -ErrorRecord $ErrorRecord
+    return (@('Timeout', 'ConnectionClosed', 'ReceiveFailure', 'SendFailure', 'KeepAliveFailure', 'PipelineFailure') -contains $status)
+}
+
+function Get-FailureLabel {
+    <# "HTTP 503" or the transport status name ("Timeout") for a log line. #>
+    param($ErrorRecord, [int]$StatusCode = 0)
+
+    if ($StatusCode -gt 0) { return "HTTP $StatusCode" }
+    $status = Get-ExceptionWebStatus -ErrorRecord $ErrorRecord
+    if ($status) { return $status }
+    return 'request error'
+}
+
+function Test-HostBreakerOpen {
+    <# $true once -HostKey has failed to connect $script:ConnectivityBreakerThreshold times in a row in this process. #>
+    param([string]$HostKey)
+
+    if ([string]::IsNullOrEmpty($HostKey)) { return $false }
+    if (-not $script:HostFailureStreak.ContainsKey($HostKey)) { return $false }
+    return ([int]$script:HostFailureStreak[$HostKey] -ge $script:ConnectivityBreakerThreshold)
+}
+
+function Register-HostOutcome {
+    <# Records one request's outcome for the breaker: no -ErrorRecord = it succeeded (streak reset); a connectivity failure extends the streak; any other HTTP answer resets it (the host IS reachable). Never throws. #>
+    param([string]$HostKey, $ErrorRecord = $null)
+
+    if ([string]::IsNullOrEmpty($HostKey)) { return }
+    try {
+        if ($null -eq $ErrorRecord) {
+            $script:HostFailureStreak[$HostKey] = 0
+            return
+        }
+        if (Test-IsConnectivityFailure -ErrorRecord $ErrorRecord) {
+            $streak = 1
+            if ($script:HostFailureStreak.ContainsKey($HostKey)) { $streak = [int]$script:HostFailureStreak[$HostKey] + 1 }
+            $script:HostFailureStreak[$HostKey] = $streak
+            if ($streak -eq $script:ConnectivityBreakerThreshold) {
+                Write-Log -Level 'WARN' -Message "$HostKey did not answer $streak requests in a row - skipping it for the rest of this run (it is tried again on the next run)"
+            }
+        } elseif ((Get-ExceptionStatusCode -ErrorRecord $ErrorRecord) -gt 0) {
+            $script:HostFailureStreak[$HostKey] = 0
+        }
+    } catch {
+        # Bookkeeping only - never let it turn a request outcome into a crash.
+    }
+}
+
+function Assert-HostReachable {
+    <# Throws immediately (a WebException, so every caller's existing catch/Get-ExceptionStatusCode handling is unchanged) when the breaker for -HostKey is open. #>
+    param([string]$HostKey)
+
+    if (-not (Test-HostBreakerOpen -HostKey $HostKey)) { return }
+    $message = "Skipped: $HostKey did not answer $($script:ConnectivityBreakerThreshold) requests in a row, so this run stops asking it. Check your internet connection."
+    throw (New-Object System.Net.WebException($message, [System.Net.WebExceptionStatus]::ConnectFailure))
+}
+
 function Invoke-HttpDownloadWithProgress {
     <#
       CS6 (UX-SPEC.md section 4.4): downloads $Uri to $OutFile with
@@ -719,6 +845,7 @@ function Invoke-CfRequest {
         'Referer' = "$script:CfBaseUrl/"
     }
 
+    $hostKey = Get-UriHostKey -Uri $Uri
     $maxAttempts = 2
     $attempt = 0
     $lastError = $null
@@ -729,6 +856,8 @@ function Invoke-CfRequest {
         $shouldRetry = $false
         $lastError = $null
         $timeoutSec = 30
+        # Round 49 (audit LOW 12): fails at once when this host has stopped answering.
+        Assert-HostReachable -HostKey $hostKey
         try {
             if ($OutFile) {
                 Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
@@ -736,11 +865,15 @@ function Invoke-CfRequest {
             } else {
                 $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
             }
+            Register-HostOutcome -HostKey $hostKey
         } catch {
             $lastError = $_
             $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
-            if (($statusCode -eq 429 -or $statusCode -eq 403) -and ($attempt -lt $maxAttempts)) {
-                Write-Log -Level 'WARN' -Message "HTTP $statusCode from $Uri - waiting 5 seconds and retrying"
+            Register-HostOutcome -HostKey $hostKey -ErrorRecord $_
+            # Round 49 (audit LOW 12): a 5xx or a dropped/timed-out transport
+            # now gets the same one retry the rate-limit codes always had.
+            if (($statusCode -eq 429 -or $statusCode -eq 403 -or (Test-IsTransientFailure -ErrorRecord $_ -StatusCode $statusCode)) -and ($attempt -lt $maxAttempts) -and (-not (Test-HostBreakerOpen -HostKey $hostKey))) {
+                Write-Log -Level 'WARN' -Message "$(Get-FailureLabel -ErrorRecord $_ -StatusCode $statusCode) from $Uri - waiting 5 seconds and retrying"
                 $shouldRetry = $true
             }
         }
@@ -975,6 +1108,7 @@ function Invoke-WagoRequest {
         foreach ($k in $Headers.Keys) { $mergedHeaders[$k] = $Headers[$k] }
     }
 
+    $hostKey = Get-UriHostKey -Uri $Uri
     $maxAttempts = 2
     $attempt = 0
     $lastError = $null
@@ -985,6 +1119,8 @@ function Invoke-WagoRequest {
         $shouldRetry = $false
         $lastError = $null
         $timeoutSec = 30
+        # Round 49 (audit LOW 12): fails at once when this host has stopped answering.
+        Assert-HostReachable -HostKey $hostKey
         try {
             if ($OutFile) {
                 Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -OutFile $OutFile -TimeoutSec $timeoutSec -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
@@ -992,11 +1128,14 @@ function Invoke-WagoRequest {
             } else {
                 $result = Invoke-WebRequest -Uri $Uri -Headers $mergedHeaders -UserAgent $script:CfUserAgent -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
             }
+            Register-HostOutcome -HostKey $hostKey
         } catch {
             $lastError = $_
             $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
-            if (($statusCode -eq 429 -or $statusCode -eq 503) -and ($attempt -lt $maxAttempts)) {
-                Write-Log -Level 'WARN' -Message "HTTP $statusCode from $Uri (Wago) - waiting 5 seconds and retrying"
+            Register-HostOutcome -HostKey $hostKey -ErrorRecord $_
+            # Round 49 (audit LOW 12): see Invoke-CfRequest.
+            if (($statusCode -eq 429 -or (Test-IsTransientFailure -ErrorRecord $_ -StatusCode $statusCode)) -and ($attempt -lt $maxAttempts) -and (-not (Test-HostBreakerOpen -HostKey $hostKey))) {
+                Write-Log -Level 'WARN' -Message "$(Get-FailureLabel -ErrorRecord $_ -StatusCode $statusCode) from $Uri (Wago) - waiting 5 seconds and retrying"
                 $shouldRetry = $true
             }
         }
@@ -1055,6 +1194,7 @@ function Invoke-GithubRequest {
         $headers['Authorization'] = 'Bearer ' + $GithubToken
     }
 
+    $hostKey = Get-UriHostKey -Uri $Uri
     $maxAttempts = 2
     $attempt = 0
     $lastError = $null
@@ -1065,6 +1205,8 @@ function Invoke-GithubRequest {
         $shouldRetry = $false
         $lastError = $null
         $waitSeconds = 5
+        # Round 49 (audit LOW 12): fails at once when this host has stopped answering.
+        Assert-HostReachable -HostKey $hostKey
         try {
             if ($OutFile) {
                 Invoke-HttpDownloadWithProgress -Uri $Uri -Headers $headers -UserAgent $script:GithubUserAgent -OutFile $OutFile -TimeoutSec 60 -ProgressTotal $ProgressTotal -ProgressIndex $ProgressIndex -ProgressAddon $ProgressAddon
@@ -1072,16 +1214,18 @@ function Invoke-GithubRequest {
             } else {
                 $result = Invoke-WebRequest -Uri $Uri -Headers $headers -UserAgent $script:GithubUserAgent -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             }
+            Register-HostOutcome -HostKey $hostKey
         } catch {
             $lastError = $_
             $statusCode = Get-ExceptionStatusCode -ErrorRecord $_
+            Register-HostOutcome -HostKey $hostKey -ErrorRecord $_
             if ($statusCode -eq 404) {
                 # 404 is never retried - it means "no access right now" (no
                 # token, an expired/rotated token, or a genuinely
                 # nonexistent repo), not "transient". Falls through to the
                 # unconditional Start-Sleep/throw below like any other
                 # non-retried failure.
-            } elseif (($statusCode -eq 403 -or $statusCode -eq 429) -and ($attempt -lt $maxAttempts)) {
+            } elseif (($statusCode -eq 403 -or $statusCode -eq 429 -or (Test-IsTransientFailure -ErrorRecord $_ -StatusCode $statusCode)) -and ($attempt -lt $maxAttempts) -and (-not (Test-HostBreakerOpen -HostKey $hostKey))) {
                 try {
                     $retryAfterHeader = $_.Exception.Response.Headers['Retry-After']
                     if ($retryAfterHeader) {
@@ -1089,7 +1233,7 @@ function Invoke-GithubRequest {
                         if ([int]::TryParse([string]$retryAfterHeader, [ref]$ras) -and $ras -gt 0) { $waitSeconds = [Math]::Min($ras, 10) }
                     }
                 } catch { }
-                Write-Log -Level 'WARN' -Message "HTTP $statusCode from GitHub - waiting $waitSeconds seconds and retrying"
+                Write-Log -Level 'WARN' -Message "$(Get-FailureLabel -ErrorRecord $_ -StatusCode $statusCode) from GitHub - waiting $waitSeconds seconds and retrying"
                 $shouldRetry = $true
             }
         }
@@ -5580,6 +5724,90 @@ function Get-RecordBackupKey {
     return [string][int]$Record.projectId
 }
 
+function Remove-OrphanedBackupFolders {
+    <#
+      Round 49 (audit LOW 10): disk housekeeping for ONE flavour's
+      flavours\<id>\backups\ folder. Two kinds of dead weight built up there
+      and were never cleaned:
+        * the <key>\ folder of an addon Furphy no longer tracks (removed in
+          the app, or replaced by a switch of source - the other source's key
+          differs): its rollback zips, and an adopted-original snapshot, can
+          never be rolled back to once nothing tracks the addon;
+        * Round 2's "<FileId>.filename.txt" sidecars, written by an early
+          build and never read since Round 3.
+      A folder is removed only when ALL of these hold: its name is a backup
+      key this code generates (digits, wago-<slug>, github-<owner>_<repo>);
+      no record in -Config produces that key; nothing inside it was written
+      within -MinAgeDays (30 by default - a window to change your mind about
+      a removal); and -Config is not empty (an empty list next to existing
+      backups means addons.json failed to load, not that everything was
+      removed). Anything else is left alone. The one-time
+      flavours\_migration-backup-* copy is deliberately NOT handled here:
+      FLAVORS-SPEC.md section 3.3 says it is listed and never auto-deleted
+      (the app offers to delete it explicitly instead).
+      Returns { FoldersRemoved; SidecarsRemoved }. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$BackupsRoot,
+        [Parameter(Mandatory = $true)]$Config,
+        [int]$MinAgeDays = 30,
+        $NowUtc = $null
+    )
+
+    $summary = [PSCustomObject]@{ FoldersRemoved = 0; SidecarsRemoved = 0 }
+    try {
+        if (-not (Test-Path -LiteralPath $BackupsRoot -PathType Container)) { return $summary }
+
+        $liveKeys = New-Object -TypeName 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase)
+        $recordCount = 0
+        foreach ($record in $Config) {
+            $recordCount++
+            $key = $null
+            try { $key = Get-RecordBackupKey -Record $record } catch { $key = $null }
+            # A record we cannot key means we cannot tell what is orphaned.
+            if ([string]::IsNullOrWhiteSpace($key)) { return $summary }
+            [void]$liveKeys.Add([string]$key)
+        }
+        if ($recordCount -eq 0) { return $summary }
+
+        if ($null -eq $NowUtc) { $NowUtc = (Get-Date).ToUniversalTime() }
+        $cutoff = $NowUtc.AddDays(-1 * $MinAgeDays)
+
+        foreach ($dir in @(Get-ChildItem -LiteralPath $BackupsRoot -Directory -Force -ErrorAction Stop)) {
+            $name = $dir.Name
+            if ($liveKeys.Contains($name)) {
+                foreach ($sidecar in @(Get-ChildItem -LiteralPath $dir.FullName -Filter '*.filename.txt' -File -Force -ErrorAction SilentlyContinue)) {
+                    try {
+                        Remove-Item -LiteralPath $sidecar.FullName -Force -ErrorAction Stop
+                        $summary.SidecarsRemoved++
+                    } catch {
+                        # A locked sidecar is simply tried again next run.
+                    }
+                }
+                continue
+            }
+            if ($name -notmatch '^(\d+|wago-[A-Za-z0-9_-]+|github-[A-Za-z0-9_-]+)$') { continue }
+
+            $newest = $dir.LastWriteTimeUtc
+            foreach ($file in @(Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($file.LastWriteTimeUtc -gt $newest) { $newest = $file.LastWriteTimeUtc }
+            }
+            if ($newest -gt $cutoff) { continue }
+
+            try {
+                Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+                $summary.FoldersRemoved++
+                Write-Log -Level 'INFO' -Message "Housekeeping: removed the backup folder '$name' of an addon that is no longer tracked (untouched for over $MinAgeDays days)"
+            } catch {
+                Write-Log -Level 'WARN' -Message "Housekeeping: could not remove the backup folder '$name': $($_.Exception.Message)"
+            }
+        }
+    } catch {
+        Write-Log -Level 'WARN' -Message "Housekeeping: backup folder cleanup skipped: $($_.Exception.Message)"
+    }
+    return $summary
+}
+
 # =====================================================================
 # Dot-source guard (TESTING.md hook #1)
 #
@@ -6732,6 +6960,14 @@ try {
         $actionLabel = 'rollback'
     } elseif ($hasFlagsOnly -and (-not $hasOnly)) {
         $actionLabel = 'flags'
+    }
+
+    # ---- Disk housekeeping (Round 49, audit LOW 10) ----
+    # After a real sync only: backup folders of addons that are no longer
+    # tracked, once nothing in them has been touched for 30 days, plus the
+    # obsolete Round 2 sidecars. Best-effort and silent (see the function).
+    if ((-not $DryRun) -and ($actionLabel -eq 'sync')) {
+        $null = Remove-OrphanedBackupFolders -BackupsRoot $script:BackupsPath -Config $config
     }
 
     # ---- Report ----
