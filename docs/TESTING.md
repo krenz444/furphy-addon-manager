@@ -400,6 +400,43 @@ No new production hook. What the tests lean on:
   the Wago grid test clears `addonSync.wagoSlugById.v1` first because earlier
   phases of the same origin warm that cache.
 
+## Round 49: the audit's LOW items (`Server.Round49` / `Cli.Round49` and friends)
+
+No new production hook. What the tests lean on:
+
+- **`Invoke-WebRequest` and `Start-Sleep` are shadowed** (a function outranks a
+  cmdlet) in `tests\unit\Cli.Round49.Tests.ps1`, with a queue of scripted
+  responses: an HTTP answer is an exception carrying `.Response.StatusCode`; a
+  transport failure is a real `System.Net.WebException` built with a
+  `WebExceptionStatus` (`NameResolutionFailure`, `ConnectFailure`, `Timeout`).
+  The per-host breaker state is `$script:HostFailureStreak` - reset it between
+  cases. No request is made and no wait is paid.
+- **`Invoke-Api -Headers @{ Host = ... }`** sets `HttpWebRequest.Host`
+  (Host is a restricted header, `Headers.Set` throws). `Invoke-Api` always
+  dials 127.0.0.1, and http.sys itself answers 400 "Invalid Hostname" for an
+  IPv6-literal Host sent over the IPv4 binding - so the `[::1]` case connects
+  to `http://[::1]:port` directly.
+- **`System.Uri` expands an IPv6 literal**: `([uri]'http://[::1]:47831').Host`
+  is `[0000:0000:0000:0000:0000:0000:0000:0001]`, never `[::1]`; compare it as
+  an `IPAddress` (`Test-LoopbackHostHeader` does).
+- **App-update handler tests** point `$Script:AppUpdatePath` at a scratch file
+  and call `Handle-AppUpdateInstall` with the fake HTTP context; the success
+  case sets `FURPHY_TEST_APPUPDATE_DRYRUN` so nothing is ever spawned. The
+  integration stub package now carries a stub `install.ps1` - the handler
+  refuses a staged copy without one.
+- **`ExternalLinkPolicy.GetBrowserUrl` / `CfInstallPolicy.NeedsConfirmation`**
+  (`host\FurphyHost.cs`, internal static, pure) are driven by reflection in
+  `tests\host\Host.Tests.ps1`, like `NextWaitSliceSeconds`.
+- **`Start-Process -ArgumentList` quotes nothing** (Windows PowerShell 5.1):
+  every launcher that can see a build root named `furphy (x86)` must quote its
+  paths. Fixed this round in `tests\spa\Run-ThemeAudit.ps1` (msedge exited 13
+  on every launch), the `-AppUpdateOnly` helper in
+  `tests\integration\Server.AppUpdate.Tests.ps1` (four Describes failed) and
+  the second server in `tests\integration\Server.StartupRace.Tests.ps1`.
+- **SPA harness**: `?migrationBackup=1` makes the mock list one pre-upgrade
+  backup; `details-damage-meter-standalone` carries a safe `website` and a
+  `javascript:` `source_url` so the drawer's links can be asserted.
+
 ## Running the suite
 
 One entry point, `tests\run-all.ps1`, runs every layer below in order,

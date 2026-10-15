@@ -1765,6 +1765,9 @@ function Invoke-Api {
     foreach ($k in $allHeaders.Keys) {
         if ($k -eq 'Origin') { $req.Headers.Set('Origin', $allHeaders[$k]) }
         elseif ($k -eq 'Referer') { $req.Referer = $allHeaders[$k] }
+        # Round 49: Host is a restricted header (Headers.Set throws) - the
+        # DNS-rebinding guard tests need to send one that is not loopback.
+        elseif ($k -eq 'Host') { $req.Host = [string]$allHeaders[$k] }
         else { $req.Headers.Set($k, [string]$allHeaders[$k]) }
     }
 

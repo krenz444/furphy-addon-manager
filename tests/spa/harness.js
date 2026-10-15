@@ -3184,6 +3184,131 @@
     checkTry("no console errors (Add dialog)", function () { return currentPhase.consoleErrors.length === 0; });
   }
 
+  // ------------------------------------------------------------------
+  // Round 49 (audit LOW 7 / LOW 9 / LOW 10), SPA side:
+  //   - the freshness headline, the Update all button and the Updates
+  //     filter agree: an addon on "Ignoring updates" can still carry the
+  //     pending version it is skipping, but it is not "ready";
+  //   - only an http(s) URL reaches an href from Wago page data (the
+  //     drawer's Website/Source buttons);
+  //   - the Settings > Troubleshooting safety-copy row exists only when the
+  //     one-time pre-upgrade backup folder does, and Delete asks first.
+  // ------------------------------------------------------------------
+  async function phaseRound49Spa() {
+    beginPhase("Round 49: ignored updates, safe external links, pre-upgrade backup row");
+
+    // ---- headline / Update all / Updates filter agree ----
+    {
+      const win = await loadFrame("?mock=1&test=1");
+      await waitForReady(win, 8000);
+      checkTry("the headline counts only actionable updates: '3 updates ready' (ignored Bagnon's pending version is not counted)", function () {
+        return /\b3 updates ready\b/.test(text(q(win, "#myaddons-freshness")));
+      });
+      checkTry("Update all says (3) - the very same number", function () { return /\(3\)/.test(text(q(win, "#btn-update-all"))); });
+      checkTry("the Updates filter chip counts 3, not 4", function () {
+        return qa(win, "#myaddons-filters .filter-chip").some(function (b) { return /^Updates3$/.test(text(b)); });
+      });
+      checkTry("Store.updatesCount() is 3 (the sidebar figure and the headline read it)", function () {
+        return win.__furphyTest.Store.updatesCount() === 3;
+      });
+
+      // Ignoring one more addon lowers all three together, with no new check.
+      const row = qa(win, "#myaddons-tbody tr").filter(function (r) { return /Auctionator/.test(text(r)); })[0];
+      const kebab = row && row.querySelector('button[aria-label="More actions"]');
+      if (!kebab) {
+        check("Auctionator row has a kebab menu", false, "row/kebab not found");
+      } else {
+        await clickAndSettle(win, kebab, 150);
+        const ignoreItem = qa(win, ".dropdown-item").filter(function (b) { return /Ignore updates/.test(text(b)); })[0];
+        checkTry("the kebab offers 'Ignore updates'", function () { return !!ignoreItem; });
+        if (ignoreItem) {
+          await clickAndSettle(win, ignoreItem, 600);
+          checkTry("after ignoring Auctionator the headline reads '2 updates ready'", function () {
+            return /\b2 updates ready\b/.test(text(q(win, "#myaddons-freshness")));
+          });
+          checkTry("...Update all reads (2)", function () { return /\(2\)/.test(text(q(win, "#btn-update-all"))); });
+        }
+      }
+      checkTry("no console errors (ignored updates)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- Sanitize.safeUrl + the Wago drawer's Website/Source buttons ----
+    {
+      const win = await loadFrame("?mock=1&test=1&view=get-new-addons&tab=wago");
+      await waitForReady(win, 8000);
+      await wait(1800);
+      const S = win.eval("Sanitize");
+      checkTry("Sanitize.safeUrl keeps an https URL", function () { return S.safeUrl("https://example.test/a?b=1") === "https://example.test/a?b=1"; });
+      checkTry("...keeps an http URL", function () { return S.safeUrl("http://example.test/") === "http://example.test/"; });
+      checkTry("...drops javascript:, data:, file: and vbscript: values", function () {
+        return ["javascript:alert(1)", "data:text/html,x", "file:///C:/Windows/win.ini", "vbscript:msgbox(1)", "JaVaScRiPt:alert(1)"].every(function (u) { return S.safeUrl(u) === null; });
+      });
+
+      const card = qa(win, "#browse-grid .browse-row").filter(function (r) { return text(r.querySelector(".browse-row-title")) === "Details! Damage Meter"; })[0];
+      if (!card) {
+        check("the Wago card for Details! Damage Meter exists", false, "card not found");
+      } else {
+        await clickAndSettle(win, card, 500);
+        const links = qa(win, "#drawer-header .drawer-links a");
+        checkTry("the drawer shows the safe Website button with the exact https href", function () {
+          return links.some(function (a) { return /Website/.test(text(a)) && a.getAttribute("href") === "https://example.test/details" && a.getAttribute("target") === "_blank"; });
+        });
+        checkTry("...and NO Source button for the javascript: value", function () {
+          return !links.some(function (a) { return /Source/.test(text(a)); }) && !links.some(function (a) { return /^javascript:/i.test(a.getAttribute("href") || ""); });
+        });
+        const closeBtn = q(win, "#drawer-close");
+        if (closeBtn) await clickAndSettle(win, closeBtn, 150);
+      }
+      checkTry("no console errors (safe links)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+
+    // ---- pre-upgrade backup row ----
+    {
+      const none = await loadFrame("?mock=1&test=1&view=settings");
+      await waitForReady(none, 8000);
+      await wait(500);
+      checkTry("no pre-upgrade backup -> the safety-copy row is hidden", function () {
+        const row = q(none, "#migration-backup-row");
+        return !!row && (row.hidden === true || !visible(row));
+      });
+    }
+    {
+      const win = await loadFrame("?mock=1&test=1&view=settings&migrationBackup=1");
+      await waitForReady(win, 8000);
+      await wait(700);
+      const row = q(win, "#migration-backup-row");
+      // The row sits in the collapsed Advanced section; open it so visible() can judge.
+      const adv = q(win, "#settings-advanced");
+      if (adv) adv.open = true;
+      await wait(150);
+      checkTry("a pre-upgrade backup exists -> the row is shown with its size", function () {
+        return !!row && row.hidden === false && /MB/.test(text(q(win, "#migration-backup-text")));
+      });
+      checkTry("...and says Furphy never deletes it by itself", function () {
+        return /never deletes it by itself/.test(text(q(win, "#migration-backup-text")));
+      });
+
+      const del = q(win, "#btn-delete-migration-backup");
+      if (!del) {
+        check("Delete button exists", false, "#btn-delete-migration-backup not found");
+      } else {
+        // Cancel first: nothing is removed.
+        await clickAndSettle(win, del, 250);
+        checkTry("Delete asks first (the confirm dialog opens)", function () { return visible(q(win, "#dialog-confirm")); });
+        const cancel = q(win, "#confirm-cancel");
+        if (cancel) await clickAndSettle(win, cancel, 250);
+        checkTry("Cancel keeps the row", function () { return q(win, "#migration-backup-row").hidden === false; });
+
+        // Confirm: it is removed and the row disappears.
+        await clickAndSettle(win, del, 250);
+        const ok = q(win, "#confirm-ok");
+        if (ok) await clickAndSettle(win, ok, 700);
+        checkTry("confirming removes it and hides the row", function () { return q(win, "#migration-backup-row").hidden === true; });
+      }
+      checkTry("no console errors (pre-upgrade backup row)", function () { return currentPhase.consoleErrors.length === 0; });
+    }
+  }
+
   async function main() {
     await phaseDefault();
     await phaseLaunchPerf();
@@ -3212,6 +3337,7 @@
     await phaseGithubSource();
     await phaseSanitizer();
     await phaseRound48Spa();
+    await phaseRound49Spa();
 
     if (currentPhase) { currentPhase.durationMs = Date.now() - currentPhase._startedAtMs; }
     results.complete = true;

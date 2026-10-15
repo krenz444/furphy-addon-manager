@@ -472,6 +472,16 @@ only in the `relaunch` value they pass)
 - CSRF required.
 - Request body: `{ "relaunch": "window" | "tray" }`.
 - 400 `{ error: "nothing staged to install" }` if `state != "ready"`.
+- **Round 49 amendment (audit LOW 8):** 410 `{ error: "The downloaded
+  update is no longer on this PC ..." }` when `state == "ready"` but the
+  staged folder's `install.ps1` is gone (the extraction lives under
+  `%TEMP%`, which storage cleanup may empty). The handler resets the state
+  to `idle` (`stagedPath`/`downloadedAt`/`checkedAt`/`lastError` cleared;
+  the release facts stay) and does NOT launch anything or shut down; the
+  next hourly maintenance tick - which now also resets a `ready` marker
+  whose staged copy is gone, instead of returning on it - looks the
+  release up and stages it again. The check sits after the busy 409 below,
+  so a running addon job is still reported first.
 - 409 `{ error: "busy: a job is running" }` if any
   `$Script:CurrentJobByFlavour` entry is `running` - the EXACT same loop
   `Handle-Shutdown` already runs (addon-server.ps1:8731-8735:

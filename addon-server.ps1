@@ -4443,8 +4443,15 @@ function Get-ComputedFreshness {
       flavour's own bucket, so a Retail sync running concurrently with a
       Classic Era job never makes Classic Era's own freshness read
       "checking" (or vice versa).
+
+      Round 49 (audit LOW 7): -PendingUpdateCount is the number of pending
+      updates whose record is NOT on ignore (Handle-State counts them in the
+      same loop that builds the addon rows). Without it every entry in the
+      per-flavour map counts, exactly as before - which is what let an addon
+      ignored AFTER the last check keep the headline on "1 update ready"
+      while Update all had nothing left to do.
     #>
-    param($CurrentJobView, [string]$Flavor)
+    param($CurrentJobView, [string]$Flavor, $PendingUpdateCount = $null)
 
     if (-not $Flavor) { $Flavor = $Script:CurrentFlavour }
     if (-not $Flavor) { $Flavor = 'retail' }
@@ -4457,6 +4464,10 @@ function Get-ComputedFreshness {
     }
     if (-not (Get-FlavourUpdatesCheckedAt -Flavor $Flavor)) {
         return 'not_checked'
+    }
+    if ($null -ne $PendingUpdateCount) {
+        if ([int]$PendingUpdateCount -gt 0) { return 'updates_available' }
+        return 'up_to_date'
     }
     $upd = Get-FlavourUpdateAvailable -Flavor $Flavor
     if ($upd -and $upd.Count -gt 0) {
@@ -7225,6 +7236,11 @@ function Handle-State {
     }
 
     $addonsOut = New-Object 'System.Collections.Generic.List[object]'
+    # Round 49 (audit LOW 7): pending updates that are actually actionable -
+    # a record on ignore keeps its entry (the row still shows what it is
+    # skipping, and "Stop ignoring" brings the update straight back) but does
+    # not count toward the freshness headline.
+    $pendingUpdateCount = 0
     for ($i = 0; $i -lt $records.Count; $i++) {
         $r = $records[$i]
         # E12: updateAvailable is keyed by the numeric CurseForge project id
@@ -7237,6 +7253,7 @@ function Handle-State {
         if ($key -and $updateAvailable.ContainsKey($key)) {
             $u = $updateAvailable[$key]
             $upd = [PSCustomObject]@{ fileId = $u.fileId; version = $u.version }
+            if (-not [bool]$r.ignoreUpdates) { $pendingUpdateCount++ }
         }
         # Round-1-fixer (perf): built via an [ordered] hashtable plus ONE
         # final [PSCustomObject] cast, instead of one [PSCustomObject]@{}
@@ -7342,7 +7359,7 @@ function Handle-State {
         # check stays visible after reload instead of being silently
         # overwritten by the old "checked X ago" timestamp. FLAVORS-SPEC.md
         # CS-F2 S5.3: all scoped to THIS flavour only - see Get-ComputedFreshness.
-        freshness        = (Get-ComputedFreshness -CurrentJobView $currentJobView -Flavor $flavor)
+        freshness        = (Get-ComputedFreshness -CurrentJobView $currentJobView -Flavor $flavor -PendingUpdateCount $pendingUpdateCount)
         lastCheckFailed  = [bool](Get-FlavourLastCheckFailed -Flavor $flavor)
         lastCheckError   = (Get-FlavourLastCheckError -Flavor $flavor)
         # E13: re-resolved per request now (Set-CurrentFlavourContext, called
@@ -7718,6 +7735,67 @@ function Handle-AddonFiles {
         return
     }
     Send-Json -Context $Context -StatusCode 200 -Body $parsed
+}
+
+function Get-MigrationBackupFolders {
+    <#
+      Round 49 (audit LOW 10): the one-time safety copies the multi-version
+      upgrade made (FLAVORS-SPEC.md section 3.3 step 3) -
+      <Root>\flavours\_migration-backup-<yyyyMMdd>-<HHmmss>\, a copy of the
+      pre-upgrade addons.json/state.json/backups\ (hundreds of MB on a
+      long-lived install). The spec says they are listed and NEVER deleted
+      automatically; this only finds them so the person can see the size and
+      remove them deliberately from Settings > Advanced > Troubleshooting.
+      Exact-name match under <Root>\flavours only - no caller-supplied path.
+      Returns a List of DirectoryInfo (possibly empty).
+    #>
+    $found = New-Object 'System.Collections.Generic.List[object]'
+    $flavoursDir = Join-Path -Path $Script:Root -ChildPath 'flavours'
+    if (-not (Test-Path -LiteralPath $flavoursDir -PathType Container)) { return $found }
+    foreach ($d in @(Get-ChildItem -LiteralPath $flavoursDir -Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($d.Name -match '^_migration-backup-\d{8}-\d{6}$') { $found.Add($d) }
+    }
+    return $found
+}
+
+function Handle-MigrationBackupGet {
+    <# GET /api/migration-backup (Round 49, audit LOW 10): {items:[{name,sizeBytes,createdAt}]} - empty when there is none. Sizes are computed on demand (a recursive walk), which is why this is its own route and not part of /api/state. #>
+    param($Context, $RouteMatch)
+
+    $items = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($d in (Get-MigrationBackupFolders)) {
+        $bytes = [int64]0
+        try {
+            $sum = (Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            if ($sum) { $bytes = [int64]$sum }
+        } catch {
+            $bytes = [int64]0
+        }
+        $items.Add([PSCustomObject]@{
+                name      = $d.Name
+                sizeBytes = $bytes
+                createdAt = $d.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            })
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ items = $items.ToArray() }
+}
+
+function Handle-MigrationBackupDelete {
+    <# POST /api/migration-backup/delete (Round 49, audit LOW 10): removes every _migration-backup-* folder under <Root>\flavours at the person's explicit request (the same-origin guard in Invoke-Route covers it like every other POST). Nothing else is ever touched. #>
+    param($Context, $RouteMatch)
+
+    $removed = 0
+    foreach ($d in (Get-MigrationBackupFolders)) {
+        try {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop
+            $removed++
+            Write-ServerLog "Removed the pre-upgrade backup folder $($d.Name) at the user's request"
+        } catch {
+            Send-Json -Context $Context -StatusCode 500 -Body @{ error = "Couldn't remove $($d.Name): $($_.Exception.Message)"; removed = $removed }
+            return
+        }
+    }
+    Send-Json -Context $Context -StatusCode 200 -Body @{ ok = $true; removed = $removed }
 }
 
 function Handle-ScanGet {
@@ -8785,6 +8863,21 @@ function Handle-Open {
                 }
                 Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $Script:Root + '"')
             }
+            'migration-backup' {
+                # Round 49 (audit LOW 10): Settings > Advanced >
+                # Troubleshooting's row for the one-time pre-upgrade backup.
+                # Allow-listed like 'logs': the folder is found by
+                # Get-MigrationBackupFolders (exact _migration-backup-<stamp>
+                # name under <Root>\flavours), never from a caller-supplied
+                # path.
+                $migrationBackupDir = $null
+                foreach ($mb in (Get-MigrationBackupFolders)) { $migrationBackupDir = $mb.FullName; break }
+                if (-not $migrationBackupDir) {
+                    Send-Json -Context $Context -StatusCode 400 -Body @{ error = 'no pre-upgrade backup folder found' }
+                    return
+                }
+                Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $migrationBackupDir + '"')
+            }
             'url' {
                 # E3: drawer's "Search CurseForge" button for a missing dependency,
                 # used only when no API key is configured (a keyed session switches
@@ -9437,6 +9530,49 @@ function Invoke-AppUpdateMaintenance {
     }
 }
 
+function Test-AppUpdateStagedInstallerPresent {
+    <# Round 49 (audit LOW 8): $true only when app-update.json's `stagedPath`
+       still holds the staged package's install.ps1 on disk. The staged
+       extraction lives under %TEMP%\FurphyUpdate-<tag>-<guid>, which Windows'
+       storage cleanup, a cleaner tool or antivirus can empty at any time
+       while a verified build sits in state "ready" waiting for Install now /
+       the tray's quiet window. Launching install.ps1 from a folder that is
+       gone used to shut this server down with nothing left to relaunch it
+       (the 5-minute watchdog then flipped the state to "error"). Never
+       throws; a missing/blank stagedPath is "not present". #>
+    param($State)
+
+    if ($null -eq $State) { return $false }
+    $stagedPath = [string]$State.stagedPath
+    if ([string]::IsNullOrWhiteSpace($stagedPath)) { return $false }
+    try {
+        return [bool](Test-Path -LiteralPath (Join-Path -Path $stagedPath -ChildPath 'install.ps1') -PathType Leaf)
+    } catch {
+        return $false
+    }
+}
+
+function Reset-AppUpdateLostStaging {
+    <# Round 49 (audit LOW 8): drops a "ready" marker whose staged copy has
+       vanished - state back to "idle", stagedPath/downloadedAt cleared, and
+       checkedAt cleared so the very next maintenance tick (the hourly one,
+       or Check now) looks the release up and stages it again instead of
+       waiting out the 24 h freshness window. Persists and returns the
+       mutated state; a failed write is logged, never thrown. #>
+    param($State)
+
+    $lostPath = [string]$State.stagedPath
+    $State.state = 'idle'
+    $State.stagedPath = $null
+    $State.downloadedAt = $null
+    $State.checkedAt = $null
+    $State.lastError = $null
+    $State.lastErrorAt = $null
+    try { Save-AppUpdateState -State $State } catch { Write-ServerLog "App-update: failed to write app-update.json after losing the staged copy: $($_.Exception.Message)" }
+    Write-ServerLog "App-update: the staged copy is gone ($lostPath) - reset to idle so the next check downloads it again"
+    return $State
+}
+
 function Remove-AppUpdateStaleStaging {
     <# APP-UPDATE-SPEC.md section 8.8, failure-with-rollback branch:
        "keep the staged folder and downloaded assets around for one more
@@ -9659,7 +9795,17 @@ function Invoke-AppUpdateMaintenanceCore {
         # cycle - nothing to check or download while a verified build sits
         # ready. Prevents re-fetching/re-downloading on every hourly tick
         # for as long as the user leaves an update sitting uninstalled.
-        return
+        #
+        # Round 49 (audit LOW 8): ...but only while the staged copy is still
+        # on disk. %TEMP% is cleaned by Windows and by cleaners; a "ready"
+        # marker pointing at a folder that no longer exists would otherwise
+        # sit here forever, every hourly tick returning above, until the
+        # user clicked Install now and the install failed. Reset it and fall
+        # through - the normal check/download pipeline below re-stages it.
+        if (Test-AppUpdateStagedInstallerPresent -State $state) {
+            return
+        }
+        $state = Reset-AppUpdateLostStaging -State $state
     }
 
     $resuming = (@('available', 'downloading') -contains $state.state)
@@ -10105,6 +10251,19 @@ function Handle-AppUpdateInstall {
         return
     }
 
+    # Round 49 (audit LOW 8): the staged install.ps1 must still exist. It
+    # lives in %TEMP%, which storage cleanup can empty while the build sits
+    # in "ready"; spawning install.ps1 from a vanished folder would shut this
+    # server down (below) and leave nothing to relaunch it. Drop the dead
+    # "ready" marker instead - the next check downloads it again - and tell
+    # the caller why (410, so the window shows the text rather than the
+    # generic "try again in a moment" it keeps for a 409).
+    if (-not (Test-AppUpdateStagedInstallerPresent -State $state)) {
+        $null = Reset-AppUpdateLostStaging -State $state
+        Send-Json -Context $Context -StatusCode 410 -Body @{ error = 'The downloaded update is no longer on this PC (Windows cleaned up its temporary files). Furphy will download it again - use Check now.' }
+        return
+    }
+
     $wowRootPath = Get-FlavourWowRootPath -Flavor 'retail'
     if (-not $wowRootPath) { $wowRootPath = Get-FlavourWowRootPath }
     if (-not $wowRootPath) {
@@ -10183,6 +10342,10 @@ $Script:Routes = @(
     @{ Method = 'GET'; Pattern = '^/api/addons/(?<id>[^/]+)/files$'; Handler = 'Handle-AddonFiles' }
     @{ Method = 'GET'; Pattern = '^/api/scan$'; Handler = 'Handle-ScanGet' }
     @{ Method = 'POST'; Pattern = '^/api/scan/delete$'; Handler = 'Handle-ScanDelete' }
+    # Round 49 (audit LOW 10): machine-level (not flavour-scoped) - the
+    # one-time pre-upgrade backup folders under <Root>\flavours.
+    @{ Method = 'GET'; Pattern = '^/api/migration-backup$'; Handler = 'Handle-MigrationBackupGet' }
+    @{ Method = 'POST'; Pattern = '^/api/migration-backup/delete$'; Handler = 'Handle-MigrationBackupDelete' }
     @{ Method = 'GET'; Pattern = '^/api/export$'; Handler = 'Handle-Export' }
     @{ Method = 'POST'; Pattern = '^/api/import$'; Handler = 'Handle-Import' }
     @{ Method = 'GET'; Pattern = '^/api/settings$'; Handler = 'Handle-SettingsGet' }
@@ -10260,6 +10423,42 @@ function Test-SameOriginRequest {
     return ($originHost -eq 'localhost' -or $originHost -eq '127.0.0.1')
 }
 
+function Test-LoopbackHostHeader {
+    <#
+      Round 49 (audit LOW 13a): DNS-rebinding guard for EVERY request,
+      GET included. The listener binds the IP-literal prefixes
+      http://127.0.0.1:<port>/ and http://[::1]:<port>/, and http.sys does
+      not look at the Host header for those, so a page on an attacker's
+      domain that has been re-pointed (after its first lookup) at
+      127.0.0.1 could read GET endpoints such as /api/state and the addon
+      list as "same origin" - the CSRF check (Test-SameOriginRequest) only
+      covers non-GET methods. Every legitimate caller (the WebView2 window,
+      the Edge --app fallback, the tray, the CLI jobs, the test suite)
+      addresses this server as localhost / 127.0.0.1 / [::1], so any other
+      Host name is refused with 403 before routing. A request with no Host
+      header at all (an HTTP/1.0 client) is let through: a browser, which
+      is what a rebinding page runs in, always sends one.
+    #>
+    param($Context)
+
+    $hostHeader = [string]$Context.Request.Headers['Host']
+    if ([string]::IsNullOrWhiteSpace($hostHeader)) { return $true }
+
+    $parsedHost = $null
+    if (-not [System.Uri]::TryCreate('http://' + $hostHeader.Trim(), [System.UriKind]::Absolute, [ref]$parsedHost)) { return $false }
+    $name = $parsedHost.DnsSafeHost.ToLowerInvariant()
+    if ($name -eq 'localhost' -or $name -eq '127.0.0.1') { return $true }
+    # An IPv6 literal comes back from System.Uri in its expanded form
+    # (0000:...:0001, never "::1"), so compare it as an address.
+    if ($parsedHost.HostNameType -eq [System.UriHostNameType]::IPv6) {
+        $address = $null
+        if ([System.Net.IPAddress]::TryParse($name, [ref]$address)) {
+            return $address.Equals([System.Net.IPAddress]::IPv6Loopback)
+        }
+    }
+    return $false
+}
+
 function Invoke-Route {
     <# Dispatches one request; never throws (every path returns a JSON response and always closes it). #>
     param($Context)
@@ -10270,6 +10469,17 @@ function Invoke-Route {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $Script:LastResponseStatus = $null
+
+    # Round 49 (audit LOW 13a): see Test-LoopbackHostHeader.
+    if (-not (Test-LoopbackHostHeader -Context $Context)) {
+        try {
+            Send-Json -Context $Context -StatusCode 403 -Body @{ error = 'forbidden: host not allowed' }
+        } catch {
+            $Script:LastResponseStatus = 403
+        }
+        Write-ServerLog "$method $path 403 (Host header is not a loopback name)"
+        return
+    }
 
     try {
         $matchedHandler = $null

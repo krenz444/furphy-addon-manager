@@ -1401,6 +1401,19 @@
                     <button type="button" class="btn btn-danger-outline" id="btn-force-reinstall">Force reinstall all</button>
                     <button type="button" class="info-tip" tabindex="0" aria-label="More about Force reinstall all" aria-describedby="app-tooltip" data-tooltip="For when an addon's files get corrupted or deleted by hand - otherwise Update all already keeps everything current."><svg class="icon"><use href="#icon-info"></use></svg></button>
                   </span>
+                  <!-- Round 49 (audit LOW 10): only shown when the one-time
+                       safety copy from the multi-version upgrade exists
+                       (GET /api/migration-backup). Never deleted by Furphy
+                       on its own - FLAVORS-SPEC.md 3.3 step 6 - so this row
+                       is where a person can see it and remove it. -->
+                  <div id="migration-backup-row" hidden>
+                    <div class="settings-row-label">Safety copy from the upgrade</div>
+                    <p class="muted-text" id="migration-backup-text"></p>
+                    <div class="btn-row">
+                      <button type="button" class="btn btn-outline" id="btn-open-migration-backup">Open folder</button>
+                      <button type="button" class="btn btn-danger-outline" id="btn-delete-migration-backup">Delete it</button>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Round 32 (SETTINGS-SPEC.md section 2, Row 19): "Diagnostics"

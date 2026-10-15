@@ -82,6 +82,79 @@ Describe 'CSRF guard (Test-SameOriginRequest)' {
     }
 }
 
+Describe 'Host header guard against DNS rebinding (Round 49, audit LOW 13a)' {
+    <#
+      The listener binds the IP-literal prefixes 127.0.0.1 / [::1], which
+      http.sys serves whatever Host header arrives - so a page on an
+      attacker's domain re-pointed at 127.0.0.1 could read GET endpoints as
+      "same origin" (the CSRF check only covers non-GET). Every request
+      whose Host is not localhost / 127.0.0.1 / [::1] is now refused 403
+      before routing. Invoke-Api reaches the server at 127.0.0.1 and only
+      overrides the Host header here (HttpWebRequest.Host).
+    #>
+    $root = New-TempRoot -Name 'hostguard'
+    $server = $null
+    try {
+        $server = Start-TestServer -Root $root -Port 47899
+
+        It 'a GET whose Host is a foreign name (a rebinding page''s own domain) is refused 403 with a plain error' {
+            $r = Invoke-Api -Port 47899 -Method Get -Path '/api/state' -Headers @{ Host = 'attacker.example:47899' }
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 403
+            $r.Body.error | Should Be 'forbidden: host not allowed'
+        }
+
+        It 'the static UI and the ping route are behind the same gate' {
+            (Invoke-Api -Port 47899 -Method Get -Path '/index.html' -Headers @{ Host = 'attacker.example:47899' }).StatusCode | Should Be 403
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping' -Headers @{ Host = 'attacker.example' }).StatusCode | Should Be 403
+        }
+
+        It 'a look-alike name is refused too (suffix, prefix, userinfo trick)' {
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping' -Headers @{ Host = 'localhost.evil.example:47899' }).StatusCode | Should Be 403
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping' -Headers @{ Host = 'notlocalhost:47899' }).StatusCode | Should Be 403
+        }
+
+        It 'a POST with a perfectly same-origin Origin header but a foreign Host is still refused 403' {
+            $r = Invoke-Api -Port 47899 -Method Put -Path '/api/settings' -Body @{ releaseType = 1 } -Headers @{ Host = 'attacker.example:47899' }
+            $r.Ok | Should Be $false
+            $r.StatusCode | Should Be 403
+        }
+
+        It 'localhost and 127.0.0.1 Host values are served normally' {
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping' -Headers @{ Host = 'localhost:47899' }).Ok | Should Be $true
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping' -Headers @{ Host = '127.0.0.1:47899' }).Ok | Should Be $true
+        }
+
+        It 'a client that really connects over IPv6 (its Host is [::1]:port) is served too' {
+            # (Not Invoke-Api: it always dials 127.0.0.1, and http.sys itself
+            # answers 400 "Invalid Hostname" for an IPv6-literal Host sent over
+            # the IPv4 binding - so this connects to [::1] for real.)
+            if (-not [System.Net.Sockets.Socket]::OSSupportsIPv6) {
+                Write-Host '  (skipped: IPv6 is not available on this machine)'
+                return
+            }
+            $req = [System.Net.HttpWebRequest]::Create('http://[::1]:47899/api/ping')
+            $req.Timeout = 5000
+            $req.KeepAlive = $false
+            $status = 0
+            try {
+                $resp = $req.GetResponse()
+                $status = [int]$resp.StatusCode
+                $resp.Close()
+            } catch [System.Net.WebException] {
+                if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            }
+            $status | Should Be 200
+        }
+
+        It 'a plain request (the test client''s own 127.0.0.1 Host) is unaffected' {
+            (Invoke-Api -Port 47899 -Method Get -Path '/api/ping').Ok | Should Be $true
+        }
+    } finally {
+        Stop-TestServer -Server $server
+    }
+}
+
 Describe 'Content-Type validation (Read-Body, Round 20 security-2)' {
     $root = New-TempRoot -Name 'content-type'
     $server = $null

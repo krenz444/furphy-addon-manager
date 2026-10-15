@@ -326,7 +326,9 @@ const Mock = (function () {
   };
   function mockFreshnessForExtra(fx) {
     if (!fx.updatesCheckedAt) return "not_checked";
-    if (fx.addons.some(function (a) { return !!a.updateAvailable; })) return "updates_available";
+    // Round 49 (audit LOW 7): mirrors the real server - an ignored addon's
+    // pending version never makes the headline "updates ready".
+    if (fx.addons.some(function (a) { return !!a.updateAvailable && !a.ignoreUpdates; })) return "updates_available";
     return "up_to_date";
   }
   // Round 18: a fake background tray, entirely in-memory - no real process,
@@ -356,6 +358,13 @@ const Mock = (function () {
   // "idle" (Furphy already up to date), the real steady-state default.
   const APP_CURRENT_VERSION = "1.22.0";
   const APP_LATEST_VERSION = "1.23.0";
+  // Round 49 (audit LOW 10): the one-time pre-upgrade backup folders the real
+  // server lists at GET /api/migration-backup. None by default (most
+  // installs never had a multi-version upgrade); ?migrationBackup=1 starts
+  // with one so the Troubleshooting row can be exercised.
+  const mockMigrationBackups = new URLSearchParams(location.search).get("migrationBackup") === "1"
+    ? [{ name: "_migration-backup-20260904-234328", sizeBytes: 302776320, createdAt: "2026-09-04T23:43:28Z" }]
+    : [];
   const mockAppUpdateForced = new URLSearchParams(location.search).get("appUpdate");
   const MOCK_APP_UPDATE_STATES = ["idle", "checking", "available", "downloading", "ready", "installing", "installed", "error"];
   const mockAppUpdate = {
@@ -563,7 +572,7 @@ const Mock = (function () {
     if (currentJob && currentJob.state === "running" && ["sync", "check", "add", "install"].indexOf(currentJob.kind) !== -1) return "checking";
     if (lastCheckFailed) return "check_failed";
     if (!updatesCheckedAt) return "not_checked";
-    if (addons.some(function (a) { return !!a.updateAvailable; })) return "updates_available";
+    if (addons.some(function (a) { return !!a.updateAvailable && !a.ignoreUpdates; })) return "updates_available";
     return "up_to_date";
   }
 
@@ -1575,8 +1584,15 @@ const Mock = (function () {
         const requested = decodeURIComponent(wagoAddonMatch[1]);
         const slug = wagoIdAliases[requested] || requested;
         const found = wagoBrowsePool.find(function (x) { return x.slug === slug; }) || { slug: slug, name: slug };
+        // Round 49 (audit LOW 9): one addon carries link fields so the
+        // drawer's Website/Source buttons can be exercised - a safe https
+        // website, and a javascript: source that must render NO button.
+        const wagoLinkFixtures = {
+          "details-damage-meter-standalone": { website: "https://example.test/details", source_url: "javascript:alert(1)" }
+        };
+        const wagoLinks = wagoLinkFixtures[slug] || { website: "", source_url: "" };
         return {
-          addon: { id: "MOCK" + slug, slug: slug, display_name: found.name, summary: "A tidy little Wago addon.", thumbnail_image: "", categories: [{ id: 1, display_name: "Utility" }], website: "", source_url: "", is_unlisted: false },
+          addon: { id: "MOCK" + slug, slug: slug, display_name: found.name, summary: "A tidy little Wago addon.", thumbnail_image: "", categories: [{ id: 1, display_name: "Utility" }], website: wagoLinks.website, source_url: wagoLinks.source_url, is_unlisted: false },
           description: "## " + found.name + "\nA **mock** description with a [link](https://addons.wago.io/addons/" + slug + ") for offline testing.\n- Fast\n- Lightweight",
           metadata: { last_update: new Date(Date.now() - 2 * 24 * 3600e3).toISOString(), download_count: 42000, like_count: 310, developers: [{ name: "MockDev" }] }
         };
@@ -1601,10 +1617,19 @@ const Mock = (function () {
         // answer {ok:true} for ANY target, which is exactly how the Game
         // folders buttons opening the wrong things stayed invisible here.
         // The server's switch is the authority; keep this list in step.
-        const knownOpenTargets = ["log", "serverlog", "wowfolder", "folder", "addons", "curseforge", "lastrun", "backups", "logs", "url", "cf-window"];
+        const knownOpenTargets = ["log", "serverlog", "wowfolder", "folder", "addons", "curseforge", "lastrun", "backups", "logs", "migration-backup", "url", "cf-window"];
         const what = body && body.what;
         if (knownOpenTargets.indexOf(what) === -1) return { __status: 400, error: "unknown what: " + what };
         return { ok: true };
+      }
+      // Round 49 (audit LOW 10): mirrors Handle-MigrationBackupGet/Delete.
+      if (p === "/api/migration-backup" && method === "GET") {
+        return { items: mockMigrationBackups.slice() };
+      }
+      if (p === "/api/migration-backup/delete" && method === "POST") {
+        const removedCount = mockMigrationBackups.length;
+        mockMigrationBackups.length = 0;
+        return { ok: true, removed: removedCount };
       }
       if (p === "/api/shutdown" && method === "POST") return { ok: true };
       // DISTRIBUTION-SPEC.md section 3.4/5.3: mirrors Handle-Uninstall's own
@@ -2004,7 +2029,11 @@ const Sanitize = (function () {
     container.appendChild(toSafeFragment(html));
   }
 
-  return { render: render };
+  // Round 49 (audit LOW 9): exposed so the few places that put an upstream
+  // URL straight into an href (the Wago drawer's Website/Source buttons) run
+  // it through the same http/https-only check the sanitizer applies to
+  // every link inside a description.
+  return { render: render, safeUrl: safeUrl };
 })();
 
 /* ==========================================================================
@@ -2241,6 +2270,12 @@ const Api = (function () {
     getSettings: function () { return request("GET", "/api/settings"); },
     putSettings: function (patch) { return request("PUT", "/api/settings", patch); },
     getDiagnostics: function () { return request("GET", "/api/diagnostics"); },
+
+    // Round 49 (audit LOW 10): the one-time pre-upgrade backup folder(s)
+    // (FLAVORS-SPEC.md 3.3) - listed with their size, removed only on an
+    // explicit click, never automatically.
+    getMigrationBackup: function () { return request("GET", "/api/migration-backup"); },
+    deleteMigrationBackup: function () { return request("POST", "/api/migration-backup/delete", {}); },
 
     // E19 (script itself is E17's, unchanged) - the curseforge:// install-
     // link handler toggle in Settings > Game and the Browse > CurseForge pane.
@@ -2481,6 +2516,9 @@ const Store = (function () {
     protocol: null,
     protocolLoading: false,
     protocolBusy: false,        // true while a register/unregister call is in flight (disables the toggle)
+    // Round 49 (audit LOW 10): [{name,sizeBytes,createdAt}] from GET
+    // /api/migration-backup - null until fetched, [] when there is none.
+    migrationBackups: null,
 
     // FLAVORS-SPEC.md CS-F4 (section 5.2): describe the MACHINE, not one
     // flavour - present on every /api/state response regardless of
@@ -2680,8 +2718,17 @@ const Store = (function () {
 
   function isBusy() { return !!(state.job && state.job.state === "running"); }
 
+  // Round 49 (audit LOW 7): an addon on "Ignoring updates" can still carry
+  // the pending version it is skipping (the row shows it), but it is not an
+  // update that is "ready" - Update all never touches it - so it must not
+  // count toward the headline, the sidebar figure or the Updates filter
+  // either, or "1 update ready" sits next to an Update all that is hidden.
+  function hasActionableUpdate(a) {
+    return !!(a && a.updateAvailable && !a.ignoreUpdates);
+  }
+
   function updatesCount() {
-    return state.addons.reduce(function (n, a) { return n + (a.updateAvailable ? 1 : 0); }, 0);
+    return state.addons.reduce(function (n, a) { return n + (hasActionableUpdate(a) ? 1 : 0); }, 0);
   }
 
   // Review fix: was keyed by display name alone, so two tracked addons that
@@ -2776,7 +2823,7 @@ const Store = (function () {
   }
 
   return {
-    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, trackedForBrowseEntry: trackedForBrowseEntry, wagoIdsNeedingSlug: wagoIdsNeedingSlug, rememberWagoSlug: rememberWagoSlug, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, lastRunStatusFor: lastRunStatusFor,
+    state: state, set: set, setMyAddonsSort: setMyAddonsSort, setBrowseTab: setBrowseTab, addonKey: addonKey, addonByProjectId: addonByProjectId, trackedForBrowseEntry: trackedForBrowseEntry, wagoIdsNeedingSlug: wagoIdsNeedingSlug, rememberWagoSlug: rememberWagoSlug, jobActingOn: jobActingOn, isBusy: isBusy, updatesCount: updatesCount, hasActionableUpdate: hasActionableUpdate, lastRunStatusFor: lastRunStatusFor,
     isSelected: isSelected, toggleSelected: toggleSelected, selectIds: selectIds, deselectIds: deselectIds, clearSelection: clearSelection, selectedAddons: selectedAddons, pruneSelection: pruneSelection, mergeAddons: mergeAddons,
     hasMultipleFlavours: hasMultipleFlavours, visibleFlavours: visibleFlavours
   };
@@ -4038,8 +4085,13 @@ Components.Drawer = (function () {
     if (d.wagoAddonError && !wa) children.push(Utils.el("div", { class: "muted-text" }, ["Couldn't load addon details (" + describeError(d.wagoAddonError) + ")."]));
 
     const links = [];
-    if (waAddon && waAddon.website) links.push(Utils.el("a", { class: "btn btn-outline", href: waAddon.website, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Website"]));
-    if (waAddon && waAddon.source_url) links.push(Utils.el("a", { class: "btn btn-outline", href: waAddon.source_url, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Source"]));
+    // Round 49 (audit LOW 9): both values come straight from the Wago page
+    // data, so only an http(s) URL is ever allowed into an href (a
+    // javascript:/data:/file: value renders no button at all).
+    const wagoWebsite = waAddon && waAddon.website ? Sanitize.safeUrl(waAddon.website) : null;
+    const wagoSource = waAddon && waAddon.source_url ? Sanitize.safeUrl(waAddon.source_url) : null;
+    if (wagoWebsite) links.push(Utils.el("a", { class: "btn btn-outline", href: wagoWebsite, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Website"]));
+    if (wagoSource) links.push(Utils.el("a", { class: "btn btn-outline", href: wagoSource, target: "_blank", rel: "noopener noreferrer" }, [Utils.icon("external"), "Source"]));
     links.push(Utils.el("button", { type: "button", class: "btn btn-outline", onclick: function () { Actions.openOnWago(d.slug); } }, [Utils.icon("external"), "Wago"]));
     children.push(Utils.el("div", { class: "drawer-links" }, links));
 
@@ -6090,6 +6142,44 @@ const Actions = (function () {
     if (Store.state.view === "settings") Views.settings.render();
   }
 
+  // Round 49 (audit LOW 10): re-reads GET /api/migration-backup into
+  // Store.state.migrationBackups and repaints Settings when it is the active
+  // view. Called on entering Settings (App.switchView) and after a delete. A
+  // failed read just leaves the row hidden - it is a convenience, never
+  // worth an error toast.
+  async function refreshMigrationBackup() {
+    try {
+      const res = await Api.getMigrationBackup();
+      Store.state.migrationBackups = (res && Array.isArray(res.items)) ? res.items : [];
+    } catch (err) {
+      Store.state.migrationBackups = null;
+    }
+    if (Store.state.view === "settings") Views.settings.render();
+  }
+
+  // The one-time pre-upgrade backup is NEVER removed automatically
+  // (FLAVORS-SPEC.md 3.3 step 6) - this is the explicit, confirmed delete.
+  async function deleteMigrationBackup() {
+    const items = Store.state.migrationBackups || [];
+    if (!items.length) return;
+    const total = items.reduce(function (n, it) { return n + (it.sizeBytes || 0); }, 0);
+    const ok = await Components.Dialogs.confirm({
+      title: "Delete the safety copy from the upgrade?",
+      message: "This is the copy of your addon list and backups that Furphy made when it learned to handle several game versions" +
+        (total ? " (" + Utils.formatBytes(total) + ")" : "") +
+        ". Your current addons and settings are not affected. This can't be undone.",
+      confirmLabel: "Delete it"
+    });
+    if (!ok) return;
+    try {
+      await Api.deleteMigrationBackup();
+      Components.Toast.show("Deleted the safety copy.", "success");
+    } catch (err) {
+      Components.Toast.show("Couldn't delete it: " + describeError(err), "error");
+    }
+    await refreshMigrationBackup();
+  }
+
   // Saves backgroundUpdates, then starts or stops the tray process to match -
   // one settings save (saveSettings' own "Settings saved." toast covers it),
   // no separate toast for the start/stop call itself.
@@ -6189,6 +6279,8 @@ const Actions = (function () {
     loadProtocolStatus: loadProtocolStatus, setProtocolRegistered: setProtocolRegistered,
     // Round 18 (tray stage B)
     setBackgroundUpdates: setBackgroundUpdates, setRunAtStartup: setRunAtStartup, refreshTrayStatus: refreshTrayStatus,
+    // Round 49 (audit LOW 10): the Troubleshooting "safety copy" row
+    refreshMigrationBackup: refreshMigrationBackup, deleteMigrationBackup: deleteMigrationBackup,
     // APP-UPDATE-SPEC.md sections 3.1/3.2/5 (app self-update)
     checkAppUpdate: checkAppUpdate, installAppUpdate: installAppUpdate
   };
@@ -6233,7 +6325,9 @@ Views.myAddons = (function () {
   function addonMissingDeps(a) { return (a && a.missingDeps) || []; }
 
   function matchesFilter(a, filter) {
-    if (filter === "updates") return !!a.updateAvailable;
+    // Round 49 (audit LOW 7): same predicate as the headline count and the
+    // Update all button - an ignored addon's pending version is not "an update".
+    if (filter === "updates") return Store.hasActionableUpdate(a);
     if (filter === "pinned") return a.pinnedFileId !== null && a.pinnedFileId !== undefined;
     if (filter === "ignored") return !!a.ignoreUpdates;
     if (filter === "failed") return Store.lastRunStatusFor(a) === "Failed";
@@ -6296,7 +6390,7 @@ Views.myAddons = (function () {
   function statusRank(a) {
     if (Store.jobActingOn(Store.addonKey(a))) return 0;
     if (Store.lastRunStatusFor(a) === "Failed") return 1;
-    if (a.updateAvailable) return 2;
+    if (Store.hasActionableUpdate(a)) return 2;
     if (a.pinnedFileId !== null && a.pinnedFileId !== undefined) return 3;
     if (a.ignoreUpdates) return 4;
     return 5;
@@ -7588,6 +7682,7 @@ Views.settings = (function () {
     Components.ProtocolControl.render("settings-protocol-control");
     renderAppearance();
     renderUntracked();
+    renderMigrationBackup();
     renderDiagnostics();
     const busy = Store.isBusy();
     const reinstall = Utils.qs("#btn-force-reinstall");
@@ -8057,6 +8152,24 @@ Views.settings = (function () {
     btn.disabled = busy;
     if (busy) btn.title = "Another task is running"; else btn.removeAttribute("title");
     btn.textContent = "Manage all (" + recognizable.length + ")";
+  }
+
+  // Round 49 (audit LOW 10): the Troubleshooting row for the one-time
+  // safety copy the multi-version upgrade made (FLAVORS-SPEC.md 3.3 step 6:
+  // listed, never deleted automatically). Hidden unless GET
+  // /api/migration-backup found one; Open folder reveals it, Delete it asks
+  // first and is the only way it is ever removed.
+  function renderMigrationBackup() {
+    const row = Utils.qs("#migration-backup-row");
+    if (!row) return;
+    const items = Store.state.migrationBackups || [];
+    row.hidden = items.length === 0;
+    if (!items.length) return;
+    const total = items.reduce(function (n, it) { return n + (it.sizeBytes || 0); }, 0);
+    Utils.qs("#migration-backup-text").textContent =
+      "A copy of your addon list and backups from before Furphy handled several game versions" +
+      (total ? " (" + Utils.formatBytes(total) + ")" : "") +
+      ". Furphy never deletes it by itself - delete it here once you are sure you will not go back to an older Furphy.";
   }
 
   function renderUntracked() {
@@ -8544,6 +8657,10 @@ Views.settings = (function () {
       if (ok) Actions.forceReinstallAll();
     });
 
+    // Round 49 (audit LOW 10): the pre-upgrade safety copy row.
+    Utils.qs("#btn-open-migration-backup").addEventListener("click", function () { Actions.openWhat("migration-backup"); });
+    Utils.qs("#btn-delete-migration-backup").addEventListener("click", function () { Actions.deleteMigrationBackup(); });
+
     // DISTRIBUTION-SPEC.md section 3.2/3.4: Actions.uninstallApp owns the
     // confirm dialog, the POST, and the success/busy/error handling below it -
     // this handler is just the click-to-action wire, same shape as every
@@ -8830,6 +8947,8 @@ const App = (function () {
     // entering Settings, rather than waiting up to one idle-poll tick (see
     // reloadState) for the status line to stop showing stale/empty data.
     if (view === "settings") Actions.refreshTrayStatus();
+    // Round 49 (audit LOW 10): same idea for the pre-upgrade safety-copy row.
+    if (view === "settings") Actions.refreshMigrationBackup();
     // Launch-perf pass: the curseforge:// handler row also wants a real
     // answer as soon as Settings is actually opened, rather than only once
     // the deferred post-first-paint call below gets to it - loadProtocolStatus
@@ -8938,12 +9057,14 @@ const App = (function () {
   function renderUpdateAllButton() {
     const btn = Utils.qs("#btn-update-all");
     // Review fix (F2): scope the button's own count to what updateAll()
-    // actually updates (excludes ignored addons) - Store.updatesCount()
-    // stays the informational "updates exist somewhere" figure used by the
-    // sidebar badge/Freshness headline, but this button's label promises
-    // what clicking it will do, so it must match updateAll()'s real scope
-    // per the file's own pre-existing post-CS6 invariant (see updateAll()).
-    const n = Store.state.addons.filter(function (a) { return a.updateAvailable && !a.ignoreUpdates; }).length;
+    // actually updates (excludes ignored addons) - this button's label
+    // promises what clicking it will do, so it must match updateAll()'s real
+    // scope per the file's own pre-existing post-CS6 invariant (see
+    // updateAll()). Round 49 (audit LOW 7): Store.updatesCount() - the
+    // sidebar figure and the Freshness headline - now uses the very same
+    // predicate (Store.hasActionableUpdate), so the headline and this button
+    // can no longer disagree.
+    const n = Store.updatesCount();
     const checked = !!Store.state.updatesCheckedAt;
     const nothingToDo = checked && n === 0;
     btn.hidden = nothingToDo;
@@ -9607,6 +9728,9 @@ const App = (function () {
     // reloadState still covers those, and App.switchView("settings")
     // covers a later in-session click into Settings.
     if (Store.state.view === "settings") Actions.loadProtocolStatus();
+    // Round 49 (audit LOW 10): and the pre-upgrade safety-copy row, for a
+    // session that opens straight on Settings (?view=settings).
+    if (Store.state.view === "settings") Actions.refreshMigrationBackup();
     wireGlobal();
     Views.myAddons.bindOnce();
     Views.browse.bindOnce();

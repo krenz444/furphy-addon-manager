@@ -71,9 +71,13 @@ Describe 'addon-server.ps1 - dual-launcher startup race (same port, back-to-back
             # trying - the opposite of the race this test needs). Mirrors
             # Start-TestServer's own -ArgumentList shape exactly.
             $scriptPath = Join-Path -Path $Script:FurphyBuildRoot -ChildPath 'addon-server.ps1'
+            # (script and root quoted by hand: Start-Process -ArgumentList on
+            # Windows PowerShell 5.1 quotes nothing, so a build root named like
+            # "furphy (x86)" - the standing test rule - would split into
+            # several arguments and the second instance would never start.)
             $argList = @(
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath,
-                '-Port', [string]$port, '-Root', $root, '-IdleMinutes', '5'
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'),
+                '-Port', [string]$port, '-Root', ('"' + $root + '"'), '-IdleMinutes', '5'
             )
             $proc2 = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru
 

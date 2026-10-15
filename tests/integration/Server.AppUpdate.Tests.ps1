@@ -288,7 +288,12 @@ function Invoke-AppUpdateOnlyPass {
     $env:FURPHY_TEST_GITHUB_BASEURL = if ($GitHubBaseUrl) { $GitHubBaseUrl } else { 'http://127.0.0.1:1' }
     $proc = $null
     try {
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script:AddonServerPath, '-Root', $Root, '-AppUpdateOnly')
+        # Start-Process (Windows PowerShell 5.1) joins -ArgumentList with bare
+        # spaces and quotes nothing, so a script or scratch-root path with a
+        # space or a parenthesis - a build root like "furphy (x86)", the
+        # standing test rule - split into several arguments and the child
+        # never ran (four of this file's Describes failed from such a root).
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Script:AddonServerPath + '"'), '-Root', ('"' + $Root + '"'), '-AppUpdateOnly')
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru
         $exited = $proc.WaitForExit($TimeoutSec * 1000)
         if (-not $exited) {
@@ -570,7 +575,10 @@ Describe 'App-update: install succeeds while WoW is running' {
     try {
         $env:FURPHY_TEST_APPUPDATE_DRYRUN = '1'
         $fakeWow = New-FakeWowProcess -Root $root -ProcessName $fakeName
-        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.4'; ZipEntries = @{ VERSION = '99.0.4' } } -ExtraServerArgs @('-WowFakeProcessName', $fakeName, '-WowRoot', $wowRoot)
+        # Round 49 (audit LOW 8): Handle-AppUpdateInstall refuses a staged
+        # copy with no install.ps1 on disk, so the stub package carries one
+        # (a stub - the dry-run seam below never runs it).
+        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.4'; ZipEntries = @{ VERSION = '99.0.4'; 'install.ps1' = '# stub installer - never executed (FURPHY_TEST_APPUPDATE_DRYRUN)' } } -ExtraServerArgs @('-WowFakeProcessName', $fakeName, '-WowRoot', $wowRoot)
         Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check' | Out-Null
         $ready = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('ready', 'error') -TimeoutSec 30
         $ready.state | Should Be 'ready'
@@ -732,7 +740,7 @@ Describe 'App-update: a window-initiated install is not falsely blocked by the w
         # var, but setting it up front keeps this Describe's own shape
         # consistent with the rest of this file and removes any doubt.
         $env:FURPHY_TEST_APPUPDATE_DRYRUN = '1'
-        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.3'; ZipEntries = @{ VERSION = '99.0.3' } } -ExtraServerArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName), '-WowRoot', $wowRoot)
+        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.3'; ZipEntries = @{ VERSION = '99.0.3'; 'install.ps1' = '# stub installer - never executed (FURPHY_TEST_APPUPDATE_DRYRUN)' } } -ExtraServerArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName), '-WowRoot', $wowRoot)
         Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check' | Out-Null
         $ready = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('ready', 'error') -TimeoutSec 30
         $ready.state | Should Be 'ready'
@@ -753,6 +761,65 @@ Describe 'App-update: a window-initiated install is not falsely blocked by the w
             Stop-TestServer -Server $started.Server
         }
         Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.3-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
+    }
+}
+
+# =====================================================================
+# 7b) Round 49 (audit LOW 8): the staged copy lives under %TEMP%, which
+#     Windows' storage cleanup (or a cleaner tool) can empty while the
+#     build sits in "ready". Install used to spawn install.ps1 from the
+#     vanished folder, shut the server down, and leave nothing to relaunch
+#     it. Now: 410 with a plain reason, the dead "ready" marker is reset
+#     to idle, and THE SERVER KEEPS RUNNING. The dry-run seam is set as a
+#     belt-and-braces guard - if the refusal ever regressed, nothing
+#     would be spawned or torn down anyway.
+# =====================================================================
+
+Describe 'App-update: a staged copy that vanished from %TEMP% is never launched (Round 49, audit LOW 8)' {
+    if (-not ($Script:CapCore -and $Script:CapMaintenance)) {
+        It 'POST /api/app-update/install with the staged folder deleted -> 410, state idle, server still up' {
+            Write-PendingSkip 'needs APPUPD-1 (GitHubBaseUrl seam), APPUPD-2 (routes/handlers) and APPUPD-3 (Invoke-AppUpdateMaintenance)'
+        }
+        return
+    }
+
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'appupdate-staged-gone'
+    $started = $null
+    $originalDryRun = $env:FURPHY_TEST_APPUPDATE_DRYRUN
+    try {
+        $env:FURPHY_TEST_APPUPDATE_DRYRUN = '1'
+        $started = Start-AppUpdateTestServer -Root $root -StubArgs @{ TagName = 'v99.0.7'; ZipEntries = @{ VERSION = '99.0.7'; 'install.ps1' = '# stub installer - never executed' } } -ExtraServerArgs @('-WowFakeProcessName', (Get-NotRunningFakeWowName), '-WowRoot', $wowRoot)
+        Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/check' | Out-Null
+        $ready = Wait-AppUpdateState -Port $Script:AppUpdatePort -Until @('ready', 'error') -TimeoutSec 30
+        $ready.state | Should Be 'ready'
+
+        It 'with the staged folder deleted, install is 410 with a plain reason and the state drops back to idle' {
+            $staged = Get-AppUpdateTempLitterFolders -Prefix 'FurphyUpdate-v99.0.7-' -CreatedAfterUtc $Script:LitterCutoffUtc
+            @($staged).Count | Should BeGreaterThan 0
+            foreach ($dir in @($staged)) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+
+            $install = Invoke-Api -Port $Script:AppUpdatePort -Method Post -Path '/api/app-update/install' -Body @{ relaunch = 'window' }
+            $install.Ok | Should Be $false
+            $install.StatusCode | Should Be 410
+            ($install.Body.error -match 'no longer on this PC') | Should Be $true
+
+            $status = Invoke-Api -Port $Script:AppUpdatePort -Method Get -Path '/api/app-update/status'
+            $status.Body.state | Should Be 'idle'
+        }
+
+        It 'the server is still answering afterwards (it was not shut down)' {
+            $ping = Invoke-Api -Port $Script:AppUpdatePort -Method Get -Path '/api/ping'
+            $ping.Ok | Should Be $true
+        }
+    } finally {
+        if ($null -eq $originalDryRun) { Remove-Item Env:\FURPHY_TEST_APPUPDATE_DRYRUN -ErrorAction SilentlyContinue }
+        else { $env:FURPHY_TEST_APPUPDATE_DRYRUN = $originalDryRun }
+        if ($started) {
+            Stop-GitHubReleaseStubServer -Stub $started.Stub
+            Stop-TestServer -Server $started.Server
+        }
+        Remove-AppUpdateTempLitter -Prefix 'FurphyUpdate-v99.0.7-' -CreatedAfterUtc $Script:LitterCutoffUtc | Out-Null
     }
 }
 

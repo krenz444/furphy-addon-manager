@@ -31,6 +31,87 @@ function Wait-JobDone {
     return $last
 }
 
+Describe 'Freshness: an addon on ignore never makes the headline "updates ready" (Round 49, audit LOW 7)' {
+    <#
+      A completed check found one update (project 1111). The addon was then
+      put on ignore - the entry is KEPT (the row still shows what it is
+      skipping, and "Stop ignoring" must bring the update straight back) but
+      it does not count: freshness is up_to_date, not "1 update ready"
+      beside an Update all that has nothing to do. Everything is offline:
+      state.json and the addon list are written before the server starts, and
+      ignore/unignore are CLI calls that make no network request.
+    #>
+    $wowRoot = Copy-Fixture
+    $root = New-TempRoot -Name 'fresh-ignored'
+    $server = $null
+    try {
+        # schemaVersion 2 so the server's startup flavour migration leaves
+        # the hand-written files exactly where they are.
+        '{"schemaVersion":2}' | Set-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8
+        $checkedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $state = '{"updatesCheckedAt":{"retail":"' + $checkedAt + '"},"updateAvailable":{"retail":{"1111":{"fileId":99,"version":"v2"}}},"lastRun":{},"jobs":[]}'
+        $state | Set-Content -LiteralPath (Join-Path $root 'state.json') -Encoding UTF8
+
+        $flavourDir = Join-Path $root 'flavours\retail'
+        New-Item -ItemType Directory -Path $flavourDir -Force | Out-Null
+        $records = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($spec in @(@{ Id = 1111; Ignore = $true }, @{ Id = 2222; Ignore = $false })) {
+            $records.Add([PSCustomObject]@{
+                    name             = "project $($spec.Id)"
+                    projectId        = $spec.Id
+                    fileId           = 1
+                    version          = '1.0.0'
+                    fileName         = 'fake.zip'
+                    installedAt      = $checkedAt
+                    folders          = @("Fake$($spec.Id)")
+                    author           = $null
+                    ignoreUpdates    = $spec.Ignore
+                    pinnedFileId     = $null
+                    releaseType      = $null
+                    previousFileId   = $null
+                    previousVersion  = $null
+                    previousFileName = $null
+                    requiredDeps     = @()
+                    optionalDeps     = @()
+                    source           = 'curseforge'
+                    wagoId           = $null
+                    slug             = $null
+                    curseId          = $null
+                    latestGameVersions = @()
+                    latestFileDate     = $null
+                })
+        }
+        ConvertTo-Json -InputObject $records.ToArray() -Depth 10 | Set-Content -LiteralPath (Join-Path $flavourDir 'addons.json') -Encoding UTF8
+
+        $server = Start-TestServer -Root $root -Port 47899 -WowRoot $wowRoot
+
+        It 'the only pending update belongs to an ignored addon: freshness is up_to_date, yet the row still carries the version it skips' {
+            $s = Invoke-Api -Port 47899 -Method Get -Path '/api/state?flavour=retail'
+            $s.Ok | Should Be $true
+            $s.Body.freshness | Should Be 'up_to_date'
+            $row = @($s.Body.addons) | Where-Object { $_.projectId -eq 1111 }
+            $row.ignoreUpdates | Should Be $true
+            $row.updateAvailable.version | Should Be 'v2'
+        }
+
+        It 'Stop ignoring brings the update straight back (no new check needed): updates_available' {
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/addons/1111/ignore?flavour=retail' -Body @{ ignore = $false }
+            $r.Ok | Should Be $true
+            $s = Invoke-Api -Port 47899 -Method Get -Path '/api/state?flavour=retail'
+            $s.Body.freshness | Should Be 'updates_available'
+        }
+
+        It 'ignoring it again takes the headline back to up_to_date' {
+            $r = Invoke-Api -Port 47899 -Method Post -Path '/api/addons/1111/ignore?flavour=retail' -Body @{ ignore = $true }
+            $r.Ok | Should Be $true
+            $s = Invoke-Api -Port 47899 -Method Get -Path '/api/state?flavour=retail'
+            $s.Body.freshness | Should Be 'up_to_date'
+        }
+    } finally {
+        Stop-TestServer -Server $server
+    }
+}
+
 Describe 'Freshness: not_checked -> up_to_date (offline, zero tracked addons)' {
     $wowRoot = Copy-Fixture
     $root = New-TempRoot -Name 'fresh-offline'

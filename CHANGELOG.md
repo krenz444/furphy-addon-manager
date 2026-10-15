@@ -1,5 +1,81 @@
 # Furphy Addon Manager - changelog
 
+## Round 49 (unreleased: the 2026-10-14 audit's LOW items)
+
+The LOW findings the audit left after Round 48 (its item 11, the spaced-path
+test launchers, was fixed there). No `VERSION` bump - cutting 1.27.1 is a
+separate decision. Behaviour the player can notice is listed first.
+
+**"N updates ready" can no longer disagree with Update all.** An addon on
+"Ignoring updates" can still carry the version it is skipping - the row shows
+it, and Stop ignoring brings it straight back - but it is not "ready". The
+headline, the sidebar figure, the Updates filter and the Update all button now
+use one rule, and the server no longer reports "updates available" when the
+only pending update belongs to an ignored addon (the headline used to read
+"1 update ready" beside an Update all that was hidden).
+
+**A self-update whose downloaded copy was cleaned up no longer takes the app
+down.** The staged copy lives in `%TEMP%`, which Windows' storage cleanup can
+empty while the build waits in "ready". Install now (or the tray's quiet
+install) used to launch the installer from the vanished folder, shut the
+server down, and leave nothing to relaunch it. It now answers "The downloaded
+update is no longer on this PC ... Furphy will download it again - use Check
+now", resets the update state, and the next hourly check stages it again; the
+server keeps running.
+
+**The pre-upgrade safety copy is visible and can be removed.** The folder the
+multi-version upgrade copied your addon list and backups into
+(`flavours\_migration-backup-<date>`, ~290 MB on a long-lived install) is now
+listed - with its size - under Settings > Advanced > Troubleshooting, with
+"Open folder" and a confirmed "Delete it". Furphy still never deletes it by
+itself (FLAVORS-SPEC.md 3.3 step 6).
+
+**Backups of addons you removed are cleaned up.** A removed addon's rollback
+zips used to stay in `backups\` forever. After a real sync, the backup folder
+of an addon nothing tracks any more is removed once nothing in it has been
+touched for 30 days (a window to change your mind), along with the obsolete
+`<fileId>.filename.txt` sidecars Round 2 left behind. Tracked addons, recent
+activity, folders it does not recognise, and an addon list that failed to load
+are never touched.
+
+**An offline PC finishes a check in seconds, and a hiccup no longer fails an
+addon.** After three requests in a row to the same site fail to connect
+(no DNS answer, connection refused, timeout), the rest of that run skips the
+site at once instead of paying the full wait for every tracked addon; a
+success - or any HTTP answer - resets the count, and the next run starts
+clean. A 5xx answer or a dropped/timed-out connection now gets the one retry
+the rate-limit codes always had.
+
+**Links open where you expect.** A link inside Furphy that opens a new window
+(Wago website/source buttons, links in addon descriptions) used to appear as a
+bare WebView2 popup. It now opens in your default browser; anything that is not
+an http(s) link is dropped. The Wago Website/Source buttons also render only
+for an http(s) URL.
+
+**A CurseForge page can't install an addon behind your back.** An install
+that the embedded CurseForge page's own script starts (a redirect, a hidden
+frame, a timer - no click) now shows "A CurseForge page you have open started
+an addon install by itself - you did not click Install. Install it anyway?"
+(default No). A real click on Install behaves exactly as before.
+
+**Other websites can't read the local server through DNS rebinding.** A
+request whose `Host` header is not `localhost`, `127.0.0.1` or `[::1]` is
+refused 403 before routing, GET included; the old Origin check only covered
+POST/PUT/DELETE.
+
+**Tests.** New: `tests\unit\Server.Round49.Tests.ps1`,
+`tests\unit\Cli.Round49.Tests.ps1`, a Round 49 phase in
+`tests\spa\harness.js`, host reflection tests for the link and held-install
+policies, a Host-header Describe in `tests\integration\Server.Security.Tests.ps1`,
+an ignored-addon freshness Describe in
+`tests\integration\Server.FreshnessAndFlavours.Tests.ps1`, and a vanished-
+staging Describe in `tests\integration\Server.AppUpdate.Tests.ps1`. The theme
+audit (`tests\spa\Run-ThemeAudit.ps1`), the app-update maintenance helper and
+the startup-race test now quote their paths, so all three run from a build
+root named like `furphy (x86)` (before this they failed there: msedge exited
+13 on every launch, four app-update Describes and the race test never saw
+their child process start).
+
 ## Round 48 (unreleased: the 2026-10-14 audit's bug fixes)
 
 Fixes from a read-only audit of 1.27.0 (usability / reliability / bugs). No

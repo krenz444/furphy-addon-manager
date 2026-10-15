@@ -2132,6 +2132,15 @@ button.chip.chip-action:focus-visible { outline: 2px solid var(--focus-ring); ou
   padding-top: 14px;
 }
 
+/* Round 49 (audit LOW 10): the pre-upgrade safety-copy row, under the
+   Troubleshooting buttons. Hidden entirely unless GET /api/migration-backup
+   found a folder (the [hidden] rule keeps display:flex from overriding it). */
+#migration-backup-row {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 14px;
+}
+#migration-backup-row[hidden] { display: none; }
+
 /* Round 32 (SETTINGS-SPEC.md section 2, footer): the demoted About line -
    no border, no h3, just small muted text below the Advanced disclosure.
    Three items separated by "." spans, spaced with flex gap rather than
