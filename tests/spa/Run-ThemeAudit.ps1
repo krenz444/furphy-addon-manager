@@ -48,6 +48,21 @@ function Find-Msedge {
     return $null
 }
 
+function ConvertTo-EdgeArgList {
+    <# Windows PowerShell 5.1's Start-Process joins -ArgumentList elements with bare spaces and quotes nothing, so a profile or screenshot path containing a space or a parenthesis (the standing rule is to test from a build root like "furphy (x86)") split into several arguments and msedge exited 13 on every launch. Quote each element that needs it. #>
+    param([string[]]$Arguments)
+
+    $quoted = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($a in $Arguments) {
+        if ($a -match '[\s()]') {
+            $quoted.Add('"' + ($a -replace '"', '\"') + '"')
+        } else {
+            $quoted.Add($a)
+        }
+    }
+    return , $quoted.ToArray()
+}
+
 $results = New-ResultsCollector -Suite 'spa:theme-audit'
 
 $msedgePath = Find-Msedge
@@ -84,7 +99,7 @@ try {
     )
     $stdoutPath = Join-Path $devRoot 'edge.contrast.out.log'
     $stderrPath = Join-Path $devRoot 'edge.contrast.err.log'
-    $proc = Start-Process -FilePath $msedgePath -ArgumentList $edgeArgs -PassThru -Wait -NoNewWindow `
+    $proc = Start-Process -FilePath $msedgePath -ArgumentList (ConvertTo-EdgeArgList -Arguments $edgeArgs) -PassThru -Wait -NoNewWindow `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     if (Test-Path -LiteralPath $stdoutPath) { Copy-Item -LiteralPath $stdoutPath -Destination $dumpPath -Force }
     Add-Result -Collector $results -Name 'contrast pass: msedge --dump-dom exited 0' -Passed ($proc.ExitCode -eq 0) -Message ("exit code " + $proc.ExitCode)
@@ -139,7 +154,7 @@ try {
             '--window-size=1400,900', '--virtual-time-budget=4000',
             ('--screenshot=' + $shotPath), $shotUrl
         )
-        $shotProc = Start-Process -FilePath $msedgePath -ArgumentList $shotArgs -PassThru -Wait -NoNewWindow `
+        $shotProc = Start-Process -FilePath $msedgePath -ArgumentList (ConvertTo-EdgeArgList -Arguments $shotArgs) -PassThru -Wait -NoNewWindow `
             -RedirectStandardOutput (Join-Path $devRoot ("shot-" + $slug + ".out.log")) `
             -RedirectStandardError (Join-Path $devRoot ("shot-" + $slug + ".err.log"))
         $ok = ($shotProc.ExitCode -eq 0) -and (Test-Path -LiteralPath $shotPath -PathType Leaf) -and ((Get-Item -LiteralPath $shotPath).Length -gt 0)
