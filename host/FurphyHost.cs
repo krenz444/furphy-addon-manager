@@ -7063,6 +7063,69 @@ boot();
             return s.Substring(0, 115) + "...";
         }
 
+        // Round 50 (the tray tooltip kept saying "Checking addons (35 of 35)..."
+        // long after the cycle ended). The Windows shell takes up to 127
+        // characters of tooltip (NOTIFYICONDATA.szTip is 128 wide - what
+        // TruncateTooltip's 118 always assumed), but .NET Framework's
+        // NotifyIcon.Text setter throws ArgumentOutOfRangeException for more
+        // than 63, and SetTooltip swallowed that exception. Every terminal
+        // status text is longer than 63 ("Updated 3 addons at 20:51: ...",
+        // "Everything's up to date - checked 20:51 - next tomorrow 20:51",
+        // "2 addons couldn't update at ..."), so each one was silently dropped
+        // and the icon kept the last SHORT progress text until the next
+        // cycle's first tick.
+        internal const int NotifyIconFrameworkLimit = 63;
+        internal const int NotifyIconShellLimit = 127;
+
+        // Pure: -text cut to at most -limit characters with "..." where it
+        // was cut; null reads as "".
+        internal static string FitNotifyIconText(string text, int limit)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            if (limit < 4) limit = 4;
+            if (text.Length <= limit) return text;
+            return text.Substring(0, limit - 3) + "...";
+        }
+
+        // Sets what the notification-area icon shows on hover, up to the
+        // shell's 127 characters. Text that fits the framework's own limit
+        // goes through the public setter. Longer text is written to the
+        // NotifyIcon's private `text` field and the shell entry refreshed
+        // (UpdateIcon) - the long-standing workaround for the 63-character
+        // setter limit. If this framework's internals are ever not what that
+        // needs, the text is cut to 63 and set normally: shorter, but never
+        // stale.
+        internal static void ApplyNotifyIconText(NotifyIcon icon, string text)
+        {
+            if (icon == null) return;
+            string full = FitNotifyIconText(text, NotifyIconShellLimit);
+            if (full.Length <= NotifyIconFrameworkLimit)
+            {
+                icon.Text = full;
+                return;
+            }
+            try
+            {
+                System.Reflection.BindingFlags hidden =
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                Type iconType = typeof(NotifyIcon);
+                System.Reflection.FieldInfo textField = iconType.GetField("text", hidden);
+                System.Reflection.FieldInfo addedField = iconType.GetField("added", hidden);
+                System.Reflection.MethodInfo updateIcon = iconType.GetMethod("UpdateIcon", hidden);
+                if (textField != null && addedField != null && updateIcon != null)
+                {
+                    textField.SetValue(icon, full);
+                    if ((bool)addedField.GetValue(icon))
+                    {
+                        updateIcon.Invoke(icon, new object[] { true });
+                    }
+                    return;
+                }
+            }
+            catch { }
+            icon.Text = FitNotifyIconText(full, NotifyIconFrameworkLimit);
+        }
+
         // Marshals onto the UI thread since this is called from the
         // background worker/ThreadPool thread but NotifyIcon.Text must be
         // set from the thread that owns its window. Round 28 (section J):
@@ -7089,11 +7152,11 @@ boot();
             {
                 if (IsHandleCreated)
                 {
-                    BeginInvoke(new MethodInvoker(delegate() { try { _icon.Text = t; } catch { } }));
+                    BeginInvoke(new MethodInvoker(delegate() { try { ApplyNotifyIconText(_icon, t); } catch { } }));
                 }
                 else
                 {
-                    try { _icon.Text = t; } catch { }
+                    try { ApplyNotifyIconText(_icon, t); } catch { }
                 }
             }
             catch { }

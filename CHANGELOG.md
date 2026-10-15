@@ -1,5 +1,18 @@
 # Furphy Addon Manager - changelog
 
+## Round 50 (unreleased: the tray tooltip that never left "Checking addons")
+
+**The tray icon's hover text now shows the result of the last check.** It used
+to keep saying "Checking addons (35 of 35)..." for the whole day after a cycle
+had finished. .NET Framework's `NotifyIcon.Text` throws for anything longer
+than 63 characters, the tray swallowed that error, and every end-of-cycle text
+("Updated 3 addons at 20:51: ...", "Everything's up to date - checked ... -
+next ...", "2 addons couldn't update ...") is longer than 63 - so the icon kept
+the last short progress text. The Windows shell itself takes 127 characters;
+the tooltip is now written at up to that length (and, should the framework's
+internals ever differ, cut to 63 rather than left stale). The tray menu's
+status line, Settings and `tray-state.json` were never affected.
+
 ## Round 49 (unreleased: the 2026-10-14 audit's LOW items)
 
 The LOW findings the audit left after Round 48 (its item 11, the spaced-path

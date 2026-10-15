@@ -1551,6 +1551,101 @@ Describe 'Host link and held-install policy (Round 49, audit LOW 9 and LOW 13b)'
     }
 }
 
+Describe 'Tray tooltip text longer than 63 characters reaches the icon (Round 50)' -Tags 'Host' {
+    <#
+      .NET Framework's NotifyIcon.Text setter throws for more than 63
+      characters; SetTooltip swallowed the exception, so every terminal
+      status text ("Updated 3 addons at 20:51: ...", "Everything's up to date
+      - checked ... - next ...") was dropped and the icon kept the last short
+      progress text - "Checking addons (35 of 35)..." - until the next cycle.
+      TrayForm.ApplyNotifyIconText writes up to the shell's 127 characters
+      through the private field. Driven by reflection against a NotifyIcon
+      that is never made visible: no icon appears and no window is created.
+    #>
+    Add-Type -AssemblyName System.Windows.Forms
+
+    function Get-TrayStaticMethod {
+        # (explicit throws, not Should: an assertion's output would become part of the return value)
+        param([string]$Name, [type[]]$ParamTypes)
+        $asm = [System.Reflection.Assembly]::LoadFrom($Script:HostExePath)
+        $t = $asm.GetType('Furphy.TrayForm')
+        if ($null -eq $t) { throw 'Furphy.TrayForm not found in FurphyHost.exe' }
+        $flags = [System.Reflection.BindingFlags]'NonPublic, Public, Static'
+        $m = $t.GetMethod($Name, $flags, $null, $ParamTypes, $null)
+        if ($null -eq $m) { throw "TrayForm.$Name not found" }
+        return $m
+    }
+
+    function Set-TrayIconText {
+        # (the NotifyIcon goes through .PSObject.BaseObject: a PSObject wrapper inside the argument
+        # array is not convertible to the NotifyIcon parameter by MethodInfo.Invoke)
+        param($Method, $Icon, [string]$Text)
+        $null = $Method.Invoke($null, [object[]]@($Icon.PSObject.BaseObject, $Text))
+    }
+
+    $Script:LongStatus = 'Furphy - Updated 3 addons at 20:51: Enhance QoL Core, Raider.IO Mythic Plus, Raiding, and Recruitment, Leatrix Plus'
+    $Script:CleanStatus = "Furphy - Everything's up to date - checked 20:51 - next tomorrow 20:51"
+
+    It 'the real status texts are longer than the framework limit (the premise of the bug)' {
+        $Script:LongStatus.Length | Should BeGreaterThan 63
+        $Script:CleanStatus.Length | Should BeGreaterThan 63
+        'Furphy - Checking addons (35 of 35)...'.Length | Should BeLessThan 64
+    }
+
+    It 'FitNotifyIconText keeps text within the limit, with "..." where it cut, and reads null as empty' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-TrayStaticMethod -Name 'FitNotifyIconText' -ParamTypes @([string], [int])
+        $m.Invoke($null, @('short', 127)) | Should Be 'short'
+        $m.Invoke($null, @($null, 127)) | Should Be ''
+        $cut = $m.Invoke($null, @(('x' * 200), 127))
+        $cut.Length | Should Be 127
+        $cut.EndsWith('...') | Should Be $true
+        $m.Invoke($null, @(('y' * 63), 63)) | Should Be ('y' * 63)
+        ($m.Invoke($null, @(('z' * 64), 63))).Length | Should Be 63
+    }
+
+    It 'a terminal status longer than 63 characters is accepted by the icon (it used to be silently dropped)' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-TrayStaticMethod -Name 'ApplyNotifyIconText' -ParamTypes @([System.Windows.Forms.NotifyIcon], [string])
+        $icon = New-Object System.Windows.Forms.NotifyIcon
+        try {
+            Set-TrayIconText -Method $m -Icon $icon -Text 'Furphy - Checking addons (35 of 35)...'
+            $icon.Text | Should Be 'Furphy - Checking addons (35 of 35)...'
+            Set-TrayIconText -Method $m -Icon $icon -Text $Script:LongStatus
+            $icon.Text | Should Be $Script:LongStatus
+            Set-TrayIconText -Method $m -Icon $icon -Text $Script:CleanStatus
+            $icon.Text | Should Be $Script:CleanStatus
+        } finally { $icon.Dispose() }
+    }
+
+    It 'a short text after a long one replaces it (the public setter still works afterwards)' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-TrayStaticMethod -Name 'ApplyNotifyIconText' -ParamTypes @([System.Windows.Forms.NotifyIcon], [string])
+        $icon = New-Object System.Windows.Forms.NotifyIcon
+        try {
+            Set-TrayIconText -Method $m -Icon $icon -Text $Script:LongStatus
+            Set-TrayIconText -Method $m -Icon $icon -Text 'Furphy - Background updates on - next check 20:51'
+            $icon.Text | Should Be 'Furphy - Background updates on - next check 20:51'
+        } finally { $icon.Dispose() }
+    }
+
+    It 'text over the shell''s 127 characters is cut to 127, never an exception' {
+        if (-not (Ensure-HostBuilt)) { Write-Host '  (skipped: host\bin\FurphyHost.exe could not be built)'; return }
+        $m = Get-TrayStaticMethod -Name 'ApplyNotifyIconText' -ParamTypes @([System.Windows.Forms.NotifyIcon], [string])
+        $icon = New-Object System.Windows.Forms.NotifyIcon
+        try {
+            Set-TrayIconText -Method $m -Icon $icon -Text ('w' * 300)
+            $icon.Text.Length | Should Be 127
+            $icon.Text.EndsWith('...') | Should Be $true
+        } finally { $icon.Dispose() }
+    }
+
+    It 'nothing assigns the NotifyIcon text directly any more (the public setter throws above 63 characters)' {
+        $src = [System.IO.File]::ReadAllText($Script:HostCsPath)
+        ([regex]::Matches($src, '_icon\.Text\s*=')).Count | Should Be 0
+    }
+}
+
 Describe 'Host MinimumSize DPI floor (regression-guards:host-minimumsize-floor-no-guard-test)' -Tags 'Host' {
     <#
       regression-guards:host-minimumsize-floor-no-guard-test - Round 32

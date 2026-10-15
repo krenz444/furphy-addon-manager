@@ -400,6 +400,21 @@ No new production hook. What the tests lean on:
   the Wago grid test clears `addonSync.wagoSlugById.v1` first because earlier
   phases of the same origin warm that cache.
 
+## Round 50: the tray tooltip
+
+- **`TrayForm.FitNotifyIconText` / `TrayForm.ApplyNotifyIconText`**
+  (`host\FurphyHost.cs`, internal static) are driven by reflection in
+  `tests\host\Host.Tests.ps1` against a `NotifyIcon` that is never made
+  visible (no icon, no window). Why it matters: `--tray-selftest` records the
+  INTENDED tooltip text (`_tooltipHistory`), not what `NotifyIcon.Text` held,
+  so a tooltip the framework rejected (> 63 characters on .NET Framework)
+  passed every selftest while the real icon went stale. The test asserts on
+  `icon.Text` itself. A source-grep test fails if anything assigns
+  `_icon.Text` directly again.
+- `NotifyIcon.Text`: 63 characters through the public setter, 127 through the
+  shell (`NOTIFYICONDATA.szTip`); the workaround writes the private `text`
+  field and calls `UpdateIcon(true)`.
+
 ## Round 49: the audit's LOW items (`Server.Round49` / `Cli.Round49` and friends)
 
 No new production hook. What the tests lean on:
