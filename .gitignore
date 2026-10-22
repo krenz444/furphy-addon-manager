@@ -27,3 +27,7 @@ host/smoke-result.txt
 
 # Keyless CurseForge catalogue cache (regenerated; never commit)
 cache/
+
+# Rust build target directories
+target/
+src-tauri/target/

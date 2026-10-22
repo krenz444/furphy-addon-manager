@@ -1,0 +1,6 @@
+[build]
+target = "x86_64-pc-windows-gnullvm"
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "E:/mingw/llvm-mingw-20260908-ucrt-x86_64/bin/clang.exe"
+ar = "E:/mingw/llvm-mingw-20260908-ucrt-x86_64/bin/llvm-ar.exe"
