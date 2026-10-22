@@ -1,10 +1,18 @@
+pub mod cli;
 pub mod commands;
 pub mod db;
+pub mod engine;
+pub mod jobs;
 pub mod logging;
+pub mod net;
 pub mod paths;
+pub mod system;
 
 use std::path::PathBuf;
 use rusqlite::Connection;
+use crate::engine::flavours::detect_installed_flavours_in_root;
+use crate::engine::swap::restore_interrupted_folder_swaps;
+use crate::jobs::runner::JobRunner;
 
 pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Check dev guard and detect WoW root
@@ -22,7 +30,16 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
     let mut conn = Connection::open(&db_path)?;
     db::migrate::run_migrations(&mut conn)?;
 
-    // 3. Import from v1 if requested or if v1 folder exists
+    // 3. Crash recovery: recover interrupted folder swaps & unfinished jobs
+    if let Ok(ref root) = wow_root_res {
+        let installed = detect_installed_flavours_in_root(root);
+        for flv in installed {
+            restore_interrupted_folder_swaps(&flv.addons_path);
+        }
+    }
+    let _ = JobRunner::recover_unfinished_jobs(&conn);
+
+    // 4. Import from v1 if requested or if v1 folder exists
     let v1_dir = if let Some(path) = override_import_path {
         Some(path)
     } else if let Ok(ref root) = wow_root_res {
@@ -59,12 +76,9 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let mut import_arg: Option<PathBuf> = None;
-    let mut export_arg: Option<PathBuf> = None;
     for i in 0..args.len() {
         if args[i] == "--import-v1" && i + 1 < args.len() {
             import_arg = Some(PathBuf::from(&args[i + 1]));
-        } else if args[i] == "--export-v1" && i + 1 < args.len() {
-            export_arg = Some(PathBuf::from(&args[i + 1]));
         }
     }
 
@@ -76,22 +90,18 @@ pub fn run() {
         std::process::exit(2);
     }
 
-    if let Some(export_dir) = export_arg {
-        let db_path = paths::get_db_path();
-        match Connection::open(&db_path) {
-            Ok(conn) => {
-                if let Err(e) = db::export_v1::export_to_v1(&conn, &export_dir) {
-                    eprintln!("[ERROR] Export to v1 failed: {}", e);
-                    std::process::exit(1);
-                } else {
-                    println!("Exported v1 data to: {}", export_dir.display());
-                    std::process::exit(0);
-                }
-            }
-            Err(e) => {
-                eprintln!("[FATAL] Failed to open database for export: {}", e);
-                std::process::exit(1);
-            }
+    // Handle CLI arguments
+    let rt = tokio::runtime::Runtime::new().expect("Failed creating Tokio runtime");
+    match rt.block_on(cli::handle_cli_args(&args)) {
+        Ok(true) => {
+            // CLI command completed
+            std::process::exit(0);
+        }
+        Err(code) => {
+            std::process::exit(code);
+        }
+        Ok(false) => {
+            // Proceed to GUI
         }
     }
 

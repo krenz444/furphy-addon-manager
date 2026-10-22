@@ -6,9 +6,9 @@ last-run.txt
 tray-state.json
 server.pid
 *.log
-jobs/
-staging/
-backups/
+/jobs/
+/staging/
+/backups/
 *.zip
 
 # WebView2 runtime cache folder (per-machine junk left next to FurphyHost.exe, not part of the app)
@@ -26,7 +26,7 @@ host/Smoke.exe
 host/smoke-result.txt
 
 # Keyless CurseForge catalogue cache (regenerated; never commit)
-cache/
+/cache/
 
 # Rust build target directories
 target/
