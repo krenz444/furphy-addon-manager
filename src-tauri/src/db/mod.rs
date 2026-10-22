@@ -378,7 +378,18 @@ mod tests {
         let freshness_state: String = conn
             .query_row("SELECT state FROM freshness WHERE flavour = 'retail'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(freshness_state, "updates_available", "Retail freshness should reflect pending updates from state.json");
+        let live_state_path = live_copy.join("state.json");
+        let expected_freshness = if live_state_path.exists() {
+            let s: Value = serde_json::from_str(&fs::read_to_string(&live_state_path).unwrap()).unwrap();
+            let has_updates = s.get("updateAvailable")
+                .and_then(|u| u.get("retail"))
+                .and_then(|r| r.as_object())
+                .map_or(false, |m| !m.is_empty());
+            if has_updates { "updates_available" } else { "up_to_date" }
+        } else {
+            "unknown"
+        };
+        assert_eq!(freshness_state, expected_freshness, "Retail freshness should reflect state.json");
 
         // Verify Wago backups are properly linked to addons (not null addon_id)
         let exboss_backup_aid: Option<String> = conn

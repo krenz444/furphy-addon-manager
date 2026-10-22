@@ -56,7 +56,19 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
         }
     }
 
-    // 3. Prefix matching: wago:slug, github:owner/repo
+    // 3. Prefix matching: wago:slug, github:owner/repo, curse:id, curseforge:id
+    if let Some(stripped) = t.strip_prefix("curse:") {
+        if let Ok(id) = stripped.trim().parse::<i64>() {
+            return Some(AddonTarget::CurseForge(id));
+        }
+    }
+
+    if let Some(stripped) = t.strip_prefix("curseforge:") {
+        if let Ok(id) = stripped.trim().parse::<i64>() {
+            return Some(AddonTarget::CurseForge(id));
+        }
+    }
+
     if let Some(stripped) = t.strip_prefix("wago:") {
         return Some(AddonTarget::Wago(stripped.trim().to_string()));
     }
@@ -124,4 +136,51 @@ pub fn create_addon_record(
     }
 
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_addon_target_variants() {
+        // Direct numeric ID
+        match parse_addon_target("2382", None) {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 2382),
+            other => panic!("Expected CurseForge(2382), got {:?}", other),
+        }
+
+        // Curse prefix
+        match parse_addon_target("curse:2382", None) {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 2382),
+            other => panic!("Expected CurseForge(2382), got {:?}", other),
+        }
+
+        // Wago prefix
+        match parse_addon_target("wago:weakauras-2", None) {
+            Some(AddonTarget::Wago(slug)) => assert_eq!(slug, "weakauras-2"),
+            other => panic!("Expected Wago(weakauras-2), got {:?}", other),
+        }
+
+        // GitHub prefix
+        match parse_addon_target("github:Tukui-Org/ElvUI", None) {
+            Some(AddonTarget::GitHub(repo)) => assert_eq!(repo, "Tukui-Org/ElvUI"),
+            other => panic!("Expected GitHub(Tukui-Org/ElvUI), got {:?}", other),
+        }
+
+        // GitHub URL
+        match parse_addon_target("https://github.com/Tukui-Org/ElvUI.git", None) {
+            Some(AddonTarget::GitHub(repo)) => assert_eq!(repo, "Tukui-Org/ElvUI"),
+            other => panic!("Expected GitHub(Tukui-Org/ElvUI), got {:?}", other),
+        }
+
+        // Wago URL
+        match parse_addon_target("https://addons.wago.io/addons/talentloadoutex", None) {
+            Some(AddonTarget::Wago(slug)) => assert_eq!(slug, "talentloadoutex"),
+            other => panic!("Expected Wago(talentloadoutex), got {:?}", other),
+        }
+
+        // Empty string
+        assert!(parse_addon_target("   ", None).is_none());
+    }
 }

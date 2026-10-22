@@ -173,20 +173,32 @@ pub async fn run_check_for_flavour(
             "wago" => {
                 if let Some(ref slug) = a.wago_slug {
                     let wago_field = mapping.wago_field.as_deref().unwrap_or("retail");
-                    // Early exit optimization: page 1 first
-                    match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, 1).await {
-                        Ok((releases, _)) => {
-                            if let Some(chosen) = select_wago_release(&releases, a.release_type, wago_field) {
-                                if a.file_id.as_deref() != Some(&chosen.id) {
-                                    outcome_status = "Would-update".to_string();
-                                    upd_file = Some(chosen.id);
-                                    upd_ver = chosen.version.clone().or(chosen.name.clone());
+                    // Paging with early exit at the first page that yields a selection (Section 3.3)
+                    let mut found_selection = None;
+                    for page in 1..=10 {
+                        match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
+                            Ok((releases, has_next)) => {
+                                if let Some(chosen) = select_wago_release(&releases, a.release_type, wago_field) {
+                                    found_selection = Some(chosen);
+                                    break;
+                                }
+                                if !has_next {
+                                    break;
                                 }
                             }
+                            Err(e) => {
+                                outcome_status = "Failed".to_string();
+                                err_msg = Some(e);
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            outcome_status = "Failed".to_string();
-                            err_msg = Some(e);
+                    }
+
+                    if let Some(chosen) = found_selection {
+                        if a.file_id.as_deref() != Some(&chosen.id) {
+                            outcome_status = "Would-update".to_string();
+                            upd_file = Some(chosen.id);
+                            upd_ver = chosen.version.clone().or(chosen.name.clone());
                         }
                     }
                 }

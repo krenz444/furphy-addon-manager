@@ -86,3 +86,43 @@ pub fn list_not_built_for_patch(
 
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_addon_built_for_patch_matches_toc() {
+        assert!(is_addon_built_for_patch(
+            Some(110002),
+            Some(110002),
+            &[],
+            Some("11.0.2.56819")
+        ));
+    }
+
+    #[test]
+    fn test_is_addon_built_for_patch_matches_game_version_prefix() {
+        assert!(is_addon_built_for_patch(
+            Some(110002),
+            Some(100207),
+            &["11.0.2".to_string()],
+            Some("11.0.2.56819")
+        ));
+    }
+
+    #[test]
+    fn test_is_addon_built_for_patch_fails_on_mismatch() {
+        assert!(!is_addon_built_for_patch(
+            Some(110002),
+            Some(100207),
+            &["10.2.7".to_string()],
+            Some("11.0.2.56819")
+        ));
+    }
+
+    #[test]
+    fn test_is_addon_built_for_patch_unknown_interface_defaults_true() {
+        assert!(is_addon_built_for_patch(None, None, &[], None));
+    }
+}

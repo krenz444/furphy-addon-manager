@@ -91,17 +91,29 @@ fn unescape_html(s: &str) -> String {
 }
 
 pub fn extract_inertia_version_from_html(html: &str) -> Option<String> {
-    let marker = "data-page=\"";
-    if let Some(pos) = html.find(marker) {
-        let start = pos + marker.len();
-        if let Some(end) = html[start..].find('"') {
-            let json_str = unescape_html(&html[start..start + end]);
-            if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
-                    return Some(ver.to_string());
+    let marker = "data-page";
+    let mut search_start = 0;
+    while let Some(pos) = html[search_start..].find(marker) {
+        let abs_pos = search_start + pos;
+        let rest = &html[abs_pos + marker.len()..];
+        let trimmed_rest = rest.trim_start();
+        if trimmed_rest.starts_with('=') {
+            let after_eq = trimmed_rest[1..].trim_start();
+            if let Some(quote_char) = after_eq.chars().next() {
+                if quote_char == '"' || quote_char == '\'' {
+                    let content_start = &after_eq[quote_char.len_utf8()..];
+                    if let Some(end) = content_start.find(quote_char) {
+                        let json_str = unescape_html(&content_start[..end]);
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
+                            if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
+                                return Some(ver.to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
+        search_start = abs_pos + marker.len();
     }
     None
 }
@@ -280,4 +292,28 @@ pub async fn download_wago_release(
     out_file.write_all(&bytes).map_err(|e| e.to_string())?;
 
     Ok(bytes.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_inertia_version_variants() {
+        // Standard double quotes with &quot; entities
+        let html1 = r#"<div id="app" data-page="{&quot;component&quot;:&quot;Versions&quot;,&quot;version&quot;:&quot;v1.2.3&quot;}"></div>"#;
+        assert_eq!(extract_inertia_version_from_html(html1), Some("v1.2.3".to_string()));
+
+        // Single quotes
+        let html2 = r#"<div id='app' data-page='{"component":"Versions","version":"v2.0.0"}'></div>"#;
+        assert_eq!(extract_inertia_version_from_html(html2), Some("v2.0.0".to_string()));
+
+        // Spaces around equals sign with HTML entities
+        let html3 = r#"<div id="app" data-page = "{&quot;version&quot;:&quot;v3.1.4&quot;}"></div>"#;
+        assert_eq!(extract_inertia_version_from_html(html3), Some("v3.1.4".to_string()));
+
+        // Missing version
+        let html4 = r#"<div id="app" data-page='{"component":"Versions"}'></div>"#;
+        assert_eq!(extract_inertia_version_from_html(html4), None);
+    }
 }

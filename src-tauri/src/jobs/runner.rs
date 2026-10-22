@@ -242,7 +242,21 @@ impl JobRunner {
                 let mut all_reports = Vec::new();
                 let mut any_reload = false;
 
+                let show_test_realms: bool = conn
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = 'showTestRealms'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .and_then(|v: String| serde_json::from_str(&v).ok())
+                    .unwrap_or(false);
+
                 for flv_info in &installed_flavours {
+                    if !show_test_realms && matches!(flv_info.id.as_str(), "ptr" | "xptr" | "beta") {
+                        continue;
+                    }
+
                     let report = run_sync_for_flavour(
                         conn,
                         &wow_root,
@@ -307,8 +321,37 @@ impl JobRunner {
                     .and_then(|v| v.as_str())
                     .ok_or("Missing addon_id parameter")?;
 
-                rollback_addon(conn, addon_id, flv, &target_flv.addons_path, &data_dir)?;
+                rollback_addon(
+                    conn,
+                    &wow_root,
+                    &target_flv.folder,
+                    addon_id,
+                    flv,
+                    &target_flv.addons_path,
+                    &data_dir,
+                )?;
                 Ok((serde_json::json!({ "rolled_back": addon_id }).to_string(), false))
+            }
+            "restore-wtf" => {
+                let flv = flavour.ok_or("Flavour is required for restore-wtf job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+
+                let snapshot_id = params
+                    .get("snapshot_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing snapshot_id parameter")?;
+
+                crate::engine::wtf::restore_wtf_snapshot(
+                    conn,
+                    &wow_root,
+                    &target_flv.folder,
+                    snapshot_id,
+                    &data_dir,
+                )?;
+                Ok((serde_json::json!({ "restored": snapshot_id }).to_string(), false))
             }
             "remove" => {
                 let flv = flavour.ok_or("Flavour is required for remove job")?;

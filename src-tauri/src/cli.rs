@@ -73,6 +73,14 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
         }
     }
 
+    if let Some(ref filter) = flavour_filter {
+        let flavours = get_installed_flavours_db(&conn).map_err(|_| 2)?;
+        if !flavours.iter().any(|f| &f.id == filter) {
+            eprintln!("[ERROR] Unknown or uninstalled flavour: {}", filter);
+            return Err(2);
+        }
+    }
+
     // Handle --status (no network)
     if args.iter().any(|a| a == "--status") {
         let flavours = get_installed_flavours_db(&conn).map_err(|_| 2)?;
@@ -233,6 +241,19 @@ mod tests {
         ];
         let res = handle_cli_args(&args).await;
         // Either DB open fails (2) or export fails (2)
+        assert_eq!(res, Err(2));
+    }
+
+    #[tokio::test]
+    async fn test_cli_unknown_flavour_returns_exit_code_2() {
+        let args = vec![
+            "furphy.exe".to_string(),
+            "--status".to_string(),
+            "--flavour".to_string(),
+            "completely_bogus_flavour_xyz".to_string(),
+        ];
+        let res = handle_cli_args(&args).await;
+        // Either DB open fails or unknown flavour returns Err(2)
         assert_eq!(res, Err(2));
     }
 }

@@ -16,6 +16,7 @@ pub struct GithubAsset {
     pub id: i64,
     pub name: String,
     pub size: Option<u64>,
+    pub digest: Option<String>,
     pub url: String,
     pub browser_download_url: Option<String>,
 }
@@ -201,6 +202,7 @@ pub async fn download_github_asset(
     client: &Client,
     download_url: &str,
     token: Option<&str>,
+    expected_digest: Option<&str>,
     dest_path: &Path,
 ) -> Result<u64, String> {
     if let Some(parent) = dest_path.parent() {
@@ -214,6 +216,23 @@ pub async fn download_github_asset(
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     if bytes.is_empty() {
         return Err("Downloaded GitHub release asset is zero-length".to_string());
+    }
+
+    if let Some(expected) = expected_digest {
+        let trimmed = expected.trim();
+        if !trimmed.is_empty() {
+            let clean_expected = trimmed.strip_prefix("sha256:").unwrap_or(trimmed).to_ascii_lowercase();
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let computed = format!("{:x}", hasher.finalize());
+            if computed != clean_expected {
+                return Err(format!(
+                    "GitHub release asset digest mismatch (expected {}, got {})",
+                    clean_expected, computed
+                ));
+            }
+        }
     }
 
     let mut out_file = File::create(dest_path).map_err(|e| e.to_string())?;
@@ -245,5 +264,15 @@ mod tests {
         // When token is None: Authorization header is not included
         let headers_none = build_github_headers(None, true, false);
         assert!(!headers_none.contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn test_github_asset_digest_calculation() {
+        use sha2::{Digest, Sha256};
+        let sample_bytes = b"sample addon zip bytes";
+        let mut hasher = Sha256::new();
+        hasher.update(sample_bytes);
+        let hash = format!("{:x}", hasher.finalize());
+        assert_eq!(hash.len(), 64);
     }
 }

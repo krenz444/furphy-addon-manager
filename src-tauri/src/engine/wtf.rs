@@ -264,8 +264,8 @@ pub fn restore_wtf_snapshot(
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name();
-        if !is_safe_entry_name(name) || !name.starts_with("Account/") {
+        let name = entry.name().replace('\\', "/");
+        if !is_safe_entry_name(&name) || !name.starts_with("Account/") {
             return Err(format!("Refusing unsafe entry path in snapshot: {}", name));
         }
     }
@@ -293,8 +293,12 @@ pub fn restore_wtf_snapshot(
     // 5. Restore snapshot files: extract ONLY files in the snapshot
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let entry_name = entry.name().to_string();
+        let entry_name = entry.name().replace('\\', "/");
         let target_path = wtf_root.join(PathBuf::from(&entry_name));
+
+        if !target_path.starts_with(&wtf_root) {
+            return Err(format!("Restore path resolves outside WTF folder: {}", target_path.display()));
+        }
 
         if entry.is_dir() {
             let _ = fs::create_dir_all(&target_path);

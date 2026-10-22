@@ -234,14 +234,26 @@ pub async fn run_sync_for_flavour(
                         }
                         found
                     } else {
-                        // Early exit on page 1
-                        match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, 1).await {
-                            Ok((rel_page, _)) => select_wago_release(&rel_page, a.release_type, wago_field),
-                            Err(e) => {
-                                sync_error = Some(e);
-                                None
+                        // Paging with early exit at the first page that yields a selection (Section 3.3)
+                        let mut chosen = None;
+                        for page in 1..=10 {
+                            match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
+                                Ok((rel_page, has_next)) => {
+                                    if let Some(sel) = select_wago_release(&rel_page, a.release_type, wago_field) {
+                                        chosen = Some(sel);
+                                        break;
+                                    }
+                                    if !has_next {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    sync_error = Some(e);
+                                    break;
+                                }
                             }
                         }
+                        chosen
                     };
 
                     if let Some(wago_rel) = target_release {
@@ -301,13 +313,38 @@ pub async fn run_sync_for_flavour(
 
                                     // Pick first asset with .zip, else zipball
                                     let asset_opt = chosen.assets.iter().find(|ast| ast.name.ends_with(".zip"));
+                                    let is_zipball = asset_opt.is_none();
                                     let dl_url = asset_opt
                                         .map(|ast| ast.url.clone())
                                         .or(chosen.zipball_url.clone());
 
                                     if let Some(url) = dl_url {
-                                        if let Err(e) = download_github_asset(&policy, &github_client, &url, github_token.as_deref(), &download_zip_path).await {
+                                        let target_dl_path = if is_zipball {
+                                            staging_root.join(format!("{}_raw.zip", a.id))
+                                        } else {
+                                            download_zip_path.clone()
+                                        };
+                                        let expected_digest = asset_opt.and_then(|ast| ast.digest.as_deref());
+                                        if let Err(e) = download_github_asset(
+                                            &policy,
+                                            &github_client,
+                                            &url,
+                                            github_token.as_deref(),
+                                            expected_digest,
+                                            &target_dl_path,
+                                        )
+                                        .await
+                                        {
                                             sync_error = Some(e);
+                                        } else if is_zipball {
+                                            let repo_name = parts[1].trim_end_matches(".git");
+                                            if let Err(e) = crate::engine::archive::normalize_github_zipball(
+                                                &target_dl_path,
+                                                repo_name,
+                                                &download_zip_path,
+                                            ) {
+                                                sync_error = Some(format!("Failed normalizing GitHub zipball: {}", e));
+                                            }
                                         }
                                     } else {
                                         sync_error = Some("No download asset or zipball available".to_string());
@@ -472,13 +509,15 @@ pub async fn run_sync_for_flavour(
 
         let _ = conn.execute(
             "UPDATE addons SET version = ?1, file_id = ?2, file_name = ?3, installed_at = ?4, \
-             required_deps = ?5, adopted = 0 WHERE id = ?6",
+             required_deps = ?5, adopted = 0, previous_file_id = ?6, previous_version = ?7 WHERE id = ?8",
             params![
                 chosen_version,
                 chosen_file_id,
                 chosen_file_name,
                 now,
                 req_deps_json,
+                a.file_id,
+                a.version,
                 a.id
             ],
         );

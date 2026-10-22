@@ -29,14 +29,24 @@ pub enum ArchiveError {
 pub fn is_safe_entry_name(name: &str) -> bool {
     let normalized = name.replace('\\', "/");
 
-    // No leading slash or drive letters
-    if normalized.starts_with('/') || (normalized.len() >= 2 && normalized.as_bytes()[1] == b':') {
+    // No leading slash or any colons (drive letters, NTFS Alternate Data Streams)
+    if normalized.starts_with('/') || normalized.contains(':') {
         return false;
     }
+
+    // Windows reserved device names
+    const RESERVED_NAMES: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
 
     // Check components
     for comp in normalized.split('/') {
         if comp == ".." {
+            return false;
+        }
+        let base_comp = comp.split('.').next().unwrap_or(comp).to_ascii_lowercase();
+        if RESERVED_NAMES.contains(&base_comp.as_str()) {
             return false;
         }
     }
@@ -194,6 +204,121 @@ fn extract_addon_archive_internal(
     Ok(candidate_folders)
 }
 
+pub fn normalize_github_zipball(
+    raw_zip_path: &Path,
+    repo_name: &str,
+    dest_normalized_zip: &Path,
+) -> Result<(), ArchiveError> {
+    let clean_repo_name = repo_name.trim();
+    if clean_repo_name.is_empty()
+        || clean_repo_name.starts_with('.')
+        || clean_repo_name.contains('/')
+        || clean_repo_name.contains('\\')
+    {
+        return Err(ArchiveError::ZipSlip(format!(
+            "Unsafe repo name '{}'",
+            repo_name
+        )));
+    }
+
+    let raw_file = File::open(raw_zip_path).map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
+    let mut archive =
+        zip::ZipArchive::new(raw_file).map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
+
+    // 1. Identify the single wrapper folder
+    let mut wrapper_prefix: Option<String> = None;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
+        let name = entry.name().replace('\\', "/");
+        if let Some(first_part) = name.split('/').next() {
+            if !first_part.is_empty() {
+                if let Some(ref p) = wrapper_prefix {
+                    if p != first_part {
+                        return Err(ArchiveError::ZipRead(
+                            "Unexpected zipball shape: multiple root entries".to_string(),
+                        ));
+                    }
+                } else {
+                    wrapper_prefix = Some(first_part.to_string());
+                }
+            }
+        }
+    }
+
+    let wrapper = wrapper_prefix.ok_or(ArchiveError::NoValidAddonFolders)?;
+    let wrapper_slash = format!("{}/", wrapper);
+
+    // 2. Check if wrapper root has its own .toc file
+    let mut wrapper_has_own_toc = false;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
+        let name = entry.name().replace('\\', "/");
+        if name.starts_with(&wrapper_slash) {
+            let rel = &name[wrapper_slash.len()..];
+            if !rel.contains('/') && rel.to_ascii_lowercase().ends_with(".toc") {
+                wrapper_has_own_toc = true;
+                break;
+            }
+        }
+    }
+
+    // 3. Write normalized zip
+    if let Some(parent) = dest_normalized_zip.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let out_file = File::create(dest_normalized_zip)?;
+    let mut writer = zip::write::ZipWriter::new(out_file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
+        let name = entry.name().replace('\\', "/");
+        if !name.starts_with(&wrapper_slash) {
+            continue;
+        }
+        let rel = &name[wrapper_slash.len()..];
+        if rel.is_empty() {
+            continue;
+        }
+
+        let new_name = if wrapper_has_own_toc {
+            format!("{}/{}", clean_repo_name, rel)
+        } else {
+            rel.to_string()
+        };
+
+        if entry.is_dir() {
+            writer
+                .add_directory(&new_name, options)
+                .map_err(|e| ArchiveError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        } else {
+            writer
+                .start_file(&new_name, options)
+                .map_err(|e| ArchiveError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = entry.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n])?;
+            }
+        }
+    }
+
+    writer
+        .finish()
+        .map_err(|e| ArchiveError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +333,11 @@ mod tests {
         assert!(!is_safe_entry_name("MyAddon/../../etc/passwd"));
         assert!(!is_safe_entry_name("/root/file.lua"));
         assert!(!is_safe_entry_name("C:/Windows/System32/calc.exe"));
+        assert!(!is_safe_entry_name("MyAddon/evil.lua:stream"), "NTFS ADS colon must be rejected");
+        assert!(!is_safe_entry_name("sub/C:/file.txt"), "Colon anywhere in path must be rejected");
+        assert!(!is_safe_entry_name("MyAddon/aux.lua"), "Windows reserved name AUX must be rejected");
+        assert!(!is_safe_entry_name("MyAddon/CON.toc"), "Windows reserved name CON must be rejected");
+        assert!(!is_safe_entry_name("MyAddon/nul"), "Windows reserved name NUL must be rejected");
     }
 
     #[test]
@@ -329,5 +459,30 @@ mod tests {
             }
             other => panic!("Expected ZipSlip for symlink, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_normalize_github_zipball() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw_zip_path = temp.path().join("raw_zipball.zip");
+        let norm_zip_path = temp.path().join("normalized.zip");
+        let extract_dir = temp.path().join("extracted");
+
+        // Case: Wrapper directory with root .toc file
+        let file = File::create(&raw_zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        zip.start_file("author-MyAddon-abc1234/MyAddon.toc", options).unwrap();
+        zip.write_all(b"## Interface: 110000\n## Title: My Addon").unwrap();
+        zip.start_file("author-MyAddon-abc1234/Core.lua", options).unwrap();
+        zip.write_all(b"print('loaded')").unwrap();
+        zip.finish().unwrap();
+
+        normalize_github_zipball(&raw_zip_path, "MyAddon", &norm_zip_path).unwrap();
+
+        let candidates = extract_addon_archive(&norm_zip_path, &extract_dir).unwrap();
+        assert_eq!(candidates, vec!["MyAddon".to_string()]);
+        assert!(extract_dir.join("MyAddon").join("MyAddon.toc").exists());
+        assert!(extract_dir.join("MyAddon").join("Core.lua").exists());
     }
 }

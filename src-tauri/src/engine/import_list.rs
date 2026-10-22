@@ -35,6 +35,17 @@ pub fn export_addon_list_v2(
     flavour: &str,
     dest_path: &Path,
 ) -> Result<(), String> {
+    export_addon_list_v2_with_options(conn, flavour, dest_path, false, None, None)
+}
+
+pub fn export_addon_list_v2_with_options(
+    conn: &Connection,
+    flavour: &str,
+    dest_path: &Path,
+    include_wtf: bool,
+    wow_root: Option<&Path>,
+    flavour_folder: Option<&str>,
+) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, source, project_id, wago_slug, wago_id, repo, release_type, pinned_file_id, ignore_updates \
@@ -112,11 +123,48 @@ pub fn export_addon_list_v2(
         version: 2,
         exported_at: Utc::now().to_rfc3339(),
         flavour: flavour.to_string(),
-        addons: items,
+        addons: items.clone(),
     };
 
     let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    fs::write(dest_path, json).map_err(|e| e.to_string())?;
+
+    if include_wtf && wow_root.is_some() && flavour_folder.is_some() {
+        let wow = wow_root.unwrap();
+        let flv_fld = flavour_folder.unwrap();
+        if let Some(parent) = dest_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = fs::File::create(dest_path).map_err(|e| e.to_string())?;
+        let mut zip = zip::write::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("addons.json", options)
+            .map_err(|e| e.to_string())?;
+        use std::io::Write;
+        zip.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+
+        let all_folders: Vec<String> = items.iter().flat_map(|it| it.folders.clone()).collect();
+        let wtf_files = crate::engine::wtf::collect_addon_wtf_files(wow, flv_fld, &all_folders);
+        for f in wtf_files {
+            let entry_name = format!("wtf/{}", f.relative_to_wtf);
+            zip.start_file(&entry_name, options).map_err(|e| e.to_string())?;
+            if let Ok(mut src_file) = fs::File::open(&f.absolute_path) {
+                use std::io::Read;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = src_file.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        zip.finish().map_err(|e| e.to_string())?;
+    } else {
+        fs::write(dest_path, json).map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
@@ -126,7 +174,28 @@ pub fn import_addon_list(
     flavour: &str,
     import_path: &Path,
 ) -> Result<usize, String> {
-    let content = fs::read_to_string(import_path).map_err(|e| e.to_string())?;
+    let content = if import_path
+        .extension()
+        .map_or(false, |ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        let file = fs::File::open(import_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut json_str = None;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            if entry.name() == "addons.json" {
+                use std::io::Read;
+                let mut s = String::new();
+                entry.read_to_string(&mut s).map_err(|e| e.to_string())?;
+                json_str = Some(s);
+                break;
+            }
+        }
+        json_str.ok_or_else(|| "Missing addons.json inside zip bundle".to_string())?
+    } else {
+        fs::read_to_string(import_path).map_err(|e| e.to_string())?
+    };
+
     let root: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
     let format_str = root
@@ -274,5 +343,58 @@ mod tests {
             .query_row("SELECT name FROM addons WHERE flavour = 'retail'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(imported_name, "Deadly Boss Mods");
+    }
+
+    #[test]
+    fn test_export_and_import_v2_bundle_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, source, project_id, release_type, ignore_updates) \
+             VALUES ('a1', 'retail', 'Details! Damage Meter', 'curseforge', 61288, 1, 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'Details', 'a1')",
+            [],
+        ).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let wow_root = temp.path().join("WoW");
+        let wtf_saved = wow_root.join("_retail_").join("WTF").join("Account").join("ACCOUNT1").join("SavedVariables");
+        fs::create_dir_all(&wtf_saved).unwrap();
+        fs::write(wtf_saved.join("Details.lua"), b"DetailsDB = {}").unwrap();
+
+        let export_zip = temp.path().join("bundle.zip");
+
+        export_addon_list_v2_with_options(
+            &conn,
+            "retail",
+            &export_zip,
+            true,
+            Some(&wow_root),
+            Some("_retail_"),
+        ).unwrap();
+        assert!(export_zip.exists());
+
+        let mut dest_conn = Connection::open_in_memory().unwrap();
+        dest_conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        dest_conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        let count = import_addon_list(&mut dest_conn, "retail", &export_zip).unwrap();
+        assert_eq!(count, 1);
+
+        let name: String = dest_conn
+            .query_row("SELECT name FROM addons WHERE flavour = 'retail'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Details! Damage Meter");
     }
 }

@@ -8,6 +8,8 @@ use crate::logging::append_app_log;
 
 pub fn rollback_addon(
     conn: &Connection,
+    wow_root: &Path,
+    flavour_folder: &str,
     addon_id: &str,
     flavour: &str,
     addons_path: &Path,
@@ -42,7 +44,18 @@ pub fn rollback_addon(
     let extract_dir = staging_dir.join("rollback");
     let candidate_folders = extract_addon_archive(&backup_path, &extract_dir).map_err(|e| e.to_string())?;
 
-    // 4. Atomic swap
+    // 4. WTF snapshot before swap (ADR-314)
+    let _ = crate::engine::wtf::take_wtf_snapshot(
+        conn,
+        wow_root,
+        flavour_folder,
+        addon_id,
+        &previous_folders,
+        data_dir,
+        "pre-update",
+    );
+
+    // 5. Atomic swap
     let protected = get_protected_folders(conn, flavour, Some(addon_id)).map_err(|e| e.to_string())?;
     let installed_folders = execute_atomic_swap(
         addons_path,
