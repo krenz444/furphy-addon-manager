@@ -23,8 +23,11 @@ static LAST_ACTIVATION_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 pub struct WindowBoundsDto {
     pub x: i32,
     pub y: i32,
+    #[serde(alias = "w")]
     pub width: u32,
+    #[serde(alias = "h")]
     pub height: u32,
+    #[serde(default)]
     pub maximized: bool,
 }
 
@@ -225,5 +228,23 @@ mod tests {
         save_window_bounds(&conn, &bounds).unwrap();
         let loaded = load_window_bounds(&conn).unwrap();
         assert_eq!(loaded, bounds);
+    }
+
+    #[test]
+    fn test_window_bounds_v1_format_and_corrupt_json() {
+        // 1. v1 format uses {"x": 100, "y": 150, "w": 1200, "h": 800} without maximized
+        let v1_json = r#"{"x":100,"y":150,"w":1200,"h":800}"#;
+        let bounds: WindowBoundsDto = serde_json::from_str(v1_json).unwrap();
+        assert_eq!(bounds.x, 100);
+        assert_eq!(bounds.y, 150);
+        assert_eq!(bounds.width, 1200);
+        assert_eq!(bounds.height, 800);
+        assert!(!bounds.maximized);
+
+        // 2. Corrupt JSON in DB safely yields None
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+        conn.execute("INSERT INTO settings (key, value) VALUES ('hostWindow', '{corrupt-json') ", []).unwrap();
+        assert!(load_window_bounds(&conn).is_none());
     }
 }

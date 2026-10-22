@@ -11,7 +11,7 @@ use crate::system::notify::{
 };
 use crate::system::power::apply_game_mode_power;
 use crate::system::tray_status::{
-    compute_core, make_tooltip, ICON_BUSY, ICON_NORMAL, ICON_UPDATED,
+    compute_core, make_tooltip, TrayStateSnapshot, ICON_BUSY, ICON_NORMAL, ICON_UPDATED,
     STATUS_CHECKING, STATUS_DONE_UPDATED, STATUS_FINISHING, STATUS_IDLE, STATUS_UPDATING,
 };
 
@@ -262,6 +262,153 @@ pub async fn run_tray_selftest(
     }
 
     Ok(marker)
+}
+
+pub fn build_tray_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    status_text: &str,
+    run_at_startup: bool,
+    background_updates: bool,
+) -> Result<tauri::menu::Menu<R>, tauri::Error> {
+    use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+    let open_item = MenuItemBuilder::with_id("open", "Open Furphy Addon Manager").build(app)?;
+    let status_item = MenuItemBuilder::with_id("status", status_text).enabled(false).build(app)?;
+    let check_item = MenuItemBuilder::with_id("check", "Check for updates now").build(app)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let startup_item = CheckMenuItemBuilder::with_id("startup", "Start with Windows")
+        .checked(run_at_startup)
+        .build(app)?;
+    let background_item = CheckMenuItemBuilder::with_id("background", "Update addons in the background")
+        .checked(background_updates)
+        .build(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let uninstall_item = MenuItemBuilder::with_id("uninstall", "Uninstall Furphy Addon Manager...").build(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+
+    MenuBuilder::new(app)
+        .items(&[
+            &open_item,
+            &status_item,
+            &check_item,
+            &sep1,
+            &startup_item,
+            &background_item,
+            &sep2,
+            &uninstall_item,
+            &sep3,
+            &quit_item,
+        ])
+        .build()
+}
+
+pub fn update_tray_display<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    snapshot: &TrayStateSnapshot,
+) {
+    if let Some(tray) = app.tray_by_id("tray") {
+        let _ = tray.set_tooltip(Some(make_tooltip(&snapshot.core_text)));
+    }
+}
+
+pub fn setup_tray<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    scheduler: std::sync::Arc<crate::system::schedule::Scheduler>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+
+    let snapshot = {
+        let snap_lock = scheduler.get_snapshot();
+        let guard = snap_lock.blocking_lock();
+        guard.clone()
+    };
+
+    let (run_at_startup, background_updates) = {
+        let db_path = crate::paths::get_db_path();
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let bg = crate::system::schedule::Scheduler::are_background_updates_enabled(&conn);
+            let autostart = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
+            (autostart, bg)
+        } else {
+            (false, true)
+        }
+    };
+
+    let menu = build_tray_menu(app, &snapshot.core_text, run_at_startup, background_updates)?;
+    let tooltip = make_tooltip(&snapshot.core_text);
+
+    let sched_clone = scheduler.clone();
+    let _tray = TrayIconBuilder::with_id("tray")
+        .tooltip(&tooltip)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if !crate::system::window::check_activation_cooldown() {
+                    return;
+                }
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                    #[cfg(windows)]
+                    if let Ok(hwnd) = window.hwnd() {
+                        let _ = crate::system::window::bring_window_to_front(hwnd.0 as isize);
+                    }
+                }
+            }
+        })
+        .on_menu_event(move |app, event| {
+            match event.id().as_ref() {
+                "open" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                        #[cfg(windows)]
+                        if let Ok(hwnd) = window.hwnd() {
+                            let _ = crate::system::window::bring_window_to_front(hwnd.0 as isize);
+                        }
+                    }
+                }
+                "check" => {
+                    sched_clone.trigger_cycle(true);
+                }
+                "startup" => {
+                    let current = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
+                    if current {
+                        let _ = crate::commands::system::autostart_disable();
+                    } else {
+                        let _ = crate::commands::system::autostart_enable();
+                    }
+                }
+                "background" => {
+                    let db_path = crate::paths::get_db_path();
+                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                        let current = crate::system::schedule::Scheduler::are_background_updates_enabled(&conn);
+                        let _ = crate::commands::system::set_background_updates(!current);
+                    }
+                }
+                "uninstall" => {
+                    crate::logging::append_app_log("INFO", "Tray menu: Uninstall clicked");
+                }
+                "quit" => {
+                    app.exit(0);
+                }
+                _ => {}
+            }
+        })
+        .build(app)?;
+
+    Ok(())
 }
 
 #[cfg(test)]

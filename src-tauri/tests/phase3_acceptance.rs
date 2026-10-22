@@ -218,7 +218,7 @@ fn test_acceptance_exact_v1_status_sentences() {
 
 #[tokio::test]
 async fn test_acceptance_tray_selftest_cycle_and_marker() {
-    let _guard = TEST_ENV_LOCK.lock().unwrap();
+    let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp_dir = tempfile::tempdir().unwrap();
     let marker_path = temp_dir.path().join("selftest_acceptance.json");
 
@@ -255,7 +255,7 @@ async fn test_acceptance_tray_selftest_cycle_and_marker() {
 
 #[tokio::test]
 async fn test_acceptance_game_mode_and_reload_notice() {
-    let _guard = TEST_ENV_LOCK.lock().unwrap();
+    let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
 
     // 1. EcoQoS / power throttling application
@@ -281,6 +281,14 @@ async fn test_acceptance_game_mode_and_reload_notice() {
 
 #[tokio::test]
 async fn test_acceptance_sleep_resume_wall_clock_trigger() {
+    let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    furphy_lib::commands::system::set_background_updates(true).unwrap();
+
+    let temp = std::env::temp_dir().join("wow test root (acceptance test)");
+    let retail_addons = temp.join("_retail_").join("Interface").join("AddOns");
+    let _ = std::fs::create_dir_all(&retail_addons);
+    std::env::set_var("FURPHY_DEV_WOWROOT", temp.to_str().unwrap());
+
     let policy = Arc::new(NetworkPolicy::default());
     let runner = Arc::new(JobRunner::new(policy));
     let mut initial = TrayStateSnapshot::default();
@@ -292,12 +300,82 @@ async fn test_acceptance_sleep_resume_wall_clock_trigger() {
     let scheduler = Scheduler::new(runner, initial);
     let snapshot_arc = scheduler.get_snapshot();
 
-    // Wall clock check: now >= next_run_at should be true
+    // 1. Wall clock check: now >= next_run_at should be true
     let is_due = {
         let s = snapshot_arc.lock().await;
         s.next_run_at.map(|t| Utc::now() >= t).unwrap_or(false)
     };
     assert!(is_due, "Scheduler must detect that nextRunAt is in the past upon wake");
+
+    // 2. Trigger notification & execution: the cycle runs and advances next_run_at
+    scheduler.notify_resume();
+    let res = scheduler.run_cycle(false).await;
+    assert!(res.is_ok(), "Cycle must execute cleanly upon resume trigger");
+
+    let updated_snapshot = snapshot_arc.lock().await.clone();
+    assert!(updated_snapshot.last_run_at.is_some(), "Cycle execution must record last_run_at");
+    assert!(
+        updated_snapshot.next_run_at.unwrap() > Utc::now(),
+        "Cycle execution must schedule next_run_at into the future"
+    );
+
+    std::env::remove_var("FURPHY_DEV_WOWROOT");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_acceptance_v1_imported_window_bounds() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+
+    // v1 hostWindow format with "w" and "h" instead of "width" and "height", and no "maximized"
+    let v1_host_window = r#"{"x":120,"y":80,"w":1150,"h":720}"#;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('hostWindow', ?1)",
+        rusqlite::params![v1_host_window],
+    )
+    .unwrap();
+
+    let bounds = furphy_lib::system::window::load_window_bounds(&conn).expect("Must parse v1 hostWindow shape");
+    assert_eq!(bounds.x, 120);
+    assert_eq!(bounds.y, 80);
+    assert_eq!(bounds.width, 1150);
+    assert_eq!(bounds.height, 720);
+    assert_eq!(bounds.maximized, false);
+
+    // Corrupt JSON in DB safely yields None
+    conn.execute("UPDATE settings SET value = '{broken' WHERE key = 'hostWindow'", []).unwrap();
+    assert!(furphy_lib::system::window::load_window_bounds(&conn).is_none());
+}
+
+#[tokio::test]
+async fn test_acceptance_background_updates_off_prevents_tight_loop() {
+    let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let policy = Arc::new(NetworkPolicy::default());
+    let runner = Arc::new(JobRunner::new(policy));
+    let scheduler = Scheduler::new(runner, TrayStateSnapshot::default());
+
+    // 1. Turn background updates off
+    furphy_lib::commands::system::set_background_updates(false).unwrap();
+    let status_off = furphy_lib::commands::system::tray_status().unwrap();
+    assert_eq!(status_off.core_text, "Background updates off");
+    assert!(status_off.next_run_at.is_none());
+
+    // 2. Automatic cycle should refuse and not set a past next_run_at
+    let cycle_res = scheduler.run_cycle(false).await;
+    assert!(cycle_res.is_err());
+    let snap = scheduler.get_snapshot();
+    let s = snap.lock().await;
+    assert_eq!(s.core_text, "Background updates off");
+    assert!(s.next_run_at.is_none(), "next_run_at must remain None to prevent 5s tight loop");
+
+    // 3. Turn background updates back on
+    drop(s);
+    furphy_lib::commands::system::set_background_updates(true).unwrap();
+    let status_on = furphy_lib::commands::system::tray_status().unwrap();
+    assert!(status_on.core_text.starts_with("Background updates on - next check "));
+    assert!(status_on.next_run_at.is_some());
 }
 
 #[test]

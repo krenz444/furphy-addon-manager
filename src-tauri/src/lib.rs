@@ -117,7 +117,28 @@ pub fn run() {
         .setup(|app| {
             if let Some(main_window) = app.get_webview_window("main") {
                 system::window::apply_saved_webview_window_bounds(&main_window);
+                // If started with --tray, hide the main window initially
+                if std::env::args().any(|a| a == "--tray") {
+                    let _ = main_window.hide();
+                }
             }
+
+            // Initialize Scheduler and Tray
+            let policy = std::sync::Arc::new(net::policy::NetworkPolicy::default());
+            let runner = std::sync::Arc::new(jobs::runner::JobRunner::new(policy));
+            let initial_state = {
+                let db_path = paths::get_db_path();
+                if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                    system::schedule::Scheduler::load_persisted_tray_state(&conn).unwrap_or_default()
+                } else {
+                    system::tray_status::TrayStateSnapshot::default()
+                }
+            };
+            let scheduler = std::sync::Arc::new(system::schedule::Scheduler::new(runner, initial_state));
+            let _ = system::tray::setup_tray(app.handle(), scheduler.clone());
+            scheduler.clone().start_background_loop();
+            app.manage(scheduler);
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -142,6 +163,7 @@ pub fn run() {
             commands::system::protocol_status,
             commands::system::protocol_check_consent,
             commands::system::get_tray_status,
+            commands::system::tray_status,
             commands::system::set_background_updates,
             commands::system::is_game_active,
         ])

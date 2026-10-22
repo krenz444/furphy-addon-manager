@@ -27,15 +27,28 @@ pub struct Scheduler {
     runner: Arc<JobRunner>,
     snapshot: Arc<Mutex<TrayStateSnapshot>>,
     is_running_cycle: Mutex<bool>,
+    trigger_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    trigger_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<bool>>>,
 }
 
 impl Scheduler {
     pub fn new(runner: Arc<JobRunner>, initial_snapshot: TrayStateSnapshot) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             runner,
             snapshot: Arc::new(Mutex::new(initial_snapshot)),
             is_running_cycle: Mutex::new(false),
+            trigger_tx: tx,
+            trigger_rx: Mutex::new(Some(rx)),
         }
+    }
+
+    pub fn trigger_cycle(&self, is_manual: bool) {
+        let _ = self.trigger_tx.send(is_manual);
+    }
+
+    pub fn notify_resume(&self) {
+        self.trigger_cycle(false);
     }
 
     pub fn get_snapshot(&self) -> Arc<Mutex<TrayStateSnapshot>> {
@@ -91,6 +104,14 @@ impl Scheduler {
 
         // Check if background updates are enabled (for automatic runs)
         if !is_manual && !Self::are_background_updates_enabled(&conn) {
+            {
+                let mut s = self.snapshot.lock().await;
+                s.status = STATUS_IDLE.to_string();
+                s.core_text = "Background updates off".to_string();
+                s.tooltip = make_tooltip(&s.core_text);
+                s.next_run_at = None;
+                let _ = Self::persist_tray_state(&conn, &s);
+            }
             *run_lock = false;
             return Err("Background updates disabled in settings".to_string());
         }
@@ -249,6 +270,7 @@ impl Scheduler {
                 s.core_text = core;
                 s.tooltip = make_tooltip(&s.core_text);
                 s.icon_variant = "normal".to_string();
+                s.last_run_at = Some(now);
                 s.next_run_at = Some(next_run_utc);
                 let _ = Self::persist_tray_state(&conn, &s);
                 s.clone()
@@ -277,6 +299,7 @@ impl Scheduler {
                 s.core_text = core;
                 s.tooltip = make_tooltip(&s.core_text);
                 s.icon_variant = "normal".to_string();
+                s.last_run_at = Some(now);
                 s.next_run_at = Some(next_run_utc);
                 let _ = Self::persist_tray_state(&conn, &s);
                 s.clone()
@@ -294,36 +317,53 @@ impl Scheduler {
 
     /// Starts the background scheduling loop.
     pub fn start_background_loop(self: Arc<Self>) {
-        // Initial setup: set nextRunAt to now + 90 seconds (FIRST_CYCLE_DELAY_SECS)
-        let initial_delay = Utc::now() + chrono::Duration::seconds(FIRST_CYCLE_DELAY_SECS);
+        let (initial_delay, is_enabled) = {
+            let db_path = get_db_path();
+            let is_enabled = if let Ok(conn) = Connection::open(&db_path) {
+                Self::are_background_updates_enabled(&conn)
+            } else {
+                true
+            };
+            if is_enabled {
+                (Some(Utc::now() + chrono::Duration::seconds(FIRST_CYCLE_DELAY_SECS)), true)
+            } else {
+                (None, false)
+            }
+        };
+
         {
             let mut s = match self.snapshot.try_lock() {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
-            s.next_run_at = Some(initial_delay);
-            s.core_text = compute_core(
-                STATUS_IDLE,
-                None,
-                None,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                None,
-                Some(initial_delay),
-                None,
-                None,
-                None,
-            );
+            s.next_run_at = initial_delay;
+            s.core_text = if is_enabled {
+                compute_core(
+                    STATUS_IDLE,
+                    None,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    initial_delay,
+                    None,
+                    None,
+                    None,
+                )
+            } else {
+                "Background updates off".to_string()
+            };
             s.tooltip = make_tooltip(&s.core_text);
             if let Ok(conn) = Connection::open(get_db_path()) {
                 let _ = Self::persist_tray_state(&conn, &s);
             }
         }
 
+        let sched = self.clone();
         std::thread::Builder::new()
             .name("furphy-scheduler".into())
             .spawn(move || {
@@ -339,15 +379,32 @@ impl Scheduler {
                 };
 
                 rt.block_on(async move {
+                    let mut rx = {
+                        let mut guard = sched.trigger_rx.lock().await;
+                        guard.take()
+                    };
+
                     let mut hourly_ticker = tokio::time::interval(Duration::from_secs(3600));
+                    // Skip the immediate first tick of hourly_ticker so it doesn't fire at startup
+                    hourly_ticker.tick().await;
+
                     // Check wall clock every 5 seconds to handle sleep / resume gracefully
                     let mut poll_interval = tokio::time::interval(Duration::from_secs(5));
 
                     loop {
                         tokio::select! {
+                            Some(manual) = async {
+                                if let Some(ref mut r) = rx {
+                                    r.recv().await
+                                } else {
+                                    std::future::pending().await
+                                }
+                            } => {
+                                let _ = sched.run_cycle(manual).await;
+                            }
                             _ = poll_interval.tick() => {
                                 let should_run = {
-                                    let s = self.snapshot.lock().await;
+                                    let s = sched.snapshot.lock().await;
                                     if let Some(next_t) = s.next_run_at {
                                         Utc::now() >= next_t
                                     } else {
@@ -356,7 +413,7 @@ impl Scheduler {
                                 };
 
                                 if should_run {
-                                    let _ = self.run_cycle(false).await;
+                                    let _ = sched.run_cycle(false).await;
                                 }
                             }
                             _ = hourly_ticker.tick() => {
