@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zip::write::{SimpleFileOptions, ZipWriter};
 use crate::engine::archive::is_safe_entry_name;
 use crate::logging::append_app_log;
-use crate::system::game::is_wow_running;
+use crate::system::game::is_wow_running_fresh;
 
 pub const MAX_WTF_SNAPSHOT_BYTES: u64 = 50 * 1024 * 1024; // 50 MB size cap per snapshot
 
@@ -238,7 +238,7 @@ pub fn restore_wtf_snapshot(
     data_dir: &Path,
 ) -> Result<(), String> {
     // 1. Refusal check: NEVER restore while WoW runs! (ADR-314)
-    if is_wow_running() {
+    if is_wow_running_fresh() {
         return Err("Cannot restore WTF SavedVariables while World of Warcraft is running.".to_string());
     }
 
@@ -425,6 +425,7 @@ mod tests {
         fs::write(acc_sv.join("MyAddon.lua"), b"account_lua_v2").unwrap();
         fs::write(char_sv.join("MyAddon.lua"), b"char_lua_v2").unwrap();
 
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
         // Refusal test: when fake game runs, restore is refused!
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
         let refused_res = restore_wtf_snapshot(&conn, &wow_root, "_retail_", &snap_id, &data_dir);
@@ -435,6 +436,7 @@ mod tests {
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
         let restore_res = restore_wtf_snapshot(&conn, &wow_root, "_retail_", &snap_id, &data_dir);
         assert!(restore_res.is_ok());
+        std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
 
         // Verified restored to v1
         assert_eq!(fs::read(acc_sv.join("MyAddon.lua")).unwrap(), b"account_lua_v1");

@@ -1,1 +1,9 @@
+pub mod autostart;
 pub mod game;
+pub mod notify;
+pub mod power;
+pub mod protocol;
+pub mod schedule;
+pub mod tray;
+pub mod tray_status;
+pub mod window;

@@ -15,8 +15,8 @@
         "title": "Furphy Addon Manager",
         "width": 1100,
         "height": 750,
-        "minWidth": 800,
-        "minHeight": 600,
+        "minWidth": 1040,
+        "minHeight": 660,
         "resizable": true,
         "fullscreen": false
       }

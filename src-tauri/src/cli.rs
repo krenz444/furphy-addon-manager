@@ -16,10 +16,56 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
             || a == "--status"
             || a == "--export-v1"
             || a == "--selftest"
+            || a == "--tray-selftest"
+            || a == "--protocol"
     });
 
     if !is_cli {
         return Ok(false);
+    }
+
+    // Handle --tray-selftest <marker_path> [--wow-fake <name>]
+    for i in 0..args.len() {
+        if args[i] == "--tray-selftest" && i + 1 < args.len() {
+            let marker_path = PathBuf::from(&args[i + 1]);
+            let mut fake_wow: Option<String> = None;
+            for j in 0..args.len() {
+                if args[j] == "--wow-fake" && j + 1 < args.len() {
+                    fake_wow = Some(args[j + 1].clone());
+                }
+            }
+            match crate::system::tray::run_tray_selftest(&marker_path, fake_wow).await {
+                Ok(_) => return Ok(true),
+                Err(e) => {
+                    eprintln!("[ERROR] Tray selftest failed: {}", e);
+                    return Err(2);
+                }
+            }
+        }
+    }
+
+    // Handle --protocol <url>
+    for i in 0..args.len() {
+        if args[i] == "--protocol" && i + 1 < args.len() {
+            let url = &args[i + 1];
+            match crate::system::protocol::parse_protocol_url(url, None) {
+                Ok(req) => {
+                    crate::system::protocol::append_handler_log(&format!(
+                        "CLI protocol received: scheme={}, action={}, project={}, file={}",
+                        req.scheme, req.action, req.project_id, req.file_id
+                    ));
+                    println!("Protocol install request valid for project {} file {}", req.project_id, req.file_id);
+                    return Ok(true);
+                }
+                Err(e) => {
+                    crate::system::protocol::append_handler_log(&format!(
+                        "CLI protocol rejected ({}): {}", url, e
+                    ));
+                    eprintln!("[ERROR] Protocol handling failed: {}", e);
+                    return Err(2);
+                }
+            }
+        }
     }
 
     let is_json = args.iter().any(|a| a == "--json");
@@ -255,5 +301,36 @@ mod tests {
         let res = handle_cli_args(&args).await;
         // Either DB open fails or unknown flavour returns Err(2)
         assert_eq!(res, Err(2));
+    }
+
+    #[tokio::test]
+    async fn test_cli_tray_selftest_executes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let marker = temp_dir.path().join("marker.json");
+        let args = vec![
+            "furphy.exe".to_string(),
+            "--tray-selftest".to_string(),
+            marker.to_string_lossy().to_string(),
+        ];
+        let res = handle_cli_args(&args).await;
+        assert_eq!(res, Ok(true));
+        assert!(marker.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cli_protocol_handler_valid_and_invalid() {
+        let valid_args = vec![
+            "furphy.exe".to_string(),
+            "--protocol".to_string(),
+            "curseforge://install?addonId=2382&fileId=12345".to_string(),
+        ];
+        assert_eq!(handle_cli_args(&valid_args).await, Ok(true));
+
+        let invalid_args = vec![
+            "furphy.exe".to_string(),
+            "--protocol".to_string(),
+            "curseforge://install?addonId=bad&fileId=12345".to_string(),
+        ];
+        assert_eq!(handle_cli_args(&invalid_args).await, Err(2));
     }
 }

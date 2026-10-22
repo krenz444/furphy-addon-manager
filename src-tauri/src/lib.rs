@@ -111,11 +111,39 @@ pub fn run() {
         context.config_mut().product_name = Some("Furphy Dev".to_string());
     }
 
+    use tauri::Manager;
+
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(main_window) = app.get_webview_window("main") {
+                system::window::apply_saved_webview_window_bounds(&main_window);
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    system::window::save_current_window_bounds(window);
+                    let _ = window.hide();
+                }
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::addons::get_addons,
             commands::addons::get_flavours,
             commands::addons::get_app_info,
+            commands::system::autostart_enable,
+            commands::system::autostart_disable,
+            commands::system::autostart_status,
+            commands::system::protocol_register,
+            commands::system::protocol_unregister,
+            commands::system::protocol_status,
+            commands::system::protocol_check_consent,
+            commands::system::get_tray_status,
+            commands::system::set_background_updates,
+            commands::system::is_game_active,
         ])
         .run(context)
         .expect("error while running tauri application");
