@@ -107,7 +107,7 @@
 
   <div class="flavour-bar">
     <div class="flavour-pills" role="tablist">
-      {#each flavours as fl (flavour.id)}
+      {#each flavours as fl (fl.id)}
         <button
           type="button"
           role="tab"

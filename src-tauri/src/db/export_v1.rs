@@ -61,7 +61,11 @@ pub fn export_to_v1(conn: &Connection, target_dir: &Path) -> Result<(), ExportEr
     })?;
 
     // 2. Export flavours/<flavour>/addons.json
-    let mut flavour_stmt = conn.prepare("SELECT id FROM flavours WHERE installed = 1")?;
+    let mut flavour_stmt = conn.prepare(
+        "SELECT id FROM flavours WHERE installed = 1 
+         UNION 
+         SELECT DISTINCT flavour FROM addons",
+    )?;
     let flavour_rows = flavour_stmt.query_map([], |r| r.get::<_, String>(0))?;
 
     for flavour_res in flavour_rows {

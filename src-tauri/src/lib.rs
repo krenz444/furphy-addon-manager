@@ -59,9 +59,12 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let mut import_arg: Option<PathBuf> = None;
+    let mut export_arg: Option<PathBuf> = None;
     for i in 0..args.len() {
         if args[i] == "--import-v1" && i + 1 < args.len() {
             import_arg = Some(PathBuf::from(&args[i + 1]));
+        } else if args[i] == "--export-v1" && i + 1 < args.len() {
+            export_arg = Some(PathBuf::from(&args[i + 1]));
         }
     }
 
@@ -69,6 +72,26 @@ pub fn run() {
         eprintln!("[FATAL] App initialization failed: {}", e);
         if paths::is_dev() {
             panic!("Dev startup aborted: {}", e);
+        }
+        std::process::exit(2);
+    }
+
+    if let Some(export_dir) = export_arg {
+        let db_path = paths::get_db_path();
+        match Connection::open(&db_path) {
+            Ok(conn) => {
+                if let Err(e) = db::export_v1::export_to_v1(&conn, &export_dir) {
+                    eprintln!("[ERROR] Export to v1 failed: {}", e);
+                    std::process::exit(1);
+                } else {
+                    println!("Exported v1 data to: {}", export_dir.display());
+                    std::process::exit(0);
+                }
+            }
+            Err(e) => {
+                eprintln!("[FATAL] Failed to open database for export: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 

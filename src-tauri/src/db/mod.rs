@@ -374,6 +374,31 @@ mod tests {
             }
         }
 
+        // Verify freshness state matches pending update in live state.json
+        let freshness_state: String = conn
+            .query_row("SELECT state FROM freshness WHERE flavour = 'retail'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(freshness_state, "updates_available", "Retail freshness should reflect pending updates from state.json");
+
+        // Verify Wago backups are properly linked to addons (not null addon_id)
+        let exboss_backup_aid: Option<String> = conn
+            .query_row("SELECT addon_id FROM backups WHERE path LIKE '%wago-exboss%' LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(exboss_backup_aid.is_some(), "Wago exboss backup must have linked addon_id");
+        assert_eq!(exboss_backup_aid.unwrap(), "retail:wago:vNAgrRKo");
+
+        let talent_backup_aid: Option<String> = conn
+            .query_row("SELECT addon_id FROM backups WHERE path LIKE '%wago-talentloadoutex%' LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(talent_backup_aid.is_some(), "Wago talentloadoutex backup must have linked addon_id");
+        assert_eq!(talent_backup_aid.unwrap(), "retail:wago:Qb6mxnNP");
+
+        // Verify zero unlinked backups
+        let orphaned_backups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM backups WHERE addon_id IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphaned_backups, 0, "All 34 live backups must be linked to valid addon_id");
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -517,6 +542,142 @@ mod tests {
 
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM addons", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0, "No records should be left in database");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_wago_and_github_backup_keys_matched_to_addon_id() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate::run_migrations(&mut conn).unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!("furphy_test_backups_{}", uuid::Uuid::new_v4()));
+        let retail_dir = temp_dir.join("flavours").join("retail");
+        fs::create_dir_all(&retail_dir).unwrap();
+
+        let addons_json = json!([
+            {
+                "name": "ExBoss",
+                "source": "wago",
+                "wagoId": "vNAgrRKo",
+                "slug": "exboss",
+                "folders": ["EXBoss"]
+            },
+            {
+                "name": "AuraUpdater",
+                "source": "github",
+                "repo": "bart-dev-wow/AuraUpdater",
+                "folders": ["AuraUpdater"]
+            }
+        ]);
+        fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        // Create backup folders following v1 Get-RecordBackupKey format
+        let wago_backup = retail_dir.join("backups").join("wago-exboss");
+        let gh_backup = retail_dir.join("backups").join("github-bart-dev-wow_AuraUpdater");
+        fs::create_dir_all(&wago_backup).unwrap();
+        fs::create_dir_all(&gh_backup).unwrap();
+
+        fs::write(wago_backup.join("rQPkLnB6.zip"), b"wago_zip").unwrap();
+        fs::write(gh_backup.join("v1.0.0.zip"), b"gh_zip").unwrap();
+
+        let v2_data_dir = temp_dir.join("v2");
+        let summary = import_v1::import_from_v1(&mut conn, &temp_dir, &v2_data_dir, false).unwrap();
+        assert_eq!(summary.addons_imported, 2);
+        assert_eq!(summary.backups_copied, 2);
+
+        // Verify Wago backup is linked to Wago addon ID
+        let wago_aid: Option<String> = conn
+            .query_row("SELECT addon_id FROM backups WHERE path LIKE '%wago-exboss%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(wago_aid, Some("retail:wago:vNAgrRKo".into()));
+
+        // Verify GitHub backup is linked to GitHub addon ID
+        let gh_aid: Option<String> = conn
+            .query_row("SELECT addon_id FROM backups WHERE path LIKE '%AuraUpdater%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gh_aid, Some("retail:gh:bart-dev-wow/AuraUpdater".into()));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_state_json_wago_and_github_updates_and_freshness_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate::run_migrations(&mut conn).unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!("furphy_test_state_{}", uuid::Uuid::new_v4()));
+        let retail_dir = temp_dir.join("flavours").join("retail");
+        fs::create_dir_all(&retail_dir).unwrap();
+
+        let addons_json = json!([
+            {
+                "name": "ExBoss",
+                "source": "wago",
+                "wagoId": "vNAgrRKo",
+                "slug": "exboss",
+                "folders": ["EXBoss"]
+            },
+            {
+                "name": "AuraUpdater",
+                "source": "github",
+                "repo": "bart-dev-wow/AuraUpdater",
+                "folders": ["AuraUpdater"]
+            }
+        ]);
+        fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        // state.json with Wago alphanumeric string fileId and GitHub update key
+        let state_json = json!({
+            "updatesCheckedAt": {
+                "retail": "2026-10-22T21:44:24Z"
+            },
+            "updateAvailable": {
+                "retail": {
+                    "wago:exboss": {
+                        "fileId": "rQPkLnB6",
+                        "version": "v2.1"
+                    },
+                    "github:bart-dev-wow/auraupdater": {
+                        "fileId": "v1.2.0",
+                        "version": "v1.2.0"
+                    }
+                }
+            }
+        });
+        fs::write(temp_dir.join("state.json"), state_json.to_string()).unwrap();
+
+        let v2_data_dir = temp_dir.join("v2");
+        let summary = import_v1::import_from_v1(&mut conn, &temp_dir, &v2_data_dir, false).unwrap();
+        assert_eq!(summary.addons_imported, 2);
+
+        // Verify freshness is "updates_available" because updates exist
+        let freshness_state: String = conn
+            .query_row("SELECT state FROM freshness WHERE flavour = 'retail'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(freshness_state, "updates_available");
+
+        // Verify Wago update check_results record has string update_file_id
+        let (wago_fid, wago_ver): (String, String) = conn
+            .query_row(
+                "SELECT update_file_id, update_version FROM check_results WHERE addon_id = 'retail:wago:vNAgrRKo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(wago_fid, "rQPkLnB6");
+        assert_eq!(wago_ver, "v2.1");
+
+        // Verify GitHub update check_results record
+        let (gh_fid, gh_ver): (String, String) = conn
+            .query_row(
+                "SELECT update_file_id, update_version FROM check_results WHERE addon_id = 'retail:gh:bart-dev-wow/AuraUpdater'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(gh_fid, "v1.2.0");
+        assert_eq!(gh_ver, "v1.2.0");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

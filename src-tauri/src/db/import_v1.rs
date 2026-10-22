@@ -66,6 +66,95 @@ fn parse_flexible_string(v: Option<Value>) -> Option<String> {
     })
 }
 
+fn find_addon_id_by_backup_key(tx: &Connection, flavour: &str, backup_key: &str) -> Option<String> {
+    if let Ok(pid) = backup_key.parse::<i64>() {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND (project_id = ?2 OR curse_id = ?3) LIMIT 1",
+            params![flavour, pid, backup_key],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    if let Some(slug) = backup_key.strip_prefix("wago-") {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND (wago_slug = ?2 COLLATE NOCASE OR wago_id = ?2 COLLATE NOCASE) LIMIT 1",
+            params![flavour, slug],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    if let Some(gh) = backup_key.strip_prefix("github-") {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND (
+                repo = ?2 COLLATE NOCASE OR 
+                REPLACE(repo, '/', '_') = ?2 COLLATE NOCASE
+            ) LIMIT 1",
+            params![flavour, gh],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    tx.query_row(
+        "SELECT id FROM addons WHERE flavour = ?1 AND (
+            wago_slug = ?2 COLLATE NOCASE OR
+            wago_id = ?2 COLLATE NOCASE OR
+            repo = ?2 COLLATE NOCASE OR
+            curse_id = ?2 COLLATE NOCASE
+        ) LIMIT 1",
+        params![flavour, backup_key],
+        |r| r.get(0),
+    ).ok()
+}
+
+fn find_addon_id_by_update_key(tx: &Connection, flavour: &str, update_key: &str) -> Option<String> {
+    if let Ok(pid) = update_key.parse::<i64>() {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND (project_id = ?2 OR curse_id = ?3) LIMIT 1",
+            params![flavour, pid, update_key],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    if let Some(slug) = update_key.strip_prefix("wago:") {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND (wago_slug = ?2 COLLATE NOCASE OR wago_id = ?2 COLLATE NOCASE) LIMIT 1",
+            params![flavour, slug],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    if let Some(repo) = update_key.strip_prefix("github:") {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM addons WHERE flavour = ?1 AND repo = ?2 COLLATE NOCASE LIMIT 1",
+            params![flavour, repo],
+            |r| r.get(0),
+        ) {
+            return Some(id);
+        }
+    }
+
+    tx.query_row(
+        "SELECT id FROM addons WHERE flavour = ?1 AND (
+            wago_slug = ?2 COLLATE NOCASE OR
+            wago_id = ?2 COLLATE NOCASE OR
+            repo = ?2 COLLATE NOCASE OR
+            curse_id = ?2 COLLATE NOCASE
+        ) LIMIT 1",
+        params![flavour, update_key],
+        |r| r.get(0),
+    ).ok()
+}
+
 pub fn import_from_v1(
     conn: &mut Connection,
     v1_dir: &Path,
@@ -439,23 +528,7 @@ pub fn import_from_v1(
                                 };
 
                                 // Find matching addon_id
-                                let matching_addon: Option<String> = tx
-                                    .query_row(
-                                        "SELECT id FROM addons WHERE flavour = ?1 AND (
-                                            project_id = ?2 OR
-                                            wago_id = ?3 OR
-                                            wago_slug = ?3 OR
-                                            repo = ?3 OR
-                                            curse_id = ?3
-                                        ) LIMIT 1",
-                                        params![
-                                            flavour_id,
-                                            backup_key.parse::<i64>().ok(),
-                                            backup_key
-                                        ],
-                                        |r| r.get(0),
-                                    )
-                                    .ok();
+                                let matching_addon = find_addon_id_by_backup_key(&tx, &flavour_id, &backup_key);
 
                                 let backup_id = uuid::Uuid::new_v4().to_string();
                                 let created_at = Utc::now().to_rfc3339();
@@ -494,10 +567,17 @@ pub fn import_from_v1(
                     if let Some(Value::Object(checked_map)) = state_map.get("updatesCheckedAt") {
                         for (flavour, timestamp_val) in checked_map {
                             if let Some(ts) = timestamp_val.as_str() {
+                                let mut has_updates = false;
+                                if let Some(Value::Object(avail_map)) = state_map.get("updateAvailable") {
+                                    if let Some(Value::Object(addon_updates)) = avail_map.get(flavour) {
+                                        has_updates = !addon_updates.is_empty();
+                                    }
+                                }
+                                let state_str = if has_updates { "updates_available" } else { "up_to_date" };
                                 tx.execute(
                                     "INSERT OR REPLACE INTO freshness (flavour, state, checked_at, last_success_at)
-                                     VALUES (?1, 'clean', ?2, ?2)",
-                                    params![flavour, ts],
+                                     VALUES (?1, ?2, ?3, ?3)",
+                                    params![flavour, state_str, ts],
                                 )?;
                             }
                         }
@@ -508,26 +588,10 @@ pub fn import_from_v1(
                         for (flavour, updates_val) in avail_map {
                             if let Value::Object(addon_updates) = updates_val {
                                 for (key, update_info) in addon_updates {
-                                    let matching_addon: Option<String> = tx
-                                        .query_row(
-                                            "SELECT id FROM addons WHERE flavour = ?1 AND (
-                                                project_id = ?2 OR
-                                                wago_id = ?3 OR
-                                                wago_slug = ?3 OR
-                                                repo = ?3 OR
-                                                curse_id = ?3
-                                            ) LIMIT 1",
-                                            params![
-                                                flavour,
-                                                key.parse::<i64>().ok(),
-                                                key
-                                            ],
-                                            |r| r.get(0),
-                                        )
-                                        .ok();
+                                    let matching_addon = find_addon_id_by_update_key(&tx, flavour, key);
 
                                     if let Some(aid) = matching_addon {
-                                        let update_file_id = update_info.get("fileId").and_then(|v| v.as_i64());
+                                        let update_file_id = parse_flexible_string(update_info.get("fileId").cloned());
                                         let update_version = update_info.get("version").and_then(|v| v.as_str().map(String::from));
                                         let checked_at = Utc::now().to_rfc3339();
 
@@ -543,9 +607,10 @@ pub fn import_from_v1(
                         }
                     }
 
-                    // jobs -> last 20 jobs
+                    // jobs -> last 20 jobs (newest jobs from tail of list)
                     if let Some(Value::Array(jobs_arr)) = state_map.get("jobs") {
-                        for job in jobs_arr.iter().take(20) {
+                        let start_idx = if jobs_arr.len() > 20 { jobs_arr.len() - 20 } else { 0 };
+                        for job in &jobs_arr[start_idx..] {
                             if let Value::Object(job_map) = job {
                                 let job_id = job_map.get("id").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                                 let kind = job_map.get("kind").and_then(|v| v.as_str()).unwrap_or("check");

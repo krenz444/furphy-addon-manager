@@ -70,6 +70,21 @@ pub fn validate_dev_wowroot(path_str: &str) -> Result<PathBuf, String> {
 }
 
 pub fn detect_wow_root(override_path: Option<&str>) -> Result<PathBuf, String> {
+    if is_dev() {
+        if let Some(ov) = override_path {
+            let trimmed = ov.trim();
+            if !trimmed.is_empty() {
+                return validate_dev_wowroot(trimmed);
+            }
+        }
+        match std::env::var("FURPHY_DEV_WOWROOT") {
+            Ok(val) => return validate_dev_wowroot(&val),
+            Err(_) => {
+                return Err("Dev build refused to start: FURPHY_DEV_WOWROOT is not set. Dev builds require a fixture root with spaces and parentheses per live-PC safety rules (ADR-307).".into());
+            }
+        }
+    }
+
     if let Some(ov) = override_path {
         let trimmed = ov.trim();
         if !trimmed.is_empty() {
@@ -78,15 +93,6 @@ pub fn detect_wow_root(override_path: Option<&str>) -> Result<PathBuf, String> {
                 return Ok(p);
             } else {
                 return Err(format!("Override WoW path does not exist: {}", trimmed));
-            }
-        }
-    }
-
-    if is_dev() {
-        match std::env::var("FURPHY_DEV_WOWROOT") {
-            Ok(val) => return validate_dev_wowroot(&val),
-            Err(_) => {
-                return Err("Dev build refused to start: FURPHY_DEV_WOWROOT is not set. Dev builds require a fixture root with spaces and parentheses per live-PC safety rules (ADR-307).".into());
             }
         }
     }
@@ -204,5 +210,19 @@ mod tests {
         assert_eq!(flavours[1].id, "classic");
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_dev_detect_wow_root_enforces_safety_guard_even_with_override() {
+        let temp = std::env::temp_dir();
+        let unsafe_path = temp.join("wow_unsafe_no_spaces");
+        let _ = fs::create_dir_all(&unsafe_path);
+        
+        let res = detect_wow_root(Some(unsafe_path.to_str().unwrap()));
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("spaces") || err.contains("parentheses"), "Error was: {}", err);
+
+        let _ = fs::remove_dir_all(&unsafe_path);
     }
 }
