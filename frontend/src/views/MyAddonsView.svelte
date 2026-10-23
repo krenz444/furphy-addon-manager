@@ -24,6 +24,7 @@
     onManageAllUntracked: () => void;
     onViewUntracked: () => void;
     onDensityChange: (density: 'comfortable' | 'compact') => void;
+    onInstallDeps?: (addonId?: string) => void;
   }
 
   let {
@@ -45,10 +46,11 @@
     onManageAllUntracked,
     onViewUntracked,
     onDensityChange,
+    onInstallDeps,
   }: Props = $props();
 
   let searchQuery = $state('');
-  let activeFilter = $state<'all' | 'updates' | 'pinned' | 'ignored' | 'old_patch'>('all');
+  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch'>('all');
   let sortBy = $state<'name' | 'status' | 'updated'>('name');
   let selectedIds = $state<Set<string>>(new Set());
 
@@ -59,6 +61,8 @@
     // Filter chip
     if (activeFilter === 'updates') {
       list = list.filter(a => !!a.update_version);
+    } else if (activeFilter === 'needs_deps') {
+      list = list.filter(a => !!(a.missing_deps && a.missing_deps.length > 0));
     } else if (activeFilter === 'pinned') {
       list = list.filter(a => !!a.pinned_file_id);
     } else if (activeFilter === 'ignored') {
@@ -88,11 +92,12 @@
       } else if (sortBy === 'status') {
         const priority = (item: Addon) => {
           if (item.update_version) return 1;
-          if (item.is_old_patch) return 2;
-          if (item.check_status === 'failed') return 3;
-          if (item.pinned_file_id) return 4;
-          if (item.ignore_updates) return 5;
-          return 6;
+          if (item.missing_deps && item.missing_deps.length > 0) return 2;
+          if (item.is_old_patch) return 3;
+          if (item.check_status === 'failed') return 4;
+          if (item.pinned_file_id) return 5;
+          if (item.ignore_updates) return 6;
+          return 7;
         };
         return priority(a) - priority(b);
       } else if (sortBy === 'updated') {
@@ -106,6 +111,7 @@
 
   // Tallies for filter chips
   let updatesCount = $derived(addons.filter(a => !!a.update_version).length);
+  let missingDepsCount = $derived(addons.filter(a => !!(a.missing_deps && a.missing_deps.length > 0)).length);
   let pinnedCount = $derived(addons.filter(a => !!a.pinned_file_id).length);
   let ignoredCount = $derived(addons.filter(a => a.ignore_updates).length);
   let oldPatchCount = $derived(addons.filter(a => a.is_old_patch).length);
@@ -155,6 +161,46 @@
       onManageAll={onManageAllUntracked}
       onViewUntracked={onViewUntracked}
     />
+  {/if}
+
+  {#if missingDepsCount > 0}
+    <aside class="missing-deps-banner" role="status" aria-label="Missing Dependencies Notice">
+      <div class="banner-content">
+        <div class="banner-icon-col">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="10" cy="10" r="8" />
+            <line x1="10" y1="6" x2="10" y2="10" />
+            <line x1="10" y1="14" x2="10.01" y2="14" />
+          </svg>
+        </div>
+        <div class="banner-text-col">
+          <strong class="banner-headline">
+            {missingDepsCount} {missingDepsCount === 1 ? 'addon has' : 'addons have'} missing dependencies
+          </strong>
+          <span class="banner-subtext">
+            Required dependencies must be installed for these addons to work in {flavour}.
+          </span>
+        </div>
+      </div>
+      <div class="banner-actions">
+        <button
+          type="button"
+          class="btn-banner-filter"
+          onclick={() => (activeFilter = 'needs_deps')}
+        >
+          View ({missingDepsCount})
+        </button>
+        {#if onInstallDeps}
+          <button
+            type="button"
+            class="btn-banner-install"
+            onclick={() => onInstallDeps?.()}
+          >
+            Install Missing Dependencies
+          </button>
+        {/if}
+      </div>
+    </aside>
   {/if}
 
   <header class="toolbar">
@@ -251,6 +297,19 @@
         </button>
       {/if}
 
+      {#if missingDepsCount > 0}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeFilter === 'needs_deps'}
+          class="filter-chip chip-warning"
+          class:active={activeFilter === 'needs_deps'}
+          onclick={() => (activeFilter = 'needs_deps')}
+        >
+          Needs Deps ({missingDepsCount})
+        </button>
+      {/if}
+
       {#if pinnedCount > 0}
         <button
           type="button"
@@ -291,15 +350,17 @@
       {/if}
     </div>
 
-    {#if updatesCount > 0}
-      <button
-        type="button"
-        class="btn-update-all"
-        onclick={onUpdateAll}
-      >
-        Update all ({updatesCount})
-      </button>
-    {/if}
+    <div class="filter-bar-actions">
+      {#if updatesCount > 0}
+        <button
+          type="button"
+          class="btn-update-all"
+          onclick={onUpdateAll}
+        >
+          Update all ({updatesCount})
+        </button>
+      {/if}
+    </div>
   </div>
 
   {#if selectedIds.size > 0}
@@ -437,6 +498,7 @@
                   onUnignore={onToggleIgnore}
                   onRetry={onUpdateAddon}
                   onViewDetails={onOpenAddonDrawer}
+                  onInstallDeps={() => onInstallDeps?.(addon.id)}
                 />
               </div>
 
@@ -449,6 +511,7 @@
                 <RowMenu
                   {addon}
                   onUpdate={onUpdateAddon}
+                  onInstallDeps={(a) => onInstallDeps?.(a.id)}
                   onViewDetails={onOpenAddonDrawer}
                   onTogglePin={onTogglePin}
                   onToggleIgnore={onToggleIgnore}
@@ -619,6 +682,12 @@
     color: var(--warning);
   }
 
+  .filter-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .btn-update-all {
     background: var(--accent);
     color: var(--accent-text);
@@ -632,6 +701,98 @@
 
   .btn-update-all:hover {
     background: var(--accent-hover);
+  }
+
+  /* Missing dependencies banner */
+  .missing-deps-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--bg-1);
+    border: 1px solid var(--warning);
+    border-radius: var(--radius);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    margin: 10px 1.25rem 4px 1.25rem;
+    flex-wrap: wrap;
+  }
+
+  .missing-deps-banner .banner-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .missing-deps-banner .banner-icon-col {
+    color: var(--warning);
+    display: flex;
+    align-items: center;
+  }
+
+  .missing-deps-banner .banner-text-col {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .missing-deps-banner .banner-headline {
+    color: var(--text);
+    font-size: 13px;
+  }
+
+  .missing-deps-banner .banner-subtext {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .missing-deps-banner .banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .btn-banner-filter {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast);
+  }
+
+  .btn-banner-filter:hover {
+    background: var(--bg-2);
+  }
+
+  .btn-banner-filter:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .btn-banner-install {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast), color var(--fast);
+  }
+
+  .btn-banner-install:hover {
+    background: var(--warning);
+    color: var(--bg-0);
+  }
+
+  .btn-banner-install:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .bulk-action-bar {

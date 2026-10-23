@@ -4,6 +4,7 @@
   interface Props {
     addon: Addon;
     onUpdate?: (addon: Addon) => void;
+    onInstallDeps?: (addon: Addon) => void;
     onViewDetails?: (addon: Addon, tab?: string) => void;
     onTogglePin?: (addon: Addon) => void;
     onToggleIgnore?: (addon: Addon) => void;
@@ -16,6 +17,7 @@
   let {
     addon,
     onUpdate,
+    onInstallDeps,
     onViewDetails,
     onTogglePin,
     onToggleIgnore,
@@ -78,6 +80,17 @@
 
   {#if isOpen}
     <div class="menu-dropdown" role="menu">
+      {#if addon.missing_deps && addon.missing_deps.length > 0 && onInstallDeps}
+        <button
+          type="button"
+          class="menu-item item-warning"
+          role="menuitem"
+          onclick={(e) => { e.stopPropagation(); closeMenu(); onInstallDeps?.(addon); }}
+        >
+          Install missing dependencies ({addon.missing_deps.length})
+        </button>
+      {/if}
+
       {#if addon.update_version && onUpdate}
         <button
           type="button"
@@ -237,6 +250,15 @@
   .menu-item:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: -1px;
+  }
+
+  .item-warning {
+    color: var(--warning);
+    font-weight: 600;
+  }
+
+  .item-warning:hover {
+    background: var(--warning-tint);
   }
 
   .item-accent {

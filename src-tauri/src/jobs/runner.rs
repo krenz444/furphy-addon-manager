@@ -129,7 +129,7 @@ impl JobRunner {
                 // Dual-write to v1 if folder exists (ADR-311, D-03)
                 let mutating_kinds = [
                     "sync", "install", "update-all-flavours", "adopt", "rollback", "remove",
-                    "switch-source", "add-by-slug", "add", "import",
+                    "switch-source", "add-by-slug", "add", "import", "install-deps",
                 ];
                 if mutating_kinds.contains(&kind) {
                     if let Ok(wow_root) = detect_wow_root(None) {
@@ -292,11 +292,31 @@ impl JobRunner {
                     &data_dir,
                     target_flv.client_interface,
                     self.policy.clone(),
-                    github_token,
+                    github_token.clone(),
                     only_ids.as_deref(),
                     force,
                 )
                 .await?;
+
+                if kind == "install" {
+                    if let Some(ref ids) = only_ids {
+                        for aid in ids {
+                            let _ = crate::engine::deps::install_missing_dependencies_for_addon(
+                                conn,
+                                &wow_root,
+                                flv,
+                                &target_flv.folder,
+                                &target_flv.addons_path,
+                                &data_dir,
+                                target_flv.client_interface,
+                                self.policy.clone(),
+                                github_token.clone(),
+                                aid,
+                            )
+                            .await;
+                        }
+                    }
+                }
 
                 let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
                 Ok((json, report.reload_needed))
@@ -470,14 +490,87 @@ impl JobRunner {
                     &data_dir,
                     target_flv.client_interface,
                     self.policy.clone(),
-                    github_token,
+                    github_token.clone(),
                     Some(&[addon_id.clone()]),
                     true,
                 )
                 .await?;
 
+                // Automatically resolve and install missing dependencies if any
+                let _ = crate::engine::deps::install_missing_dependencies_for_addon(
+                    conn,
+                    &wow_root,
+                    flv,
+                    &target_flv.folder,
+                    &target_flv.addons_path,
+                    &data_dir,
+                    target_flv.client_interface,
+                    self.policy.clone(),
+                    github_token,
+                    &addon_id,
+                )
+                .await;
+
                 let json = serde_json::to_string(&sync_rep).map_err(|e| e.to_string())?;
                 Ok((json, sync_rep.reload_needed))
+            }
+            "install-deps" => {
+                let flv = flavour.ok_or("Flavour is required for install-deps job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+
+                let addon_id = params
+                    .get("addon_id")
+                    .and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(n) = v.as_i64() {
+                            Some(n.to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                let installed_deps = if let Some(ref aid) = addon_id {
+                    crate::engine::deps::install_missing_dependencies_for_addon(
+                        conn,
+                        &wow_root,
+                        flv,
+                        &target_flv.folder,
+                        &target_flv.addons_path,
+                        &data_dir,
+                        target_flv.client_interface,
+                        self.policy.clone(),
+                        github_token,
+                        aid,
+                    )
+                    .await?
+                } else {
+                    crate::engine::deps::install_all_missing_dependencies_for_flavour(
+                        conn,
+                        &wow_root,
+                        flv,
+                        &target_flv.folder,
+                        &target_flv.addons_path,
+                        &data_dir,
+                        target_flv.client_interface,
+                        self.policy.clone(),
+                        github_token,
+                    )
+                    .await?
+                };
+
+                let count = installed_deps.len();
+                let reload_needed = count > 0 && crate::system::game::is_wow_running();
+                let json = serde_json::json!({
+                    "installed_deps": installed_deps,
+                    "count": count
+                })
+                .to_string();
+
+                Ok((json, reload_needed))
             }
             "import" => {
                 let flv = flavour.ok_or("Flavour is required for import job")?;
@@ -543,5 +636,52 @@ mod tests {
             Err(JobError::Busy(id)) => assert_eq!(id, "running-job-123"),
             other => panic!("Expected JobError::Busy, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_install_deps_job_execution() {
+        let temp = std::env::temp_dir().join("furphy test wow (install deps)");
+        let retail_addons = temp.join("_retail_").join("Interface").join("AddOns");
+        let _ = std::fs::create_dir_all(&retail_addons);
+        std::env::set_var("FURPHY_DEV_WOWROOT", temp.to_str().unwrap());
+
+        let policy = Arc::new(NetworkPolicy::new());
+        let runner = JobRunner::new(policy);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        // Insert flavour retail
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed, client_build, client_interface) \
+             VALUES ('retail', '_retail_', 'Retail', 1, '11.0.2', '110002')",
+            [],
+        ).unwrap();
+
+        // Insert addon without missing deps
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, required_deps) VALUES ('addon-1', 'retail', 'CleanAddon', '[]')",
+            [],
+        ).unwrap();
+
+        let res = runner.run_job(
+            &mut conn,
+            "install-deps",
+            Some("retail"),
+            serde_json::json!({ "addon_id": "addon-1" }),
+        ).await;
+
+        assert!(res.is_ok(), "install-deps job failed: {:?}", res);
+        let record = res.unwrap();
+        assert_eq!(record.kind, "install-deps");
+        assert_eq!(record.state, "completed");
+
+        let results_val: serde_json::Value = serde_json::from_str(&record.results.unwrap()).unwrap();
+        assert_eq!(results_val["count"], 0);
+        assert_eq!(results_val["installed_deps"], serde_json::json!([]));
+
+        // Cleanup
+        std::env::remove_var("FURPHY_DEV_WOWROOT");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

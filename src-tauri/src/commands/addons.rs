@@ -1,5 +1,8 @@
+use std::sync::Arc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::State;
 use crate::db::open_connection;
 use crate::db::repo::{get_installed_flavours_db, FlavourDto};
 use crate::engine::adopt::adopt_candidate_group;
@@ -8,7 +11,7 @@ use crate::engine::flavours::detect_installed_flavours_in_root;
 use crate::engine::ignore::set_ignore_updates;
 use crate::engine::pin::{pin_addon, unpin_addon};
 use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
-use crate::jobs::runner::JobRecord;
+use crate::jobs::runner::{JobRecord, JobRunner};
 use crate::paths::{detect_wow_root, get_db_path, is_dev};
 use crate::system::game::is_wow_running;
 
@@ -563,4 +566,43 @@ pub fn list_not_built_for_patch(
         client_build.as_deref(),
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn install_dependencies(
+    runner: State<'_, Arc<JobRunner>>,
+    flavour: String,
+    addon_id: Option<String>,
+) -> Result<Value, String> {
+    let runner = runner.inner().clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let params_val = serde_json::json!({
+        "addon_id": addon_id,
+    });
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async move {
+            let db_path = get_db_path();
+            let mut conn = match open_connection(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let res = runner
+                .run_job(&mut conn, "install-deps", Some(&flavour), params_val)
+                .await
+                .map(|rec| serde_json::to_value(&rec).unwrap_or(Value::Null))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+    });
+
+    rx.await.map_err(|e| e.to_string())?
 }

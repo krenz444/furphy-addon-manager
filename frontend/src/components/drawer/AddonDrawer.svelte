@@ -10,6 +10,7 @@
     onClose: () => void;
     onInstallVersion?: (addon: Addon, fileId: string) => void;
     onPinVersion?: (addon: Addon, fileId: string) => void;
+    onInstallDeps?: (addonId: string) => void;
   }
 
   let {
@@ -19,6 +20,7 @@
     onClose,
     onInstallVersion,
     onPinVersion,
+    onInstallDeps,
   }: Props = $props();
 
   interface ScreenshotItem {
@@ -286,6 +288,49 @@
       <div class="drawer-content">
         {#if activeTab === 'overview'}
           <div class="overview-section">
+            {#if addon.missing_deps && addon.missing_deps.length > 0}
+              <div class="missing-deps-callout" role="alert" aria-label="Missing dependencies callout">
+                <div class="callout-header">
+                  <div class="callout-title">
+                    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" class="warning-icon">
+                      <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                    </svg>
+                    <strong>Missing Dependencies ({addon.missing_deps.length})</strong>
+                  </div>
+                  {#if onInstallDeps}
+                    <button
+                      type="button"
+                      class="btn-warning-solid"
+                      onclick={() => onInstallDeps?.(addon.id)}
+                    >
+                      Install Missing Dependencies
+                    </button>
+                  {/if}
+                </div>
+                <p class="callout-desc">
+                  This addon requires {addon.missing_deps.length === 1 ? 'this missing dependency' : 'these missing dependencies'} to function properly:
+                </p>
+                <div class="callout-chips">
+                  {#each addon.missing_deps as dep}
+                    <div class="dep-badge">
+                      <span class="dep-label">{dep}</span>
+                      {#if onInstallDeps}
+                        <button
+                          type="button"
+                          class="btn-dep-install"
+                          onclick={() => onInstallDeps?.(addon.id)}
+                          title="Install {dep}"
+                          aria-label="Install dependency {dep}"
+                        >
+                          Install
+                        </button>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
             <div class="info-card">
               <div class="info-group">
                 <span class="info-label">Managed Folders ({addon.folders.length})</span>
@@ -295,6 +340,31 @@
                   {/each}
                 </div>
               </div>
+              {#if addon.missing_deps && addon.missing_deps.length > 0}
+                <div class="info-group">
+                  <span class="info-label">Dependencies</span>
+                  <div class="dep-chips-list">
+                    {#each addon.missing_deps as dep}
+                      <div class="dep-chip">
+                        <span class="dep-dot-missing"></span>
+                        <span class="dep-name">{dep}</span>
+                        <span class="dep-tag-missing">missing</span>
+                        {#if onInstallDeps}
+                          <button
+                            type="button"
+                            class="btn-dep-install-sm"
+                            onclick={() => onInstallDeps?.(addon.id)}
+                            title="Install {dep}"
+                            aria-label="Install dependency {dep}"
+                          >
+                            Install
+                          </button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               <div class="info-grid">
                 <div>
                   <span class="info-label">Installed At</span>
@@ -303,7 +373,7 @@
                 <div>
                   <span class="info-label">Status</span>
                   <span class="info-value">
-                    {addon.pinned_file_id ? 'Pinned' : addon.ignore_updates ? 'Ignoring updates' : addon.adopted ? 'Adopted from AddOns' : 'Managed'}
+                    {addon.pinned_file_id ? 'Pinned' : addon.ignore_updates ? 'Ignoring updates' : addon.missing_deps && addon.missing_deps.length > 0 ? 'Needs dependency' : addon.adopted ? 'Adopted from AddOns' : 'Managed'}
                   </span>
                 </div>
               </div>
@@ -959,5 +1029,173 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* Missing Dependencies Callout & Badges */
+  .missing-deps-callout {
+    background: var(--bg-1);
+    border: 1px solid var(--warning);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  }
+
+  .callout-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .callout-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--warning);
+    font-size: 13.5px;
+  }
+
+  .warning-icon {
+    flex-shrink: 0;
+  }
+
+  .callout-desc {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  .callout-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .dep-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--warning);
+    padding: 3px 6px 3px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .dep-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 500;
+  }
+
+  .btn-warning-solid {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    font-weight: 600;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast), color var(--fast), transform var(--fast);
+  }
+
+  .btn-warning-solid:hover {
+    background: var(--warning);
+    color: var(--bg-0);
+    transform: translateY(-1px);
+  }
+
+  .btn-warning-solid:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .btn-dep-install {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast), color var(--fast);
+  }
+
+  .btn-dep-install:hover {
+    background: var(--warning);
+    color: var(--bg-0);
+  }
+
+  .btn-dep-install:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
+  .dep-chips-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .dep-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+  }
+
+  .dep-dot-missing {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--warning);
+  }
+
+  .dep-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--text);
+  }
+
+  .dep-tag-missing {
+    font-size: 10.5px;
+    color: var(--warning);
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+
+  .btn-dep-install-sm {
+    background: rgba(255, 179, 71, 0.15);
+    color: var(--warning);
+    border: 1px solid rgba(255, 179, 71, 0.4);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast), color var(--fast);
+  }
+
+  .btn-dep-install-sm:hover {
+    background: var(--warning);
+    color: #12151f;
+  }
+
+  .btn-dep-install-sm:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 </style>

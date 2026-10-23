@@ -1,5 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::path::Path;
+use std::sync::Arc;
 use rusqlite::{params, Connection, Result};
+use crate::engine::add::{create_addon_record, AddonTarget};
+use crate::engine::sync::run_sync_for_flavour;
+use crate::net::policy::NetworkPolicy;
+
+pub const MAX_RECURSION_DEPTH: usize = 5;
+
+pub fn normalize_dep_slug(dep_name: &str) -> String {
+    dep_name.to_ascii_lowercase().replace('.', "-").replace('_', "-")
+}
 
 pub fn check_missing_dependencies(
     conn: &Connection,
@@ -23,18 +34,570 @@ pub fn check_missing_dependencies(
         return Ok(Vec::new());
     }
 
-    // 2. Get all installed folders in this flavour
-    let mut stmt = conn.prepare("SELECT folder FROM addon_folders WHERE flavour = ?1")?;
-    let rows = stmt.query_map(params![flavour], |r| r.get::<_, String>(0))?;
-    let installed_folders: HashSet<String> = rows.flatten().map(|f| f.to_ascii_lowercase()).collect();
-
-    // 3. Find missing
+    // 2. Find missing by checking presence across installed folders and registered addons
     let mut missing = Vec::new();
     for dep in required {
-        if !installed_folders.contains(&dep.to_ascii_lowercase()) {
+        if !is_dependency_already_present(conn, flavour, &dep) {
             missing.push(dep);
         }
     }
 
     Ok(missing)
+}
+
+pub async fn resolve_dependency_target(
+    dep_name: &str,
+    policy: &Arc<NetworkPolicy>,
+    data_dir: &Path,
+) -> Option<AddonTarget> {
+    let dep_trimmed = dep_name.trim();
+    if dep_trimmed.is_empty() {
+        return None;
+    }
+    let norm = normalize_dep_slug(dep_trimmed);
+
+    // 1. Check Catalogue (load_or_refresh_catalogue in crate::net::catalogue)
+    if let Ok(cf_client) = crate::net::curseforge::create_cf_client() {
+        if let Ok(cat) = crate::net::catalogue::load_or_refresh_catalogue(policy, &cf_client, data_dir).await {
+            // Exact slug match
+            if let Some(id) = cat.get_id_by_slug(dep_trimmed) {
+                return Some(AddonTarget::CurseForge(id));
+            }
+            // Normalized slug match
+            if let Some(id) = cat.get_id_by_slug(&norm) {
+                return Some(AddonTarget::CurseForge(id));
+            }
+        }
+
+        // 2. Fallback to CurseForge search via create_cf_client and query /api/v1/mods/search?gameId=1&searchFilter={dep_name}
+        let base_cf_url = crate::net::curseforge::get_cf_base_url();
+        let cf_search_url = reqwest::Url::parse_with_params(
+            &format!("{}/api/v1/mods/search", base_cf_url),
+            &[
+                ("gameId", "1"),
+                ("pageSize", "20"),
+                ("index", "0"),
+                ("searchFilter", dep_trimmed),
+            ],
+        )
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| {
+            format!("{}/api/v1/mods/search?gameId=1&pageSize=20&index=0", base_cf_url)
+        });
+
+        if let Ok(resp) = crate::net::curseforge::execute_cf_request(policy, &cf_client, &cf_search_url).await {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(items) = json.get("data").and_then(|v| v.as_array()) {
+                        if !items.is_empty() {
+                            let matched = items.iter().find(|item| {
+                                let slug = item.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                                let name = item.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                                slug.eq_ignore_ascii_case(dep_trimmed)
+                                    || slug.eq_ignore_ascii_case(&norm)
+                                    || name.eq_ignore_ascii_case(dep_trimmed)
+                            }).or_else(|| items.first());
+
+                            if let Some(item) = matched {
+                                if let Some(id) = item.get("id").and_then(|v| v.as_i64()) {
+                                    return Some(AddonTarget::CurseForge(id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. If still not found, check Wago search /api/search?q={dep_name} -> AddonTarget::Wago(slug)
+    if let Ok(wago_client) = crate::net::wago::create_wago_client() {
+        let base_wago = crate::net::wago::get_wago_base_url();
+        let parsed_wago = reqwest::Url::parse_with_params(
+            &format!("{}/api/search", base_wago),
+            &[("q", dep_trimmed), ("sort", "popular"), ("page", "1")],
+        );
+
+        if let Ok(parsed_url) = parsed_wago {
+            let host = parsed_url.host_str().unwrap_or("").to_string();
+            let wago_url = parsed_url.to_string();
+            if let Ok(_permit) = policy.acquire_permit(&host).await {
+                match wago_client.get(&wago_url).send().await {
+                    Ok(resp) => {
+                        policy.breaker.register_http_response(&host);
+                        if resp.status().is_success() {
+                            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                let results = json.get("results").and_then(|v| v.as_array())
+                                    .or_else(|| json.as_array());
+                                if let Some(items) = results {
+                                    if !items.is_empty() {
+                                        let matched = items.iter().find(|item| {
+                                            let slug = item.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                                            let name = item.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                                            slug.eq_ignore_ascii_case(dep_trimmed)
+                                                || slug.eq_ignore_ascii_case(&norm)
+                                                || name.eq_ignore_ascii_case(dep_trimmed)
+                                        }).or_else(|| items.first());
+
+                                        if let Some(item) = matched {
+                                            if let Some(slug) = item.get("slug").and_then(|v| v.as_str()) {
+                                                return Some(AddonTarget::Wago(slug.to_string()));
+                                            } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                                return Some(AddonTarget::Wago(id.to_string()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        policy.breaker.register_connectivity_failure(&host);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
+    let dep_lower = dep_name.to_ascii_lowercase();
+    let norm = normalize_dep_slug(dep_name);
+
+    // 1. Check addon_folders table
+    if let Ok(mut stmt) = conn.prepare("SELECT folder FROM addon_folders WHERE flavour = ?1") {
+        if let Ok(rows) = stmt.query_map(params![flavour], |r| r.get::<_, String>(0)) {
+            for f in rows.flatten() {
+                let f_lower = f.to_ascii_lowercase();
+                if f_lower == dep_lower || f_lower == norm || normalize_dep_slug(&f) == norm {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Check addons table
+    let in_addons: bool = conn
+        .query_row(
+            "SELECT 1 FROM addons WHERE flavour = ?1 AND (
+                LOWER(name) = ?2 OR LOWER(name) = ?3 OR
+                LOWER(wago_slug) = ?2 OR LOWER(wago_slug) = ?3 OR
+                LOWER(id) = ?2
+            ) LIMIT 1",
+            params![flavour, dep_lower, norm],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    in_addons
+}
+
+pub fn is_target_already_present(conn: &Connection, flavour: &str, target: &AddonTarget) -> bool {
+    match target {
+        AddonTarget::CurseForge(pid) => conn
+            .query_row(
+                "SELECT 1 FROM addons WHERE flavour = ?1 AND project_id = ?2 LIMIT 1",
+                params![flavour, pid],
+                |_| Ok(true),
+            )
+            .unwrap_or(false),
+        AddonTarget::Wago(slug) => conn
+            .query_row(
+                "SELECT 1 FROM addons WHERE flavour = ?1 AND (LOWER(wago_slug) = LOWER(?2) OR wago_id = ?2) LIMIT 1",
+                params![flavour, slug],
+                |_| Ok(true),
+            )
+            .unwrap_or(false),
+        AddonTarget::GitHub(repo) => conn
+            .query_row(
+                "SELECT 1 FROM addons WHERE flavour = ?1 AND LOWER(repo) = LOWER(?2) LIMIT 1",
+                params![flavour, repo],
+                |_| Ok(true),
+            )
+            .unwrap_or(false),
+    }
+}
+
+pub async fn install_missing_dependencies_for_addon(
+    conn: &mut Connection,
+    wow_root: &Path,
+    flavour: &str,
+    flavour_folder: &str,
+    addons_path: &Path,
+    data_dir: &Path,
+    client_interface: Option<i32>,
+    policy: Arc<NetworkPolicy>,
+    github_token: Option<String>,
+    addon_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut visited = HashSet::new();
+    let mut installed = Vec::new();
+
+    visited.insert(addon_id.to_ascii_lowercase());
+    if let Ok(name) = conn.query_row(
+        "SELECT name FROM addons WHERE id = ?1",
+        params![addon_id],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        if let Some(n) = name {
+            visited.insert(n.to_ascii_lowercase());
+            visited.insert(normalize_dep_slug(&n));
+        }
+    }
+
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    queue.push_back((addon_id.to_string(), 0));
+
+    while let Some((current_id, depth)) = queue.pop_front() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue;
+        }
+
+        let missing = check_missing_dependencies(conn, flavour, &current_id)
+            .map_err(|e| e.to_string())?;
+
+        for dep in missing {
+            let dep_lower = dep.to_ascii_lowercase();
+            let dep_norm = normalize_dep_slug(&dep);
+
+            if !visited.insert(dep_lower.clone()) {
+                continue;
+            }
+            visited.insert(dep_norm.clone());
+
+            if is_dependency_already_present(conn, flavour, &dep) {
+                continue;
+            }
+
+            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir).await {
+                if is_target_already_present(conn, flavour, &target) {
+                    continue;
+                }
+
+                let new_addon_id = match create_addon_record(conn, flavour, target, Some(&dep)) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to create addon record for dep '{}': {}", dep, e),
+                        );
+                        continue;
+                    }
+                };
+
+                let sync_res = run_sync_for_flavour(
+                    conn,
+                    wow_root,
+                    flavour,
+                    flavour_folder,
+                    addons_path,
+                    data_dir,
+                    client_interface,
+                    policy.clone(),
+                    github_token.clone(),
+                    Some(&[new_addon_id.clone()]),
+                    true,
+                )
+                .await;
+
+                match sync_res {
+                    Ok(ref rep) if rep.failed == 0 && rep.results.iter().any(|r| r.status == "Updated" || r.status == "Up-to-date" || r.status == "Installed") => {
+                        installed.push(dep.clone());
+                        queue.push_back((new_addon_id, depth + 1));
+                    }
+                    Ok(rep) => {
+                        let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(installed)
+}
+
+pub async fn install_all_missing_dependencies_for_flavour(
+    conn: &mut Connection,
+    wow_root: &Path,
+    flavour: &str,
+    flavour_folder: &str,
+    addons_path: &Path,
+    data_dir: &Path,
+    client_interface: Option<i32>,
+    policy: Arc<NetworkPolicy>,
+    github_token: Option<String>,
+) -> Result<Vec<String>, String> {
+    let addon_ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM addons WHERE flavour = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![flavour], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.flatten().collect()
+    };
+
+    let mut visited = HashSet::new();
+    let mut total_installed = Vec::new();
+
+    for aid in &addon_ids {
+        visited.insert(aid.to_ascii_lowercase());
+        if let Ok(name) = conn.query_row(
+            "SELECT name FROM addons WHERE id = ?1",
+            params![aid],
+            |r| r.get::<_, Option<String>>(0),
+        ) {
+            if let Some(n) = name {
+                visited.insert(n.to_ascii_lowercase());
+                visited.insert(normalize_dep_slug(&n));
+            }
+        }
+    }
+
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    for aid in addon_ids {
+        queue.push_back((aid, 0));
+    }
+
+    while let Some((current_id, depth)) = queue.pop_front() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue;
+        }
+
+        let missing = match check_missing_dependencies(conn, flavour, &current_id) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        for dep in missing {
+            let dep_lower = dep.to_ascii_lowercase();
+            let dep_norm = normalize_dep_slug(&dep);
+
+            if !visited.insert(dep_lower.clone()) {
+                continue;
+            }
+            visited.insert(dep_norm.clone());
+
+            if is_dependency_already_present(conn, flavour, &dep) {
+                continue;
+            }
+
+            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir).await {
+                if is_target_already_present(conn, flavour, &target) {
+                    continue;
+                }
+
+                let new_addon_id = match create_addon_record(conn, flavour, target, Some(&dep)) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to create addon record for dep '{}': {}", dep, e),
+                        );
+                        continue;
+                    }
+                };
+
+                let sync_res = run_sync_for_flavour(
+                    conn,
+                    wow_root,
+                    flavour,
+                    flavour_folder,
+                    addons_path,
+                    data_dir,
+                    client_interface,
+                    policy.clone(),
+                    github_token.clone(),
+                    Some(&[new_addon_id.clone()]),
+                    true,
+                )
+                .await;
+
+                match sync_res {
+                    Ok(ref rep) if rep.failed == 0 && rep.results.iter().any(|r| r.status == "Updated" || r.status == "Up-to-date" || r.status == "Installed") => {
+                        if !total_installed.contains(&dep) {
+                            total_installed.push(dep.clone());
+                        }
+                        queue.push_back((new_addon_id, depth + 1));
+                    }
+                    Ok(rep) => {
+                        let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
+                        crate::logging::append_sync_log(
+                            Some(flavour),
+                            "WARN",
+                            &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(total_installed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use rusqlite::Connection;
+    use crate::db::schema::INITIAL_SCHEMA;
+
+    #[test]
+    fn test_normalize_dep_slug() {
+        assert_eq!(normalize_dep_slug("LibSharedMedia-3.0"), "libsharedmedia-3-0");
+        assert_eq!(normalize_dep_slug("CallbackHandler-1.0"), "callbackhandler-1-0");
+        assert_eq!(normalize_dep_slug("AceGUI-3.0_SharedMediaWidgets"), "acegui-3-0-sharedmediawidgets");
+        assert_eq!(normalize_dep_slug("Ace3"), "ace3");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dependency_target_catalogue_lookup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let catalogue_file = cache_dir.join("cf_catalogue.json");
+
+        // Write sample catalogue JSON with both standard and normalized slugs
+        let sample_catalogue = serde_json::json!({
+            "details": 61288,
+            "libsharedmedia-3-0": 13346,
+            "callbackhandler-1-0": 13347,
+            "ace3": 13345
+        });
+        fs::write(&catalogue_file, sample_catalogue.to_string()).unwrap();
+
+        let policy = Arc::new(NetworkPolicy::new());
+
+        // Exact match
+        let res_details = resolve_dependency_target("details", &policy, temp_dir.path()).await;
+        match res_details {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 61288),
+            other => panic!("Expected CurseForge(61288), got {:?}", other),
+        }
+
+        // Normalized match: LibSharedMedia-3.0 -> libsharedmedia-3-0
+        let res_lsm = resolve_dependency_target("LibSharedMedia-3.0", &policy, temp_dir.path()).await;
+        match res_lsm {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 13346),
+            other => panic!("Expected CurseForge(13346), got {:?}", other),
+        }
+
+        // Normalized match: CallbackHandler-1.0 -> callbackhandler-1-0
+        let res_cbh = resolve_dependency_target("CallbackHandler-1.0", &policy, temp_dir.path()).await;
+        match res_cbh {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 13347),
+            other => panic!("Expected CurseForge(13347), got {:?}", other),
+        }
+
+        // Whitespace/empty
+        assert!(resolve_dependency_target("   ", &policy, temp_dir.path()).await.is_none());
+    }
+
+    #[test]
+    fn test_cycle_detection_visited_set() {
+        let mut visited = HashSet::new();
+        visited.insert("addon_a".to_string());
+
+        let dep = "addon_b";
+        let inserted = visited.insert(dep.to_string());
+        assert!(inserted, "First visit of addon_b should succeed");
+
+        // Now addon_b requires addon_a
+        let cycle_dep = "addon_a";
+        let cycle_inserted = visited.insert(cycle_dep.to_string());
+        assert!(!cycle_inserted, "Second visit of addon_a should be rejected by cycle detection");
+    }
+
+    #[test]
+    fn test_is_dependency_already_present() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-1', 'retail', 'Ace3')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'LibSharedMedia-3.0', 'addon-1')",
+            [],
+        ).unwrap();
+
+        // 1. Matched by addon name
+        assert!(is_dependency_already_present(&conn, "retail", "Ace3"));
+        assert!(is_dependency_already_present(&conn, "retail", "ace3"));
+
+        // 2. Matched by addon_folder
+        assert!(is_dependency_already_present(&conn, "retail", "LibSharedMedia-3.0"));
+        assert!(is_dependency_already_present(&conn, "retail", "libsharedmedia-3.0"));
+        assert!(is_dependency_already_present(&conn, "retail", "libsharedmedia-3-0"));
+
+        // 3. Not present
+        assert!(!is_dependency_already_present(&conn, "retail", "NonExistentLib"));
+    }
+
+    #[test]
+    fn test_check_missing_dependencies_harmonized() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, required_deps) VALUES ('addon-parent', 'retail', 'ParentAddon', '[\"Ace3\", \"LibSharedMedia-3.0\", \"MissingLib-1.0\"]')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-ace', 'retail', 'Ace3')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-lsm', 'retail', 'LibSharedMedia')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'LibSharedMedia-3.0', 'addon-lsm')",
+            [],
+        ).unwrap();
+
+        let missing = check_missing_dependencies(&conn, "retail", "addon-parent").unwrap();
+        assert_eq!(missing, vec!["MissingLib-1.0".to_string()]);
+    }
 }

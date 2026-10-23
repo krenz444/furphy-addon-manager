@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke, isMockMode } from './lib/ipc';
+  import { invoke, isMockMode, installDependencies } from './lib/ipc';
   import Sidebar from './components/layout/Sidebar.svelte';
   import MyAddonsView from './views/MyAddonsView.svelte';
   import GetAddonsView from './views/GetAddonsView.svelte';
@@ -166,7 +166,14 @@
       }>('get_state', { flavour: flavourId });
 
       if (stateRes) {
-        if (stateRes.addons) addons = stateRes.addons;
+        if (stateRes.addons) {
+          addons = stateRes.addons;
+          if (activeDrawerAddon) {
+            const currentId = activeDrawerAddon.id;
+            const refreshed = addons.find((a) => a.id === currentId);
+            if (refreshed) activeDrawerAddon = refreshed;
+          }
+        }
         if (stateRes.freshness) freshness = stateRes.freshness;
         if (stateRes.running_job !== undefined) runningJob = stateRes.running_job;
         if (stateRes.untracked_count !== undefined) untrackedCount = stateRes.untracked_count;
@@ -182,6 +189,11 @@
       console.warn('Could not refresh flavour data:', err);
       try {
         addons = await invoke<Addon[]>('get_addons', { flavour: flavourId });
+        if (activeDrawerAddon) {
+          const currentId = activeDrawerAddon.id;
+          const refreshed = addons.find((a) => a.id === currentId);
+          if (refreshed) activeDrawerAddon = refreshed;
+        }
       } catch {
         addons = [];
       }
@@ -265,6 +277,50 @@
         runningJob = { ...runningJob, state: 'failed', error: String(err) };
       }
       addToast('error', 'Update failed: ' + err);
+    }
+  }
+
+  async function handleInstallDeps(addonId?: string) {
+    try {
+      const targetAddon = addonId ? addons.find((a) => a.id === addonId) : null;
+      const targetName = targetAddon?.name ?? addonId;
+      runningJob = {
+        id: 'job-dep-' + Date.now(),
+        kind: 'install_dependencies',
+        flavour: activeFlavour,
+        params: JSON.stringify({ addon_id: addonId ?? null }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: isGameActive,
+        log_path: null,
+      };
+      activeJobPhase = 'Installing Dependencies';
+      currentJobAddon = targetName ? `Resolving dependencies for ${targetName}…` : 'Resolving missing dependencies…';
+      jobLogs = [
+        `[Dependencies] Starting dependency installation for ${targetName ?? 'all addons in ' + activeFlavour}`,
+      ];
+
+      await installDependencies(activeFlavour, addonId);
+
+      addToast(
+        'success',
+        targetName
+          ? `Installed missing dependencies for ${targetName}`
+          : 'All missing dependencies installed successfully.'
+      );
+      if (isGameActive) {
+        reloadNeeded = true;
+      }
+      await refreshFlavourData(activeFlavour);
+      runningJob = null;
+    } catch (err: unknown) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err) };
+      }
+      addToast('error', 'Dependency installation failed: ' + err);
     }
   }
 
@@ -535,6 +591,7 @@
           onManageAllUntracked={handleManageAllUntracked}
           onViewUntracked={() => (activeView = 'settings')}
           onDensityChange={handleDensityChange}
+          onInstallDeps={handleInstallDeps}
         />
       {:else if activeView === 'get_addons'}
         <GetAddonsView
@@ -598,6 +655,7 @@
         addToast('info', `Pinned to version ${fileId}`);
         await refreshFlavourData(activeFlavour);
       }}
+      onInstallDeps={handleInstallDeps}
     />
   {/if}
 

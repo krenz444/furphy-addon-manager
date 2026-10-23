@@ -8,9 +8,10 @@
     onUnignore?: (addon: Addon) => void;
     onRetry?: (addon: Addon) => void;
     onViewDetails?: (addon: Addon) => void;
+    onInstallDeps?: (addon?: Addon) => void;
   }
 
-  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails }: Props = $props();
+  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails, onInstallDeps }: Props = $props();
 
   let hasMissingDeps = $derived((addon.missing_deps && addon.missing_deps.length > 0) ?? false);
 
@@ -34,7 +35,13 @@
       onUnignore(addon);
     } else if (statusType === 'failed' && onRetry) {
       onRetry(addon);
-    } else if ((statusType === 'needs_dep' || statusType === 'old_patch') && onViewDetails) {
+    } else if (statusType === 'needs_dep') {
+      if (onInstallDeps) {
+        onInstallDeps(addon);
+      } else if (onViewDetails) {
+        onViewDetails(addon);
+      }
+    } else if (statusType === 'old_patch' && onViewDetails) {
       onViewDetails(addon);
     }
   }
@@ -69,14 +76,30 @@
     Ignored
   </button>
 {:else if statusType === 'needs_dep'}
-  <button
-    type="button"
-    class="status-pill pill-needs-dep"
-    onclick={handleClick}
-    title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to view details."
-  >
-    Needs a dependency
-  </button>
+  {#if onInstallDeps}
+    <button
+      type="button"
+      class="status-pill pill-needs-dep interactive"
+      onclick={(e) => {
+        e.stopPropagation();
+        onInstallDeps(addon);
+      }}
+      aria-label="Install missing dependencies for {addon.name ?? addon.id}: {addon.missing_deps?.join(', ') || 'Unknown'}"
+      title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to install."
+    >
+      <span class="pill-dot"></span>
+      Install deps ({addon.missing_deps?.length ?? 1})
+    </button>
+  {:else}
+    <button
+      type="button"
+      class="status-pill pill-needs-dep"
+      onclick={handleClick}
+      title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to view details."
+    >
+      Needs a dependency
+    </button>
+  {/if}
 {:else if statusType === 'old_patch'}
   <button
     type="button"
@@ -175,21 +198,32 @@
   .pill-needs-dep {
     background: var(--warning-tint);
     color: var(--warning);
-    border-color: rgba(255, 179, 71, 0.4);
+    border-color: var(--warning);
   }
 
   .pill-needs-dep:hover {
-    background: rgba(255, 179, 71, 0.25);
+    background: var(--warning-tint);
+    border-color: var(--warning);
+  }
+
+  .pill-needs-dep.interactive {
+    cursor: pointer;
+  }
+
+  .pill-needs-dep.interactive:hover {
+    background: var(--warning);
+    color: var(--bg-0);
+    border-color: var(--warning);
   }
 
   .pill-old-patch {
     background: var(--warning-tint);
     color: var(--warning);
-    border-color: rgba(255, 179, 71, 0.35);
+    border-color: var(--warning);
   }
 
   .pill-old-patch:hover {
-    background: rgba(255, 179, 71, 0.25);
+    background: var(--warning-tint);
   }
 
   .pill-failed {

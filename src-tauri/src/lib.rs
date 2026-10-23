@@ -212,6 +212,7 @@ pub fn run() {
             commands::addons::adopt_untracked,
             commands::addons::adopt_all_untracked,
             commands::addons::list_not_built_for_patch,
+            commands::addons::install_dependencies,
             commands::jobs::start_job,
             commands::jobs::list_jobs,
             commands::jobs::get_job,
