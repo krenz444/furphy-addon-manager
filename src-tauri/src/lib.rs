@@ -142,12 +142,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            if let Some(main_window) = app.get_webview_window("main") {
+            let window = app.get_webview_window("main")
+                .or_else(|| app.webview_windows().values().next().cloned());
+            if let Some(main_window) = window {
                 system::window::apply_saved_webview_window_bounds(&main_window);
                 // If started with --tray, hide the main window initially
                 if std::env::args().any(|a| a == "--tray") {
                     let _ = main_window.hide();
+                } else {
+                    let _ = main_window.show();
+                    let _ = main_window.set_focus();
                 }
+            } else {
+                eprintln!("[WARN] No main webview window found in setup!");
             }
 
             // Initialize Scheduler, Policy, Runner and Tray
