@@ -239,7 +239,7 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
         } else {
             "Furphy Addon Manager".into()
         },
-        version: "2.0.0-dev".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
         is_dev: dev,
         identifier: if dev {
             "krenzcreative.furphy.addonmanager.dev".into()

@@ -112,10 +112,10 @@
         appInfo = await invoke<AppInfo>('get_app_info');
       } catch {
         appInfo = {
-          name: 'Furphy Dev',
-          version: '2.0.0-dev',
-          is_dev: true,
-          identifier: 'krenzcreative.furphy.addonmanager.dev',
+          name: 'Furphy Addon Manager',
+          version: '2.0.0',
+          is_dev: false,
+          identifier: 'krenzcreative.furphy.addonmanager',
         };
       }
 
