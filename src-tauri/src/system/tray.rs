@@ -340,10 +340,18 @@ pub fn setup_tray<R: tauri::Runtime>(
     let tooltip = make_tooltip(&snapshot.core_text);
 
     let sched_clone = scheduler.clone();
-    let _tray = TrayIconBuilder::with_id("tray")
+    let mut builder = TrayIconBuilder::with_id("tray")
         .tooltip(&tooltip)
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(false);
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    } else if let Ok(icon) = tauri::image::Image::from_app_icon_resource(32) {
+        builder = builder.icon(icon);
+    }
+
+    let _tray = builder
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
