@@ -460,31 +460,41 @@ pub fn scan_untracked(flavour: Option<String>) -> Result<Vec<ScannedCandidateGro
 }
 
 #[tauri::command]
-pub fn delete_untracked_folder(flavour: String, folder: String) -> Result<(), String> {
-    if folder.trim().is_empty()
-        || folder == "."
-        || folder == ".."
-        || folder.contains('/')
-        || folder.contains('\\')
-        || folder.contains("..")
-        || folder.contains(':')
-    {
-        return Err("Invalid folder name: path separators and directory traversal are rejected".into());
+pub fn delete_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(), String> {
+    if folders.is_empty() {
+        return Ok(());
     }
+
+    for folder in &folders {
+        let trimmed = folder.trim();
+        if trimmed.is_empty()
+            || trimmed == "."
+            || trimmed == ".."
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains("..")
+            || trimmed.contains(':')
+        {
+            return Err("Invalid folder name: path separators and directory traversal are rejected".into());
+        }
+    }
+
     let db_path = get_db_path();
     let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
-    let mut stmt = conn
-        .prepare("SELECT 1 FROM addon_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)")
-        .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query(rusqlite::params![flavour, folder])
-        .map_err(|e| e.to_string())?;
-    if rows.next().map_err(|e| e.to_string())?.is_some() {
-        return Err(format!(
-            "Folder '{}' is tracked by an existing addon and cannot be deleted as untracked",
-            folder
-        ));
+    for folder in &folders {
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM addon_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(rusqlite::params![flavour, folder.trim()])
+            .map_err(|e| e.to_string())?;
+        if rows.next().map_err(|e| e.to_string())?.is_some() {
+            return Err(format!(
+                "Folder '{}' is tracked by an existing addon and cannot be deleted as untracked",
+                folder
+            ));
+        }
     }
 
     let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
@@ -493,10 +503,143 @@ pub fn delete_untracked_folder(flavour: String, folder: String) -> Result<(), St
         .iter()
         .find(|f| f.id == flavour)
         .ok_or_else(|| format!("Flavour '{}' not installed", flavour))?;
-    let target = flv.addons_path.join(&folder);
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+
+    for folder in &folders {
+        let target = flv.addons_path.join(folder.trim());
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+        }
+        let _ = conn.execute(
+            "DELETE FROM ignored_untracked_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)",
+            rusqlite::params![flavour, folder.trim()],
+        );
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_untracked_folder(flavour: String, folder: String) -> Result<(), String> {
+    delete_untracked_addon(flavour, vec![folder])
+}
+
+#[tauri::command]
+pub fn ignore_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    for folder in folders {
+        let trimmed = folder.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO ignored_untracked_folders (flavour, folder) VALUES (?1, ?2)",
+            rusqlite::params![flavour, trimmed],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unignore_untracked_folder(flavour: String, folder: String) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM ignored_untracked_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)",
+        rusqlite::params![flavour, folder.trim()],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_ignored_untracked(flavour: String) -> Result<Vec<String>, String> {
+    let db_path = get_db_path();
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT folder FROM ignored_untracked_folders WHERE flavour = ?1 ORDER BY folder COLLATE NOCASE ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![flavour], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let result = rows.flatten().collect();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn ignore_dependency(addon_id: String, dep_name: String) -> Result<(), String> {
+    let dep_trimmed = dep_name.trim();
+    if dep_trimmed.is_empty() {
+        return Err("Dependency name cannot be empty".into());
+    }
+
+    let db_path = get_db_path();
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    let existing_json: Option<String> = conn
+        .query_row(
+            "SELECT ignored_deps FROM addons WHERE id = ?1",
+            rusqlite::params![addon_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Addon '{}' not found: {}", addon_id, e))?;
+
+    let mut list: Vec<String> = existing_json
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if !list.iter().any(|d| d.eq_ignore_ascii_case(dep_trimmed)) {
+        list.push(dep_trimmed.to_string());
+    }
+
+    let new_json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE addons SET ignored_deps = ?1 WHERE id = ?2",
+        rusqlite::params![new_json, addon_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unignore_dependency(addon_id: String, dep_name: String) -> Result<(), String> {
+    let dep_trimmed = dep_name.trim();
+    let db_path = get_db_path();
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    let existing_json: Option<String> = conn
+        .query_row(
+            "SELECT ignored_deps FROM addons WHERE id = ?1",
+            rusqlite::params![addon_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Addon '{}' not found: {}", addon_id, e))?;
+
+    let list: Vec<String> = existing_json
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let updated_list: Vec<String> = list
+        .into_iter()
+        .filter(|d| !d.eq_ignore_ascii_case(dep_trimmed))
+        .collect();
+
+    let new_json = serde_json::to_string(&updated_list).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE addons SET ignored_deps = ?1 WHERE id = ?2",
+        rusqlite::params![new_json, addon_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
     Ok(())
 }
 
@@ -605,4 +748,216 @@ pub async fn install_dependencies(
     });
 
     rx.await.map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use crate::db::schema::INITIAL_SCHEMA;
+
+    #[test]
+    fn test_delete_untracked_addon_traversal_rejection() {
+        let bad = [
+            "../SavedVariables",
+            "../../Windows",
+            "folder/subfolder",
+            "folder\\subfolder",
+            "C:AddOns",
+            "..",
+            ".",
+            "   ",
+        ];
+
+        for folder in bad {
+            let res = delete_untracked_addon("retail".to_string(), vec![folder.to_string()]);
+            assert!(res.is_err(), "Expected folder '{}' to be rejected", folder);
+            let err = res.unwrap_err();
+            assert!(
+                err.contains("path separators and directory traversal are rejected")
+                    || err.contains("Invalid folder name"),
+                "Unexpected error message: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_ignored_dependency_lifecycle() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let orig_local = std::env::var("LOCALAPPDATA").ok();
+        std::env::set_var("LOCALAPPDATA", temp.path().to_str().unwrap());
+
+        let db_path = get_db_path();
+        let conn = open_connection(&db_path).unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-1', 'retail', 'TestAddon')",
+            [],
+        ).unwrap();
+
+        // 1. Ignore "exwindcore"
+        ignore_dependency("addon-1".to_string(), "exwindcore".to_string()).unwrap();
+
+        let val: String = conn.query_row(
+            "SELECT ignored_deps FROM addons WHERE id = 'addon-1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        let list: Vec<String> = serde_json::from_str(&val).unwrap();
+        assert_eq!(list, vec!["exwindcore"]);
+
+        // 2. Ignore "Ace3"
+        ignore_dependency("addon-1".to_string(), "Ace3".to_string()).unwrap();
+        let val2: String = conn.query_row(
+            "SELECT ignored_deps FROM addons WHERE id = 'addon-1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        let list2: Vec<String> = serde_json::from_str(&val2).unwrap();
+        assert_eq!(list2, vec!["exwindcore", "Ace3"]);
+
+        // 3. Duplicate ignore is no-op
+        ignore_dependency("addon-1".to_string(), "exwindcore".to_string()).unwrap();
+        let val3: String = conn.query_row(
+            "SELECT ignored_deps FROM addons WHERE id = 'addon-1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        let list3: Vec<String> = serde_json::from_str(&val3).unwrap();
+        assert_eq!(list3, vec!["exwindcore", "Ace3"]);
+
+        // 4. Unignore "exwindcore" (case insensitive)
+        unignore_dependency("addon-1".to_string(), "ExWindCore".to_string()).unwrap();
+        let val4: String = conn.query_row(
+            "SELECT ignored_deps FROM addons WHERE id = 'addon-1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        let list4: Vec<String> = serde_json::from_str(&val4).unwrap();
+        assert_eq!(list4, vec!["Ace3"]);
+
+        // Restore env
+        if let Some(l) = orig_local {
+            std::env::set_var("LOCALAPPDATA", l);
+        } else {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+    }
+
+    #[test]
+    fn test_ignored_untracked_folders_lifecycle() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let orig_local = std::env::var("LOCALAPPDATA").ok();
+        std::env::set_var("LOCALAPPDATA", temp.path().to_str().unwrap());
+
+        let db_path = get_db_path();
+        let conn = open_connection(&db_path).unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        // 1. Initially empty
+        let initial = list_ignored_untracked("retail".to_string()).unwrap();
+        assert!(initial.is_empty());
+
+        // 2. Ignore multiple folders
+        ignore_untracked_addon(
+            "retail".to_string(),
+            vec!["FolderA".to_string(), "FolderB".to_string()],
+        ).unwrap();
+
+        let list = list_ignored_untracked("retail".to_string()).unwrap();
+        assert_eq!(list, vec!["FolderA", "FolderB"]);
+
+        // 3. Unignore FolderA case-insensitively
+        unignore_untracked_folder("retail".to_string(), "foldera".to_string()).unwrap();
+
+        let list_after = list_ignored_untracked("retail".to_string()).unwrap();
+        assert_eq!(list_after, vec!["FolderB"]);
+
+        // Restore env
+        if let Some(l) = orig_local {
+            std::env::set_var("LOCALAPPDATA", l);
+        } else {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+    }
+
+    #[test]
+    fn test_delete_untracked_addon_success_and_tracked_guard() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let temp_local = tempdir().unwrap();
+        let orig_local = std::env::var("LOCALAPPDATA").ok();
+        std::env::set_var("LOCALAPPDATA", temp_local.path().to_str().unwrap());
+
+        let temp_wow = std::env::temp_dir().join("furphy test wow (delete untracked)");
+        let retail_addons = temp_wow.join("_retail_").join("Interface").join("AddOns");
+        std::fs::create_dir_all(&retail_addons).unwrap();
+        std::env::set_var("FURPHY_DEV_WOWROOT", temp_wow.to_str().unwrap());
+
+        let db_path = get_db_path();
+        let conn = open_connection(&db_path).unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        // Create 2 untracked folders on disk
+        let dir1 = retail_addons.join("UntrackedFolder1");
+        let dir2 = retail_addons.join("UntrackedFolder2");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        assert!(dir1.exists());
+        assert!(dir2.exists());
+
+        // Delete untracked addon with both folders
+        delete_untracked_addon(
+            "retail".to_string(),
+            vec!["UntrackedFolder1".to_string(), "UntrackedFolder2".to_string()],
+        ).unwrap();
+
+        assert!(!dir1.exists());
+        assert!(!dir2.exists());
+
+        // Now test tracked guard
+        let tracked_dir = retail_addons.join("TrackedAddonFolder");
+        std::fs::create_dir_all(&tracked_dir).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-tracked', 'retail', 'Tracked')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'TrackedAddonFolder', 'addon-tracked')",
+            [],
+        ).unwrap();
+
+        let res = delete_untracked_addon("retail".to_string(), vec!["TrackedAddonFolder".to_string()]);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("is tracked by an existing addon"));
+        assert!(tracked_dir.exists(), "Tracked folder must not be deleted");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_wow);
+        std::env::remove_var("FURPHY_DEV_WOWROOT");
+        if let Some(l) = orig_local {
+            std::env::set_var("LOCALAPPDATA", l);
+        } else {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+    }
 }

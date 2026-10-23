@@ -41,7 +41,18 @@ pub fn scan_untracked_addons(
     let rows = stmt.query_map(params![flavour], |r| r.get::<_, String>(0))?;
     let managed_folders: HashSet<String> = rows.flatten().map(|f| f.to_ascii_lowercase()).collect();
 
-    // 2. Scan disk for unmanaged folders
+    // 2. Get ignored untracked folders from DB
+    let ignored_folders: HashSet<String> = if let Ok(mut stmt) = conn.prepare("SELECT folder FROM ignored_untracked_folders WHERE flavour = ?1") {
+        if let Ok(rows) = stmt.query_map(params![flavour], |r| r.get::<_, String>(0)) {
+            rows.flatten().map(|f| f.to_ascii_lowercase()).collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
+
+    // 3. Scan disk for unmanaged folders
     let entries = fs::read_dir(addons_path).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let mut unmanaged = Vec::new();
 
@@ -49,7 +60,8 @@ pub fn scan_untracked_addons(
         let path = entry_res.path();
         if path.is_dir() {
             let name = entry_res.file_name().to_string_lossy().to_string();
-            if managed_folders.contains(&name.to_ascii_lowercase()) {
+            let name_lower = name.to_ascii_lowercase();
+            if managed_folders.contains(&name_lower) || ignored_folders.contains(&name_lower) {
                 continue;
             }
 
@@ -127,4 +139,50 @@ pub fn scan_untracked_addons(
 
     result.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+    use crate::db::schema::INITIAL_SCHEMA;
+
+    #[test]
+    fn test_scan_untracked_addons_filters_ignored_folders() {
+        let temp = tempdir().unwrap();
+        let addons_dir = temp.path().join("Interface").join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let addon_a = addons_dir.join("AddonA");
+        fs::create_dir_all(&addon_a).unwrap();
+        fs::write(addon_a.join("AddonA.toc"), "## Title: Addon A\n## Version: 1.0.0\n").unwrap();
+
+        let addon_b = addons_dir.join("AddonB");
+        fs::create_dir_all(&addon_b).unwrap();
+        fs::write(addon_b.join("AddonB.toc"), "## Title: Addon B\n## Version: 1.0.0\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        // Initially both are found
+        let scanned = scan_untracked_addons(&conn, &addons_dir, "retail", None).unwrap();
+        assert_eq!(scanned.len(), 2);
+
+        // Add AddonB to ignored_untracked_folders
+        conn.execute(
+            "INSERT INTO ignored_untracked_folders (flavour, folder) VALUES ('retail', 'AddonB')",
+            [],
+        ).unwrap();
+
+        // Now only AddonA should be scanned
+        let scanned_after = scan_untracked_addons(&conn, &addons_dir, "retail", None).unwrap();
+        assert_eq!(scanned_after.len(), 1);
+        assert_eq!(scanned_after[0].folders, vec!["AddonA".to_string()]);
+    }
 }

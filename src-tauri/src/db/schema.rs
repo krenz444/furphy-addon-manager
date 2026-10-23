@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS addons (
     required_deps TEXT,
     github_rate_limited_until TEXT,
     extra TEXT,
+    ignored_deps TEXT,
+    FOREIGN KEY(flavour) REFERENCES flavours(id)
+);
+
+CREATE TABLE IF NOT EXISTS ignored_untracked_folders (
+    flavour TEXT NOT NULL,
+    folder TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY (flavour, folder),
     FOREIGN KEY(flavour) REFERENCES flavours(id)
 );
 

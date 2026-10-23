@@ -39,7 +39,7 @@ pub fn get_schema_version(conn: &Connection) -> Result<i32> {
 pub fn run_migrations(conn: &mut Connection) -> Result<()> {
     initialize_connection(conn)?;
 
-    let current_version = get_schema_version(conn)?;
+    let mut current_version = get_schema_version(conn)?;
 
     if current_version < 1 {
         let tx = conn.transaction()?;
@@ -59,6 +59,39 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         )?;
 
         tx.commit()?;
+        current_version = 1;
+    }
+
+    if current_version < 2 {
+        let tx = conn.transaction()?;
+
+        let has_ignored_deps: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'ignored_deps'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if !has_ignored_deps {
+            tx.execute("ALTER TABLE addons ADD COLUMN ignored_deps TEXT", [])?;
+        }
+
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS ignored_untracked_folders (
+                flavour TEXT NOT NULL,
+                folder TEXT NOT NULL COLLATE NOCASE,
+                PRIMARY KEY (flavour, folder),
+                FOREIGN KEY(flavour) REFERENCES flavours(id)
+            );
+            "#,
+        )?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')",
+            [],
+        )?;
+
+        tx.commit()?;
     }
 
     Ok(())
@@ -74,7 +107,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
@@ -83,5 +116,26 @@ mod tests {
         // Verify foreign keys enabled
         let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
         assert_eq!(fk, 1);
+
+        // Verify ignored_deps column exists on addons
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'ignored_deps'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_col);
+
+        // Verify ignored_untracked_folders table exists
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='ignored_untracked_folders'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
     }
 }

@@ -5,6 +5,7 @@
     addon: Addon;
     onUpdate?: (addon: Addon) => void;
     onInstallDeps?: (addon: Addon) => void;
+    onIgnoreDeps?: (addon: Addon) => void;
     onViewDetails?: (addon: Addon, tab?: string) => void;
     onTogglePin?: (addon: Addon) => void;
     onToggleIgnore?: (addon: Addon) => void;
@@ -18,6 +19,7 @@
     addon,
     onUpdate,
     onInstallDeps,
+    onIgnoreDeps,
     onViewDetails,
     onTogglePin,
     onToggleIgnore,
@@ -88,6 +90,17 @@
           onclick={(e) => { e.stopPropagation(); closeMenu(); onInstallDeps?.(addon); }}
         >
           Install missing dependencies ({addon.missing_deps.length})
+        </button>
+      {/if}
+
+      {#if addon.missing_deps && addon.missing_deps.length > 0 && onIgnoreDeps}
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitem"
+          onclick={(e) => { e.stopPropagation(); closeMenu(); onIgnoreDeps?.(addon); }}
+        >
+          Ignore missing dependencies
         </button>
       {/if}
 

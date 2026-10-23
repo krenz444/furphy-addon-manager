@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke, isMockMode, installDependencies } from './lib/ipc';
+  import { invoke, isMockMode, installDependencies, ignoreDependency } from './lib/ipc';
   import Sidebar from './components/layout/Sidebar.svelte';
   import MyAddonsView from './views/MyAddonsView.svelte';
   import GetAddonsView from './views/GetAddonsView.svelte';
@@ -303,24 +303,95 @@
         `[Dependencies] Starting dependency installation for ${targetName ?? 'all addons in ' + activeFlavour}`,
       ];
 
-      await installDependencies(activeFlavour, addonId);
+      const job = await installDependencies(activeFlavour, addonId);
 
-      addToast(
-        'success',
-        targetName
-          ? `Installed missing dependencies for ${targetName}`
-          : 'All missing dependencies installed successfully.'
-      );
+      let unresolved: string[] = [];
+      if (job?.results) {
+        try {
+          const parsed = typeof job.results === 'string' ? JSON.parse(job.results) : job.results;
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              if (Array.isArray(item.unresolved_deps)) unresolved.push(...item.unresolved_deps);
+            }
+          } else if (Array.isArray(parsed?.unresolved_deps)) {
+            unresolved.push(...parsed.unresolved_deps);
+          }
+        } catch {
+          // ignore parse error
+        }
+      }
+
+      await refreshFlavourData(activeFlavour);
+
+      if (unresolved.length === 0) {
+        if (addonId) {
+          const target = addons.find((a) => a.id === addonId);
+          if (target?.missing_deps && target.missing_deps.length > 0) {
+            unresolved = [...target.missing_deps];
+          }
+        }
+      }
+
+      if (unresolved.length > 0) {
+        addToast(
+          'warning',
+          `Could not automatically resolve: ${unresolved.join(', ')}. You can ignore or search for them.`
+        );
+      } else {
+        addToast(
+          'success',
+          targetName
+            ? `Installed missing dependencies for ${targetName}`
+            : 'All missing dependencies installed successfully.'
+        );
+      }
+
       if (isGameActive) {
         reloadNeeded = true;
       }
-      await refreshFlavourData(activeFlavour);
       runningJob = null;
     } catch (err: unknown) {
       if (runningJob) {
         runningJob = { ...runningJob, state: 'failed', error: String(err) };
       }
       addToast('error', 'Dependency installation failed: ' + err);
+    }
+  }
+
+  async function handleIgnoreDep(addonId: string, depName: string) {
+    try {
+      await ignoreDependency(addonId, depName);
+      addToast('success', `Ignored dependency '${depName}'.`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to ignore dependency '${depName}': ${err}`);
+    }
+  }
+
+  function handleSearchDep(query: string) {
+    activeView = 'get_addons';
+    activeDrawerAddon = null;
+    requestAnimationFrame(() => {
+      const searchInput = document.querySelector<HTMLInputElement>('.get-addons-view input.search-input');
+      if (searchInput) {
+        searchInput.value = query;
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const searchBtn = document.querySelector<HTMLButtonElement>('.get-addons-view .btn-primary');
+        if (searchBtn) {
+          searchBtn.click();
+        }
+      }
+    });
+  }
+
+  async function handleIgnoreAllDeps(addon: Addon) {
+    if (!addon.missing_deps || addon.missing_deps.length === 0) return;
+    try {
+      await Promise.all(addon.missing_deps.map((dep) => ignoreDependency(addon.id, dep)));
+      addToast('success', `Ignored missing dependencies for ${addon.name ?? addon.id}.`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to ignore dependencies: ${err}`);
     }
   }
 
@@ -592,6 +663,7 @@
           onViewUntracked={() => (activeView = 'settings')}
           onDensityChange={handleDensityChange}
           onInstallDeps={handleInstallDeps}
+          onIgnoreDeps={handleIgnoreAllDeps}
         />
       {:else if activeView === 'get_addons'}
         <GetAddonsView
@@ -622,6 +694,10 @@
           onDensityChange={handleDensityChange}
           onExportList={() => (exportDialogOpen = true)}
           onImportList={handleImportAddonList}
+          onToast={addToast}
+          onUntrackedChange={async () => {
+            await refreshFlavourData(activeFlavour);
+          }}
           onRequestUninstall={() => {
             confirmTitle = 'Uninstall Furphy Addon Manager';
             confirmMessage = 'Are you sure you want to uninstall Furphy Addon Manager?';
@@ -656,6 +732,8 @@
         await refreshFlavourData(activeFlavour);
       }}
       onInstallDeps={handleInstallDeps}
+      onIgnoreDep={handleIgnoreDep}
+      onSearchDep={handleSearchDep}
     />
   {/if}
 

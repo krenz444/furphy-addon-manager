@@ -8,8 +8,22 @@ use crate::net::policy::NetworkPolicy;
 
 pub const MAX_RECURSION_DEPTH: usize = 5;
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InstallDepsResult {
+    pub installed_deps: Vec<String>,
+    pub unresolved_deps: Vec<String>,
+}
+
 pub fn normalize_dep_slug(dep_name: &str) -> String {
     dep_name.to_ascii_lowercase().replace('.', "-").replace('_', "-")
+}
+
+pub fn get_dependency_alias(dep_name: &str) -> Option<&'static str> {
+    let norm = normalize_dep_slug(dep_name);
+    match norm.as_str() {
+        "exwindcore" | "exwind-core" | "exwind" => Some("excore"),
+        _ => None,
+    }
 }
 
 pub fn check_missing_dependencies(
@@ -17,14 +31,14 @@ pub fn check_missing_dependencies(
     flavour: &str,
     addon_id: &str,
 ) -> Result<Vec<String>> {
-    // 1. Get required deps for this addon
-    let required_deps_json: Option<String> = conn
+    // 1. Get required deps and ignored deps for this addon
+    let (required_deps_json, ignored_deps_json): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT required_deps FROM addons WHERE id = ?1 AND flavour = ?2",
+            "SELECT required_deps, ignored_deps FROM addons WHERE id = ?1 AND flavour = ?2",
             params![addon_id, flavour],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap_or(None);
+        .unwrap_or((None, None));
 
     let required: Vec<String> = required_deps_json
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -34,9 +48,21 @@ pub fn check_missing_dependencies(
         return Ok(Vec::new());
     }
 
+    let ignored_set: HashSet<String> = ignored_deps_json
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+
     // 2. Find missing by checking presence across installed folders and registered addons
     let mut missing = Vec::new();
     for dep in required {
+        let dep_lower = dep.to_ascii_lowercase();
+        let dep_norm = normalize_dep_slug(&dep);
+        if ignored_set.contains(&dep_lower) || ignored_set.contains(&dep) || ignored_set.contains(&dep_norm) {
+            continue;
+        }
         if !is_dependency_already_present(conn, flavour, &dep) {
             missing.push(dep);
         }
@@ -45,7 +71,7 @@ pub fn check_missing_dependencies(
     Ok(missing)
 }
 
-pub async fn resolve_dependency_target(
+async fn resolve_dependency_target_direct(
     dep_name: &str,
     policy: &Arc<NetworkPolicy>,
     data_dir: &Path,
@@ -162,7 +188,26 @@ pub async fn resolve_dependency_target(
     None
 }
 
-pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
+pub async fn resolve_dependency_target(
+    dep_name: &str,
+    policy: &Arc<NetworkPolicy>,
+    data_dir: &Path,
+) -> Option<AddonTarget> {
+    let dep_trimmed = dep_name.trim();
+    if dep_trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(alias) = get_dependency_alias(dep_trimmed) {
+        if let Some(target) = resolve_dependency_target_direct(alias, policy, data_dir).await {
+            return Some(target);
+        }
+    }
+
+    resolve_dependency_target_direct(dep_trimmed, policy, data_dir).await
+}
+
+fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
     let dep_lower = dep_name.to_ascii_lowercase();
     let norm = normalize_dep_slug(dep_name);
 
@@ -179,19 +224,28 @@ pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name:
     }
 
     // 2. Check addons table
-    let in_addons: bool = conn
-        .query_row(
-            "SELECT 1 FROM addons WHERE flavour = ?1 AND (
-                LOWER(name) = ?2 OR LOWER(name) = ?3 OR
-                LOWER(wago_slug) = ?2 OR LOWER(wago_slug) = ?3 OR
-                LOWER(id) = ?2
-            ) LIMIT 1",
-            params![flavour, dep_lower, norm],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
+    conn.query_row(
+        "SELECT 1 FROM addons WHERE flavour = ?1 AND (
+            LOWER(name) = ?2 OR LOWER(name) = ?3 OR
+            LOWER(wago_slug) = ?2 OR LOWER(wago_slug) = ?3 OR
+            LOWER(id) = ?2
+        ) LIMIT 1",
+        params![flavour, dep_lower, norm],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
 
-    in_addons
+pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
+    if is_dependency_already_present_direct(conn, flavour, dep_name) {
+        return true;
+    }
+    if let Some(alias) = get_dependency_alias(dep_name) {
+        if is_dependency_already_present_direct(conn, flavour, alias) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_target_already_present(conn: &Connection, flavour: &str, target: &AddonTarget) -> bool {
@@ -231,9 +285,10 @@ pub async fn install_missing_dependencies_for_addon(
     policy: Arc<NetworkPolicy>,
     github_token: Option<String>,
     addon_id: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<InstallDepsResult, String> {
     let mut visited = HashSet::new();
     let mut installed = Vec::new();
+    let mut unresolved = Vec::new();
 
     visited.insert(addon_id.to_ascii_lowercase());
     if let Ok(name) = conn.query_row(
@@ -284,6 +339,9 @@ pub async fn install_missing_dependencies_for_addon(
                             "WARN",
                             &format!("Failed to create addon record for dep '{}': {}", dep, e),
                         );
+                        if !unresolved.contains(&dep) {
+                            unresolved.push(dep.clone());
+                        }
                         continue;
                     }
                 };
@@ -305,7 +363,9 @@ pub async fn install_missing_dependencies_for_addon(
 
                 match sync_res {
                     Ok(ref rep) if rep.failed == 0 && rep.results.iter().any(|r| r.status == "Updated" || r.status == "Up-to-date" || r.status == "Installed") => {
-                        installed.push(dep.clone());
+                        if !installed.contains(&dep) {
+                            installed.push(dep.clone());
+                        }
                         queue.push_back((new_addon_id, depth + 1));
                     }
                     Ok(rep) => {
@@ -315,6 +375,9 @@ pub async fn install_missing_dependencies_for_addon(
                             "WARN",
                             &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
                         );
+                        if !unresolved.contains(&dep) {
+                            unresolved.push(dep.clone());
+                        }
                     }
                     Err(e) => {
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
@@ -323,13 +386,23 @@ pub async fn install_missing_dependencies_for_addon(
                             "WARN",
                             &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
                         );
+                        if !unresolved.contains(&dep) {
+                            unresolved.push(dep.clone());
+                        }
                     }
+                }
+            } else {
+                if !unresolved.contains(&dep) {
+                    unresolved.push(dep.clone());
                 }
             }
         }
     }
 
-    Ok(installed)
+    Ok(InstallDepsResult {
+        installed_deps: installed,
+        unresolved_deps: unresolved,
+    })
 }
 
 pub async fn install_all_missing_dependencies_for_flavour(
@@ -342,7 +415,7 @@ pub async fn install_all_missing_dependencies_for_flavour(
     client_interface: Option<i32>,
     policy: Arc<NetworkPolicy>,
     github_token: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<InstallDepsResult, String> {
     let addon_ids: Vec<String> = {
         let mut stmt = conn
             .prepare("SELECT id FROM addons WHERE flavour = ?1")
@@ -355,6 +428,7 @@ pub async fn install_all_missing_dependencies_for_flavour(
 
     let mut visited = HashSet::new();
     let mut total_installed = Vec::new();
+    let mut total_unresolved = Vec::new();
 
     for aid in &addon_ids {
         visited.insert(aid.to_ascii_lowercase());
@@ -411,6 +485,9 @@ pub async fn install_all_missing_dependencies_for_flavour(
                             "WARN",
                             &format!("Failed to create addon record for dep '{}': {}", dep, e),
                         );
+                        if !total_unresolved.contains(&dep) {
+                            total_unresolved.push(dep.clone());
+                        }
                         continue;
                     }
                 };
@@ -444,6 +521,9 @@ pub async fn install_all_missing_dependencies_for_flavour(
                             "WARN",
                             &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
                         );
+                        if !total_unresolved.contains(&dep) {
+                            total_unresolved.push(dep.clone());
+                        }
                     }
                     Err(e) => {
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
@@ -452,13 +532,23 @@ pub async fn install_all_missing_dependencies_for_flavour(
                             "WARN",
                             &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
                         );
+                        if !total_unresolved.contains(&dep) {
+                            total_unresolved.push(dep.clone());
+                        }
                     }
+                }
+            } else {
+                if !total_unresolved.contains(&dep) {
+                    total_unresolved.push(dep.clone());
                 }
             }
         }
     }
 
-    Ok(total_installed)
+    Ok(InstallDepsResult {
+        installed_deps: total_installed,
+        unresolved_deps: total_unresolved,
+    })
 }
 
 #[cfg(test)]
@@ -476,6 +566,17 @@ mod tests {
         assert_eq!(normalize_dep_slug("Ace3"), "ace3");
     }
 
+    #[test]
+    fn test_dependency_alias_mapping() {
+        assert_eq!(get_dependency_alias("exwindcore"), Some("excore"));
+        assert_eq!(get_dependency_alias("exwind-core"), Some("excore"));
+        assert_eq!(get_dependency_alias("exwind"), Some("excore"));
+        assert_eq!(get_dependency_alias("ExWindCore"), Some("excore"));
+        assert_eq!(get_dependency_alias("ExWind"), Some("excore"));
+        assert_eq!(get_dependency_alias("Ace3"), None);
+        assert_eq!(get_dependency_alias("details"), None);
+    }
+
     #[tokio::test]
     async fn test_resolve_dependency_target_catalogue_lookup() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -488,7 +589,8 @@ mod tests {
             "details": 61288,
             "libsharedmedia-3-0": 13346,
             "callbackhandler-1-0": 13347,
-            "ace3": 13345
+            "ace3": 13345,
+            "excore": 99999
         });
         fs::write(&catalogue_file, sample_catalogue.to_string()).unwrap();
 
@@ -513,6 +615,13 @@ mod tests {
         match res_cbh {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 13347),
             other => panic!("Expected CurseForge(13347), got {:?}", other),
+        }
+
+        // Alias match: exwindcore -> excore (99999)
+        let res_alias = resolve_dependency_target("exwindcore", &policy, temp_dir.path()).await;
+        match res_alias {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 99999),
+            other => panic!("Expected CurseForge(99999) for exwindcore via alias excore, got {:?}", other),
         }
 
         // Whitespace/empty
@@ -554,6 +663,11 @@ mod tests {
             [],
         ).unwrap();
 
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'ExCore', 'addon-1')",
+            [],
+        ).unwrap();
+
         // 1. Matched by addon name
         assert!(is_dependency_already_present(&conn, "retail", "Ace3"));
         assert!(is_dependency_already_present(&conn, "retail", "ace3"));
@@ -563,7 +677,11 @@ mod tests {
         assert!(is_dependency_already_present(&conn, "retail", "libsharedmedia-3.0"));
         assert!(is_dependency_already_present(&conn, "retail", "libsharedmedia-3-0"));
 
-        // 3. Not present
+        // 3. Matched via alias (exwindcore / exwind -> excore)
+        assert!(is_dependency_already_present(&conn, "retail", "exwindcore"));
+        assert!(is_dependency_already_present(&conn, "retail", "exwind"));
+
+        // 4. Not present
         assert!(!is_dependency_already_present(&conn, "retail", "NonExistentLib"));
     }
 
@@ -598,6 +716,31 @@ mod tests {
         ).unwrap();
 
         let missing = check_missing_dependencies(&conn, "retail", "addon-parent").unwrap();
+        assert_eq!(missing, vec!["MissingLib-1.0".to_string()]);
+    }
+
+    #[test]
+    fn test_check_missing_dependencies_filters_ignored_deps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, required_deps, ignored_deps) VALUES ('addon-parent', 'retail', 'ParentAddon', '[\"Ace3\", \"MissingLib-1.0\", \"exwindcore\"]', '[\"exwindcore\"]')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-ace', 'retail', 'Ace3')",
+            [],
+        ).unwrap();
+
+        let missing = check_missing_dependencies(&conn, "retail", "addon-parent").unwrap();
+        // exwindcore was ignored, Ace3 is present, so only MissingLib-1.0 remains
         assert_eq!(missing, vec!["MissingLib-1.0".to_string()]);
     }
 }

@@ -533,7 +533,7 @@ impl JobRunner {
                         }
                     });
 
-                let installed_deps = if let Some(ref aid) = addon_id {
+                let deps_result = if let Some(ref aid) = addon_id {
                     crate::engine::deps::install_missing_dependencies_for_addon(
                         conn,
                         &wow_root,
@@ -562,10 +562,11 @@ impl JobRunner {
                     .await?
                 };
 
-                let count = installed_deps.len();
+                let count = deps_result.installed_deps.len();
                 let reload_needed = count > 0 && crate::system::game::is_wow_running();
                 let json = serde_json::json!({
-                    "installed_deps": installed_deps,
+                    "installed_deps": deps_result.installed_deps,
+                    "unresolved_deps": deps_result.unresolved_deps,
                     "count": count
                 })
                 .to_string();
@@ -679,6 +680,26 @@ mod tests {
         let results_val: serde_json::Value = serde_json::from_str(&record.results.unwrap()).unwrap();
         assert_eq!(results_val["count"], 0);
         assert_eq!(results_val["installed_deps"], serde_json::json!([]));
+        assert_eq!(results_val["unresolved_deps"], serde_json::json!([]));
+
+        // Insert addon with unresolvable dependency
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, required_deps) VALUES ('addon-2', 'retail', 'NeedyAddon', '[\"TotallyFakeDepThatDoesNotExist\"]')",
+            [],
+        ).unwrap();
+
+        let res2 = runner.run_job(
+            &mut conn,
+            "install-deps",
+            Some("retail"),
+            serde_json::json!({ "addon_id": "addon-2" }),
+        ).await;
+        assert!(res2.is_ok());
+        let record2 = res2.unwrap();
+        let results_val2: serde_json::Value = serde_json::from_str(&record2.results.unwrap()).unwrap();
+        assert_eq!(results_val2["count"], 0);
+        assert_eq!(results_val2["installed_deps"], serde_json::json!([]));
+        assert_eq!(results_val2["unresolved_deps"], serde_json::json!(["TotallyFakeDepThatDoesNotExist"]));
 
         // Cleanup
         std::env::remove_var("FURPHY_DEV_WOWROOT");

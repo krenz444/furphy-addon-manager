@@ -11,6 +11,8 @@
     onInstallVersion?: (addon: Addon, fileId: string) => void;
     onPinVersion?: (addon: Addon, fileId: string) => void;
     onInstallDeps?: (addonId: string) => void;
+    onIgnoreDep?: (addonId: string, depName: string) => void;
+    onSearchDep?: (query: string) => void;
   }
 
   let {
@@ -21,6 +23,8 @@
     onInstallVersion,
     onPinVersion,
     onInstallDeps,
+    onIgnoreDep,
+    onSearchDep,
   }: Props = $props();
 
   interface ScreenshotItem {
@@ -314,17 +318,41 @@
                   {#each addon.missing_deps as dep}
                     <div class="dep-badge">
                       <span class="dep-label">{dep}</span>
-                      {#if onInstallDeps}
-                        <button
-                          type="button"
-                          class="btn-dep-install"
-                          onclick={() => onInstallDeps?.(addon.id)}
-                          title="Install {dep}"
-                          aria-label="Install dependency {dep}"
-                        >
-                          Install
-                        </button>
-                      {/if}
+                      <div class="dep-actions">
+                        {#if onInstallDeps}
+                          <button
+                            type="button"
+                            class="btn-dep-action btn-dep-install"
+                            onclick={() => onInstallDeps?.(addon.id)}
+                            title="Install {dep}"
+                            aria-label="Install dependency {dep}"
+                          >
+                            Install
+                          </button>
+                        {/if}
+                        {#if onSearchDep}
+                          <button
+                            type="button"
+                            class="btn-dep-action btn-dep-find"
+                            onclick={() => onSearchDep?.(dep)}
+                            title="Find {dep} in Browse"
+                            aria-label="Find dependency {dep}"
+                          >
+                            Find
+                          </button>
+                        {/if}
+                        {#if onIgnoreDep}
+                          <button
+                            type="button"
+                            class="btn-dep-action btn-dep-ignore"
+                            onclick={() => onIgnoreDep?.(addon.id, dep)}
+                            title="Ignore {dep}"
+                            aria-label="Ignore dependency {dep}"
+                          >
+                            Ignore
+                          </button>
+                        {/if}
+                      </div>
                     </div>
                   {/each}
                 </div>
@@ -349,17 +377,41 @@
                         <span class="dep-dot-missing"></span>
                         <span class="dep-name">{dep}</span>
                         <span class="dep-tag-missing">missing</span>
-                        {#if onInstallDeps}
-                          <button
-                            type="button"
-                            class="btn-dep-install-sm"
-                            onclick={() => onInstallDeps?.(addon.id)}
-                            title="Install {dep}"
-                            aria-label="Install dependency {dep}"
-                          >
-                            Install
-                          </button>
-                        {/if}
+                        <div class="dep-actions">
+                          {#if onInstallDeps}
+                            <button
+                              type="button"
+                              class="btn-dep-action btn-dep-install btn-dep-sm"
+                              onclick={() => onInstallDeps?.(addon.id)}
+                              title="Install {dep}"
+                              aria-label="Install dependency {dep}"
+                            >
+                              Install
+                            </button>
+                          {/if}
+                          {#if onSearchDep}
+                            <button
+                              type="button"
+                              class="btn-dep-action btn-dep-find btn-dep-sm"
+                              onclick={() => onSearchDep?.(dep)}
+                              title="Find {dep} in Browse"
+                              aria-label="Find dependency {dep}"
+                            >
+                              Find
+                            </button>
+                          {/if}
+                          {#if onIgnoreDep}
+                            <button
+                              type="button"
+                              class="btn-dep-action btn-dep-ignore btn-dep-sm"
+                              onclick={() => onIgnoreDep?.(addon.id, dep)}
+                              title="Ignore {dep}"
+                              aria-label="Ignore dependency {dep}"
+                            >
+                              Ignore
+                            </button>
+                          {/if}
+                        </div>
                       </div>
                     {/each}
                   </div>
@@ -1197,5 +1249,70 @@
   .btn-dep-install-sm:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
+  }
+
+  .dep-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 6px;
+  }
+
+  .btn-dep-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    line-height: 1.2;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-dep-action:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
+  .btn-dep-action.btn-dep-install {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    font-weight: 600;
+  }
+
+  .btn-dep-action.btn-dep-install:hover {
+    background: var(--warning);
+    color: var(--bg-0);
+  }
+
+  .btn-dep-action.btn-dep-find {
+    background: var(--bg-1);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  .btn-dep-action.btn-dep-find:hover {
+    background: var(--border-hover);
+    border-color: var(--text-muted);
+  }
+
+  .btn-dep-action.btn-dep-ignore {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+
+  .btn-dep-action.btn-dep-ignore:hover {
+    background: var(--bg-3);
+    color: var(--text);
+    border-color: var(--border-hover);
+  }
+
+  .btn-dep-action.btn-dep-sm {
+    font-size: 10px;
+    padding: 1px 5px;
   }
 </style>

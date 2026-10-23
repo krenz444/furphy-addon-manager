@@ -25,6 +25,7 @@
     onViewUntracked: () => void;
     onDensityChange: (density: 'comfortable' | 'compact') => void;
     onInstallDeps?: (addonId?: string) => void;
+    onIgnoreDeps?: (addon: Addon) => void;
   }
 
   let {
@@ -47,6 +48,7 @@
     onViewUntracked,
     onDensityChange,
     onInstallDeps,
+    onIgnoreDeps,
   }: Props = $props();
 
   let searchQuery = $state('');
@@ -512,6 +514,7 @@
                   {addon}
                   onUpdate={onUpdateAddon}
                   onInstallDeps={(a) => onInstallDeps?.(a.id)}
+                  onIgnoreDeps={onIgnoreDeps}
                   onViewDetails={onOpenAddonDrawer}
                   onTogglePin={onTogglePin}
                   onToggleIgnore={onToggleIgnore}

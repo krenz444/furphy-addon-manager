@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { invoke } from '../lib/ipc';
+  import {
+    invoke,
+    ignoreUntrackedAddon,
+    unignoreUntrackedFolder,
+    listIgnoredUntracked,
+    deleteUntrackedAddon,
+  } from '../lib/ipc';
+  import ConfirmDialog from '../components/dialogs/ConfirmDialog.svelte';
   import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo } from '../lib/types';
 
   interface Props {
@@ -11,6 +18,8 @@
     onExportList: () => void;
     onImportList: () => void;
     onRequestUninstall: () => void;
+    onToast?: (type: 'info' | 'success' | 'warning' | 'error', message: string) => void;
+    onUntrackedChange?: () => void;
   }
 
   let {
@@ -22,6 +31,8 @@
     onExportList,
     onImportList,
     onRequestUninstall,
+    onToast,
+    onUntrackedChange,
   }: Props = $props();
 
   // Settings State
@@ -44,6 +55,14 @@
   // Untracked folders
   let untrackedGroups = $state<ScannedCandidateGroup[]>([]);
   let scanningUntracked = $state(false);
+  let ignoredFolders = $state<string[]>([]);
+  let showIgnored = $state(false);
+
+  // Confirm delete dialog
+  let confirmOpen = $state(false);
+  let confirmTitle = $state('');
+  let confirmMessage = $state('');
+  let confirmAction = $state<(() => void) | null>(null);
 
   // Diagnostics
   let diagnostics = $state<DiagnosticItem[]>([]);
@@ -133,7 +152,13 @@
       initialLoaded = true;
     }
 
-    scanUntracked();
+    await scanUntracked();
+  }
+
+  function notify(type: 'info' | 'success' | 'warning' | 'error', message: string) {
+    if (onToast) {
+      onToast(type, message);
+    }
   }
 
   async function updateSetting(key: string, value: any) {
@@ -144,10 +169,21 @@
     }
   }
 
+  async function loadIgnoredFolders() {
+    try {
+      ignoredFolders = await listIgnoredUntracked(flavour);
+    } catch {
+      ignoredFolders = [];
+    }
+  }
+
   async function scanUntracked() {
     scanningUntracked = true;
     try {
-      untrackedGroups = await invoke<ScannedCandidateGroup[]>('scan_untracked', { flavour });
+      await loadIgnoredFolders();
+      const raw = await invoke<ScannedCandidateGroup[]>('scan_untracked', { flavour });
+      const ignoredSet = new Set(ignoredFolders.map((f) => f.toLowerCase()));
+      untrackedGroups = raw.filter((g) => !g.folders.some((f) => ignoredSet.has(f.toLowerCase())));
     } catch {
       untrackedGroups = [];
     } finally {
@@ -159,6 +195,7 @@
     try {
       await invoke('adopt_untracked', { flavour, candidate: group });
       await scanUntracked();
+      onUntrackedChange?.();
     } catch (err) {
       console.error('Failed to adopt:', err);
     }
@@ -168,8 +205,48 @@
     try {
       await invoke('adopt_all_untracked', { flavour });
       await scanUntracked();
+      onUntrackedChange?.();
     } catch (err) {
       console.error('Failed to adopt all:', err);
+    }
+  }
+
+  async function handleIgnoreGroup(group: ScannedCandidateGroup) {
+    try {
+      await ignoreUntrackedAddon(flavour, group.folders);
+      notify('info', `Ignored unmanaged addon '${group.name}'.`);
+      await scanUntracked();
+      onUntrackedChange?.();
+    } catch (err) {
+      notify('error', `Failed ignoring addon: ${err}`);
+    }
+  }
+
+  function promptDeleteGroup(group: ScannedCandidateGroup) {
+    confirmTitle = 'Delete Unmanaged Addon';
+    confirmMessage = `Are you sure you want to permanently delete '${group.name}' (${group.folders.join(', ')}) from disk?`;
+    confirmAction = async () => {
+      confirmOpen = false;
+      try {
+        await deleteUntrackedAddon(flavour, group.folders);
+        notify('info', `Deleted '${group.name}' from disk.`);
+        await scanUntracked();
+        onUntrackedChange?.();
+      } catch (err) {
+        notify('error', `Failed deleting unmanaged addon: ${err}`);
+      }
+    };
+    confirmOpen = true;
+  }
+
+  async function handleUnignoreFolder(folder: string) {
+    try {
+      await unignoreUntrackedFolder(flavour, folder);
+      notify('info', `Restored '${folder}' to untracked scanner.`);
+      await scanUntracked();
+      onUntrackedChange?.();
+    } catch (err) {
+      notify('error', `Failed unignoring folder: ${err}`);
     }
   }
 
@@ -453,17 +530,73 @@
                   {group.folders.join(', ')}
                 </span>
               </div>
-              <button
-                type="button"
-                class="btn-sm btn-accent"
-                onclick={() => adoptFolder(group)}
-              >
-                Manage
-              </button>
+              <div class="untracked-actions">
+                <button
+                  type="button"
+                  class="btn-sm btn-accent"
+                  onclick={() => adoptFolder(group)}
+                  title="Adopt and manage '{group.name}' in Furphy"
+                >
+                  Manage
+                </button>
+                <button
+                  type="button"
+                  class="btn-sm btn-secondary"
+                  onclick={() => handleIgnoreGroup(group)}
+                  title="Ignore unmanaged addon '{group.name}'"
+                >
+                  Ignore
+                </button>
+                <button
+                  type="button"
+                  class="btn-sm btn-danger"
+                  onclick={() => promptDeleteGroup(group)}
+                  title="Permanently delete '{group.name}' from disk"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           {/each}
         </div>
       {/if}
+
+      <!-- Ignored Unmanaged Addons Accordion -->
+      <div class="ignored-untracked-section">
+        <button
+          type="button"
+          class="ignored-untracked-toggle"
+          onclick={() => (showIgnored = !showIgnored)}
+          aria-expanded={showIgnored}
+        >
+          <span class="toggle-icon">{showIgnored ? '▼' : '►'}</span>
+          <span class="ignored-untracked-heading">Ignored Unmanaged Addons ({ignoredFolders.length})</span>
+        </button>
+
+        {#if showIgnored}
+          <div class="ignored-untracked-body">
+            {#if ignoredFolders.length === 0}
+              <p class="empty-ignored-text">No unmanaged addons are currently ignored.</p>
+            {:else}
+              <div class="ignored-untracked-list">
+                {#each ignoredFolders as folder (folder)}
+                  <div class="ignored-untracked-item">
+                    <span class="ignored-folder-name font-mono">{folder}</span>
+                    <button
+                      type="button"
+                      class="btn-sm btn-secondary"
+                      onclick={() => handleUnignoreFolder(folder)}
+                      title="Restore '{folder}' to untracked scanner"
+                    >
+                      Un-ignore
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
     </section>
 
     <!-- 5. Advanced Accordion -->
@@ -656,6 +789,16 @@
     </section>
   </div>
 </div>
+
+<ConfirmDialog
+  open={confirmOpen}
+  title={confirmTitle}
+  message={confirmMessage}
+  confirmLabel="Delete Permanently"
+  isDanger={true}
+  onConfirm={() => confirmAction?.()}
+  onCancel={() => { confirmOpen = false; }}
+/>
 
 <style>
   .settings-view {
@@ -905,6 +1048,73 @@
   .untracked-folders {
     font-size: 0.75rem;
     color: var(--text-faint);
+  }
+
+  .untracked-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .ignored-untracked-section {
+    margin-top: 1.25rem;
+    border-top: 1px solid var(--border-soft);
+    padding-top: 0.85rem;
+  }
+
+  .ignored-untracked-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0.35rem 0;
+    transition: color 0.15s ease;
+  }
+
+  .ignored-untracked-toggle:hover {
+    color: var(--text);
+  }
+
+  .ignored-untracked-toggle:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .ignored-untracked-body {
+    margin-top: 0.6rem;
+  }
+
+  .empty-ignored-text {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin: 0.25rem 0 0 0;
+  }
+
+  .ignored-untracked-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .ignored-untracked-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-0);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.45rem 0.75rem;
+  }
+
+  .ignored-folder-name {
+    font-size: 0.8rem;
+    color: var(--text);
   }
 
   .advanced-section {
