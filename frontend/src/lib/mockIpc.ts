@@ -13,9 +13,9 @@ import type {
 } from './types';
 
 const MOCK_FLAVOURS: Flavour[] = [
-  { id: 'retail', folder: '_retail_', label: 'The War Within (Retail)', product: 'wow', installed: true },
+  { id: 'retail', folder: '_retail_', label: 'Retail', product: 'wow', installed: true },
   { id: 'classic_era', folder: '_classic_era_', label: 'Classic Era', product: 'wow_classic_era', installed: true },
-  { id: 'classic', folder: '_classic_', label: 'Cataclysm Classic', product: 'wow_classic', installed: true },
+  { id: 'classic', folder: '_classic_', label: 'Mists Classic', product: 'wow_classic', installed: true },
 ];
 
 function generateMockAddons(count: number = 200): Addon[] {
