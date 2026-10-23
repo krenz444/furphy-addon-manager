@@ -45,6 +45,7 @@ pub struct AddonDto {
     pub check_status: Option<String>,
     pub is_old_patch: bool,
     pub missing_deps: Vec<String>,
+    pub ignored_deps: Vec<String>,
     pub wago_slug: Option<String>,
     pub repo: Option<String>,
 }
@@ -114,7 +115,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             "SELECT a.id, a.flavour, a.name, a.author, a.source, a.version, a.project_id, \
              a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
              a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
-             c.update_version, c.update_file_id, c.status, a.latest_game_versions \
+             c.update_version, c.update_file_id, c.status, a.latest_game_versions, a.ignored_deps \
              FROM addons a \
              LEFT JOIN check_results c ON a.id = c.addon_id \
              WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
@@ -143,12 +144,13 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             let update_file_id: Option<String> = row.get(17)?;
             let check_status: Option<String> = row.get(18)?;
             let latest_gv_json: Option<String> = row.get(19)?;
+            let ignored_deps_json: Option<String> = row.get(20)?;
 
             Ok((
                 addon_id, flavour_id, name, author, source, version,
                 project_id, file_id, file_name, installed_at, adopted,
                 ignore_updates, pinned_file_id, release_type, wago_slug,
-                repo, update_version, update_file_id, check_status, latest_gv_json,
+                repo, update_version, update_file_id, check_status, latest_gv_json, ignored_deps_json,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -159,7 +161,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             addon_id, flavour_id, name, author, source, version,
             project_id, file_id, file_name, installed_at, adopted,
             ignore_updates, pinned_file_id, release_type, wago_slug,
-            repo, update_version, update_file_id, check_status, latest_gv_json,
+            repo, update_version, update_file_id, check_status, latest_gv_json, ignored_deps_json,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut folder_stmt = conn
@@ -188,6 +190,9 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
 
         let missing_deps = crate::engine::deps::check_missing_dependencies(conn, &flavour_id, &addon_id)
             .unwrap_or_default();
+        let ignored_deps: Vec<String> = ignored_deps_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
 
         result.push(AddonDto {
             id: addon_id,
@@ -210,6 +215,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             check_status,
             is_old_patch,
             missing_deps,
+            ignored_deps,
             wago_slug,
             repo,
         });
@@ -465,34 +471,41 @@ pub fn delete_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(
         return Ok(());
     }
 
+    if is_wow_running() {
+        return Err("World of Warcraft is running. Please exit the game before deleting addons to prevent file locking issues.".into());
+    }
+
+    // Sanitize all folder names (including Windows trailing dot / 8.3 bypass prevention)
+    let mut clean_folders = Vec::new();
     for folder in &folders {
-        let trimmed = folder.trim();
-        if trimmed.is_empty()
-            || trimmed == "."
-            || trimmed == ".."
-            || trimmed.contains('/')
-            || trimmed.contains('\\')
-            || trimmed.contains("..")
-            || trimmed.contains(':')
+        let clean = folder.trim().trim_end_matches('.');
+        if clean.is_empty()
+            || clean == "."
+            || clean == ".."
+            || clean.contains('/')
+            || clean.contains('\\')
+            || clean.contains("..")
+            || clean.contains(':')
         {
             return Err("Invalid folder name: path separators and directory traversal are rejected".into());
         }
+        clean_folders.push(clean.to_string());
     }
 
     let db_path = get_db_path();
     let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
-    for folder in &folders {
+    for clean in &clean_folders {
         let mut stmt = conn
             .prepare("SELECT 1 FROM addon_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)")
             .map_err(|e| e.to_string())?;
         let mut rows = stmt
-            .query(rusqlite::params![flavour, folder.trim()])
+            .query(rusqlite::params![flavour, clean])
             .map_err(|e| e.to_string())?;
         if rows.next().map_err(|e| e.to_string())?.is_some() {
             return Err(format!(
                 "Folder '{}' is tracked by an existing addon and cannot be deleted as untracked",
-                folder
+                clean
             ));
         }
     }
@@ -504,14 +517,14 @@ pub fn delete_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(
         .find(|f| f.id == flavour)
         .ok_or_else(|| format!("Flavour '{}' not installed", flavour))?;
 
-    for folder in &folders {
-        let target = flv.addons_path.join(folder.trim());
+    for clean in &clean_folders {
+        let target = flv.addons_path.join(clean);
         if target.is_dir() {
             std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
         }
         let _ = conn.execute(
             "DELETE FROM ignored_untracked_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)",
-            rusqlite::params![flavour, folder.trim()],
+            rusqlite::params![flavour, clean],
         );
     }
     Ok(())
@@ -898,6 +911,8 @@ mod tests {
     #[test]
     fn test_delete_untracked_addon_success_and_tracked_guard() {
         let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let orig_fake_wow = std::env::var("FURPHY_DEV_FAKE_WOW").ok();
+        std::env::remove_var("FURPHY_DEV_FAKE_WOW");
         let temp_local = tempdir().unwrap();
         let orig_local = std::env::var("LOCALAPPDATA").ok();
         std::env::set_var("LOCALAPPDATA", temp_local.path().to_str().unwrap());
@@ -954,6 +969,11 @@ mod tests {
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_wow);
         std::env::remove_var("FURPHY_DEV_WOWROOT");
+        if let Some(fw) = orig_fake_wow {
+            std::env::set_var("FURPHY_DEV_FAKE_WOW", fw);
+        } else {
+            std::env::remove_var("FURPHY_DEV_FAKE_WOW");
+        }
         if let Some(l) = orig_local {
             std::env::set_var("LOCALAPPDATA", l);
         } else {

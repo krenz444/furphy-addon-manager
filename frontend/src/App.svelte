@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke, isMockMode, installDependencies, ignoreDependency } from './lib/ipc';
+  import { invoke, isMockMode, installDependencies, ignoreDependency, unignoreDependency } from './lib/ipc';
   import Sidebar from './components/layout/Sidebar.svelte';
   import MyAddonsView from './views/MyAddonsView.svelte';
   import GetAddonsView from './views/GetAddonsView.svelte';
@@ -48,6 +48,7 @@
   // Overlays & Dialogs State
   let activeDrawerAddon = $state<Addon | null>(null);
   let activeDrawerTab = $state<string>('overview');
+  let browseSearchQuery = $state<string>('');
   let addDialogOpen = $state<boolean>(false);
   let exportDialogOpen = $state<boolean>(false);
 
@@ -368,26 +369,28 @@
     }
   }
 
+  async function handleUnignoreDep(addonId: string, depName: string) {
+    try {
+      await unignoreDependency(addonId, depName);
+      addToast('info', `Restored dependency warning for '${depName}'.`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to un-ignore dependency '${depName}': ${err}`);
+    }
+  }
+
   function handleSearchDep(query: string) {
+    browseSearchQuery = query;
     activeView = 'get_addons';
     activeDrawerAddon = null;
-    requestAnimationFrame(() => {
-      const searchInput = document.querySelector<HTMLInputElement>('.get-addons-view input.search-input');
-      if (searchInput) {
-        searchInput.value = query;
-        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        const searchBtn = document.querySelector<HTMLButtonElement>('.get-addons-view .btn-primary');
-        if (searchBtn) {
-          searchBtn.click();
-        }
-      }
-    });
   }
 
   async function handleIgnoreAllDeps(addon: Addon) {
     if (!addon.missing_deps || addon.missing_deps.length === 0) return;
     try {
-      await Promise.all(addon.missing_deps.map((dep) => ignoreDependency(addon.id, dep)));
+      for (const dep of addon.missing_deps) {
+        await ignoreDependency(addon.id, dep);
+      }
       addToast('success', `Ignored missing dependencies for ${addon.name ?? addon.id}.`);
       await refreshFlavourData(activeFlavour);
     } catch (err) {
@@ -668,6 +671,7 @@
       {:else if activeView === 'get_addons'}
         <GetAddonsView
           flavour={activeFlavour}
+          initialSearchQuery={browseSearchQuery}
           onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`)}
           onInstallCurseForge={(target) => handleAddAddon(String(target))}
           onInstallGitHub={(repoUrl) => handleAddAddon(repoUrl)}
@@ -733,6 +737,7 @@
       }}
       onInstallDeps={handleInstallDeps}
       onIgnoreDep={handleIgnoreDep}
+      onUnignoreDep={handleUnignoreDep}
       onSearchDep={handleSearchDep}
     />
   {/if}

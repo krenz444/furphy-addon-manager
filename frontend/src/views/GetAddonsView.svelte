@@ -15,17 +15,26 @@
 
   interface Props {
     flavour: string;
+    initialSearchQuery?: string;
     onInstallWago: (slug: string) => void;
     onInstallCurseForge: (target: string) => void;
     onInstallGitHub: (repoUrl: string) => void;
   }
 
-  let { flavour, onInstallWago, onInstallCurseForge, onInstallGitHub }: Props = $props();
+  let { flavour, initialSearchQuery = '', onInstallWago, onInstallCurseForge, onInstallGitHub }: Props = $props();
 
   let activeTab = $state<'wago' | 'curseforge' | 'github'>('wago');
 
   // Wago tab state
   let wagoSearchQuery = $state('');
+
+  $effect(() => {
+    if (initialSearchQuery) {
+      activeTab = 'wago';
+      wagoSearchQuery = initialSearchQuery;
+      searchWago();
+    }
+  });
   let wagoSort = $state<'popular' | 'updated' | 'name' | 'gaining'>('popular');
   let wagoCategory = $state<string>('');
   let wagoCategories = $state<{ id: string; label: string }[]>([]);

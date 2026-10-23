@@ -12,6 +12,7 @@
     onPinVersion?: (addon: Addon, fileId: string) => void;
     onInstallDeps?: (addonId: string) => void;
     onIgnoreDep?: (addonId: string, depName: string) => void;
+    onUnignoreDep?: (addonId: string, depName: string) => void;
     onSearchDep?: (query: string) => void;
   }
 
@@ -24,6 +25,7 @@
     onPinVersion,
     onInstallDeps,
     onIgnoreDep,
+    onUnignoreDep,
     onSearchDep,
   }: Props = $props();
 
@@ -412,6 +414,33 @@
                             </button>
                           {/if}
                         </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if addon.ignored_deps && addon.ignored_deps.length > 0}
+                <div class="info-group">
+                  <span class="info-label">Ignored Dependencies ({addon.ignored_deps.length})</span>
+                  <div class="dep-chips-list">
+                    {#each addon.ignored_deps as dep}
+                      <div class="dep-chip dep-chip-ignored">
+                        <span class="dep-dot-ignored"></span>
+                        <span class="dep-name">{dep}</span>
+                        <span class="dep-tag-ignored">ignored</span>
+                        {#if onUnignoreDep}
+                          <div class="dep-actions">
+                            <button
+                              type="button"
+                              class="btn-dep-action btn-dep-unignore btn-dep-sm"
+                              onclick={() => onUnignoreDep?.(addon.id, dep)}
+                              title="Un-ignore {dep}"
+                              aria-label="Un-ignore dependency {dep}"
+                            >
+                              Un-ignore
+                            </button>
+                          </div>
+                        {/if}
                       </div>
                     {/each}
                   </div>
@@ -1306,6 +1335,33 @@
   }
 
   .btn-dep-action.btn-dep-ignore:hover {
+    background: var(--bg-3);
+    color: var(--text);
+    border-color: var(--border-hover);
+  }
+
+  .dep-dot-ignored {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+  }
+
+  .dep-tag-ignored {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+
+  .btn-dep-action.btn-dep-unignore {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+
+  .btn-dep-action.btn-dep-unignore:hover {
     background: var(--bg-3);
     color: var(--text);
     border-color: var(--border-hover);

@@ -23,6 +23,16 @@
     onCancel,
   }: Props = $props();
 
+  let cancelButtonEl = $state<HTMLButtonElement | null>(null);
+
+  $effect(() => {
+    if (open) {
+      requestAnimationFrame(() => {
+        cancelButtonEl?.focus();
+      });
+    }
+  });
+
   function handleKeydown(e: KeyboardEvent) {
     if (!open) return;
     if (e.key === 'Escape') {
@@ -76,6 +86,7 @@
         <button
           type="button"
           class="btn-secondary"
+          bind:this={cancelButtonEl}
           onclick={onCancel}
         >
           {cancelLabel}
