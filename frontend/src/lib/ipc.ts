@@ -37,7 +37,12 @@ export async function ignoreDependency(addonId: string, depName: string): Promis
     }
     return;
   }
-  await invoke('ignore_dependency', { addon_id: addonId, dep_name: depName });
+  await invoke('ignore_dependency', {
+    addonId,
+    depName,
+    addon_id: addonId,
+    dep_name: depName,
+  });
 }
 
 export async function unignoreDependency(addonId: string, depName: string): Promise<void> {
@@ -46,7 +51,12 @@ export async function unignoreDependency(addonId: string, depName: string): Prom
     mockIgnoredDeps[addonId] = current.filter((d) => d.toLowerCase() !== depName.trim().toLowerCase());
     return;
   }
-  await invoke('unignore_dependency', { addon_id: addonId, dep_name: depName });
+  await invoke('unignore_dependency', {
+    addonId,
+    depName,
+    addon_id: addonId,
+    dep_name: depName,
+  });
 }
 
 export async function ignoreUntrackedAddon(flavour: string, folders: string[]): Promise<void> {
@@ -170,5 +180,9 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
 }
 
 export async function installDependencies(flavour: string, addonId?: string): Promise<JobDto> {
-  return invoke<JobDto>('install_dependencies', { flavour, addon_id: addonId ?? null });
+  return invoke<JobDto>('install_dependencies', {
+    flavour,
+    addonId: addonId ?? null,
+    addon_id: addonId ?? null,
+  });
 }

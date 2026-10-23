@@ -26,6 +26,7 @@
     onDensityChange: (density: 'comfortable' | 'compact') => void;
     onInstallDeps?: (addonId?: string) => void;
     onIgnoreDeps?: (addon: Addon) => void;
+    onIgnoreAllMissing?: () => void;
   }
 
   let {
@@ -49,6 +50,7 @@
     onDensityChange,
     onInstallDeps,
     onIgnoreDeps,
+    onIgnoreAllMissing,
   }: Props = $props();
 
   let searchQuery = $state('');
@@ -210,8 +212,19 @@
                 type="button"
                 class="btn-banner btn-banner-install"
                 onclick={() => onInstallDeps?.()}
+                title="Automatically fetch and install missing dependencies"
               >
                 Install Missing
+              </button>
+            {/if}
+            {#if onIgnoreAllMissing}
+              <button
+                type="button"
+                class="btn-banner btn-banner-ignore"
+                onclick={() => onIgnoreAllMissing?.()}
+                title="Ignore all missing dependency warnings"
+              >
+                Ignore Missing
               </button>
             {/if}
             <button
@@ -843,6 +856,22 @@
   }
 
   .btn-banner-install:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .btn-banner-ignore {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+
+  .btn-banner-ignore:hover {
+    background: var(--bg-2);
+    color: var(--text);
+  }
+
+  .btn-banner-ignore:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
   }

@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Result};
 use uuid::Uuid;
 use crate::net::catalogue::Catalogue;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddonTarget {
     CurseForge(i64),
     Wago(String),      // slug or id

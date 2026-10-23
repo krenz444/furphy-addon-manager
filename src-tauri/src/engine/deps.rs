@@ -26,6 +26,16 @@ pub fn get_dependency_alias(dep_name: &str) -> Option<&'static str> {
     }
 }
 
+pub fn get_dependency_alias_target(dep_name: &str) -> Option<AddonTarget> {
+    let norm = normalize_dep_slug(dep_name);
+    match norm.as_str() {
+        "exwindcore" | "exwind-core" | "exwind" | "excore" => {
+            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+        }
+        _ => None,
+    }
+}
+
 pub fn check_missing_dependencies(
     conn: &Connection,
     flavour: &str,
@@ -204,7 +214,11 @@ pub async fn resolve_dependency_target(
         }
     }
 
-    resolve_dependency_target_direct(dep_trimmed, policy, data_dir).await
+    if let Some(target) = resolve_dependency_target_direct(dep_trimmed, policy, data_dir).await {
+        return Some(target);
+    }
+
+    get_dependency_alias_target(dep_trimmed)
 }
 
 fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
@@ -239,6 +253,11 @@ fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_na
 pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
     if is_dependency_already_present_direct(conn, flavour, dep_name) {
         return true;
+    }
+    if let Some(target) = get_dependency_alias_target(dep_name) {
+        if is_target_already_present(conn, flavour, &target) {
+            return true;
+        }
     }
     if let Some(alias) = get_dependency_alias(dep_name) {
         if is_dependency_already_present_direct(conn, flavour, alias) {
@@ -575,6 +594,16 @@ mod tests {
         assert_eq!(get_dependency_alias("ExWind"), Some("excore"));
         assert_eq!(get_dependency_alias("Ace3"), None);
         assert_eq!(get_dependency_alias("details"), None);
+
+        assert_eq!(
+            get_dependency_alias_target("ExwindCore"),
+            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+        );
+        assert_eq!(
+            get_dependency_alias_target("exwind"),
+            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+        );
+        assert_eq!(get_dependency_alias_target("Ace3"), None);
     }
 
     #[tokio::test]

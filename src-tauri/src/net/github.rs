@@ -191,8 +191,20 @@ pub async fn get_github_releases(
 
     let resp = execute_github_request(policy, client, &url, token, false).await?;
     let text = resp.text().await.map_err(|e| (e.to_string(), None))?;
-    let releases: Vec<GithubRelease> =
+    let mut releases: Vec<GithubRelease> =
         serde_json::from_str(&text).map_err(|e| (format!("Invalid releases list JSON: {}", e), None))?;
+
+    if releases.is_empty() {
+        releases.push(GithubRelease {
+            id: 0,
+            tag_name: "main".to_string(),
+            name: Some("main".to_string()),
+            prerelease: false,
+            published_at: None,
+            zipball_url: Some(format!("{}/repos/{}/{}/zipball", base_url, owner, repo)),
+            assets: vec![],
+        });
+    }
 
     Ok(releases)
 }

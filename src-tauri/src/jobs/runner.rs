@@ -641,6 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_deps_job_execution() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = std::env::temp_dir().join("furphy test wow (install deps)");
         let retail_addons = temp.join("_retail_").join("Interface").join("AddOns");
         let _ = std::fs::create_dir_all(&retail_addons);

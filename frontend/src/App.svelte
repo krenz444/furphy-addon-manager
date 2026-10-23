@@ -398,6 +398,24 @@
     }
   }
 
+  async function handleIgnoreAllMissing() {
+    const addonsWithDeps = addons.filter((a) => a.missing_deps && a.missing_deps.length > 0);
+    if (addonsWithDeps.length === 0) return;
+    try {
+      for (const addon of addonsWithDeps) {
+        if (addon.missing_deps) {
+          for (const dep of addon.missing_deps) {
+            await ignoreDependency(addon.id, dep);
+          }
+        }
+      }
+      addToast('success', 'Ignored all missing dependencies.');
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to ignore missing dependencies: ${err}`);
+    }
+  }
+
   async function handleUpdateAddon(addon: Addon) {
     try {
       await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { addon_ids: [addon.id] } });
@@ -667,6 +685,7 @@
           onDensityChange={handleDensityChange}
           onInstallDeps={handleInstallDeps}
           onIgnoreDeps={handleIgnoreAllDeps}
+          onIgnoreAllMissing={handleIgnoreAllMissing}
         />
       {:else if activeView === 'get_addons'}
         <GetAddonsView
