@@ -144,6 +144,21 @@ pub async fn run_sync_for_flavour(
             continue;
         }
 
+        // If the addon has no remote provider configured (e.g. locally adopted addon without upstream source):
+        if a.project_id.is_none() && a.wago_slug.is_none() && a.repo.is_none() {
+            up_to_date_count += 1;
+            results.push(AddonSyncResult {
+                addon_id: a.id.clone(),
+                name: a.name.clone(),
+                status: "Up-to-date".to_string(),
+                previous_version: a.version.clone(),
+                new_version: a.version.clone(),
+                error: None,
+            });
+            append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date (local/adopted)", a.name));
+            continue;
+        }
+
         // Retrieve existing folders for this addon
         let mut fstmt = conn
             .prepare("SELECT folder FROM addon_folders WHERE addon_id = ?1 AND flavour = ?2")
@@ -154,8 +169,9 @@ pub async fn run_sync_for_flavour(
         let previous_folders: Vec<String> = frows.flatten().collect();
 
         let src = a.source.as_deref().unwrap_or("curseforge");
-        let download_zip_path = staging_root.join(format!("{}.zip", a.id));
-        let extract_dir = staging_root.join(&a.id);
+        let safe_id = a.id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+        let download_zip_path = staging_root.join(format!("{}.zip", safe_id));
+        let extract_dir = staging_root.join(&safe_id);
 
         let mut chosen_file_id: Option<String> = None;
         let mut chosen_version: Option<String> = None;
@@ -211,6 +227,8 @@ pub async fn run_sync_for_flavour(
                     } else if sync_error.is_none() {
                         sync_error = Some("No compatible CurseForge file found".to_string());
                     }
+                } else {
+                    sync_error = Some("CurseForge addon missing project ID".to_string());
                 }
             }
             "wago" => {
@@ -284,6 +302,8 @@ pub async fn run_sync_for_flavour(
                     } else if sync_error.is_none() {
                         sync_error = Some("No compatible Wago release found".to_string());
                     }
+                } else {
+                    sync_error = Some("Wago addon missing slug".to_string());
                 }
             }
             "github" => {
@@ -320,7 +340,7 @@ pub async fn run_sync_for_flavour(
 
                                     if let Some(url) = dl_url {
                                         let target_dl_path = if is_zipball {
-                                            staging_root.join(format!("{}_raw.zip", a.id))
+                                            staging_root.join(format!("{}_raw.zip", safe_id))
                                         } else {
                                             download_zip_path.clone()
                                         };
@@ -357,7 +377,11 @@ pub async fn run_sync_for_flavour(
                                 sync_error = Some(e);
                             }
                         }
+                    } else {
+                        sync_error = Some(format!("Invalid GitHub repository format: '{}'", repo));
                     }
+                } else {
+                    sync_error = Some("GitHub addon missing repository".to_string());
                 }
             }
             _ => {
@@ -450,8 +474,9 @@ pub async fn run_sync_for_flavour(
 
         // Step 5: Backup outgoing version
         if !previous_folders.is_empty() {
-            let backup_dir = data_dir.join("backups").join(flavour).join(&a.id);
-            let backup_file = backup_dir.join(format!("{}.zip", a.file_id.as_deref().unwrap_or("backup")));
+            let backup_dir = data_dir.join("backups").join(flavour).join(&safe_id);
+            let safe_file_id = a.file_id.as_deref().unwrap_or("backup").replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let backup_file = backup_dir.join(format!("{}.zip", safe_file_id));
             let kind = if a.adopted { "pre-adopt" } else { "update" };
 
             if let Ok(size) = create_backup_zip(addons_path, &previous_folders, &backup_file) {

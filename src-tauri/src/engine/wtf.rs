@@ -152,7 +152,8 @@ pub fn take_wtf_snapshot(
     let _ = fs::create_dir_all(&snapshots_dir);
 
     let snapshot_id = Uuid::new_v4().to_string();
-    let zip_filename = format!("{}_{}_{}.zip", addon_id, Utc::now().format("%Y%m%d_%H%M%S"), &snapshot_id[..8]);
+    let safe_addon_id = addon_id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+    let zip_filename = format!("{}_{}_{}.zip", safe_addon_id, Utc::now().format("%Y%m%d_%H%M%S"), &snapshot_id[..8]);
     let zip_path = snapshots_dir.join(&zip_filename);
 
     let zip_file = File::create(&zip_path).map_err(|e| e.to_string())?;
@@ -453,5 +454,66 @@ mod tests {
         assert_eq!(count, 1);
 
         std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
+    }
+
+    #[test]
+    fn test_wtf_snapshot_with_colon_and_slash_addon_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow_root = temp.path().join("World of Warcraft");
+        let acc_sv = wow_root.join("_retail_").join("WTF").join("Account").join("12345#1").join("SavedVariables");
+        fs::create_dir_all(&acc_sv).unwrap();
+        fs::write(acc_sv.join("MyAddon.lua"), b"account_lua_v1").unwrap();
+
+        let data_dir = temp.path().join("furphy_data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE wtf_snapshots (
+                id TEXT PRIMARY KEY,
+                addon_id TEXT NOT NULL,
+                account TEXT,
+                scope TEXT,
+                path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                restored_at TEXT
+            );
+            CREATE TABLE addons (id TEXT PRIMARY KEY, flavour TEXT, name TEXT, adopted INTEGER);
+            CREATE TABLE addon_folders (flavour TEXT, folder TEXT, addon_id TEXT);"
+        ).unwrap();
+
+        let complex_id = "retail:gh:bart-dev-wow/TimelineReminders";
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, adopted) VALUES (?1, 'retail', 'TimelineReminders', 0)",
+            rusqlite::params![complex_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'MyAddon', ?1)",
+            rusqlite::params![complex_id],
+        ).unwrap();
+
+        // Taking snapshot must not fail with os error 123
+        let snap_id = take_wtf_snapshot(
+            &conn,
+            &wow_root,
+            "_retail_",
+            complex_id,
+            &["MyAddon".to_string()],
+            &data_dir,
+            "pre-update",
+        )
+        .unwrap()
+        .expect("Snapshot should be created");
+
+        let saved_path: String = conn.query_row(
+            "SELECT path FROM wtf_snapshots WHERE id = ?1",
+            rusqlite::params![snap_id],
+            |r| r.get(0),
+        ).unwrap();
+
+        assert!(!saved_path.contains(':') || (cfg!(windows) && saved_path.chars().filter(|c| *c == ':').count() <= 1), "No extra colons in path: {}", saved_path);
+        assert!(std::path::Path::new(&saved_path).exists(), "Snapshot zip must exist on disk!");
     }
 }
