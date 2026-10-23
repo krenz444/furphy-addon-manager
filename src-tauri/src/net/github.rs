@@ -49,12 +49,24 @@ pub fn create_github_client() -> reqwest::Result<Client> {
         .build()
 }
 
-fn build_github_headers(token: Option<&str>, is_api_github: bool, is_asset_stream: bool) -> HeaderMap {
+fn build_github_headers(
+    token: Option<&str>,
+    is_api_github: bool,
+    is_asset_stream: bool,
+    url: &str,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(GITHUB_USER_AGENT));
 
     if is_asset_stream {
-        headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+        // GitHub release assets endpoint (/releases/assets/{id}) requires application/octet-stream.
+        // Repository zipballs (/zipball/...) and codeload URLs fail with 415 if application/octet-stream is passed,
+        // and require */* or application/zip.
+        if url.contains("/releases/assets/") {
+            headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+        } else {
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        }
     } else {
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
     }
@@ -97,7 +109,7 @@ pub async fn execute_github_request(
             .await
             .map_err(|e| (e, None))?;
 
-        let headers = build_github_headers(token, is_api_github, is_asset_stream);
+        let headers = build_github_headers(token, is_api_github, is_asset_stream, url);
         let resp = client.get(url).headers(headers).send().await;
 
         match resp {
@@ -262,7 +274,7 @@ mod tests {
         let token = "github_pat_11AAAAAAA_test_token_1234567890";
 
         // When sending to api.github.com: Authorization header is included
-        let headers_api = build_github_headers(Some(token), true, false);
+        let headers_api = build_github_headers(Some(token), true, false, "https://api.github.com/repos/owner/repo/releases");
         assert!(headers_api.contains_key(AUTHORIZATION));
         assert_eq!(
             headers_api.get(AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -270,12 +282,20 @@ mod tests {
         );
 
         // When redirecting or sending to another host: Authorization header is NEVER included
-        let headers_redirect = build_github_headers(Some(token), false, false);
+        let headers_redirect = build_github_headers(Some(token), false, false, "https://objects.githubusercontent.com/file.zip");
         assert!(!headers_redirect.contains_key(AUTHORIZATION));
 
         // When token is None: Authorization header is not included
-        let headers_none = build_github_headers(None, true, false);
+        let headers_none = build_github_headers(None, true, false, "https://api.github.com/repos/owner/repo/releases");
         assert!(!headers_none.contains_key(AUTHORIZATION));
+
+        // When downloading zipball: Accept is */*
+        let headers_zipball = build_github_headers(Some(token), true, true, "https://api.github.com/repos/owner/repo/zipball");
+        assert_eq!(headers_zipball.get(ACCEPT).unwrap(), "*/*");
+
+        // When downloading release asset: Accept is application/octet-stream
+        let headers_asset = build_github_headers(Some(token), true, true, "https://api.github.com/repos/owner/repo/releases/assets/12345");
+        assert_eq!(headers_asset.get(ACCEPT).unwrap(), "application/octet-stream");
     }
 
     #[test]

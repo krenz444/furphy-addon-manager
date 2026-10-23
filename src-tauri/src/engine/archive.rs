@@ -5,8 +5,22 @@ use crate::logging::append_app_log;
 
 pub const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 pub const MAX_COMPRESSION_RATIO: u64 = 100;
+pub const MAX_MEDIA_COMPRESSION_RATIO: u64 = 5_000;
 pub const RATIO_CHECK_THRESHOLD_BYTES: u64 = 1024 * 1024; // 1 MB
+pub const RATIO_CHECK_THRESHOLD_BYTES_MEDIA: u64 = 64 * 1024 * 1024; // 64 MB
 pub const MAX_ENTRIES_COUNT: usize = 10_000;
+
+pub fn is_media_texture_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".tga")
+        || lower.ends_with(".blp")
+        || lower.ends_with(".bmp")
+        || lower.ends_with(".png")
+        || lower.ends_with(".wav")
+        || lower.ends_with(".mp3")
+        || lower.ends_with(".ogg")
+        || lower.ends_with(".raw")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
@@ -102,10 +116,22 @@ fn extract_addon_archive_internal(
         let uncompressed_size = entry.size();
         let compressed_size = entry.compressed_size();
 
-        // Check zip bomb ratio for entries over 1 MB
-        if uncompressed_size > RATIO_CHECK_THRESHOLD_BYTES {
+        let is_media = is_media_texture_file(&entry_name);
+        let ratio_threshold = if is_media {
+            RATIO_CHECK_THRESHOLD_BYTES_MEDIA
+        } else {
+            RATIO_CHECK_THRESHOLD_BYTES
+        };
+        let max_ratio = if is_media {
+            MAX_MEDIA_COMPRESSION_RATIO
+        } else {
+            MAX_COMPRESSION_RATIO
+        };
+
+        // Check zip bomb ratio for entries over threshold
+        if uncompressed_size > ratio_threshold {
             let ratio = uncompressed_size / compressed_size.max(1);
-            if ratio > MAX_COMPRESSION_RATIO {
+            if ratio > max_ratio {
                 return Err(ArchiveError::ZipBomb(entry_name));
             }
         }
@@ -154,9 +180,9 @@ fn extract_addon_archive_internal(
                 }
 
                 // Validate that actual written bytes didn't lie in headers
-                if written_for_entry > RATIO_CHECK_THRESHOLD_BYTES {
+                if written_for_entry > ratio_threshold {
                     let actual_ratio = written_for_entry / compressed_size.max(1);
-                    if actual_ratio > MAX_COMPRESSION_RATIO {
+                    if actual_ratio > max_ratio {
                         return Err(ArchiveError::ZipBomb(entry_name));
                     }
                 }
@@ -415,6 +441,30 @@ mod tests {
             other => panic!("Expected ZipBomb error, got {:?}", other),
         }
         assert!(!extract_dir.exists(), "Extract dir should be cleaned up on failure");
+    }
+
+    #[test]
+    fn test_tga_texture_high_ratio_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip_path = temp.path().join("addon_with_tga.zip");
+        let extract_dir = temp.path().join("extracted");
+
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+        // 2 MB of repeating bytes in a .tga file (ratio > 1000:1) should NOT be flagged as zip bomb
+        zip.start_file("MyAddon/cursor.tga", options).unwrap();
+        let zeros = vec![0u8; 2 * 1024 * 1024];
+        zip.write_all(&zeros).unwrap();
+
+        zip.start_file("MyAddon/MyAddon.toc", options).unwrap();
+        zip.write_all(b"## Interface: 110000").unwrap();
+        zip.finish().unwrap();
+
+        let res = extract_addon_archive(&zip_path, &extract_dir);
+        assert!(res.is_ok(), "High ratio on .tga texture should be allowed, got {:?}", res.err());
+        assert!(extract_dir.join("MyAddon").join("cursor.tga").exists());
     }
 
     #[test]
