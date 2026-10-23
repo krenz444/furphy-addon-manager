@@ -391,6 +391,12 @@ pub async fn run_sync_for_flavour(
 
         if let Some(err) = sync_error {
             failed_count += 1;
+            let now_str = Utc::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                 VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                params![a.id, now_str, a.file_id, a.version, &err],
+            );
             results.push(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
@@ -409,6 +415,12 @@ pub async fn run_sync_for_flavour(
             Err(e) => {
                 failed_count += 1;
                 let emsg = format!("Archive extraction error: {}", e);
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                     VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                    params![a.id, now_str, a.file_id, a.version, &emsg],
+                );
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
@@ -427,13 +439,20 @@ pub async fn run_sync_for_flavour(
             Ok(c) => c,
             Err(e) => {
                 failed_count += 1;
+                let emsg = e.to_string();
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                     VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                    params![a.id, now_str, a.file_id, a.version, &emsg],
+                );
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Failed".to_string(),
                     previous_version: a.version.clone(),
                     new_version: None,
-                    error: Some(e.to_string()),
+                    error: Some(emsg),
                 });
                 continue;
             }
@@ -443,6 +462,12 @@ pub async fn run_sync_for_flavour(
             failed_count += 1;
             let (f, owner) = &conflicts[0];
             let emsg = format!("Folder '{}' is already owned by {}", f, owner);
+            let now_str = Utc::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                 VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                params![a.id, now_str, a.file_id, a.version, &emsg],
+            );
             results.push(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
@@ -509,6 +534,12 @@ pub async fn run_sync_for_flavour(
             Ok(f) => f,
             Err(e) => {
                 failed_count += 1;
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                     VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                    params![a.id, now_str, a.file_id, a.version, &e],
+                );
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
@@ -560,6 +591,13 @@ pub async fn run_sync_for_flavour(
                 params![flavour, f, a.id],
             );
         }
+
+        let now_str = Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+             VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+            params![a.id, now_str],
+        );
 
         updated_count += 1;
         if is_wow_running() {

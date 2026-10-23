@@ -43,6 +43,7 @@ pub struct AddonDto {
     pub update_version: Option<String>,
     pub update_file_id: Option<String>,
     pub check_status: Option<String>,
+    pub error: Option<String>,
     pub is_old_patch: bool,
     pub missing_deps: Vec<String>,
     pub ignored_deps: Vec<String>,
@@ -115,7 +116,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             "SELECT a.id, a.flavour, a.name, a.author, a.source, a.version, a.project_id, \
              a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
              a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
-             c.update_version, c.update_file_id, c.status, a.latest_game_versions, a.ignored_deps \
+             c.update_version, c.update_file_id, c.status, c.error, a.latest_game_versions, a.ignored_deps \
              FROM addons a \
              LEFT JOIN check_results c ON a.id = c.addon_id \
              WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
@@ -143,14 +144,15 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             let update_version: Option<String> = row.get(16)?;
             let update_file_id: Option<String> = row.get(17)?;
             let check_status: Option<String> = row.get(18)?;
-            let latest_gv_json: Option<String> = row.get(19)?;
-            let ignored_deps_json: Option<String> = row.get(20)?;
+            let error: Option<String> = row.get(19)?;
+            let latest_gv_json: Option<String> = row.get(20)?;
+            let ignored_deps_json: Option<String> = row.get(21)?;
 
             Ok((
                 addon_id, flavour_id, name, author, source, version,
                 project_id, file_id, file_name, installed_at, adopted,
                 ignore_updates, pinned_file_id, release_type, wago_slug,
-                repo, update_version, update_file_id, check_status, latest_gv_json, ignored_deps_json,
+                repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -161,7 +163,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             addon_id, flavour_id, name, author, source, version,
             project_id, file_id, file_name, installed_at, adopted,
             ignore_updates, pinned_file_id, release_type, wago_slug,
-            repo, update_version, update_file_id, check_status, latest_gv_json, ignored_deps_json,
+            repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut folder_stmt = conn
@@ -213,6 +215,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             update_version,
             update_file_id,
             check_status,
+            error,
             is_old_patch,
             missing_deps,
             ignored_deps,
@@ -1001,5 +1004,34 @@ mod tests {
         } else {
             std::env::remove_var("LOCALAPPDATA");
         }
+    }
+
+    #[test]
+    fn test_fetch_addons_with_details_includes_error() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, version) VALUES ('addon-err', 'retail', 'FailedAddon', '1.0.0')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO check_results (addon_id, checked_at, status, error) VALUES ('addon-err', '2026-10-23T00:00:00Z', 'failed', 'Network timeout connecting to provider')",
+            [],
+        ).unwrap();
+
+        let addons = fetch_addons_with_details(&conn, "retail").unwrap();
+        assert_eq!(addons.len(), 1);
+        let dto = &addons[0];
+        assert_eq!(dto.id, "addon-err");
+        assert_eq!(dto.name.as_deref(), Some("FailedAddon"));
+        assert_eq!(dto.check_status.as_deref(), Some("failed"));
+        assert_eq!(dto.error.as_deref(), Some("Network timeout connecting to provider"));
     }
 }

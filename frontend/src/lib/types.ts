@@ -17,6 +17,7 @@ export interface Addon {
   update_version?: string | null;
   update_file_id?: string | null;
   check_status?: string | null;
+  error?: string | null;
   is_old_patch?: boolean;
   missing_deps?: string[];
   ignored_deps?: string[];
@@ -58,6 +59,26 @@ export interface JobRecord {
   results: string | null;
   reload_needed: boolean;
   log_path: string | null;
+}
+
+export interface AddonSyncResultItem {
+  addon_id: string;
+  name: string;
+  status: string;
+  previous_version?: string | null;
+  new_version?: string | null;
+  error?: string | null;
+}
+
+export interface SyncJobReport {
+  flavour?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated?: number;
+  up_to_date?: number;
+  failed?: number;
+  reload_needed?: boolean;
+  results?: AddonSyncResultItem[];
 }
 
 export interface WtfSnapshot {

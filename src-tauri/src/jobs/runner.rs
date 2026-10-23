@@ -120,10 +120,10 @@ impl JobRunner {
 
         let finished_at = Utc::now().to_rfc3339();
         match exec_res {
-            Ok((results_json, reload_needed)) => {
+            Ok((results_json, reload_needed, job_error)) => {
                 conn.execute(
-                    "UPDATE jobs SET state = 'completed', finished_at = ?1, results = ?2, reload_needed = ?3 WHERE id = ?4",
-                    params![finished_at, results_json, if reload_needed { 1 } else { 0 }, job_id],
+                    "UPDATE jobs SET state = 'completed', finished_at = ?1, results = ?2, reload_needed = ?3, error = ?4 WHERE id = ?5",
+                    params![finished_at, results_json, if reload_needed { 1 } else { 0 }, job_error, job_id],
                 )?;
 
                 // Dual-write to v1 if folder exists (ADR-311, D-03)
@@ -154,7 +154,7 @@ impl JobRunner {
                     state: "completed".to_string(),
                     started_at,
                     finished_at: Some(finished_at),
-                    error: None,
+                    error: job_error,
                     results: Some(results_json),
                     reload_needed,
                     log_path: Some(log_path),
@@ -182,7 +182,7 @@ impl JobRunner {
         kind: &str,
         flavour: Option<&str>,
         params: &Value,
-    ) -> Result<(String, bool), String> {
+    ) -> Result<(String, bool, Option<String>), String> {
         let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
         let data_dir = get_data_dir();
 
@@ -216,8 +216,18 @@ impl JobRunner {
                 )
                 .await?;
 
+                let job_error = if report.failed_count > 0 {
+                    let failed_msgs: Vec<String> = report.outcomes.iter()
+                        .filter(|o| o.status == "Failed")
+                        .map(|o| format!("{}: {}", o.name, o.error.as_deref().unwrap_or("Unknown error")))
+                        .collect();
+                    Some(format!("{} addon(s) failed: {}", report.failed_count, failed_msgs.join("; ")))
+                } else {
+                    None
+                };
+
                 let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
-                Ok((json, false))
+                Ok((json, false, job_error))
             }
             "sync" | "install" => {
                 let flv = flavour.ok_or("Flavour is required for sync job")?;
@@ -318,8 +328,18 @@ impl JobRunner {
                     }
                 }
 
+                let job_error = if report.failed > 0 {
+                    let failed_msgs: Vec<String> = report.results.iter()
+                        .filter(|r| r.status == "Failed")
+                        .map(|r| format!("{}: {}", r.name, r.error.as_deref().unwrap_or("Unknown error")))
+                        .collect();
+                    Some(format!("{} addon(s) failed: {}", report.failed, failed_msgs.join("; ")))
+                } else {
+                    None
+                };
+
                 let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
-                Ok((json, report.reload_needed))
+                Ok((json, report.reload_needed, job_error))
             }
             "update-all-flavours" => {
                 let mut all_reports = Vec::new();
@@ -361,8 +381,23 @@ impl JobRunner {
                     all_reports.push(report);
                 }
 
+                let total_failed: usize = all_reports.iter().map(|r| r.failed).sum();
+                let job_error = if total_failed > 0 {
+                    let mut failed_msgs = Vec::new();
+                    for r in &all_reports {
+                        for res in &r.results {
+                            if res.status == "Failed" {
+                                failed_msgs.push(format!("{}: {}", res.name, res.error.as_deref().unwrap_or("Unknown error")));
+                            }
+                        }
+                    }
+                    Some(format!("{} addon(s) failed: {}", total_failed, failed_msgs.join("; ")))
+                } else {
+                    None
+                };
+
                 let json = serde_json::to_string(&all_reports).map_err(|e| e.to_string())?;
-                Ok((json, any_reload))
+                Ok((json, any_reload, job_error))
             }
             "scan" => {
                 let flv = flavour.ok_or("Flavour is required for scan job")?;
@@ -380,7 +415,7 @@ impl JobRunner {
                 .map_err(|e| e.to_string())?;
 
                 let json = serde_json::to_string(&candidates).map_err(|e| e.to_string())?;
-                Ok((json, false))
+                Ok((json, false, None))
             }
             "adopt" => {
                 let flv = flavour.ok_or("Flavour is required for adopt job")?;
@@ -390,7 +425,7 @@ impl JobRunner {
                 .map_err(|e| format!("Invalid adopt payload: {}", e))?;
 
                 let addon_id = adopt_candidate_group(conn, flv, &candidate).map_err(|e| e.to_string())?;
-                Ok((serde_json::json!({ "addon_id": addon_id }).to_string(), false))
+                Ok((serde_json::json!({ "addon_id": addon_id }).to_string(), false, None))
             }
             "rollback" => {
                 let flv = flavour.ok_or("Flavour is required for rollback job")?;
@@ -413,7 +448,7 @@ impl JobRunner {
                     &target_flv.addons_path,
                     &data_dir,
                 )?;
-                Ok((serde_json::json!({ "rolled_back": addon_id }).to_string(), false))
+                Ok((serde_json::json!({ "rolled_back": addon_id }).to_string(), false, None))
             }
             "restore-wtf" => {
                 let flv = flavour.ok_or("Flavour is required for restore-wtf job")?;
@@ -434,7 +469,7 @@ impl JobRunner {
                     snapshot_id,
                     &data_dir,
                 )?;
-                Ok((serde_json::json!({ "restored": snapshot_id }).to_string(), false))
+                Ok((serde_json::json!({ "restored": snapshot_id }).to_string(), false, None))
             }
             "remove" => {
                 let flv = flavour.ok_or("Flavour is required for remove job")?;
@@ -449,7 +484,7 @@ impl JobRunner {
                     .ok_or("Missing addon_id parameter")?;
 
                 remove_addon(conn, addon_id, flv, &target_flv.addons_path)?;
-                Ok((serde_json::json!({ "removed": addon_id }).to_string(), false))
+                Ok((serde_json::json!({ "removed": addon_id }).to_string(), false, None))
             }
             "switch-source" => {
                 let addon_id = params.get("addon_id").and_then(|v| v.as_str()).ok_or("Missing addon_id")?;
@@ -459,7 +494,7 @@ impl JobRunner {
                 let wago_slug = params.get("wago_slug").and_then(|v| v.as_str());
 
                 switch_addon_source(conn, addon_id, new_source, project_id, wago_id, wago_slug)?;
-                Ok((serde_json::json!({ "switched": addon_id }).to_string(), false))
+                Ok((serde_json::json!({ "switched": addon_id }).to_string(), false, None))
             }
             "add-by-slug" | "add" => {
                 let flv = flavour.ok_or("Flavour is required for add job")?;
@@ -511,8 +546,18 @@ impl JobRunner {
                 )
                 .await;
 
+                let job_error = if sync_rep.failed > 0 {
+                    let failed_msgs: Vec<String> = sync_rep.results.iter()
+                        .filter(|r| r.status == "Failed")
+                        .map(|r| format!("{}: {}", r.name, r.error.as_deref().unwrap_or("Unknown error")))
+                        .collect();
+                    Some(format!("{} addon(s) failed: {}", sync_rep.failed, failed_msgs.join("; ")))
+                } else {
+                    None
+                };
+
                 let json = serde_json::to_string(&sync_rep).map_err(|e| e.to_string())?;
-                Ok((json, sync_rep.reload_needed))
+                Ok((json, sync_rep.reload_needed, job_error))
             }
             "install-deps" => {
                 let flv = flavour.ok_or("Flavour is required for install-deps job")?;
@@ -571,7 +616,17 @@ impl JobRunner {
                 })
                 .to_string();
 
-                Ok((json, reload_needed))
+                let job_error = if !deps_result.unresolved_deps.is_empty() {
+                    if deps_result.unresolved_deps.len() == 1 {
+                        Some(format!("Failed to install dependency '{}'", deps_result.unresolved_deps[0]))
+                    } else {
+                        Some(format!("Failed to install {} dependency(ies): {}", deps_result.unresolved_deps.len(), deps_result.unresolved_deps.join(", ")))
+                    }
+                } else {
+                    None
+                };
+
+                Ok((json, reload_needed, job_error))
             }
             "import" => {
                 let flv = flavour.ok_or("Flavour is required for import job")?;
@@ -579,7 +634,7 @@ impl JobRunner {
                 let import_file = PathBuf::from(file_path_str);
 
                 let count = import_addon_list(conn, flv, &import_file)?;
-                Ok((serde_json::json!({ "imported_count": count }).to_string(), false))
+                Ok((serde_json::json!({ "imported_count": count }).to_string(), false, None))
             }
             _ => Err(format!("Unrecognized job kind '{}'", kind)),
         }
@@ -701,6 +756,71 @@ mod tests {
         assert_eq!(results_val2["count"], 0);
         assert_eq!(results_val2["installed_deps"], serde_json::json!([]));
         assert_eq!(results_val2["unresolved_deps"], serde_json::json!(["TotallyFakeDepThatDoesNotExist"]));
+        assert_eq!(
+            record2.error,
+            Some("Failed to install dependency 'TotallyFakeDepThatDoesNotExist'".to_string())
+        );
+
+        // Cleanup
+        std::env::remove_var("FURPHY_DEV_WOWROOT");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[tokio::test]
+    async fn test_sync_job_failure_pipeline() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join("furphy test wow (sync failure pipeline)");
+        let retail_addons = temp.join("_retail_").join("Interface").join("AddOns");
+        let _ = std::fs::create_dir_all(&retail_addons);
+        std::env::set_var("FURPHY_DEV_WOWROOT", temp.to_str().unwrap());
+
+        let policy = Arc::new(NetworkPolicy::new());
+        let runner = JobRunner::new(policy);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed, client_build, client_interface) \
+             VALUES ('retail', '_retail_', 'Retail', 1, '11.0.2', '110002')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, source, project_id, version) VALUES ('failed-addon', 'retail', 'BrokenAddon', 'unknown-src', 12345, '1.0.0')",
+            [],
+        ).unwrap();
+
+        let res = runner.run_job(
+            &mut conn,
+            "sync",
+            Some("retail"),
+            serde_json::json!({ "addon_id": "failed-addon" }),
+        ).await;
+
+        assert!(res.is_ok(), "sync job should succeed with completed status even if individual addon failed: {:?}", res);
+        let record = res.unwrap();
+        assert_eq!(record.state, "completed");
+        assert_eq!(
+            record.error,
+            Some("1 addon(s) failed: BrokenAddon: Unknown source 'unknown-src'".to_string())
+        );
+
+        // Verify check_results table in DB
+        let (cr_status, cr_err): (String, Option<String>) = conn.query_row(
+            "SELECT status, error FROM check_results WHERE addon_id = 'failed-addon'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(cr_status, "failed");
+        assert_eq!(cr_err, Some("Unknown source 'unknown-src'".to_string()));
+
+        // Verify fetch_addons_with_details reflects the error
+        let dtos = crate::commands::addons::fetch_addons_with_details(&conn, "retail").unwrap();
+        assert_eq!(dtos.len(), 1);
+        assert_eq!(dtos[0].id, "failed-addon");
+        assert_eq!(dtos[0].error.as_deref(), Some("Unknown source 'unknown-src'"));
+        assert_eq!(dtos[0].check_status.as_deref(), Some("failed"));
 
         // Cleanup
         std::env::remove_var("FURPHY_DEV_WOWROOT");

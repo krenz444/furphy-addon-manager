@@ -9,32 +9,41 @@
     onRetry?: (addon: Addon) => void;
     onViewDetails?: (addon: Addon) => void;
     onInstallDeps?: (addon?: Addon) => void;
+    onShowError?: (addon: Addon) => void;
   }
 
-  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails, onInstallDeps }: Props = $props();
+  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails, onInstallDeps, onShowError }: Props = $props();
 
   let hasMissingDeps = $derived((addon.missing_deps && addon.missing_deps.length > 0) ?? false);
 
   let statusType = $derived.by(() => {
+    if (addon.error || addon.check_status === 'failed') return 'failed';
     if (addon.pinned_file_id) return 'pinned';
     if (addon.ignore_updates) return 'ignored';
     if (addon.update_version) return 'update';
     if (hasMissingDeps) return 'needs_dep';
     if (addon.is_old_patch) return 'old_patch';
-    if (addon.check_status === 'failed') return 'failed';
     return 'up_to_date';
   });
 
   function handleClick(e: MouseEvent) {
     e.stopPropagation();
-    if (statusType === 'update' && onUpdate) {
+    if (statusType === 'failed') {
+      if (onShowError) {
+        onShowError(addon);
+      } else if (onViewDetails) {
+        onViewDetails(addon);
+      } else if (onRetry) {
+        onRetry(addon);
+      } else if (onUpdate) {
+        onUpdate(addon);
+      }
+    } else if (statusType === 'update' && onUpdate) {
       onUpdate(addon);
     } else if (statusType === 'pinned' && onUnpin) {
       onUnpin(addon);
     } else if (statusType === 'ignored' && onUnignore) {
       onUnignore(addon);
-    } else if (statusType === 'failed' && onRetry) {
-      onRetry(addon);
     } else if (statusType === 'needs_dep') {
       if (onInstallDeps) {
         onInstallDeps(addon);
@@ -47,7 +56,17 @@
   }
 </script>
 
-{#if statusType === 'update'}
+{#if statusType === 'failed'}
+  <button
+    type="button"
+    class="status-pill pill-failed"
+    onclick={handleClick}
+    title={addon.error || "Update check failed. Click to retry."}
+  >
+    <span class="pill-dot"></span>
+    Failed · View error
+  </button>
+{:else if statusType === 'update'}
   <button
     type="button"
     class="status-pill pill-update"
@@ -108,15 +127,6 @@
     title="Not built for current game client patch. Click to view compatibility."
   >
     Old patch
-  </button>
-{:else if statusType === 'failed'}
-  <button
-    type="button"
-    class="status-pill pill-failed"
-    onclick={handleClick}
-    title="Update check failed. Click to retry."
-  >
-    Couldn’t update · Retry
   </button>
 {:else}
   <span class="status-pill pill-up-to-date">

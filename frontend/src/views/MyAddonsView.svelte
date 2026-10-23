@@ -54,9 +54,11 @@
   }: Props = $props();
 
   let searchQuery = $state('');
-  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch'>('all');
+  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch' | 'failed'>('all');
   let sortBy = $state<'name' | 'status' | 'updated'>('name');
   let selectedIds = $state<Set<string>>(new Set());
+  let errorDialogAddon = $state<Addon | null>(null);
+  let errorCopied = $state(false);
 
   // Filtered addons
   let filteredAddons = $derived.by(() => {
@@ -73,6 +75,8 @@
       list = list.filter(a => a.ignore_updates);
     } else if (activeFilter === 'old_patch') {
       list = list.filter(a => a.is_old_patch);
+    } else if (activeFilter === 'failed') {
+      list = list.filter(a => !!a.error || a.check_status === 'failed');
     }
 
     // Search query
@@ -95,10 +99,10 @@
         return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
       } else if (sortBy === 'status') {
         const priority = (item: Addon) => {
-          if (item.update_version) return 1;
-          if (item.missing_deps && item.missing_deps.length > 0) return 2;
-          if (item.is_old_patch) return 3;
-          if (item.check_status === 'failed') return 4;
+          if (item.error || item.check_status === 'failed') return 1;
+          if (item.update_version) return 2;
+          if (item.missing_deps && item.missing_deps.length > 0) return 3;
+          if (item.is_old_patch) return 4;
           if (item.pinned_file_id) return 5;
           if (item.ignore_updates) return 6;
           return 7;
@@ -119,6 +123,7 @@
   let pinnedCount = $derived(addons.filter(a => !!a.pinned_file_id).length);
   let ignoredCount = $derived(addons.filter(a => a.ignore_updates).length);
   let oldPatchCount = $derived(addons.filter(a => a.is_old_patch).length);
+  let failedCount = $derived(addons.filter(a => !!a.error || a.check_status === 'failed').length);
 
   // Selection helpers
   let isAllSelected = $derived(
@@ -386,6 +391,19 @@
           Old Patch ({oldPatchCount})
         </button>
       {/if}
+
+      {#if failedCount > 0}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeFilter === 'failed'}
+          class="filter-chip chip-failed"
+          class:active={activeFilter === 'failed'}
+          onclick={() => (activeFilter = 'failed')}
+        >
+          Failed ({failedCount})
+        </button>
+      {/if}
     </div>
 
     <div class="filter-bar-actions">
@@ -508,6 +526,20 @@
 
               <div class="col-name">
                 <span class="addon-title">{addon.name ?? addon.id}</span>
+                {#if addon.error}
+                  <button
+                    type="button"
+                    class="addon-error-badge"
+                    title="Error: {addon.error}. Click to view details."
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      errorDialogAddon = addon;
+                    }}
+                  >
+                    <span class="error-badge-icon" aria-hidden="true">⚠</span>
+                    <span class="error-badge-text">Error</span>
+                  </button>
+                {/if}
                 {#if addon.author}
                   <span class="addon-author">by {addon.author}</span>
                 {/if}
@@ -537,6 +569,7 @@
                   onRetry={onUpdateAddon}
                   onViewDetails={onOpenAddonDrawer}
                   onInstallDeps={() => onInstallDeps?.(addon.id)}
+                  onShowError={(a) => (errorDialogAddon = a)}
                 />
               </div>
 
@@ -565,7 +598,96 @@
       </div>
     {/if}
   </div>
+
+  {#if errorDialogAddon}
+    <div
+      class="dialog-backdrop"
+      onclick={() => (errorDialogAddon = null)}
+      role="presentation"
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div
+        class="dialog-card error-dialog-card"
+        onclick={(e) => e.stopPropagation()}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="addon-error-modal-title"
+        tabindex="-1"
+      >
+        <div class="dialog-header">
+          <span class="dialog-status-icon failed-icon" aria-hidden="true">✕</span>
+          <div class="dialog-title-block">
+            <h3 id="addon-error-modal-title" class="dialog-title danger-text">
+              Addon Operation Failed
+            </h3>
+            <span class="dialog-subtitle">{errorDialogAddon.name ?? errorDialogAddon.id}</span>
+          </div>
+          <button
+            type="button"
+            class="dialog-close-btn"
+            onclick={() => (errorDialogAddon = null)}
+            aria-label="Close error dialog"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div class="dialog-body">
+          <p class="dialog-explanation">
+            An error occurred while updating, installing, or checking this addon:
+          </p>
+          <div class="error-detail-box font-mono" role="region" aria-label="Error message">
+            {errorDialogAddon.error || 'Update check, download, or installation failed.'}
+          </div>
+        </div>
+
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="btn-secondary"
+            onclick={() => {
+              const err = errorDialogAddon?.error || 'Operation failed';
+              navigator.clipboard.writeText(`${errorDialogAddon?.name ?? errorDialogAddon?.id}: ${err}`);
+              errorCopied = true;
+              setTimeout(() => { errorCopied = false; }, 2000);
+            }}
+          >
+            {errorCopied ? '✓ Copied' : 'Copy Error'}
+          </button>
+          <button
+            type="button"
+            class="btn-secondary"
+            onclick={() => {
+              const target = errorDialogAddon;
+              errorDialogAddon = null;
+              if (target) onOpenAddonDrawer(target, 'changelog');
+            }}
+          >
+            View in Drawer
+          </button>
+          <button
+            type="button"
+            class="btn-primary btn-retry-error"
+            onclick={() => {
+              const target = errorDialogAddon;
+              errorDialogAddon = null;
+              if (target) onUpdateAddon(target);
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
+
+<svelte:window onkeydown={(e) => {
+  if (errorDialogAddon && e.key === 'Escape') {
+    e.preventDefault();
+    errorDialogAddon = null;
+  }
+}} />
 
 <style>
   .my-addons-view {
@@ -1140,5 +1262,192 @@
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     border: 0;
+  }
+
+  .filter-chip.chip-failed {
+    border-color: var(--danger-border);
+    color: var(--danger);
+  }
+
+  .filter-chip.chip-failed.active {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: var(--danger-text);
+  }
+
+  .addon-error-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: var(--danger-tint);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-sm, 4px);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    cursor: pointer;
+    vertical-align: middle;
+    transition: background var(--fast), border-color var(--fast);
+    flex-shrink: 0;
+  }
+
+  .addon-error-badge:hover {
+    background: rgba(255, 111, 120, 0.25);
+    border-color: var(--danger);
+  }
+
+  .addon-error-badge:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .error-badge-icon {
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .error-badge-text {
+    line-height: 1.2;
+  }
+
+  .dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+    backdrop-filter: blur(2px);
+  }
+
+  .dialog-card {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg, 12px);
+    width: 100%;
+    max-width: 480px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .dialog-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+
+  .dialog-status-icon.failed-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--danger-tint);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .dialog-title-block {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .dialog-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .dialog-title.danger-text {
+    color: var(--danger);
+  }
+
+  .dialog-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+    margin-top: 2px;
+  }
+
+  .dialog-close-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: color var(--fast);
+  }
+
+  .dialog-close-btn:hover {
+    color: var(--text);
+  }
+
+  .dialog-close-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .dialog-body {
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .dialog-explanation {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .error-detail-box {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.75rem 1rem;
+    font-size: 0.8rem;
+    color: var(--danger);
+    line-height: 1.45;
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .dialog-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.65rem;
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+
+  .btn-retry-error {
+    background: var(--danger);
+    color: #fff;
+    border: 1px solid var(--danger);
+  }
+
+  .btn-retry-error:hover {
+    background: var(--danger-hover);
   }
 </style>

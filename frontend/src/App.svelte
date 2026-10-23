@@ -107,6 +107,80 @@
     }, durationMs);
   }
 
+  function inspectFinishedJob(job: JobRecord): { failedCount: number; failedNames: string[]; errorMessage: string | null } {
+    let failedCount = 0;
+    const failedNames: string[] = [];
+    let errorMessage: string | null = job.error || null;
+
+    if (job.results) {
+      try {
+        const parsed = typeof job.results === 'string' ? JSON.parse(job.results) : job.results;
+        if (parsed) {
+          if (typeof parsed.failed === 'number' && parsed.failed > 0) {
+            failedCount = parsed.failed;
+          }
+
+          const items = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed.results)
+              ? parsed.results
+              : [];
+
+          for (const item of items) {
+            if (!item) continue;
+            if (item.status === 'Failed' || item.status === 'failed' || item.error) {
+              const name = item.name || item.addon_id || 'Unknown Addon';
+              if (!failedNames.includes(name)) {
+                failedNames.push(name);
+              }
+              if (!errorMessage && item.error) {
+                errorMessage = item.error;
+              }
+            }
+            if (Array.isArray(item.failed)) {
+              for (const f of item.failed) {
+                const name = typeof f === 'string' ? f : (f?.name || f?.addon_id || 'Unknown Addon');
+                if (!failedNames.includes(name)) failedNames.push(name);
+                if (!errorMessage && typeof f === 'object' && f?.error) errorMessage = f.error;
+              }
+            }
+          }
+
+          if (Array.isArray(parsed.failed)) {
+            for (const f of parsed.failed) {
+              const name = typeof f === 'string' ? f : (f?.name || f?.addon_id || 'Unknown Addon');
+              if (!failedNames.includes(name)) failedNames.push(name);
+              if (!errorMessage && typeof f === 'object' && f?.error) errorMessage = f.error;
+            }
+          }
+
+          if (failedCount === 0 && failedNames.length > 0) {
+            failedCount = failedNames.length;
+          }
+        }
+      } catch {
+        // ignore parse error
+      }
+    }
+
+    if (job.state === 'failed' && failedCount === 0) {
+      failedCount = 1;
+    }
+
+    return { failedCount, failedNames, errorMessage };
+  }
+
+  function handleJobResultToast(job: JobRecord): boolean {
+    const { failedCount, failedNames, errorMessage } = inspectFinishedJob(job);
+    if (failedCount > 0 || job.error || job.state === 'failed') {
+      const nameStr = failedNames.length > 0 ? failedNames.join(', ') : `${failedCount} addon(s)`;
+      const errorSummary = errorMessage ? `: ${errorMessage}` : '';
+      addToast('error', `Failed updating ${nameStr}${errorSummary}`, 6000);
+      return true;
+    }
+    return false;
+  }
+
   async function loadInitialData() {
     try {
       try {
@@ -176,7 +250,13 @@
           }
         }
         if (stateRes.freshness) freshness = stateRes.freshness;
-        if (stateRes.running_job !== undefined) runningJob = stateRes.running_job;
+        if (stateRes.running_job !== undefined) {
+          const prevJob = runningJob;
+          runningJob = stateRes.running_job;
+          if (prevJob?.state === 'running' && runningJob && runningJob.state !== 'running') {
+            handleJobResultToast(runningJob);
+          }
+        }
         if (stateRes.untracked_count !== undefined) untrackedCount = stateRes.untracked_count;
         if (stateRes.is_game_active !== undefined) isGameActive = stateRes.is_game_active;
       }
@@ -235,13 +315,26 @@
       currentJobAddon = 'Contacting repositories…';
       jobLogs = ['[Check] Starting check for ' + activeFlavour];
 
-      await invoke('start_job', { kind: 'check', flavour: activeFlavour });
-      addToast('info', 'Check complete.');
+      const job = await invoke<JobRecord>('start_job', { kind: 'check', flavour: activeFlavour });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('info', 'Check complete.');
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 2000);
+      }
       await refreshFlavourData(activeFlavour);
-      runningJob = null;
     } catch (err: unknown) {
       if (runningJob) {
-        runningJob = { ...runningJob, state: 'failed', error: String(err) };
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
       }
       addToast('error', 'Check failed: ' + err);
     }
@@ -266,16 +359,29 @@
       currentJobAddon = 'Downloading updates…';
       jobLogs = ['[Sync] Updating all eligible addons for ' + activeFlavour];
 
-      await invoke('start_job', { kind: 'sync', flavour: activeFlavour });
-      addToast('success', 'All addons updated successfully.');
-      if (isGameActive) {
+      const job = await invoke<JobRecord>('start_job', { kind: 'sync', flavour: activeFlavour });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('success', 'All addons updated successfully.');
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
+      }
+      if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
       await refreshFlavourData(activeFlavour);
-      runningJob = null;
     } catch (err: unknown) {
       if (runningJob) {
-        runningJob = { ...runningJob, state: 'failed', error: String(err) };
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
       }
       addToast('error', 'Update failed: ' + err);
     }
@@ -305,11 +411,18 @@
       ];
 
       const job = await installDependencies(activeFlavour, addonId);
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasJobError = handleJobResultToast(finishedJob);
 
       let unresolved: string[] = [];
-      if (job?.results) {
+      if (finishedJob?.results) {
         try {
-          const parsed = typeof job.results === 'string' ? JSON.parse(job.results) : job.results;
+          const parsed = typeof finishedJob.results === 'string' ? JSON.parse(finishedJob.results) : finishedJob.results;
           if (Array.isArray(parsed)) {
             for (const item of parsed) {
               if (Array.isArray(item.unresolved_deps)) unresolved.push(...item.unresolved_deps);
@@ -333,27 +446,33 @@
         }
       }
 
-      if (unresolved.length > 0) {
-        addToast(
-          'warning',
-          `Could not automatically resolve: ${unresolved.join(', ')}. You can ignore or search for them.`
-        );
-      } else {
-        addToast(
-          'success',
-          targetName
-            ? `Installed missing dependencies for ${targetName}`
-            : 'All missing dependencies installed successfully.'
-        );
+      if (!hasJobError) {
+        if (unresolved.length > 0) {
+          addToast(
+            'warning',
+            `Could not automatically resolve: ${unresolved.join(', ')}. You can ignore or search for them.`
+          );
+        } else {
+          addToast(
+            'success',
+            targetName
+              ? `Installed missing dependencies for ${targetName}`
+              : 'All missing dependencies installed successfully.'
+          );
+        }
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
       }
 
-      if (isGameActive) {
+      if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
-      runningJob = null;
     } catch (err: unknown) {
       if (runningJob) {
-        runningJob = { ...runningJob, state: 'failed', error: String(err) };
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
       }
       addToast('error', 'Dependency installation failed: ' + err);
     }
@@ -418,13 +537,47 @@
 
   async function handleUpdateAddon(addon: Addon) {
     try {
-      await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { addon_ids: [addon.id] } });
-      addToast('success', `Updated ${addon.name ?? addon.id}`);
-      if (isGameActive) {
+      runningJob = {
+        id: 'job-sync-single-' + Date.now(),
+        kind: 'sync',
+        flavour: activeFlavour,
+        params: JSON.stringify({ addon_ids: [addon.id] }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: isGameActive,
+        log_path: null,
+      };
+      activeJobPhase = 'Updating';
+      currentJobAddon = addon.name ?? addon.id;
+      jobLogs = [`[Sync] Updating ${addon.name ?? addon.id}`];
+
+      const job = await invoke<JobRecord>('start_job', { kind: 'sync', flavour: activeFlavour, params: { addon_ids: [addon.id] } });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('success', `Updated ${addon.name ?? addon.id}`);
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
+      }
+      if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
       await refreshFlavourData(activeFlavour);
     } catch (err) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
+      }
       addToast('error', `Failed to update ${addon.name ?? addon.id}: ${err}`);
     }
   }
@@ -433,13 +586,47 @@
     if (selected.length === 0) return;
     try {
       const ids = selected.map(a => a.id);
-      await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { addon_ids: ids } });
-      addToast('success', `Updated ${selected.length} addons`);
-      if (isGameActive) {
+      runningJob = {
+        id: 'job-sync-selected-' + Date.now(),
+        kind: 'sync',
+        flavour: activeFlavour,
+        params: JSON.stringify({ addon_ids: ids }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: isGameActive,
+        log_path: null,
+      };
+      activeJobPhase = 'Updating';
+      currentJobAddon = `${selected.length} addons`;
+      jobLogs = [`[Sync] Updating ${selected.length} selected addons`];
+
+      const job = await invoke<JobRecord>('start_job', { kind: 'sync', flavour: activeFlavour, params: { addon_ids: ids } });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('success', `Updated ${selected.length} addons`);
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
+      }
+      if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
       await refreshFlavourData(activeFlavour);
     } catch (err) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
+      }
       addToast('error', `Bulk update failed: ${err}`);
     }
   }
@@ -524,12 +711,50 @@
   }
 
   async function handleAddAddon(target: string) {
-    await invoke('start_job', { kind: 'add', flavour: activeFlavour, params: { target } });
-    addToast('success', 'Addon installed successfully');
-    if (isGameActive) {
-      reloadNeeded = true;
+    try {
+      runningJob = {
+        id: 'job-add-' + Date.now(),
+        kind: 'add',
+        flavour: activeFlavour,
+        params: JSON.stringify({ target }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: isGameActive,
+        log_path: null,
+      };
+      activeJobPhase = 'Installing';
+      currentJobAddon = target;
+      jobLogs = [`[Add] Installing addon ${target}`];
+
+      const job = await invoke<JobRecord>('start_job', { kind: 'add', flavour: activeFlavour, params: { target } });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('success', 'Addon installed successfully');
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
+      }
+      if (isGameActive && finishedJob.reload_needed) {
+        reloadNeeded = true;
+      }
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
+      }
+      addToast('error', `Installation failed: ${err}`);
     }
-    await refreshFlavourData(activeFlavour);
   }
 
   async function handleExportAddonList(includeWtf: boolean): Promise<string> {
@@ -585,25 +810,59 @@
   function handleProtocolConsent(flavour: string, addonId: number, fileId?: number | null) {
     protocolOpen = false;
     const existing = addons.find(a => a.project_id === addonId || a.id === String(addonId));
+    runningJob = {
+      id: 'job-protocol-' + Date.now(),
+      kind: existing ? 'install' : 'add',
+      flavour,
+      params: null,
+      state: 'running',
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      error: null,
+      results: null,
+      reload_needed: isGameActive,
+      log_path: null,
+    };
+    activeJobPhase = 'Installing';
+    currentJobAddon = existing?.name ?? `Addon #${addonId}`;
+    jobLogs = [`[Protocol] Installing addon #${addonId}`];
+
     const jobPromise = existing
-      ? invoke('start_job', {
+      ? invoke<JobRecord>('start_job', {
           kind: 'install',
           flavour,
           params: { addon_id: existing.id, project_id: addonId, file_id: fileId },
         })
-      : invoke('start_job', {
+      : invoke<JobRecord>('start_job', {
           kind: 'add',
           flavour,
           params: { target: `curse:${addonId}`, file_id: fileId },
         });
 
-    jobPromise.then(() => {
-      addToast('success', `Installed addon #${addonId}`);
-      if (isGameActive) {
+    jobPromise.then((job) => {
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+      const hasError = handleJobResultToast(finishedJob);
+      if (!hasError) {
+        addToast('success', `Installed addon #${addonId}`);
+        setTimeout(() => {
+          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+            runningJob = null;
+          }
+        }, 3000);
+      }
+      if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
       refreshFlavourData(activeFlavour);
     }).catch(err => {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
+      }
       addToast('error', `Protocol install failed: ${err}`);
     });
   }
@@ -637,7 +896,13 @@
         progressIndex={jobIndex}
         progressTotal={jobTotal}
         logs={jobLogs}
-        onRetry={handleCheckNow}
+        onRetry={() => {
+          if (runningJob?.kind === 'check') {
+            handleCheckNow();
+          } else {
+            handleUpdateAll();
+          }
+        }}
         onDismiss={() => (runningJob = null)}
         onOpenLog={() => invoke('open_target', { what: 'lastrun', args: [] })}
       />
