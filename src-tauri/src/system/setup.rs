@@ -8,9 +8,13 @@ use winreg::enums::HKEY_CURRENT_USER;
 #[cfg(windows)]
 use winreg::RegKey;
 
-pub const UNINSTALL_REG_KEY_NAME: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Furphy Addon Manager";
+pub const UNINSTALL_REG_KEY_NAME: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager";
+pub const LEGACY_SPACED_REG_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Furphy Addon Manager";
 pub const APP_TITLE: &str = "Furphy Addon Manager";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const EMBEDDED_WEBVIEW2: &[u8] = include_bytes!("../../resources/WebView2Loader.dll");
+const EMBEDDED_LIBUNWIND: &[u8] = include_bytes!("../../resources/libunwind.dll");
 
 pub fn get_default_install_dir() -> PathBuf {
     if let Some(local_app_data) = dirs::data_local_dir() {
@@ -38,7 +42,7 @@ pub fn create_shortcut(target_exe: &Path, shortcut_path: &Path, description: &st
         );
 
         let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
             .output()
             .map_err(|e| format!("Failed executing shortcut script: {}", e))?;
 
@@ -80,21 +84,20 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
             .map_err(|e| format!("Failed copying binary to '{}': {}", dest_exe.display(), e))?;
     }
 
-    // Copy runtime dependencies alongside the executable
-    if let Some(parent) = current_exe.parent() {
-        for dll in &["libunwind.dll", "WebView2Loader.dll"] {
-            let src_dll = parent.join(dll);
-            if src_dll.exists() {
-                let dest_dll = install_dir.join(dll);
-                let _ = fs::copy(&src_dll, &dest_dll);
-            }
-        }
-    }
+    // Unpack embedded runtime dependencies alongside the executable
+    let dest_wv2 = install_dir.join("WebView2Loader.dll");
+    let _ = fs::write(&dest_wv2, EMBEDDED_WEBVIEW2);
+    let dest_unwind = install_dir.join("libunwind.dll");
+    let _ = fs::write(&dest_unwind, EMBEDDED_LIBUNWIND);
 
     // 1. Create Desktop Shortcut
     if let Some(desktop) = dirs::desktop_dir() {
         let sc_path = desktop.join(format!("{}.lnk", APP_TITLE));
-        let _ = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2");
+        if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
+            append_app_log("WARN", &format!("Failed creating desktop shortcut: {}", e));
+        } else {
+            append_app_log("INFO", &format!("Created desktop shortcut: {}", sc_path.display()));
+        }
     }
 
     // 2. Create Start Menu Shortcut
@@ -102,7 +105,11 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
         // %APPDATA%\Microsoft\Windows\Start Menu\Programs\
         let start_menu = data_dir.join(r"Microsoft\Windows\Start Menu\Programs");
         let sc_path = start_menu.join(format!("{}.lnk", APP_TITLE));
-        let _ = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2");
+        if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
+            append_app_log("WARN", &format!("Failed creating start menu shortcut: {}", e));
+        } else {
+            append_app_log("INFO", &format!("Created start menu shortcut: {}", sc_path.display()));
+        }
     }
 
     // 3. Register Installed-Apps entry in HKCU Uninstall
@@ -124,6 +131,7 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
             let _ = key.set_value("NoModify", &dword_one);
             let _ = key.set_value("NoRepair", &dword_one);
         }
+        let _ = hkcu.delete_subkey(LEGACY_SPACED_REG_KEY);
     }
 
     append_app_log("INFO", &format!("Installed Furphy v2 into '{}'", install_dir.display()));
@@ -166,6 +174,7 @@ pub fn run_uninstall(silent: bool, target_dir_override: Option<PathBuf>) -> Resu
     {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let _ = hkcu.delete_subkey(UNINSTALL_REG_KEY_NAME);
+        let _ = hkcu.delete_subkey(LEGACY_SPACED_REG_KEY);
     }
 
     // 4. Remove binaries in install directory

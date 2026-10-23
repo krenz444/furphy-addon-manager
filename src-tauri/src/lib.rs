@@ -81,10 +81,18 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for installation lifecycle arguments before init_app (§5.1)
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let exe_name = current_exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let is_setup_exe = exe_name.contains("setup");
+
+    // Check for installation lifecycle arguments before init_app
     let is_silent = args.iter().any(|a| a.eq_ignore_ascii_case("/S") || a == "--silent");
-    let is_install = args.iter().any(|a| a == "--install") || (is_silent && !args.iter().any(|a| a == "--uninstall"));
     let is_uninstall = args.iter().any(|a| a == "--uninstall");
+    let is_install = !is_uninstall && (is_setup_exe || args.iter().any(|a| a == "--install") || is_silent);
 
     if is_install {
         if let Err(e) = system::setup::run_install(is_silent, None) {
