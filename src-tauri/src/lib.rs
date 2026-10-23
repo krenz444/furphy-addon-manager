@@ -7,6 +7,7 @@ pub mod logging;
 pub mod net;
 pub mod paths;
 pub mod system;
+pub mod update;
 
 use std::path::PathBuf;
 use rusqlite::Connection;
@@ -62,6 +63,11 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
                         "Imported from v1: {} addons, {} flavours, {} backups copied",
                         summary.addons_imported, summary.flavours_imported, summary.backups_copied
                     ));
+                    // Section 5.2: First run of v2 on a PC that has v1
+                    system::retire_v1::retire_v1_blocking(system::retire_v1::RetireOptions {
+                        custom_v1_path: Some(v1_path.clone()),
+                        ..Default::default()
+                    });
                 }
             }
             Err(e) => {

@@ -60,6 +60,18 @@ impl JobRunner {
         }
     }
 
+    pub async fn is_busy(&self) -> bool {
+        self.active_job_id.lock().await.is_some()
+    }
+
+    pub fn is_busy_sync(&self) -> bool {
+        if let Ok(guard) = self.active_job_id.try_lock() {
+            guard.is_some()
+        } else {
+            true
+        }
+    }
+
     pub fn recover_unfinished_jobs(conn: &Connection) -> SqlResult<()> {
         let now = Utc::now().to_rfc3339();
         conn.execute(

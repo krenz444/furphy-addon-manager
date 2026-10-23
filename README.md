@@ -1,6 +1,10 @@
 # Furphy Addon Manager
 
-A self-contained World of Warcraft (retail) addon manager for Windows: silent background addon updates, plus a CurseForge-style desktop app to browse, install, pin, roll back and manage addons - from both CurseForge and Wago Addons. No Electron, **no accounts, no API keys, no sign-up of any kind**, no ads. One PowerShell CLI, one local server, one static web UI opened as an Edge app window.
+A self-contained World of Warcraft addon manager for Windows: silent background addon updates, plus a CurseForge-style desktop app to browse, install, pin, roll back and manage addons - from CurseForge, Wago Addons, and GitHub. No Electron, **no accounts, no API keys, no sign-up of any kind**, no ads, no local HTTP port. Powered by a single native Rust core (Tauri 2) and a reactive Svelte 5 frontend with SQLite WAL storage.
+
+## Data location & compatibility
+
+Furphy v2 stores its database, backups, WTF snapshots, and logs in `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\`. Existing v1 installations are automatically detected, imported, and retired on first launch. To ensure safe rollback, a dual-write mirror synchronizes addon lists and settings back to `<WoW>\_retail_\AddonSync\` until v2.1.0.
 
 ## No accounts, no API keys
 

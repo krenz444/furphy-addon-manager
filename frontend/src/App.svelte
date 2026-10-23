@@ -12,7 +12,8 @@
   import ConfirmDialog from './components/dialogs/ConfirmDialog.svelte';
   import JobPanel from './components/jobs/JobPanel.svelte';
   import Toasts, { type ToastItem } from './components/jobs/Toasts.svelte';
-  import type { Addon, Flavour, AppInfo, Freshness, JobRecord, PatchCompatStatus } from './lib/types';
+  import AppUpdateBanner from './components/banners/AppUpdateBanner.svelte';
+  import type { Addon, Flavour, AppInfo, Freshness, JobRecord, PatchCompatStatus, AppUpdateInfo } from './lib/types';
 
   // Navigation State
   let activeView = $state<'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings'>('my_addons');
@@ -26,6 +27,9 @@
   let compatList = $state<PatchCompatStatus[]>([]);
   let untrackedCount = $state<number>(0);
   let isGameActive = $state<boolean>(false);
+  let appUpdate = $state<AppUpdateInfo | null>(null);
+  let updateBannerDismissed = $state<boolean>(false);
+  let isInstallingAppUpdate = $state<boolean>(false);
 
   // Preference State
   let currentTheme = $state<string>('tokyo-rain');
@@ -132,6 +136,13 @@
       } catch {
         flavours = [{ id: 'retail', folder: '_retail_', label: 'Retail', product: null, installed: true }];
       }
+
+      try {
+        const u = await invoke<AppUpdateInfo>('app_update_status');
+        if (u && u.has_update && u.update_version) {
+          appUpdate = u;
+        }
+      } catch {}
 
       await refreshFlavourData(activeFlavour);
     } catch (err) {
@@ -467,6 +478,25 @@
         onRetry={handleCheckNow}
         onDismiss={() => (runningJob = null)}
         onOpenLog={() => invoke('open_target', { what: 'lastrun', args: [] })}
+      />
+    {/if}
+
+    {#if appUpdate && appUpdate.has_update && appUpdate.update_version && !updateBannerDismissed}
+      <AppUpdateBanner
+        updateVersion={appUpdate.update_version}
+        releaseNotes={appUpdate.release_notes}
+        isInstalling={isInstallingAppUpdate}
+        onInstall={async () => {
+          isInstallingAppUpdate = true;
+          try {
+            await invoke('app_update_install');
+            addToast('info', 'Installing update and relaunching...');
+          } catch (err: any) {
+            isInstallingAppUpdate = false;
+            addToast('error', `Update installation failed: ${err}`);
+          }
+        }}
+        onDismiss={() => (updateBannerDismissed = true)}
       />
     {/if}
 

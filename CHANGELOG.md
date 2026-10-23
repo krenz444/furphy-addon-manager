@@ -1,5 +1,18 @@
 # Furphy Addon Manager - changelog
 
+## 2.0.0: The Tauri 2 + Svelte 5 Transition (v2 Architecture)
+
+Furphy Addon Manager transitions from PowerShell/C#/.NET to a single native binary powered by Tauri 2, Rust, and Svelte 5.
+
+- **Native Single-Process Architecture:** Replaced the local HTTP server (port 47831) and multi-process WinForms host with an in-process Rust core and sandboxed WebView2 window. No local port is opened.
+- **SQLite WAL Storage:** Addon metadata, folders, settings, and job history are now safely stored in a transactional SQLite database in `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\`.
+- **Automatic v1 Migration & Dual-Write Rollback:** On first run, existing v1 installations are seamlessly imported and retired (`MOVED-TO-V2.txt`). Dual-write compatibility maintains synchronized v1-readable files until v2.1.0.
+- **WTF SavedVariables Protection:** Automatic pre-update SavedVariables snapshots and safe, user-initiated WTF restore with running-game safety guards.
+- **High-Performance Svelte 5 UI:** Modernized virtualized addon list, instant theme transitions across 16 palettes, responsive layout, and Bits UI components.
+- **CurseForge Measured Request Policy:** Multi-lane parallel checking with 2 requests in flight and automatic 24-hour rate fallback.
+- **Secure Self-Update:** Built-in cryptographic updater feed with signature verification, job-busy protection, and silent tray updates.
+- **Small Native CLI:** Direct CLI support for `--check`, `--sync`, `--status`, `--json`, and `--export-v1`.
+
 ## Round 50 (1.27.1: the tray tooltip that never left "Checking addons")
 
 **The tray icon's hover text now shows the result of the last check.** It used

@@ -3,6 +3,7 @@ pub mod game;
 pub mod notify;
 pub mod power;
 pub mod protocol;
+pub mod retire_v1;
 pub mod schedule;
 pub mod tray;
 pub mod tray_status;

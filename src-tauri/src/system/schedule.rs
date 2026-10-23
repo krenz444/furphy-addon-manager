@@ -417,8 +417,21 @@ impl Scheduler {
                                 }
                             }
                             _ = hourly_ticker.tick() => {
-                                // Hourly self-update check and catalogue refresh
+                                // Hourly self-update check and catalogue refresh (§2.H, §2.K, §5.4)
                                 crate::logging::append_app_log("INFO", "Running hourly maintenance crawl");
+                                if let Ok(status) = crate::update::app_update::check_for_updates(None).await {
+                                    if let Ok(conn) = Connection::open(get_db_path()) {
+                                        let _ = crate::update::app_update::save_app_update_state(&conn, &status);
+                                        let auto_install = {
+                                            let settings = get_settings_map(&conn).unwrap_or_default();
+                                            settings.get("appUpdateAutoInstall").and_then(|v| v.as_bool()).unwrap_or(true)
+                                        };
+                                        if auto_install && status.has_update {
+                                            let is_busy = sched.runner.is_busy().await;
+                                            let _ = crate::update::app_update::install_update(&status, is_busy, false).await;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

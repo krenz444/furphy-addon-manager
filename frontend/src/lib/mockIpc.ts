@@ -576,6 +576,30 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         ],
       } as T;
 
+    case 'app_update_check':
+      return {
+        status: 'available',
+        current_version: '2.0.0-dev',
+        update_version: '2.0.1',
+        release_notes: '• Modernized Svelte 5 frontend with custom Tokyo Rain theme\n• Enhanced WTF SavedVariables snapshot protection\n• Direct CurseForge & Wago updates with rate-limit fallback',
+        published_at: '2026-10-23T00:00:00Z',
+        has_update: true,
+        download_url: 'https://github.com/krenz444/furphy-addon-manager/releases/download/v2.0.1/FurphyAddonManager-2.0.1-setup.exe',
+      } as T;
+
+    case 'app_update_install':
+      return null as T;
+
+    case 'app_update_status':
+      return {
+        status: 'idle',
+        current_version: '2.0.0-dev',
+        update_version: null,
+        release_notes: null,
+        published_at: null,
+        has_update: false,
+      } as T;
+
     default:
       console.warn(`[MockIPC] Unhandled command: ${cmd}`);
       return undefined as T;

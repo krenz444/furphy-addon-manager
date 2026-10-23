@@ -253,24 +253,36 @@ pub fn set_window_theme(theme: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn app_update_check() -> Result<Value, String> {
-    Ok(serde_json::json!({
-        "status": "idle",
-        "has_update": false,
-        "current_version": "2.0.0-dev"
-    }))
+pub async fn app_update_check() -> Result<Value, String> {
+    let status = crate::update::app_update::check_for_updates(None).await?;
+    let db_path = get_db_path();
+    if let Ok(conn) = Connection::open(&db_path) {
+        let _ = crate::update::app_update::save_app_update_state(&conn, &status);
+    }
+    serde_json::to_value(&status).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn app_update_install() -> Result<(), String> {
-    Ok(())
+pub async fn app_update_install(
+    runner: tauri::State<'_, Arc<crate::jobs::runner::JobRunner>>,
+) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    let is_busy = runner.is_busy().await;
+    let status = crate::update::app_update::load_app_update_state(&conn)
+        .ok_or_else(|| "No update state found. Check for updates first.".to_string())?;
+
+    crate::update::app_update::install_update(&status, is_busy, true).await
 }
 
 #[tauri::command]
 pub fn app_update_status() -> Result<Value, String> {
-    Ok(serde_json::json!({
-        "status": "idle",
-        "current_version": "2.0.0-dev",
-        "update_version": null
-    }))
+    let db_path = get_db_path();
+    let status = if let Ok(conn) = Connection::open(&db_path) {
+        crate::update::app_update::load_app_update_state(&conn).unwrap_or_default()
+    } else {
+        crate::update::app_update::AppUpdateStatus::default()
+    };
+    serde_json::to_value(&status).map_err(|e| e.to_string())
 }

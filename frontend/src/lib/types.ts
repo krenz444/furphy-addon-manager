@@ -130,3 +130,14 @@ export interface ThemeDef {
   swAccent: string;
   swText: string;
 }
+
+export interface AppUpdateInfo {
+  status: string;
+  current_version: string;
+  update_version: string | null;
+  release_notes: string | null;
+  published_at: string | null;
+  has_update: boolean;
+  error?: string | null;
+  download_url?: string | null;
+}

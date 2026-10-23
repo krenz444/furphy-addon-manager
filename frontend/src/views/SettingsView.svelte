@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '../lib/ipc';
-  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef } from '../lib/types';
+  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo } from '../lib/types';
 
   interface Props {
     flavour: string;
@@ -56,6 +56,36 @@
 
   // Advanced accordion
   let advancedOpen = $state(false);
+
+  // App Update State
+  let appUpdateInfo = $state<AppUpdateInfo | null>(null);
+  let checkingAppUpdate = $state(false);
+  let installingAppUpdate = $state(false);
+  let updateCheckError = $state<string | null>(null);
+
+  async function handleCheckAppUpdate() {
+    checkingAppUpdate = true;
+    updateCheckError = null;
+    try {
+      const res = await invoke<AppUpdateInfo>('app_update_check');
+      appUpdateInfo = res;
+    } catch (err: any) {
+      updateCheckError = String(err);
+    } finally {
+      checkingAppUpdate = false;
+    }
+  }
+
+  async function handleInstallAppUpdate() {
+    installingAppUpdate = true;
+    updateCheckError = null;
+    try {
+      await invoke('app_update_install');
+    } catch (err: any) {
+      updateCheckError = String(err);
+      installingAppUpdate = false;
+    }
+  }
 
   // All 16 Themes definitions for the swatch grid
   const themes: ThemeDef[] = [
@@ -303,10 +333,50 @@
         </label>
       </div>
       <div class="setting-actions">
-        <button type="button" class="btn-secondary" onclick={() => invoke('app_update_check')}>
-          Check for updates now
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={checkingAppUpdate}
+          onclick={handleCheckAppUpdate}
+        >
+          {checkingAppUpdate ? 'Checking for updates...' : 'Check for updates now'}
         </button>
       </div>
+
+      {#if appUpdateInfo}
+        <div class="app-update-status-panel">
+          {#if appUpdateInfo.has_update}
+            <div class="update-found-msg">
+              <strong>Version {appUpdateInfo.update_version} is available.</strong>
+            </div>
+            {#if appUpdateInfo.release_notes}
+              <div class="update-notes-box">
+                <pre>{appUpdateInfo.release_notes}</pre>
+              </div>
+            {/if}
+            <div class="setting-actions" style="margin-top: 8px;">
+              <button
+                type="button"
+                class="btn-primary"
+                disabled={installingAppUpdate}
+                onclick={handleInstallAppUpdate}
+              >
+                {installingAppUpdate ? 'Installing...' : 'Install now'}
+              </button>
+            </div>
+          {:else}
+            <div class="up-to-date-msg">
+              Furphy Addon Manager is up to date (current: v{appUpdateInfo.current_version}).
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if updateCheckError}
+        <div class="error-banner" style="margin-top: 8px;">
+          {updateCheckError}
+        </div>
+      {/if}
     </section>
 
     <!-- 3. Appearance: Density & 16-Theme Grid -->
