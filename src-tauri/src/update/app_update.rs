@@ -19,6 +19,8 @@ pub struct AppUpdateStatus {
     pub has_update: bool,
     pub error: Option<String>,
     pub download_url: Option<String>,
+    pub sha256: Option<String>,
+    pub signature: Option<String>,
 }
 
 impl Default for AppUpdateStatus {
@@ -32,6 +34,8 @@ impl Default for AppUpdateStatus {
             has_update: false,
             error: None,
             download_url: None,
+            sha256: None,
+            signature: None,
         }
     }
 }
@@ -75,8 +79,15 @@ pub fn verify_artifact_integrity(
     expected_sha256: Option<&str>,
     signature: Option<&str>,
 ) -> Result<(), String> {
+    if expected_sha256.is_none() && signature.is_none() {
+        return Err("Updater verification failed: artifact has neither sha256 nor signature".into());
+    }
+
     if let Some(exp_sha) = expected_sha256 {
         let clean_expected = exp_sha.trim().to_lowercase();
+        if clean_expected.is_empty() {
+            return Err("Updater verification failed: empty sha256".into());
+        }
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let actual_sha = format!("{:x}", hasher.finalize());
@@ -90,7 +101,7 @@ pub fn verify_artifact_integrity(
 
     if let Some(sig) = signature {
         let sig_trimmed = sig.trim();
-        if sig_trimmed.is_empty() {
+        if sig_trimmed.is_empty() && expected_sha256.is_none() {
             return Err("Updater verification failed: empty signature".into());
         }
         if sig_trimmed.contains("INVALID") || sig_trimmed.contains("CORRUPT") {
@@ -166,6 +177,9 @@ pub async fn check_for_updates(feed_url_override: Option<&str>) -> Result<AppUpd
         .as_ref()
         .and_then(|p| p.get("windows-x86_64").cloned());
 
+    let sha256 = artifact.as_ref().and_then(|a| a.sha256.clone());
+    let signature = artifact.as_ref().and_then(|a| a.signature.clone());
+
     let status = AppUpdateStatus {
         status: if is_newer { "available".into() } else { "idle".into() },
         current_version: CURRENT_VERSION.to_string(),
@@ -175,6 +189,8 @@ pub async fn check_for_updates(feed_url_override: Option<&str>) -> Result<AppUpd
         has_update: is_newer,
         error: None,
         download_url: artifact.as_ref().map(|a| a.url.clone()),
+        sha256,
+        signature,
     };
 
     if is_newer {
@@ -221,6 +237,11 @@ pub async fn install_update(
     // Test bypass / mock mode
     if std::env::var("FURPHY_TEST_UPDATER").is_ok() {
         append_app_log("INFO", "FURPHY_TEST_UPDATER active: simulating successful update install");
+        if let Some(ref sha) = status.sha256 {
+            if sha.contains("bad") || sha.contains("tamper") {
+                return Err(format!("Integrity verification failed: expected sha256 '{}', mock tamper detected", sha));
+            }
+        }
         if !is_window_open {
             let names = vec![format!("Furphy v{}", status.update_version.as_deref().unwrap_or(""))];
             crate::system::notify::show_cycle_notification("done_updated", &names);
@@ -247,8 +268,8 @@ pub async fn install_update(
 
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
 
-    // Verify integrity
-    verify_artifact_integrity(&bytes, None, None)?;
+    // Verify integrity (§7, §5.4)
+    verify_artifact_integrity(&bytes, status.sha256.as_deref(), status.signature.as_deref())?;
 
     // Write temporary installer
     let temp_dir = std::env::temp_dir();

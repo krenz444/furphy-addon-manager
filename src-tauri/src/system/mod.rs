@@ -5,6 +5,7 @@ pub mod power;
 pub mod protocol;
 pub mod retire_v1;
 pub mod schedule;
+pub mod setup;
 pub mod tray;
 pub mod tray_status;
 pub mod window;

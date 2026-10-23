@@ -22,6 +22,7 @@ pub struct RetirementSummary {
     pub replaced_autostart: bool,
     pub replaced_protocol: bool,
     pub replaced_shortcut: bool,
+    pub replaced_apps_entry: bool,
     pub notice_written: bool,
     pub errors: Vec<String>,
 }
@@ -32,6 +33,7 @@ pub struct RetireOptions {
     pub test_run_value: Option<String>,
     pub test_protocol_scheme: Option<String>,
     pub test_desktop_dir: Option<PathBuf>,
+    pub test_apps_entry: Option<String>,
 }
 
 impl Default for RetireOptions {
@@ -42,6 +44,7 @@ impl Default for RetireOptions {
             test_run_value: None,
             test_protocol_scheme: None,
             test_desktop_dir: None,
+            test_apps_entry: None,
         }
     }
 }
@@ -222,7 +225,7 @@ pub fn replace_v1_protocol(opts: &RetireOptions) -> Result<bool, String> {
     Ok(false)
 }
 
-/// Replaces desktop shortcut if it points to v1
+/// Replaces desktop shortcut if it points to v1 (§5.2 step 4)
 pub fn replace_v1_desktop_shortcut(opts: &RetireOptions) -> Result<bool, String> {
     let desktop_dir = if let Some(ref d) = opts.test_desktop_dir {
         d.clone()
@@ -244,19 +247,52 @@ pub fn replace_v1_desktop_shortcut(opts: &RetireOptions) -> Result<bool, String>
         return Ok(false);
     }
 
+    let is_v1 = if opts.force_test {
+        true
+    } else {
+        #[cfg(windows)]
+        {
+            let ps_check = format!(
+                "$ws = New-Object -ComObject WScript.Shell; \
+                 $sc = $ws.CreateShortcut('{}'); \
+                 $sc.TargetPath",
+                shortcut_path.display()
+            );
+            if let Ok(out) = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_check])
+                .output()
+            {
+                let target = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                target.contains("addonsync") || target.contains("furphyhost") || target.contains(".vbs")
+            } else {
+                false
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    };
+
+    if !is_v1 {
+        append_app_log("INFO", &format!("Desktop shortcut '{}' does not point to v1; leaving untouched", shortcut_path.display()));
+        return Ok(false);
+    }
+
     // Replace shortcut target with current exe
     if let Ok(current_exe) = std::env::current_exe() {
         #[cfg(windows)]
         {
-            // Update shortcut using PowerShell script or create pointer
             let ps_script = format!(
                 "$ws = New-Object -ComObject WScript.Shell; \
                  $sc = $ws.CreateShortcut('{}'); \
                  $sc.TargetPath = '{}'; \
                  $sc.Description = 'Furphy Addon Manager v2'; \
+                 $sc.WorkingDirectory = '{}'; \
                  $sc.Save()",
                 shortcut_path.display(),
-                current_exe.display()
+                current_exe.display(),
+                current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default()
             );
             let _ = std::process::Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
@@ -264,6 +300,54 @@ pub fn replace_v1_desktop_shortcut(opts: &RetireOptions) -> Result<bool, String>
             append_app_log("INFO", &format!("Updated desktop shortcut at: {}", shortcut_path.display()));
             return Ok(true);
         }
+    }
+
+    Ok(false)
+}
+
+/// Replaces the v1 Installed-Apps registration if it points to v1 (§5.2 step 4)
+pub fn replace_v1_apps_entry(opts: &RetireOptions) -> Result<bool, String> {
+    let dev = is_dev();
+    if dev && !opts.force_test && opts.test_apps_entry.is_none() && std::env::var("FURPHY_TEST_RETIRE_OVERRIDE").is_err() {
+        append_app_log("INFO", "Dev mode: skipped replacing Apps uninstall entry (live-PC safety)");
+        return Ok(false);
+    }
+
+    let subkey_name = opts.test_apps_entry.clone().unwrap_or_else(|| {
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager".to_string()
+    });
+
+    #[cfg(windows)]
+    {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(entry_key) = hkcu.open_subkey_with_flags(&subkey_name, KEY_READ | KEY_SET_VALUE) {
+            let install_loc: String = entry_key.get_value("InstallLocation").unwrap_or_default();
+            let uninst_str: String = entry_key.get_value("UninstallString").unwrap_or_default();
+            let is_v1 = install_loc.to_lowercase().contains("addonsync")
+                || uninst_str.to_lowercase().contains("addonsync")
+                || install_loc.to_lowercase().contains("furphyhost")
+                || opts.force_test;
+
+            if is_v1 {
+                if let Ok(current_exe) = std::env::current_exe() {
+                    let install_dir = current_exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    let _ = entry_key.set_value("DisplayName", &crate::system::setup::APP_TITLE);
+                    let _ = entry_key.set_value("DisplayVersion", &crate::system::setup::CURRENT_VERSION);
+                    let _ = entry_key.set_value("Publisher", &"Eric Krenz");
+                    let _ = entry_key.set_value("InstallLocation", &install_dir);
+                    let _ = entry_key.set_value("DisplayIcon", &format!("\"{}\",0", current_exe.to_string_lossy()));
+                    let _ = entry_key.set_value("UninstallString", &format!("\"{}\" --uninstall", current_exe.to_string_lossy()));
+                    let _ = entry_key.set_value("QuietUninstallString", &format!("\"{}\" --uninstall /S", current_exe.to_string_lossy()));
+                    append_app_log("INFO", &format!("Replaced v1 Apps uninstall entry at '{}'", subkey_name));
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = subkey_name;
     }
 
     Ok(false)
@@ -279,6 +363,7 @@ pub async fn retire_v1(opts: RetireOptions) -> RetirementSummary {
         replaced_autostart: false,
         replaced_protocol: false,
         replaced_shortcut: false,
+        replaced_apps_entry: false,
         notice_written: false,
         errors: Vec::new(),
     };
@@ -353,6 +438,14 @@ pub async fn retire_v1(opts: RetireOptions) -> RetirementSummary {
         }
     }
 
+    match replace_v1_apps_entry(&opts) {
+        Ok(replaced) => summary.replaced_apps_entry = replaced,
+        Err(e) => {
+            append_app_log("ERROR", &format!("Retire v1 apps entry replacement failed: {}", e));
+            summary.errors.push(e);
+        }
+    }
+
     // 4. Write MOVED-TO-V2.txt into the v1 folder
     let notice_file = v1_dir.join(MOVED_NOTICE_FILENAME);
     let notice_text = generate_moved_notice_text();
@@ -384,6 +477,7 @@ pub fn retire_v1_blocking(opts: RetireOptions) -> RetirementSummary {
             replaced_autostart: false,
             replaced_protocol: false,
             replaced_shortcut: false,
+            replaced_apps_entry: false,
             notice_written: false,
             errors: vec!["Failed creating Tokio runtime for retire_v1".to_string()],
         }

@@ -139,8 +139,13 @@
 
       try {
         const u = await invoke<AppUpdateInfo>('app_update_status');
-        if (u && u.has_update && u.update_version) {
-          appUpdate = u;
+        if (u) {
+          if (u.first_run_update) {
+            addToast('success', `Updated to Furphy Addon Manager v${u.first_run_update}.`);
+          }
+          if (u.has_update && u.update_version) {
+            appUpdate = u;
+          }
         }
       } catch {}
 

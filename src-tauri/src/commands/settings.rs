@@ -273,16 +273,35 @@ pub async fn app_update_install(
     let status = crate::update::app_update::load_app_update_state(&conn)
         .ok_or_else(|| "No update state found. Check for updates first.".to_string())?;
 
-    crate::update::app_update::install_update(&status, is_busy, true).await
+    match crate::update::app_update::install_update(&status, is_busy, true).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let mut err_status = status.clone();
+            err_status.status = "error".into();
+            err_status.error = Some(e.clone());
+            let _ = crate::update::app_update::save_app_update_state(&conn, &err_status);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub fn app_update_status() -> Result<Value, String> {
     let db_path = get_db_path();
-    let status = if let Ok(conn) = Connection::open(&db_path) {
-        crate::update::app_update::load_app_update_state(&conn).unwrap_or_default()
+    let (status, first_run_update) = if let Ok(conn) = Connection::open(&db_path) {
+        let first_run = crate::update::app_update::check_first_run_after_update(&conn);
+        let s = crate::update::app_update::load_app_update_state(&conn).unwrap_or_default();
+        (s, first_run)
     } else {
-        crate::update::app_update::AppUpdateStatus::default()
+        (crate::update::app_update::AppUpdateStatus::default(), None)
     };
-    serde_json::to_value(&status).map_err(|e| e.to_string())
+
+    let mut val = serde_json::to_value(&status).map_err(|e| e.to_string())?;
+    if let Value::Object(ref mut map) = val {
+        map.insert(
+            "first_run_update".into(),
+            serde_json::to_value(&first_run_update).unwrap_or(Value::Null),
+        );
+    }
+    Ok(val)
 }

@@ -140,4 +140,5 @@ export interface AppUpdateInfo {
   has_update: boolean;
   error?: string | null;
   download_url?: string | null;
+  first_run_update?: string | null;
 }

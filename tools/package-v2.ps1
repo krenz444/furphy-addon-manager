@@ -68,10 +68,10 @@ $stableSetupPath = Join-Path $OutputDir $stableSetupName
 Copy-Item -Path $targetExe -Destination $versionedSetupPath -Force
 Copy-Item -Path $targetExe -Destination $stableSetupPath -Force
 
-# Generate SHA256 for Setup
-$setupHash = (Get-FileHash -Path $versionedSetupPath -Algorithm SHA256).Hash.ToLower()
-Set-Content -Path "$versionedSetupPath.sha256" -Value "$setupHash  $versionedSetupName"
-Set-Content -Path "$stableSetupPath.sha256" -Value "$setupHash  $stableSetupName"
+# Generate SHA256 for Setup (bare lowercase hex per DISTRIBUTION-SPEC.md)
+$setupHash = (Get-FileHash -Path $versionedSetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$setupHash | Set-Content -LiteralPath "$versionedSetupPath.sha256" -Encoding Ascii -NoNewline
+$setupHash | Set-Content -LiteralPath "$stableSetupPath.sha256" -Encoding Ascii -NoNewline
 Write-Host "Created $versionedSetupName (SHA256: $setupHash)"
 
 # 4. Generate Bridge Package
@@ -131,8 +131,11 @@ try {
 
     $shaFile = "$($setupExe.FullName).sha256"
     if (Test-Path $shaFile) {
-        $expectedSha = (Get-Content $shaFile).Trim().Split(" ")[0].ToLower()
-        $actualSha = (Get-FileHash -Path $setupExe.FullName -Algorithm SHA256).Hash.ToLower()
+        $expectedSha = (Get-Content -LiteralPath $shaFile -Raw).Trim().ToLowerInvariant()
+        if ($expectedSha.Contains(" ")) {
+            $expectedSha = $expectedSha.Split(" ")[0]
+        }
+        $actualSha = (Get-FileHash -Path $setupExe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($expectedSha -ne $actualSha) {
             throw "Checksum mismatch for $($setupExe.Name): expected $expectedSha, got $actualSha"
         }
@@ -169,12 +172,18 @@ try {
     # Launch v2 with import flag
     $localAppData = [System.Environment]::GetFolderPath('LocalApplicationData')
     $v2Exe = Join-Path $localAppData "Programs\Furphy Addon Manager\Furphy Addon Manager.exe"
+    if (-not (Test-Path $v2Exe)) {
+        if (Test-Path $setupExe.FullName) {
+            $v2Exe = $setupExe.FullName
+        } else {
+            throw "Could not locate v2 executable after setup at $v2Exe"
+        }
+    }
+
     $launchArgs = @("--import-v1", "`"$ScriptDir`"")
     if ($Relaunch -eq 'tray') { $launchArgs += "--tray" }
 
-    if (Test-Path $v2Exe) {
-        Start-Process -FilePath $v2Exe -ArgumentList $launchArgs
-    }
+    Start-Process -FilePath $v2Exe -ArgumentList $launchArgs
     Log-BridgeMessage "Bridge upgrade complete."
     exit 0
 } catch {
@@ -201,23 +210,30 @@ Write-Host "Creating bridge zip $versionedBridgeZipName..."
 Compress-Archive -Path "$bridgeDir\*" -DestinationPath $versionedBridgeZipPath -Force
 Copy-Item -Path $versionedBridgeZipPath -Destination $stableBridgeZipPath -Force
 
-# Generate SHA256 for Bridge Zip
-$bridgeHash = (Get-FileHash -Path $versionedBridgeZipPath -Algorithm SHA256).Hash.ToLower()
-Set-Content -Path "$versionedBridgeZipPath.sha256" -Value "$bridgeHash  $versionedBridgeZipName"
-Set-Content -Path "$stableBridgeZipPath.sha256" -Value "$bridgeHash  $stableBridgeZipName"
+# Generate SHA256 for Bridge Zip (bare lowercase hex per DISTRIBUTION-SPEC.md)
+$bridgeHash = (Get-FileHash -Path $versionedBridgeZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$bridgeHash | Set-Content -LiteralPath "$versionedBridgeZipPath.sha256" -Encoding Ascii -NoNewline
+$bridgeHash | Set-Content -LiteralPath "$stableBridgeZipPath.sha256" -Encoding Ascii -NoNewline
 Write-Host "Created $versionedBridgeZipName (SHA256: $bridgeHash)"
 
 # Remove bridge-staging dir
 Remove-Item -Recurse -Force $bridgeDir
 
 # 5. Generate latest.json for Tauri Updater Feed
+$signature = ""
+if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+    Write-Host "TAURI_SIGNING_PRIVATE_KEY present in environment per ADR-313."
+} else {
+    Write-Host "Notice: TAURI_SIGNING_PRIVATE_KEY not set in shell; signing skipped per ADR-313 custody rules."
+}
+
 $latestJson = @{
     version = $Version
     notes = "Furphy Addon Manager v$Version release featuring Tauri 2 architecture, Svelte 5 UI, and SQLite storage."
     pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     platforms = @{
         "windows-x86_64" = @{
-            signature = ""
+            signature = $signature
             url = "https://github.com/krenz444/furphy-addon-manager/releases/download/v$Version/$versionedSetupName"
             sha256 = $setupHash
         }

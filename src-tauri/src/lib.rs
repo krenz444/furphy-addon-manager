@@ -81,6 +81,28 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for installation lifecycle arguments before init_app (§5.1)
+    let is_silent = args.iter().any(|a| a.eq_ignore_ascii_case("/S") || a == "--silent");
+    let is_install = args.iter().any(|a| a == "--install") || (is_silent && !args.iter().any(|a| a == "--uninstall"));
+    let is_uninstall = args.iter().any(|a| a == "--uninstall");
+
+    if is_install {
+        if let Err(e) = system::setup::run_install(is_silent, None) {
+            eprintln!("[FATAL] Installation failed: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    if is_uninstall {
+        if let Err(e) = system::setup::run_uninstall(is_silent, None) {
+            eprintln!("[FATAL] Uninstallation failed: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     let mut import_arg: Option<PathBuf> = None;
     for i in 0..args.len() {
         if args[i] == "--import-v1" && i + 1 < args.len() {

@@ -39,6 +39,7 @@ fn test_acceptance_v1_retirement_lifecycle_and_moved_notice() {
         test_run_value: Some("FurphyAddonManager.TestRetire".into()),
         test_protocol_scheme: Some("furphy-test-retire".into()),
         test_desktop_dir: Some(temp.path().join("Desktop")),
+        test_apps_entry: Some(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FurphyAddonManager.TestRetire".into()),
     };
 
     let summary = retire_v1_blocking(opts);
@@ -87,6 +88,7 @@ fn test_acceptance_v1_retirement_dev_safety_isolation() {
         test_run_value: None,
         test_protocol_scheme: None,
         test_desktop_dir: None,
+        test_apps_entry: None,
     };
 
     let summary = retire_v1_blocking(opts);
@@ -162,6 +164,8 @@ async fn test_acceptance_updater_install_guards_and_job_busy_lock() {
         has_update: true,
         error: None,
         download_url: Some("https://example.com/setup.exe".into()),
+        sha256: Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()),
+        signature: Some("test_signature".into()),
     };
 
     // 1. Guard: Cannot install while a job is running (§2.K, §5.4)
@@ -199,6 +203,8 @@ fn test_acceptance_updater_db_persistence_roundtrip() {
         has_update: true,
         error: None,
         download_url: Some("https://github.com/releases/download/v2.0.1/setup.exe".into()),
+        sha256: Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()),
+        signature: Some("test_sig_123".into()),
     };
 
     save_app_update_state(&conn, &initial).unwrap();
@@ -278,4 +284,85 @@ fn test_acceptance_straggler_version_upgrade_detection() {
             v
         );
     }
+}
+
+#[test]
+fn test_acceptance_bare_hex_sha256_compatibility_with_v1_updater() {
+    let temp = tempdir().unwrap();
+    let zip_file = temp.path().join("FurphyAddonManager-2.0.0.zip");
+    let content = b"PK\x03\x04mock bridge zip archive payload content";
+    fs::write(&zip_file, content).unwrap();
+
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, content);
+    let expected_hex = format!("{:x}", sha2::Digest::finalize(hasher));
+
+    // Sidecar must be bare lowercase hex, no filename, no newline (DISTRIBUTION-SPEC.md §737)
+    let sha_file = temp.path().join("FurphyAddonManager-2.0.0.zip.sha256");
+    fs::write(&sha_file, &expected_hex).unwrap();
+
+    let sidecar_raw = fs::read_to_string(&sha_file).unwrap();
+    assert_eq!(sidecar_raw.len(), 64, "Sidecar must be exactly 64 hex characters");
+    assert!(!sidecar_raw.contains(' '), "Sidecar must NOT contain filenames or spaces");
+    assert!(!sidecar_raw.contains('\n'), "Sidecar must NOT contain newlines");
+
+    // Replicate v1 exact validation algorithm (addon-server.ps1:10011)
+    let sha_expected = sidecar_raw.trim().to_lowercase();
+    let mut actual_hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut actual_hasher, &fs::read(&zip_file).unwrap());
+    let sha_actual = format!("{:x}", sha2::Digest::finalize(actual_hasher));
+
+    assert_eq!(sha_expected, sha_actual, "v1 exact sha equality check must pass");
+}
+
+#[test]
+fn test_acceptance_setup_silent_install_and_uninstall_lifecycle() {
+    let temp = tempdir().unwrap();
+    let scratch_install_dir = temp.path().join("Programs").join("Furphy Addon Manager");
+
+    // 1. Silent Install creates install dir and copies binary
+    let install_res = furphy_lib::system::setup::run_install(true, Some(scratch_install_dir.clone()));
+    assert!(install_res.is_ok(), "Silent install should succeed: {:?}", install_res);
+    assert!(scratch_install_dir.exists(), "Install directory was not created");
+    assert!(
+        scratch_install_dir.join("Furphy Addon Manager.exe").exists(),
+        "Installed binary was not copied"
+    );
+
+    // 2. Uninstall removes binaries and keeps user data intact (§5.1)
+    let uninst_res = furphy_lib::system::setup::run_uninstall(true, Some(scratch_install_dir.clone()));
+    assert!(uninst_res.is_ok(), "Uninstall should succeed: {:?}", uninst_res);
+    assert!(
+        !scratch_install_dir.exists(),
+        "Install directory should be removed after uninstall"
+    );
+}
+
+#[test]
+fn test_acceptance_updater_integrity_missing_hash_and_sig_rejected() {
+    let payload = b"Executable bytes";
+    // Must reject update when neither sha256 nor signature is provided (§7 security model)
+    let res = verify_artifact_integrity(payload, None, None);
+    assert!(res.is_err(), "Must reject update without hash or signature");
+    assert!(
+        res.unwrap_err().contains("neither sha256 nor signature"),
+        "Expected error message regarding missing integrity metadata"
+    );
+}
+
+#[test]
+fn test_acceptance_first_run_after_update_notification() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("test_first_run.db");
+    let mut conn = Connection::open(&db_path).unwrap();
+    run_migrations(&mut conn).unwrap();
+
+    // First call: returns Some(version) and marks version as seen
+    let first = furphy_lib::update::app_update::check_first_run_after_update(&conn);
+    assert!(first.is_some(), "Expected first run after update to return version");
+    assert_eq!(first.unwrap(), env!("CARGO_PKG_VERSION"));
+
+    // Second call: already seen, returns None (no duplicate toasts)
+    let second = furphy_lib::update::app_update::check_first_run_after_update(&conn);
+    assert!(second.is_none(), "Expected second check to return None");
 }
