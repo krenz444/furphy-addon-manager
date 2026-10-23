@@ -130,7 +130,7 @@
   --border-hover: #4e4585;
   --text: #f4eedd;
   --text-muted: #baa98f;
-  --text-faint: #9c8a73;
+  --text-faint: #a8967f;
   --accent: #88afff;
   --accent-hover: #a3c2ff;
   --accent-active: #6696fa;
@@ -296,7 +296,7 @@
   --text: #1b1c1f;
   --text-muted: #52545b;
   --text-faint: #63656c;
-  --accent: #d9531f;
+  --accent: #c44615;
   --accent-hover: #a83c16;
   --accent-text: #ffffff;
   --success: #0f6b3c;
@@ -739,7 +739,11 @@
    Motion Pause Rules (Zero impact on gameplay & battery)
    ========================================================================== */
 :root[data-game-active="true"] *,
-:root[data-window-inactive="true"] * {
+:root[data-game-active="true"] *::before,
+:root[data-game-active="true"] *::after,
+:root[data-window-inactive="true"] *,
+:root[data-window-inactive="true"] *::before,
+:root[data-window-inactive="true"] *::after {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;

@@ -100,16 +100,131 @@ pub fn verify_artifact_integrity(
     }
 
     if let Some(sig) = signature {
-        let sig_trimmed = sig.trim();
-        if sig_trimmed.is_empty() && expected_sha256.is_none() {
-            return Err("Updater verification failed: empty signature".into());
-        }
-        if sig_trimmed.contains("INVALID") || sig_trimmed.contains("CORRUPT") {
-            return Err("Updater verification failed: invalid signature format".into());
-        }
+        let sig_bytes = parse_ed25519_signature(sig)?;
+        let pubkey_bytes = get_updater_public_key()?;
+        let peer_public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pubkey_bytes);
+        peer_public_key
+            .verify(bytes, &sig_bytes)
+            .map_err(|_| "Updater verification failed: Ed25519 cryptographic signature verification failed".to_string())?;
     }
 
     Ok(())
+}
+
+pub const DEFAULT_UPDATER_PUBKEY: &str = "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE=";
+
+pub fn get_updater_public_key() -> Result<Vec<u8>, String> {
+    if let Ok(env_key) = std::env::var("FURPHY_UPDATER_PUBKEY") {
+        return parse_ed25519_pubkey(&env_key);
+    }
+    let conf_str = include_str!("../../tauri.conf.json");
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(conf_str) {
+        if let Some(pk) = val.pointer("/plugins/updater/pubkey").and_then(|v| v.as_str()) {
+            return parse_ed25519_pubkey(pk);
+        }
+    }
+    parse_ed25519_pubkey(DEFAULT_UPDATER_PUBKEY)
+}
+
+pub fn parse_ed25519_pubkey(key_str: &str) -> Result<Vec<u8>, String> {
+    let clean = key_str.trim();
+    if clean.is_empty() {
+        return Err("Empty updater public key".into());
+    }
+    let b64_line = clean
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.starts_with("untrusted comment") && !l.is_empty())
+        .unwrap_or(clean);
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_line)
+        .map_err(|e| format!("Invalid base64 in public key: {}", e))?;
+
+    if decoded.len() == 32 {
+        Ok(decoded)
+    } else if decoded.len() == 42 {
+        Ok(decoded[10..42].to_vec())
+    } else {
+        Err(format!("Expected 32-byte or 42-byte public key, got {} bytes", decoded.len()))
+    }
+}
+
+pub fn parse_ed25519_signature(sig_str: &str) -> Result<Vec<u8>, String> {
+    let clean = sig_str.trim();
+    if clean.is_empty() {
+        return Err("Updater verification failed: empty signature".into());
+    }
+    if clean.contains("INVALID") || clean.contains("CORRUPT") {
+        return Err("Updater verification failed: invalid signature format".into());
+    }
+
+    let b64_line = clean
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.starts_with("untrusted comment") && !l.starts_with("trusted comment") && !l.is_empty())
+        .unwrap_or(clean);
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_line)
+        .map_err(|e| format!("Updater verification failed: invalid base64 signature: {}", e))?;
+
+    if decoded.len() == 64 {
+        Ok(decoded)
+    } else if decoded.len() == 74 {
+        Ok(decoded[10..74].to_vec())
+    } else {
+        Err(format!("Expected 64-byte or 74-byte signature, got {} bytes", decoded.len()))
+    }
+}
+
+pub fn sign_artifact_with_seed(bytes: &[u8], seed: &[u8; 32]) -> Result<(String, String), String> {
+    let key_pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(seed)
+        .map_err(|e| format!("Invalid Ed25519 seed: {}", e))?;
+    let sig = key_pair.sign(bytes);
+    use ring::signature::KeyPair;
+    let pubkey_bytes = key_pair.public_key().as_ref();
+    use base64::Engine;
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(pubkey_bytes);
+    Ok((sig_b64, pub_b64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ed25519_signing_and_verification_roundtrip() {
+        let seed = [42u8; 32];
+        let payload = b"Hello, Furphy v2 release binary!";
+        let (sig, pubkey) = sign_artifact_with_seed(payload, &seed).unwrap();
+        println!("TEST_PUBKEY: {}", pubkey);
+
+        // Check parsing
+        let parsed_pub = parse_ed25519_pubkey(&pubkey).unwrap();
+        assert_eq!(parsed_pub.len(), 32);
+
+        let parsed_sig = parse_ed25519_signature(&sig).unwrap();
+        assert_eq!(parsed_sig.len(), 64);
+
+        // Verify with env override for pubkey
+        std::env::set_var("FURPHY_UPDATER_PUBKEY", &pubkey);
+        let verify_res = verify_artifact_integrity(payload, None, Some(&sig));
+        assert!(verify_res.is_ok(), "Verification failed: {:?}", verify_res);
+
+        // Tampered payload fails
+        let tampered = b"Hello, Furphy v2 malicious payload!";
+        let tamper_res = verify_artifact_integrity(tampered, None, Some(&sig));
+        assert!(tamper_res.is_err(), "Tampered payload must fail verification");
+
+        // Bad signature format fails
+        let bad_sig_res = verify_artifact_integrity(payload, None, Some("INVALID_SIG"));
+        assert!(bad_sig_res.is_err());
+        std::env::remove_var("FURPHY_UPDATER_PUBKEY");
+    }
 }
 
 /// Loads persisted updater state from database

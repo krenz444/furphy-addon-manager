@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::db::open_connection;
 use crate::db::repo::get_settings_map;
 use crate::engine::import_list::{export_addon_list_v2_with_options, import_addon_list};
 use crate::net::policy::NetworkPolicy;
@@ -26,7 +26,7 @@ pub struct MigrationBackupDto {
 #[tauri::command]
 pub fn get_settings() -> Result<HashMap<String, Value>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let mut map = get_settings_map(&conn).map_err(|e| e.to_string())?;
 
     // Token is write-only, show ONLY whether token is set!
@@ -43,13 +43,14 @@ pub fn get_settings() -> Result<HashMap<String, Value>, String> {
 #[tauri::command]
 pub fn update_settings(key: String, value: Value) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let json_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
         rusqlite::params![key, json_str],
     )
     .map_err(|e| e.to_string())?;
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
     Ok(())
 }
 
@@ -60,7 +61,7 @@ pub fn export_list(
     path: Option<String>,
 ) -> Result<String, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let wow_root = detect_wow_root(None).ok();
     let flv_clean = flavour.trim_matches('_');
     let flv_folder = format!("_{}_", flv_clean);
@@ -91,7 +92,7 @@ pub fn export_list(
 #[tauri::command]
 pub fn import_list(path: Option<String>, flavour: String) -> Result<usize, String> {
     let db_path = get_db_path();
-    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let target_path = if let Some(p) = path {
         PathBuf::from(p)
     } else {
@@ -149,7 +150,7 @@ pub async fn run_diagnostics(
 
     // 3. Database
     let db_path = get_db_path();
-    let db_ok = match Connection::open(&db_path) {
+    let db_ok = match open_connection(&db_path) {
         Ok(c) => c.execute("SELECT 1", []).is_ok(),
         Err(_) => false,
     };
@@ -242,13 +243,18 @@ pub fn quit_app() -> Result<(), String> {
 #[tauri::command]
 pub fn set_window_theme(theme: String) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let val = serde_json::to_string(&theme).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('hostTheme', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1",
         rusqlite::params![val],
     )
     .map_err(|e| e.to_string())?;
+    let _ = conn.execute(
+        "INSERT INTO ui_prefs (key, value) VALUES ('theme', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1",
+        rusqlite::params![theme],
+    );
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
     Ok(())
 }
 
@@ -256,7 +262,7 @@ pub fn set_window_theme(theme: String) -> Result<(), String> {
 pub async fn app_update_check() -> Result<Value, String> {
     let status = crate::update::app_update::check_for_updates(None).await?;
     let db_path = get_db_path();
-    if let Ok(conn) = Connection::open(&db_path) {
+    if let Ok(conn) = open_connection(&db_path) {
         let _ = crate::update::app_update::save_app_update_state(&conn, &status);
     }
     serde_json::to_value(&status).map_err(|e| e.to_string())
@@ -267,7 +273,7 @@ pub async fn app_update_install(
     runner: tauri::State<'_, Arc<crate::jobs::runner::JobRunner>>,
 ) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
     let is_busy = runner.is_busy().await;
     let status = crate::update::app_update::load_app_update_state(&conn)
@@ -288,7 +294,7 @@ pub async fn app_update_install(
 #[tauri::command]
 pub fn app_update_status() -> Result<Value, String> {
     let db_path = get_db_path();
-    let (status, first_run_update) = if let Ok(conn) = Connection::open(&db_path) {
+    let (status, first_run_update) = if let Ok(conn) = open_connection(&db_path) {
         let first_run = crate::update::app_update::check_first_run_after_update(&conn);
         let s = crate::update::app_update::load_app_update_state(&conn).unwrap_or_default();
         (s, first_run)

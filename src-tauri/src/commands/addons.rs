@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use crate::db::open_connection;
 use crate::db::repo::{get_installed_flavours_db, FlavourDto};
 use crate::engine::adopt::adopt_candidate_group;
 use crate::engine::compat::{list_not_built_for_patch as engine_compat, PatchCompatStatus};
@@ -217,7 +218,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
 #[tauri::command]
 pub fn get_addons(flavour: Option<String>) -> Result<Vec<AddonDto>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let active_flavour = flavour.unwrap_or_else(|| "retail".into());
     fetch_addons_with_details(&conn, &active_flavour)
 }
@@ -225,7 +226,7 @@ pub fn get_addons(flavour: Option<String>) -> Result<Vec<AddonDto>, String> {
 #[tauri::command]
 pub fn get_flavours() -> Result<Vec<FlavourDto>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     get_installed_flavours_db(&conn).map_err(|e| e.to_string())
 }
 
@@ -251,7 +252,7 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
 #[tauri::command]
 pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let active_flavour = flavour.unwrap_or_else(|| "retail".into());
 
     let addons = fetch_addons_with_details(&conn, &active_flavour)?;
@@ -349,28 +350,34 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
 #[tauri::command]
 pub fn set_ignore(id: String, ignore: bool) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    set_ignore_updates(&conn, &id, ignore).map_err(|e| e.to_string())
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    set_ignore_updates(&conn, &id, ignore).map_err(|e| e.to_string())?;
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn unpin(id: String) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    unpin_addon(&conn, &id).map_err(|e| e.to_string())
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    unpin_addon(&conn, &id).map_err(|e| e.to_string())?;
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn pin_version(id: String, file_id: String) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    pin_addon(&conn, &id, &file_id).map_err(|e| e.to_string())
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    pin_addon(&conn, &id, &file_id).map_err(|e| e.to_string())?;
+    crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn list_files(id: String) -> Result<Vec<VersionItemDto>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
     let (current_file_id, current_version, pinned_file_id): (Option<String>, Option<String>, Option<String>) = conn
         .query_row(
@@ -432,7 +439,7 @@ pub fn list_files(id: String) -> Result<Vec<VersionItemDto>, String> {
 #[tauri::command]
 pub fn scan_untracked(flavour: Option<String>) -> Result<Vec<ScannedCandidateGroup>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let flv_id = flavour.unwrap_or_else(|| "retail".into());
     let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
     let installed = detect_installed_flavours_in_root(&wow_root);
@@ -462,7 +469,7 @@ pub fn delete_untracked_folder(flavour: String, folder: String) -> Result<(), St
         return Err("Invalid folder name: path separators and directory traversal are rejected".into());
     }
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
     let mut stmt = conn
         .prepare("SELECT 1 FROM addon_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)")
@@ -496,14 +503,14 @@ pub fn adopt_untracked(
     candidate: ScannedCandidateGroup,
 ) -> Result<String, String> {
     let db_path = get_db_path();
-    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     adopt_candidate_group(&mut conn, &flavour, &candidate).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn adopt_all_untracked(flavour: String) -> Result<usize, String> {
     let db_path = get_db_path();
-    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
     let installed = detect_installed_flavours_in_root(&wow_root);
     let target_flv = installed
@@ -535,7 +542,7 @@ pub fn list_not_built_for_patch(
     flavour: Option<String>,
 ) -> Result<Vec<PatchCompatStatus>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let flv = flavour.unwrap_or_else(|| "retail".into());
 
     let wow_root = detect_wow_root(None).ok();

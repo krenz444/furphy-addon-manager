@@ -16,7 +16,7 @@
   interface Props {
     flavour: string;
     onInstallWago: (slug: string) => void;
-    onInstallCurseForge: (projectId: number) => void;
+    onInstallCurseForge: (target: string) => void;
     onInstallGitHub: (repoUrl: string) => void;
   }
 
@@ -113,23 +113,8 @@
     const raw = cfInput.trim();
     if (!raw) return;
 
-    let id: number | null = null;
-    if (/^\d+$/.test(raw)) {
-      id = parseInt(raw, 10);
-    } else {
-      const match = raw.match(/curseforge\.com\/wow\/addons\/([^/]+)/);
-      if (match) {
-        // Will be resolved by server
-        id = parseInt(raw.replace(/\D/g, ''), 10) || null;
-      }
-    }
-
-    if (id) {
-      onInstallCurseForge(id);
-      cfInput = '';
-    } else {
-      cfError = 'Please enter a valid CurseForge project ID or addon URL.';
-    }
+    onInstallCurseForge(raw);
+    cfInput = '';
   }
 
   function handleGithubInstall() {

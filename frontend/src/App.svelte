@@ -436,11 +436,20 @@
 
   function handleProtocolConsent(flavour: string, addonId: number, fileId?: number | null) {
     protocolOpen = false;
-    invoke('start_job', {
-      kind: 'install',
-      flavour,
-      params: { project_id: addonId, file_id: fileId },
-    }).then(() => {
+    const existing = addons.find(a => a.project_id === addonId || a.id === String(addonId));
+    const jobPromise = existing
+      ? invoke('start_job', {
+          kind: 'install',
+          flavour,
+          params: { addon_id: existing.id, project_id: addonId, file_id: fileId },
+        })
+      : invoke('start_job', {
+          kind: 'add',
+          flavour,
+          params: { target: `curse:${addonId}`, file_id: fileId },
+        });
+
+    jobPromise.then(() => {
       addToast('success', `Installed addon #${addonId}`);
       if (isGameActive) {
         reloadNeeded = true;
@@ -531,7 +540,7 @@
         <GetAddonsView
           flavour={activeFlavour}
           onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`)}
-          onInstallCurseForge={(projectId) => handleAddAddon(String(projectId))}
+          onInstallCurseForge={(target) => handleAddAddon(String(target))}
           onInstallGitHub={(repoUrl) => handleAddAddon(repoUrl)}
         />
       {:else if activeView === 'not_built_for_patch'}
@@ -580,7 +589,7 @@
       {isGameActive}
       onClose={() => (activeDrawerAddon = null)}
       onInstallVersion={async (addon, fileId) => {
-        await invoke('start_job', { kind: 'install', flavour: activeFlavour, params: { project_id: addon.project_id, file_id: fileId } });
+        await invoke('start_job', { kind: 'install', flavour: activeFlavour, params: { addon_id: addon.id, project_id: addon.project_id, file_id: fileId } });
         addToast('success', `Installed version ${fileId}`);
         await refreshFlavourData(activeFlavour);
       }}

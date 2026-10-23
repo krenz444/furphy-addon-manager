@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use rusqlite::Connection;
 use serde_json::Value;
 use crate::db::export_v1::export_to_v1;
 use crate::db::repo::{get_addons_by_flavour, get_installed_flavours_db};
@@ -18,10 +17,61 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
             || a == "--selftest"
             || a == "--tray-selftest"
             || a == "--protocol"
+            || a == "--sign-file"
     });
 
     if !is_cli {
         return Ok(false);
+    }
+
+    // Handle --sign-file <path>
+    for i in 0..args.len() {
+        if args[i] == "--sign-file" && i + 1 < args.len() {
+            let file_path = PathBuf::from(&args[i + 1]);
+            let file_bytes = match std::fs::read(&file_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[ERROR] Could not read file to sign at {}: {}", file_path.display(), e);
+                    return Err(1);
+                }
+            };
+
+            let priv_key_val = match std::env::var("TAURI_SIGNING_PRIVATE_KEY") {
+                Ok(k) if !k.trim().is_empty() => k,
+                _ => {
+                    eprintln!("[ERROR] TAURI_SIGNING_PRIVATE_KEY environment variable is not set");
+                    return Err(1);
+                }
+            };
+
+            let seed_bytes = match crate::update::app_update::parse_ed25519_pubkey(&priv_key_val) {
+                Ok(b) => {
+                    if b.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        arr
+                    } else {
+                        eprintln!("[ERROR] TAURI_SIGNING_PRIVATE_KEY must decode to 32 bytes, got {}", b.len());
+                        return Err(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] Could not decode TAURI_SIGNING_PRIVATE_KEY: {}", e);
+                    return Err(1);
+                }
+            };
+
+            match crate::update::app_update::sign_artifact_with_seed(&file_bytes, &seed_bytes) {
+                Ok((sig, _)) => {
+                    println!("{}", sig);
+                    return Ok(true);
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] Signing failed: {}", e);
+                    return Err(1);
+                }
+            }
+        }
     }
 
     // Handle --tray-selftest <marker_path> [--wow-fake <name>]
@@ -82,7 +132,7 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
     }
 
     let db_path = get_db_path();
-    let mut conn = Connection::open(&db_path).map_err(|e| {
+    let mut conn = crate::db::open_connection(&db_path).map_err(|e| {
         eprintln!("[FATAL] Could not open database at {}: {}", db_path.display(), e);
         2
     })?;

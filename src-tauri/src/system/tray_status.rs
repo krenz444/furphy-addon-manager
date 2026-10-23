@@ -192,7 +192,12 @@ pub fn compute_core(
         }
         STATUS_UPDATING => {
             let addon_name = current_addon.unwrap_or("addon");
-            format!("Updating {} ({} of {} updates)...", addon_name, updates_found, updates_found)
+            let current_idx = if updates_found == 0 {
+                updated + 1
+            } else {
+                (updated + 1).min(updates_found)
+            };
+            format!("Updating {} ({} of {} updates)...", addon_name, current_idx, updates_found)
         }
         STATUS_FINISHING => "Finishing...".to_string(),
         STATUS_DONE_CLEAN => {
@@ -356,6 +361,25 @@ mod tests {
             Some(now),
         );
         assert_eq!(failed, "2 addons couldn't update at 20:51 - open Furphy for details");
+
+        // updating progress: updated + 1 of updates_found
+        let updating = compute_core(
+            STATUS_UPDATING,
+            None,
+            Some("Details"),
+            5,
+            5,
+            1, // 1 already updated
+            0,
+            0,
+            3, // 3 updates found total
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+        );
+        assert_eq!(updating, "Updating Details (2 of 3 updates)...");
 
         // checking with total > 0
         let checking = compute_core(

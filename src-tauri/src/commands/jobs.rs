@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use rusqlite::Connection;
 use serde_json::Value;
+use crate::db::open_connection;
 use crate::jobs::runner::{JobRecord, JobRunner};
 use crate::paths::get_db_path;
 
@@ -22,7 +22,7 @@ pub async fn start_job(
 
         rt.block_on(async move {
             let db_path = get_db_path();
-            let mut conn = match Connection::open(&db_path) {
+            let mut conn = match open_connection(&db_path) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = tx.send(Err(e.to_string()));
@@ -44,7 +44,7 @@ pub async fn start_job(
 #[tauri::command]
 pub fn list_jobs() -> Result<Vec<JobRecord>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, kind, flavour, params, state, started_at, finished_at, error, results, reload_needed, log_path \
@@ -80,7 +80,7 @@ pub fn list_jobs() -> Result<Vec<JobRecord>, String> {
 #[tauri::command]
 pub fn get_job(id: String) -> Result<JobRecord, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     conn.query_row(
         "SELECT id, kind, flavour, params, state, started_at, finished_at, error, results, reload_needed, log_path \
          FROM jobs WHERE id = ?1",

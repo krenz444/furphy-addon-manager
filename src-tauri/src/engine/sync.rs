@@ -431,13 +431,19 @@ pub async fn run_sync_for_flavour(
             continue;
         }
 
-        // Step 4: WTF snapshot before swap (ADR-314)
+        // Step 4: WTF snapshot before swap (ADR-314) - union of previous_folders and candidate_folders
+        let mut snapshot_folders = previous_folders.clone();
+        for f in &candidate_folders {
+            if !snapshot_folders.iter().any(|existing| existing.eq_ignore_ascii_case(f)) {
+                snapshot_folders.push(f.clone());
+            }
+        }
         let _ = take_wtf_snapshot(
             conn,
             wow_root,
             flavour_folder,
             &a.id,
-            &candidate_folders,
+            &snapshot_folders,
             data_dir,
             "pre-update",
         );

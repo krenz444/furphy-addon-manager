@@ -43,7 +43,23 @@ pub fn export_to_v1(conn: &Connection, target_dir: &Path) -> Result<(), ExportEr
     settings_map.entry("adFilter").or_insert(json!(true));
     settings_map.entry("cfFocus").or_insert(json!(true));
     settings_map.entry("hostWindow").or_insert(Value::Null);
-    settings_map.entry("hostTheme").or_insert(Value::Null);
+
+    // Export current theme from ui_prefs into hostTheme (§7)
+    let theme_val: Option<String> = conn
+        .query_row("SELECT value FROM ui_prefs WHERE key = 'theme'", [], |r| r.get(0))
+        .ok()
+        .or_else(|| {
+            conn.query_row("SELECT value FROM settings WHERE key = 'hostTheme'", [], |r| r.get(0))
+                .ok()
+                .and_then(|s: String| serde_json::from_str::<String>(&s).ok().or(Some(s)))
+        });
+    let host_theme_val = if let Some(theme) = theme_val {
+        json!({ "name": theme })
+    } else {
+        json!({ "name": "tokyo-rain" })
+    };
+    settings_map.insert("hostTheme".to_string(), host_theme_val);
+
     settings_map.entry("backgroundUpdates").or_insert(json!(false));
     settings_map.entry("backgroundIntervalMinutes").or_insert(json!(120));
     settings_map.entry("runAtStartup").or_insert(json!(false));
@@ -205,4 +221,14 @@ pub fn export_to_v1(conn: &Connection, target_dir: &Path) -> Result<(), ExportEr
     }
 
     Ok(())
+}
+
+/// Triggers export_to_v1 if a v1 directory exists next to the WoW installation
+pub fn trigger_dual_write_if_v1_exists(conn: &Connection) {
+    if let Ok(wow_root) = crate::paths::detect_wow_root(None) {
+        let v1_dir = crate::paths::get_v1_sync_folder(&wow_root);
+        if v1_dir.exists() {
+            let _ = export_to_v1(conn, &v1_dir);
+        }
+    }
 }

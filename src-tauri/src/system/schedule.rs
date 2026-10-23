@@ -4,6 +4,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use crate::db::open_connection;
 
 use crate::db::repo::get_settings_map;
 use crate::jobs::runner::{JobError, JobRunner};
@@ -100,7 +101,7 @@ impl Scheduler {
         *run_lock = true;
 
         let db_path = get_db_path();
-        let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+        let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
         // Check if background updates are enabled (for automatic runs)
         if !is_manual && !Self::are_background_updates_enabled(&conn) {
@@ -319,7 +320,7 @@ impl Scheduler {
     pub fn start_background_loop(self: Arc<Self>) {
         let (initial_delay, is_enabled) = {
             let db_path = get_db_path();
-            let is_enabled = if let Ok(conn) = Connection::open(&db_path) {
+            let is_enabled = if let Ok(conn) = open_connection(&db_path) {
                 Self::are_background_updates_enabled(&conn)
             } else {
                 true
@@ -358,7 +359,7 @@ impl Scheduler {
                 "Background updates off".to_string()
             };
             s.tooltip = make_tooltip(&s.core_text);
-            if let Ok(conn) = Connection::open(get_db_path()) {
+            if let Ok(conn) = open_connection(get_db_path()) {
                 let _ = Self::persist_tray_state(&conn, &s);
             }
         }
@@ -420,7 +421,7 @@ impl Scheduler {
                                 // Hourly self-update check and catalogue refresh (§2.H, §2.K, §5.4)
                                 crate::logging::append_app_log("INFO", "Running hourly maintenance crawl");
                                 if let Ok(status) = crate::update::app_update::check_for_updates(None).await {
-                                    if let Ok(conn) = Connection::open(get_db_path()) {
+                                    if let Ok(conn) = open_connection(get_db_path()) {
                                         let _ = crate::update::app_update::save_app_update_state(&conn, &status);
                                         let auto_install = {
                                             let settings = get_settings_map(&conn).unwrap_or_default();

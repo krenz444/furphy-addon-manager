@@ -27,5 +27,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tempfile = "3.10"
 sha2 = "0.10"
+ring = "0.17"
+base64 = "0.22"
 windows-sys = { version = "0.52", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 

@@ -28,7 +28,7 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       onCancel();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' && !isDanger) {
       e.preventDefault();
       onConfirm();
     }

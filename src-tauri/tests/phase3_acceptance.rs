@@ -98,7 +98,7 @@ fn test_acceptance_exact_v1_status_sentences() {
         None,
         Some(now),
     );
-    assert_eq!(updating, "Updating Details (3 of 3 updates)...");
+    assert_eq!(updating, "Updating Details (1 of 3 updates)...");
 
     // 5. Finishing
     let finishing = compute_core(

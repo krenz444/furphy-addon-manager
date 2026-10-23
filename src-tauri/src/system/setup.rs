@@ -26,20 +26,18 @@ pub fn create_shortcut(target_exe: &Path, shortcut_path: &Path, description: &st
         if let Some(parent) = shortcut_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let ps_script = format!(
-            "$ws = New-Object -ComObject WScript.Shell; \
-             $sc = $ws.CreateShortcut('{}'); \
-             $sc.TargetPath = '{}'; \
-             $sc.Description = '{}'; \
-             $sc.WorkingDirectory = '{}'; \
-             $sc.Save()",
-            shortcut_path.display(),
-            target_exe.display(),
-            description,
-            target_exe.parent().map(|p| p.display().to_string()).unwrap_or_default()
-        );
+        let working_dir = target_exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "& { param($p, $t, $d, $w); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($p); $sc.TargetPath = $t; $sc.Description = $d; $sc.WorkingDirectory = $w; $sc.Save() }",
+                &shortcut_path.to_string_lossy(),
+                &target_exe.to_string_lossy(),
+                description,
+                &working_dir,
+            ])
             .output()
             .map_err(|e| format!("Failed executing shortcut script: {}", e))?;
 

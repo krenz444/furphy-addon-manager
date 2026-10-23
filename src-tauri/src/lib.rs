@@ -10,7 +10,6 @@ pub mod system;
 pub mod update;
 
 use std::path::PathBuf;
-use rusqlite::Connection;
 use crate::engine::flavours::detect_installed_flavours_in_root;
 use crate::engine::swap::restore_interrupted_folder_swaps;
 use crate::jobs::runner::JobRunner;
@@ -28,7 +27,7 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 
     // 2. Open DB and run migrations
     let db_path = paths::get_db_path();
-    let mut conn = Connection::open(&db_path)?;
+    let mut conn = db::open_connection(&db_path)?;
     db::migrate::run_migrations(&mut conn)?;
 
     // 3. Crash recovery: recover interrupted folder swaps & unfinished jobs
@@ -153,10 +152,13 @@ pub fn run() {
 
             // Initialize Scheduler, Policy, Runner and Tray
             let policy = std::sync::Arc::new(net::policy::NetworkPolicy::default());
+            let db_path = paths::get_db_path();
+            if let Ok(conn) = db::open_connection(&db_path) {
+                policy.load_fallback_from_db(&conn);
+            }
             let runner = std::sync::Arc::new(jobs::runner::JobRunner::new(policy.clone()));
             let initial_state = {
-                let db_path = paths::get_db_path();
-                if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                if let Ok(conn) = db::open_connection(&db_path) {
                     system::schedule::Scheduler::load_persisted_tray_state(&conn).unwrap_or_default()
                 } else {
                     system::tray_status::TrayStateSnapshot::default()

@@ -1,5 +1,5 @@
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use crate::db::open_connection;
 use crate::engine::wtf::{
     preview_wtf_restore as engine_preview, restore_wtf_snapshot as engine_restore,
 };
@@ -20,7 +20,7 @@ pub struct WtfSnapshotDto {
 #[tauri::command]
 pub fn list_wtf_snapshots(addon_id: String) -> Result<Vec<WtfSnapshotDto>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, addon_id, kind, path, size, created_at, restored_at \
@@ -66,7 +66,7 @@ pub fn preview_wtf_restore(
     flavour: Option<String>,
 ) -> Result<Vec<String>, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
     let flv = flavour.unwrap_or_else(|| "retail".into());
     let flv_folder = if flv.starts_with('_') {
@@ -83,7 +83,7 @@ pub fn restore_wtf_snapshot(
     flavour: Option<String>,
 ) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
     let data_dir = get_data_dir();
     let flv = flavour.unwrap_or_else(|| "retail".into());

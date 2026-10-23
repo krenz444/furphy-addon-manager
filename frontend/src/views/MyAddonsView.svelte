@@ -393,7 +393,12 @@
                 }
               }}
             >
-              <div class="col-select" onclick={(e) => e.stopPropagation()} role="presentation">
+              <div
+                class="col-select"
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation(); }}
+                role="presentation"
+              >
                 <input
                   type="checkbox"
                   checked={selectedIds.has(addon.id)}
@@ -419,7 +424,12 @@
                 </span>
               </div>
 
-              <div class="col-status" onclick={(e) => e.stopPropagation()} role="presentation">
+              <div
+                class="col-status"
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation(); }}
+                role="presentation"
+              >
                 <StatusPill
                   {addon}
                   onUpdate={onUpdateAddon}
@@ -430,7 +440,12 @@
                 />
               </div>
 
-              <div class="col-menu" onclick={(e) => e.stopPropagation()} role="presentation">
+              <div
+                class="col-menu"
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation(); }}
+                role="presentation"
+              >
                 <RowMenu
                   {addon}
                   onUpdate={onUpdateAddon}

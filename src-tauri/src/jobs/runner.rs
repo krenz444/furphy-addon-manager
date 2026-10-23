@@ -240,36 +240,45 @@ impl JobRunner {
                 }
 
                 if kind == "install" {
-                    let file_id_str = params
-                        .get("file_id")
-                        .and_then(|v| {
-                            if let Some(s) = v.as_str() {
-                                Some(s.to_string())
-                            } else if let Some(n) = v.as_i64() {
-                                Some(n.to_string())
-                            } else {
-                                None
-                            }
-                        });
-
-                    if let Some(fid) = file_id_str {
-                        let target_addon_id: Option<String> = if let Some(ref ids) = only_ids {
-                            ids.first().cloned()
-                        } else if let Some(aid) = params.get("addon_id").and_then(|v| v.as_str()) {
-                            Some(aid.to_string())
-                        } else if let Some(pid) = params.get("project_id").and_then(|v| v.as_i64()) {
-                            conn.query_row(
-                                "SELECT id FROM addons WHERE flavour = ?1 AND project_id = ?2",
-                                rusqlite::params![flv, pid],
-                                |r| r.get(0),
-                            ).ok()
+                    let target_addon_id: Option<String> = if let Some(aid) = params.get("addon_id").and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(n) = v.as_i64() {
+                            Some(n.to_string())
                         } else {
                             None
-                        };
+                        }
+                    }) {
+                        Some(aid)
+                    } else if let Some(ref ids) = only_ids {
+                        ids.first().cloned()
+                    } else if let Some(pid) = params.get("project_id").and_then(|v| v.as_i64()) {
+                        conn.query_row(
+                            "SELECT id FROM addons WHERE flavour = ?1 AND project_id = ?2",
+                            rusqlite::params![flv, pid],
+                            |r| r.get(0),
+                        ).ok()
+                    } else {
+                        None
+                    };
 
-                        if let Some(ref aid) = target_addon_id {
+                    if let Some(ref aid) = target_addon_id {
+                        only_ids = Some(vec![aid.clone()]);
+
+                        let file_id_str = params
+                            .get("file_id")
+                            .and_then(|v| {
+                                if let Some(s) = v.as_str() {
+                                    Some(s.to_string())
+                                } else if let Some(n) = v.as_i64() {
+                                    Some(n.to_string())
+                                } else {
+                                    None
+                                }
+                            });
+
+                        if let Some(fid) = file_id_str {
                             let _ = crate::engine::pin::pin_addon(conn, aid, &fid);
-                            only_ids = Some(vec![aid.clone()]);
                         }
                     }
                 }

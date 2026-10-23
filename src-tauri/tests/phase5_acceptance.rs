@@ -111,9 +111,11 @@ fn test_acceptance_updater_integrity_verification_and_tamper_refusal() {
     sha2::Digest::update(&mut hasher, payload);
     let real_sha = format!("{:x}", sha2::Digest::finalize(hasher));
 
-    // 1. Valid matching sha256 MUST succeed
-    let res_valid = verify_artifact_integrity(payload, Some(&real_sha), Some("valid_minisign_sig"));
-    assert!(res_valid.is_ok(), "Expected valid integrity check to succeed");
+    let (real_sig, _) = furphy_lib::update::app_update::sign_artifact_with_seed(payload, &[42u8; 32]).unwrap();
+
+    // 1. Valid matching sha256 and valid Ed25519 signature MUST succeed
+    let res_valid = verify_artifact_integrity(payload, Some(&real_sha), Some(&real_sig));
+    assert!(res_valid.is_ok(), "Expected valid integrity check to succeed: {:?}", res_valid);
 
     // 2. Corrupted bytes or tampered hash MUST be rejected
     let res_tampered = verify_artifact_integrity(payload, Some("bad_hash_000000000000000000000"), None);
@@ -125,7 +127,11 @@ fn test_acceptance_updater_integrity_verification_and_tamper_refusal() {
         err_msg
     );
 
-    // 3. Invalid signature marker MUST be rejected
+    // 3. Tampered payload with signature MUST be rejected
+    let res_tampered_payload = verify_artifact_integrity(b"Tampered payload", None, Some(&real_sig));
+    assert!(res_tampered_payload.is_err());
+
+    // 4. Invalid signature marker MUST be rejected
     let res_bad_sig = verify_artifact_integrity(payload, Some(&real_sha), Some("INVALID_SIG"));
     assert!(res_bad_sig.is_err(), "Expected invalid signature to be rejected");
 }

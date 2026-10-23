@@ -223,6 +223,17 @@ Remove-Item -Recurse -Force $bridgeDir
 $signature = ""
 if ($env:TAURI_SIGNING_PRIVATE_KEY) {
     Write-Host "TAURI_SIGNING_PRIVATE_KEY present in environment per ADR-313."
+    try {
+        $signOutput = & $targetExe --sign-file "$versionedSetupPath" 2>&1
+        if ($LASTEXITCODE -eq 0 -and $signOutput) {
+            $signature = $signOutput.ToString().Trim()
+            Write-Host "Generated Ed25519 signature for $versionedSetupName"
+        } else {
+            Write-Host "Warning: Could not generate signature: $signOutput"
+        }
+    } catch {
+        Write-Host "Warning: Failed invoking binary to sign: $_"
+    }
 } else {
     Write-Host "Notice: TAURI_SIGNING_PRIVATE_KEY not set in shell; signing skipped per ADR-313 custody rules."
 }

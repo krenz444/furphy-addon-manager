@@ -4,6 +4,29 @@ pub mod migrate;
 pub mod repo;
 pub mod schema;
 
+use std::path::Path;
+use rusqlite::Connection;
+
+pub fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("
+        PRAGMA busy_timeout = 5000;
+        PRAGMA foreign_keys = ON;
+    ")?;
+    Ok(())
+}
+
+pub fn open_connection<P: AsRef<Path>>(path: P) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    configure_connection(&conn)?;
+    Ok(conn)
+}
+
+pub fn open_in_memory() -> rusqlite::Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    configure_connection(&conn)?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11,6 +34,16 @@ mod tests {
     use std::path::{Path, PathBuf};
     use rusqlite::Connection;
     use serde_json::{json, Value};
+
+    #[test]
+    fn test_open_connection_pragmas() {
+        let conn = open_in_memory().unwrap();
+        let fk: i32 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "foreign_keys PRAGMA must be ON");
+
+        let bt: i32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert_eq!(bt, 5000, "busy_timeout PRAGMA must be 5000ms");
+    }
 
     fn compute_dir_fingerprint(dir: &Path) -> Vec<(String, u64)> {
         let mut entries = Vec::new();

@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use crate::db::open_connection;
 use crate::paths::get_db_path;
 use crate::system::autostart::{
     disable_autostart, enable_autostart, get_autostart_status, AutostartStatusDto,
@@ -15,7 +15,7 @@ use crate::system::tray_status::TrayStateSnapshot;
 pub fn autostart_enable() -> Result<(), String> {
     enable_autostart(None)?;
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let true_val = serde_json::to_string(&true).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('runAtStartup', ?1) \
@@ -35,7 +35,7 @@ pub fn autostart_enable() -> Result<(), String> {
 pub fn autostart_disable() -> Result<(), String> {
     disable_autostart(None)?;
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let false_val = serde_json::to_string(&false).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('runAtStartup', ?1) \
@@ -72,7 +72,7 @@ pub fn protocol_check_consent(
 ) -> Result<ProtocolConsentInfo, String> {
     let req = parse_protocol_url(&url, None)?;
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let flv = flavour.unwrap_or_else(|| "retail".into());
     check_protocol_consent(&conn, &req, &flv)
 }
@@ -80,7 +80,7 @@ pub fn protocol_check_consent(
 #[tauri::command]
 pub fn get_tray_status() -> Result<TrayStateSnapshot, String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     if let Some(state) = Scheduler::load_persisted_tray_state(&conn) {
         Ok(state)
     } else {
@@ -96,7 +96,7 @@ pub fn tray_status() -> Result<TrayStateSnapshot, String> {
 #[tauri::command]
 pub fn set_background_updates(enabled: bool) -> Result<(), String> {
     let db_path = get_db_path();
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let val_json = serde_json::to_string(&enabled).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('backgroundUpdates', ?1) \

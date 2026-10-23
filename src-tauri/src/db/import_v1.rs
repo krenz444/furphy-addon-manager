@@ -561,7 +561,8 @@ pub fn import_from_v1(
     let state_path = v1_dir.join("state.json");
     if state_path.exists() {
         if let Ok(content) = fs::read_to_string(&state_path) {
-            if let Ok(state_val) = serde_json::from_str::<Value>(&content) {
+            let content_clean = content.trim_start_matches('\u{feff}').trim();
+            if let Ok(state_val) = serde_json::from_str::<Value>(content_clean) {
                 if let Value::Object(state_map) = state_val {
                     // updatesCheckedAt -> freshness
                     if let Some(Value::Object(checked_map)) = state_map.get("updatesCheckedAt") {
@@ -639,9 +640,10 @@ pub fn import_from_v1(
     let tray_state_path = v1_dir.join("tray-state.json");
     if tray_state_path.exists() {
         if let Ok(content) = fs::read_to_string(&tray_state_path) {
+            let content_clean = content.trim_start_matches('\u{feff}').trim();
             tx.execute(
                 "INSERT OR REPLACE INTO tray_state (id, data) VALUES (1, ?1)",
-                params![content],
+                params![content_clean],
             )?;
         }
     }
@@ -650,9 +652,10 @@ pub fn import_from_v1(
     let app_update_path = v1_dir.join("app-update.json");
     if app_update_path.exists() {
         if let Ok(content) = fs::read_to_string(&app_update_path) {
+            let content_clean = content.trim_start_matches('\u{feff}').trim();
             tx.execute(
                 "INSERT OR REPLACE INTO app_update (id, data) VALUES (1, ?1)",
-                params![content],
+                params![content_clean],
             )?;
         }
     }

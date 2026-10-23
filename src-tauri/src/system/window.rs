@@ -53,7 +53,7 @@ pub fn save_current_window_bounds(window: &tauri::Window) {
     };
 
     let db_path = crate::paths::get_db_path();
-    if let Ok(conn) = Connection::open(&db_path) {
+    if let Ok(conn) = crate::db::open_connection(&db_path) {
         let _ = save_window_bounds(&conn, &bounds);
     }
 }
@@ -67,7 +67,7 @@ pub fn apply_saved_window_bounds(window: &tauri::Window) {
 
     // 2. Load and apply persisted bounds if available
     let db_path = crate::paths::get_db_path();
-    if let Ok(conn) = Connection::open(&db_path) {
+    if let Ok(conn) = crate::db::open_connection(&db_path) {
         if let Some(bounds) = load_window_bounds(&conn) {
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(bounds.x, bounds.y)));
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(bounds.width, bounds.height)));
@@ -87,7 +87,7 @@ pub fn apply_saved_webview_window_bounds(window: &tauri::WebviewWindow) {
 
     // 2. Load and apply persisted bounds if available
     let db_path = crate::paths::get_db_path();
-    if let Ok(conn) = Connection::open(&db_path) {
+    if let Ok(conn) = crate::db::open_connection(&db_path) {
         if let Some(bounds) = load_window_bounds(&conn) {
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(bounds.x, bounds.y)));
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(bounds.width, bounds.height)));

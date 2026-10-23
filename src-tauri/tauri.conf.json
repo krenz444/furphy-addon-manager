@@ -22,7 +22,12 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE="
     }
   },
   "bundle": {

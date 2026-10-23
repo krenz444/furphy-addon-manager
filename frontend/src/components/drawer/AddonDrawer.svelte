@@ -46,55 +46,73 @@
     }
   });
 
+  let lastLoadedAddonId = $state<string | null>(null);
+
   $effect(() => {
-    if (addon) {
+    const currentId = addon?.id ?? null;
+    if (currentId !== lastLoadedAddonId) {
+      lastLoadedAddonId = currentId;
       screenshots = [];
       enrichedDescription = null;
-      loadTabData(activeTab);
+      versions = [];
+      snapshots = [];
+      if (addon) {
+        fetchEnriched();
+        loadTabData(activeTab);
+      }
     }
   });
+
+  async function fetchEnriched() {
+    if (!addon) return;
+    try {
+      if (addon.source === 'curseforge' || addon.project_id) {
+        const pid = addon.project_id || parseInt(addon.id, 10);
+        if (pid && !isNaN(pid)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const enriched = await invoke<any>('cf_enrich', { addon_id: pid });
+          if (enriched?.summary) {
+            enrichedDescription = enriched.summary;
+          }
+          if (Array.isArray(enriched?.screenshots)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            screenshots = enriched.screenshots.map((s: any) => ({
+              url: s.url || s.thumbnailUrl,
+              title: s.title || s.description,
+            }));
+          }
+        }
+      } else if (addon.source === 'wago' || addon.wago_slug) {
+        const slug = addon.wago_slug || addon.id;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const wagoData = await invoke<any>('wago_addon', { slug_or_id: slug });
+        if (wagoData?.description) {
+          enrichedDescription = wagoData.description;
+        }
+        if (Array.isArray(wagoData?.screenshots)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          screenshots = wagoData.screenshots.map((s: any) => ({
+            url: s.url,
+            title: s.title,
+          }));
+        }
+      }
+    } catch (err) {
+      console.warn('Failed loading enriched data:', err);
+    }
+  }
 
   async function loadTabData(tab: string) {
     if (!addon) return;
     loadingTab = true;
     try {
       if (tab === 'versions') {
-        versions = await invoke<VersionItem[]>('list_files', { id: addon.id });
+        if (versions.length === 0) {
+          versions = await invoke<VersionItem[]>('list_files', { id: addon.id });
+        }
       } else if (tab === 'saved-settings') {
-        snapshots = await invoke<WtfSnapshot[]>('list_wtf_snapshots', { addon_id: addon.id });
-      } else if (tab === 'screenshots' || tab === 'overview') {
-        if (screenshots.length === 0 && !enrichedDescription) {
-          if (addon.source === 'curseforge' || addon.project_id) {
-            const pid = addon.project_id || parseInt(addon.id, 10);
-            if (pid && !isNaN(pid)) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const enriched = await invoke<any>('cf_enrich', { addon_id: pid });
-              if (enriched?.summary) {
-                enrichedDescription = enriched.summary;
-              }
-              if (Array.isArray(enriched?.screenshots)) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                screenshots = enriched.screenshots.map((s: any) => ({
-                  url: s.url || s.thumbnailUrl,
-                  title: s.title || s.description,
-                }));
-              }
-            }
-          } else if (addon.source === 'wago' || addon.wago_slug) {
-            const slug = addon.wago_slug || addon.id;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const wagoData = await invoke<any>('wago_addon', { slug_or_id: slug });
-            if (wagoData?.description) {
-              enrichedDescription = wagoData.description;
-            }
-            if (Array.isArray(wagoData?.screenshots)) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              screenshots = wagoData.screenshots.map((s: any) => ({
-                url: s.url,
-                title: s.title,
-              }));
-            }
-          }
+        if (snapshots.length === 0) {
+          snapshots = await invoke<WtfSnapshot[]>('list_wtf_snapshots', { addon_id: addon.id });
         }
       }
     } catch (err) {
@@ -353,9 +371,7 @@
           <div class="changelog-section">
             <h3 class="section-title">Release Notes</h3>
             <div class="rich-content">
-              {@html sanitizeHtml(
-                `<h4>Version ${addon.version || '1.0.0'}</h4><ul><li>Compatibility update for game client.</li><li>Bug fixes and performance improvements.</li></ul>`
-              )}
+              <p>No release notes provided for this version.</p>
             </div>
           </div>
         {:else if activeTab === 'screenshots'}

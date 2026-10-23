@@ -71,9 +71,9 @@
 
 <style>
   .app-update-banner {
-    background: var(--bg-surface-elevated, #1f2335);
-    border-bottom: 1px solid var(--accent-primary, #7aa2f7);
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--accent);
+    color: var(--text);
     padding: 10px 16px;
     font-size: 0.875rem;
     position: relative;
@@ -88,7 +88,7 @@
   }
 
   .banner-icon {
-    color: var(--accent-primary, #7aa2f7);
+    color: var(--accent);
     display: flex;
     align-items: center;
     flex-shrink: 0;
@@ -109,7 +109,7 @@
   .notes-toggle-btn {
     background: none;
     border: none;
-    color: var(--accent-primary, #7aa2f7);
+    color: var(--accent);
     font-size: 0.8125rem;
     cursor: pointer;
     text-decoration: underline;
@@ -118,7 +118,7 @@
   }
 
   .notes-toggle-btn:focus-visible {
-    outline: 2px solid var(--accent-primary, #7aa2f7);
+    outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
 
@@ -130,8 +130,8 @@
   }
 
   .install-btn {
-    background: var(--accent-primary, #7aa2f7);
-    color: var(--text-inverse, #15161e);
+    background: var(--accent);
+    color: var(--accent-text);
     border: none;
     font-weight: 600;
     font-size: 0.8125rem;
@@ -151,14 +151,14 @@
   }
 
   .install-btn:focus-visible {
-    outline: 2px solid var(--text-primary, #c0caf5);
+    outline: 2px solid var(--text);
     outline-offset: 2px;
   }
 
   .dismiss-btn {
     background: transparent;
-    border: 1px solid var(--border-default, #292e42);
-    color: var(--text-secondary, #9aa5ce);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     font-size: 0.8125rem;
     padding: 5px 10px;
     border-radius: 4px;
@@ -167,21 +167,21 @@
   }
 
   .dismiss-btn:hover {
-    background: var(--bg-hover, #24283b);
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-2);
+    color: var(--text);
   }
 
   .dismiss-btn:focus-visible {
-    outline: 2px solid var(--accent-primary, #7aa2f7);
+    outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
 
   .banner-notes {
     margin-top: 8px;
     padding: 8px 12px;
-    background: var(--bg-base, #1a1b26);
+    background: var(--bg-2);
     border-radius: 4px;
-    border: 1px solid var(--border-default, #292e42);
+    border: 1px solid var(--border);
     font-size: 0.8125rem;
     max-height: 140px;
     overflow-y: auto;
@@ -192,6 +192,6 @@
     font-family: inherit;
     white-space: pre-wrap;
     word-break: break-word;
-    color: var(--text-secondary, #9aa5ce);
+    color: var(--text-muted);
   }
 </style>

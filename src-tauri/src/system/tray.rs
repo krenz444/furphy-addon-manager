@@ -327,7 +327,7 @@ pub fn setup_tray<R: tauri::Runtime>(
 
     let (run_at_startup, background_updates) = {
         let db_path = crate::paths::get_db_path();
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        if let Ok(conn) = crate::db::open_connection(&db_path) {
             let bg = crate::system::schedule::Scheduler::are_background_updates_enabled(&conn);
             let autostart = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
             (autostart, bg)
@@ -392,7 +392,7 @@ pub fn setup_tray<R: tauri::Runtime>(
                 }
                 "background" => {
                     let db_path = crate::paths::get_db_path();
-                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                    if let Ok(conn) = crate::db::open_connection(&db_path) {
                         let current = crate::system::schedule::Scheduler::are_background_updates_enabled(&conn);
                         let _ = crate::commands::system::set_background_updates(!current);
                     }

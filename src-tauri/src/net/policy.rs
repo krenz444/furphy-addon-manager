@@ -113,6 +113,36 @@ impl NetworkPolicy {
         }
     }
 
+    pub fn load_fallback_from_db(&self, conn: &rusqlite::Connection) {
+        if let Ok(mut stmt) = conn.prepare("SELECT value FROM settings WHERE key = 'cfFallbackUntil'") {
+            if let Ok(val_str) = stmt.query_row([], |r| r.get::<_, String>(0)) {
+                let clean = val_str.trim().trim_matches('"');
+                if let Ok(parsed) = DateTime::parse_from_rfc3339(clean) {
+                    let utc = parsed.with_timezone(&Utc);
+                    if Utc::now() < utc {
+                        if let Ok(mut guard) = self.cf_fallback_until.try_lock() {
+                            *guard = Some(utc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn persist_fallback_to_db(&self, conn: &rusqlite::Connection, until: Option<DateTime<Utc>>) -> Result<(), String> {
+        if let Some(u) = until {
+            let val = format!("\"{}\"", u.to_rfc3339());
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('cfFallbackUntil', ?1) \
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                rusqlite::params![val],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("DELETE FROM settings WHERE key = 'cfFallbackUntil'", []).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn check_host_allowed(&self, host: &str) -> Result<(), String> {
         let clean_host = HostBreaker::get_host_key(host);
         if self.allowed_hosts.contains(&clean_host) || clean_host == "127.0.0.1" || clean_host == "localhost" {
@@ -138,6 +168,18 @@ impl NetworkPolicy {
             "WARN",
             &format!("CurseForge switched to 24h fallback rule (1 in flight, 300ms) until {}", until.to_rfc3339()),
         );
+        #[cfg(not(test))]
+        {
+            let db_path = crate::paths::get_db_path();
+            if let Ok(conn) = crate::db::open_connection(&db_path) {
+                let val = format!("\"{}\"", until.to_rfc3339());
+                let _ = conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('cfFallbackUntil', ?1) \
+                     ON CONFLICT(key) DO UPDATE SET value = ?1",
+                    rusqlite::params![val],
+                );
+            }
+        }
     }
 
     pub async fn acquire_permit(&self, host_key: &str) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
@@ -188,5 +230,27 @@ mod tests {
         let future = Utc::now() + chrono::Duration::hours(24);
         policy.set_cf_fallback(future).await;
         assert!(policy.is_cf_fallback_active().await);
+    }
+
+    #[tokio::test]
+    async fn test_cf_fallback_db_persistence() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+
+        let future = Utc::now() + chrono::Duration::hours(24);
+        let policy = NetworkPolicy::new();
+        assert!(!policy.is_cf_fallback_active().await);
+
+        policy.persist_fallback_to_db(&conn, Some(future)).unwrap();
+
+        let policy2 = NetworkPolicy::new();
+        assert!(!policy2.is_cf_fallback_active().await);
+        policy2.load_fallback_from_db(&conn);
+        assert!(policy2.is_cf_fallback_active().await);
+
+        policy.persist_fallback_to_db(&conn, None).unwrap();
+        let policy3 = NetworkPolicy::new();
+        policy3.load_fallback_from_db(&conn);
+        assert!(!policy3.is_cf_fallback_active().await);
     }
 }

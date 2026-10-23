@@ -252,14 +252,14 @@ pub fn replace_v1_desktop_shortcut(opts: &RetireOptions) -> Result<bool, String>
     } else {
         #[cfg(windows)]
         {
-            let ps_check = format!(
-                "$ws = New-Object -ComObject WScript.Shell; \
-                 $sc = $ws.CreateShortcut('{}'); \
-                 $sc.TargetPath",
-                shortcut_path.display()
-            );
             if let Ok(out) = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_check])
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "& { param($p); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($p); $sc.TargetPath }",
+                    &shortcut_path.to_string_lossy(),
+                ])
                 .output()
             {
                 let target = String::from_utf8_lossy(&out.stdout).to_lowercase();
@@ -283,19 +283,18 @@ pub fn replace_v1_desktop_shortcut(opts: &RetireOptions) -> Result<bool, String>
     if let Ok(current_exe) = std::env::current_exe() {
         #[cfg(windows)]
         {
-            let ps_script = format!(
-                "$ws = New-Object -ComObject WScript.Shell; \
-                 $sc = $ws.CreateShortcut('{}'); \
-                 $sc.TargetPath = '{}'; \
-                 $sc.Description = 'Furphy Addon Manager v2'; \
-                 $sc.WorkingDirectory = '{}'; \
-                 $sc.Save()",
-                shortcut_path.display(),
-                current_exe.display(),
-                current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default()
-            );
+            let working_dir = current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
             let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "& { param($p, $t, $d, $w); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($p); $sc.TargetPath = $t; $sc.Description = $d; $sc.WorkingDirectory = $w; $sc.Save() }",
+                    &shortcut_path.to_string_lossy(),
+                    &current_exe.to_string_lossy(),
+                    "Furphy Addon Manager v2",
+                    &working_dir,
+                ])
                 .output();
             append_app_log("INFO", &format!("Updated desktop shortcut at: {}", shortcut_path.display()));
             return Ok(true);

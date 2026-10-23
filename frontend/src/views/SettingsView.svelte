@@ -137,61 +137,12 @@
   }
 
   async function updateSetting(key: string, value: any) {
-    if (!initialLoaded) return;
     try {
       await invoke('update_settings', { key, value });
     } catch (err) {
       console.warn(`Failed persisting setting ${key}:`, err);
     }
   }
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    updateSetting('releaseType', includeBeta ? 2 : 1);
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    invoke('set_background_updates', { enabled: backgroundUpdates }).catch(() => {});
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    const mins = parseInt(backgroundInterval, 10);
-    if (!isNaN(mins)) {
-      updateSetting('backgroundIntervalMinutes', mins);
-    }
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    if (startWithWindows) {
-      invoke('autostart_enable').catch(() => {});
-      backgroundUpdates = true;
-    } else {
-      invoke('autostart_disable').catch(() => {});
-    }
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    updateSetting('appUpdateAutoInstall', autoAppUpdate);
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    updateSetting('showTestRealms', showTestRealms);
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    updateSetting('adFilter', cfAdFilter);
-  });
-
-  $effect(() => {
-    if (!initialLoaded) return;
-    updateSetting('cfFocus', cfSearchOnly);
-  });
 
   async function scanUntracked() {
     scanningUntracked = true;
@@ -290,14 +241,22 @@
       <h2 class="card-heading">Addon Updates</h2>
       <div class="setting-row">
         <label class="toggle-control">
-          <input type="checkbox" bind:checked={includeBeta} />
+          <input
+            type="checkbox"
+            bind:checked={includeBeta}
+            onchange={() => updateSetting('releaseType', includeBeta ? 2 : 1)}
+          />
           <span class="toggle-text">Include beta versions for addon checks</span>
         </label>
       </div>
 
       <div class="setting-row">
         <label class="toggle-control">
-          <input type="checkbox" bind:checked={backgroundUpdates} />
+          <input
+            type="checkbox"
+            bind:checked={backgroundUpdates}
+            onchange={() => invoke('set_background_updates', { enabled: backgroundUpdates }).catch(() => {})}
+          />
           <span class="toggle-text">Update addons automatically in the background</span>
         </label>
       </div>
@@ -305,7 +264,17 @@
       {#if backgroundUpdates}
         <div class="setting-row indent">
           <label for="interval-select" class="control-label">Check interval:</label>
-          <select id="interval-select" class="form-select" bind:value={backgroundInterval}>
+          <select
+            id="interval-select"
+            class="form-select"
+            bind:value={backgroundInterval}
+            onchange={() => {
+              const mins = parseInt(backgroundInterval, 10);
+              if (!isNaN(mins)) {
+                updateSetting('backgroundIntervalMinutes', mins);
+              }
+            }}
+          >
             <option value="60">Every hour</option>
             <option value="120">Every 2 hours (default)</option>
             <option value="240">Every 4 hours</option>
@@ -317,7 +286,19 @@
 
       <div class="setting-row">
         <label class="toggle-control">
-          <input type="checkbox" bind:checked={startWithWindows} />
+          <input
+            type="checkbox"
+            bind:checked={startWithWindows}
+            onchange={() => {
+              if (startWithWindows) {
+                invoke('autostart_enable').catch(() => {});
+                backgroundUpdates = true;
+                invoke('set_background_updates', { enabled: true }).catch(() => {});
+              } else {
+                invoke('autostart_disable').catch(() => {});
+              }
+            }}
+          />
           <span class="toggle-text">Start Furphy with Windows (in system tray)</span>
         </label>
       </div>
@@ -328,7 +309,11 @@
       <h2 class="card-heading">Furphy App Updates</h2>
       <div class="setting-row">
         <label class="toggle-control">
-          <input type="checkbox" bind:checked={autoAppUpdate} />
+          <input
+            type="checkbox"
+            bind:checked={autoAppUpdate}
+            onchange={() => updateSetting('appUpdateAutoInstall', autoAppUpdate)}
+          />
           <span class="toggle-text">Install Furphy app updates automatically</span>
         </label>
       </div>
@@ -499,11 +484,19 @@
           <div class="advanced-group">
             <h3>CurseForge Browser Pane</h3>
             <label class="toggle-control">
-              <input type="checkbox" bind:checked={cfAdFilter} />
+              <input
+                type="checkbox"
+                bind:checked={cfAdFilter}
+                onchange={() => updateSetting('adFilter', cfAdFilter)}
+              />
               <span class="toggle-text">Filter ads and telemetry on embedded CurseForge pages</span>
             </label>
             <label class="toggle-control">
-              <input type="checkbox" bind:checked={cfSearchOnly} />
+              <input
+                type="checkbox"
+                bind:checked={cfSearchOnly}
+                onchange={() => updateSetting('cfFocus', cfSearchOnly)}
+              />
               <span class="toggle-text">Focus mode: hide headers and navigation banners</span>
             </label>
           </div>
@@ -545,7 +538,11 @@
           <div class="advanced-group">
             <h3>World of Warcraft Versions</h3>
             <label class="toggle-control">
-              <input type="checkbox" bind:checked={showTestRealms} />
+              <input
+                type="checkbox"
+                bind:checked={showTestRealms}
+                onchange={() => updateSetting('showTestRealms', showTestRealms)}
+              />
               <span class="toggle-text">Show test realms (PTR, XPTR, Beta clients) in version switcher</span>
             </label>
           </div>
