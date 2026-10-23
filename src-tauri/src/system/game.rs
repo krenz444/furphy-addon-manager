@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_fake_wow_name_dynamic() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_fake_wow_process_name(Some("CustomFakeGame".into()));
         assert!(is_wow_process_name("CustomFakeGame.exe"));
         assert!(is_wow_process_name("customfakegame"));
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_is_wow_running_env_override() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
         assert!(is_wow_running_fresh());
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");

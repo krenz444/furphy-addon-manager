@@ -95,7 +95,7 @@ fn test_acceptance_untracked_folder_path_traversal_refusal() {
 
 #[test]
 fn test_acceptance_wtf_restore_game_running_refusal_guard() {
-    let _lock = TEST_ENV_LOCK.lock().unwrap();
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let temp = tempdir().unwrap();
     let conn = Connection::open_in_memory().unwrap();

@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_format_balloon_text_updated_with_wow_running() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
         let updated_names = vec!["Details".to_string(), "Plater".to_string()];
         let (text, is_warning) = format_balloon_text("done_updated", &updated_names).unwrap();
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_format_balloon_text_updated_without_wow() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
         let updated_names = vec!["Details".to_string()];
         let (text, is_warning) = format_balloon_text("done_updated", &updated_names).unwrap();
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_show_cycle_notification_suppression_on_fullscreen() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_notification_tracking();
         std::env::set_var("FURPHY_TEST_GAME_FOREGROUND", "1");
         show_cycle_notification("done_updated", &["Details".into()]);

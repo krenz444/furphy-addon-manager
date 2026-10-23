@@ -931,7 +931,8 @@ mod tests {
         let orig_local = std::env::var("LOCALAPPDATA").ok();
         std::env::set_var("LOCALAPPDATA", temp_local.path().to_str().unwrap());
 
-        let temp_wow = std::env::temp_dir().join("furphy test wow (delete untracked)");
+        let temp_wow_dir = tempdir().unwrap();
+        let temp_wow = temp_wow_dir.path().join("furphy test wow (delete untracked)");
         let retail_addons = temp_wow.join("_retail_").join("Interface").join("AddOns");
         std::fs::create_dir_all(&retail_addons).unwrap();
         std::env::set_var("FURPHY_DEV_WOWROOT", temp_wow.to_str().unwrap());

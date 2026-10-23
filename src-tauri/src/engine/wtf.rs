@@ -425,7 +425,7 @@ mod tests {
         fs::write(acc_sv.join("MyAddon.lua"), b"account_lua_v2").unwrap();
         fs::write(char_sv.join("MyAddon.lua"), b"char_lua_v2").unwrap();
 
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Refusal test: when fake game runs, restore is refused!
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
         let refused_res = restore_wtf_snapshot(&conn, &wow_root, "_retail_", &snap_id, &data_dir);

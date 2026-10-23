@@ -141,20 +141,9 @@ pub fn run() {
     }
 
     // Single-instance enforcement for GUI
-    let _single_instance_guard = match system::window::acquire_single_instance_mutex() {
-        Ok(Some(guard)) => Some(guard),
-        Ok(None) => {
-            // Another instance is already running
-            if !args.iter().any(|a| a == "--tray") {
-                system::window::activate_existing_instance();
-            }
-            std::process::exit(0);
-        }
-        Err(e) => {
-            eprintln!("[WARN] Single instance mutex check failed: {}", e);
-            None
-        }
-    };
+    if system::single_instance::try_activate_existing_instance(&args) {
+        std::process::exit(0);
+    }
 
     let mut context = tauri::generate_context!();
     if paths::is_dev() {
@@ -196,7 +185,13 @@ pub fn run() {
                 }
             };
             let scheduler = std::sync::Arc::new(system::schedule::Scheduler::new(runner.clone(), initial_state));
-            let _ = system::tray::setup_tray(app.handle(), scheduler.clone());
+            system::single_instance::start_single_instance_listener(app.handle().clone());
+            if let Err(e) = system::tray::setup_tray(app.handle(), scheduler.clone()) {
+                logging::append_app_log("ERROR", &format!("setup_tray failed: {}", e));
+                eprintln!("[ERROR] setup_tray failed: {}", e);
+            } else {
+                logging::append_app_log("INFO", "setup_tray succeeded");
+            }
             scheduler.clone().start_background_loop();
             app.manage(policy);
             app.manage(runner);

@@ -347,10 +347,9 @@ pub fn setup_tray<R: tauri::Runtime>(
         .menu(&menu)
         .show_menu_on_left_click(false);
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .or_else(|| tauri::image::Image::from_bytes(TRAY_ICON_PNG).ok())
+    let icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)
+        .ok()
+        .or_else(|| app.default_window_icon().cloned())
         .or_else(|| tauri::image::Image::from_app_icon_resource(32).ok());
     if let Some(icon) = icon {
         builder = builder.icon(icon);
@@ -431,6 +430,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_embedded_tray_icon_decodes() {
+        let res = tauri::image::Image::from_bytes(TRAY_ICON_PNG);
+        assert!(res.is_ok(), "Image::from_bytes failed: {:?}", res.err());
+    }
+
+    #[test]
     fn test_tray_menu_items_structure() {
         let items = get_tray_menu_items("Background updates on - next check 12:00");
         assert_eq!(items.len(), 10);
@@ -466,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_tray_selftest_with_fake_wow_running() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
         let temp_dir = tempfile::tempdir().unwrap();
         let marker_path = temp_dir.path().join("tray-selftest-wow.json");
