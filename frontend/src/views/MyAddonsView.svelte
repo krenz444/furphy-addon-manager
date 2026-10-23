@@ -17,6 +17,7 @@
     onUninstallSelected: (addons: Addon[]) => void;
     onTogglePin: (addon: Addon) => void;
     onToggleIgnore: (addon: Addon) => void;
+    onRollbackAddon?: (addon: Addon) => void;
     onOpenAddonDrawer: (addon: Addon, tab?: string) => void;
     onOpenAddDialog: () => void;
     onOpenSource: (addon: Addon) => void;
@@ -37,6 +38,7 @@
     onUninstallSelected,
     onTogglePin,
     onToggleIgnore,
+    onRollbackAddon,
     onOpenAddonDrawer,
     onOpenAddDialog,
     onOpenSource,
@@ -424,6 +426,7 @@
                   onUnpin={onTogglePin}
                   onUnignore={onToggleIgnore}
                   onRetry={onUpdateAddon}
+                  onViewDetails={onOpenAddonDrawer}
                 />
               </div>
 
@@ -434,6 +437,7 @@
                   onViewDetails={onOpenAddonDrawer}
                   onTogglePin={onTogglePin}
                   onToggleIgnore={onToggleIgnore}
+                  onRollback={onRollbackAddon}
                   onOpenSource={onOpenSource}
                   onUninstall={onUninstallAddon}
                 />

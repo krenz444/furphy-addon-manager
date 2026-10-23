@@ -1,28 +1,79 @@
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use reqwest::Url;
 use crate::paths::{detect_wow_root, get_data_dir};
 
-fn open_url_or_file(target: &str) -> Result<(), String> {
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", target])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+pub fn open_url_or_file(target: &str) -> Result<(), String> {
+    if std::env::var("FURPHY_TEST_NO_SPAWN").is_ok() {
+        return Ok(());
+    }
+    let wide_target: Vec<u16> = OsStr::new(target).encode_wide().chain(Some(0)).collect();
+    let wide_open: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let ret = windows_sys::Win32::UI::Shell::ShellExecuteW(
+            0,
+            wide_open.as_ptr(),
+            wide_target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+        if (ret as usize) <= 32 {
+            std::process::Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", target])
+                .spawn()
+                .map_err(|e| format!("Failed to open target (ShellExecute code {}, error {})", ret as usize, e))?;
+        }
+    }
     Ok(())
 }
 
-fn open_folder_path(path: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer")
-        .arg(path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+pub fn open_folder_path(path: &Path) -> Result<(), String> {
+    if std::env::var("FURPHY_TEST_NO_SPAWN").is_ok() {
+        return Ok(());
+    }
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            if parent.exists() {
+                return open_folder_path(parent);
+            }
+        }
+    }
+    let wide_target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide_explore: Vec<u16> = OsStr::new("explore").encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let ret = windows_sys::Win32::UI::Shell::ShellExecuteW(
+            0,
+            wide_explore.as_ptr(),
+            wide_target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+        if (ret as usize) <= 32 {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn open_target(what: String, args: Option<String>) -> Result<(), String> {
+pub fn open_target(what: String, args: Option<serde_json::Value>) -> Result<(), String> {
+    let arg_str = match args {
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::Array(ref arr)) => {
+            arr.first().and_then(|v| v.as_str().map(|s| s.to_string()))
+        }
+        _ => None,
+    };
+
     match what.as_str() {
         "url" => {
-            let url_str = args.ok_or("URL argument is required")?;
+            let url_str = arg_str.ok_or("URL argument is required")?;
             let parsed = Url::parse(&url_str).map_err(|e| format!("Invalid URL: {}", e))?;
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
                 return Err("Only HTTP/HTTPS URLs are allowed".into());
@@ -51,7 +102,7 @@ pub fn open_target(what: String, args: Option<String>) -> Result<(), String> {
         }
         "addons" => {
             let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
-            let flv = args.unwrap_or_else(|| "retail".into());
+            let flv = arg_str.unwrap_or_else(|| "retail".into());
             let flv_folder = if flv.starts_with('_') {
                 flv
             } else {

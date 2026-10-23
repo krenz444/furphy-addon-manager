@@ -77,32 +77,91 @@
     { slug: 'snow-day', name: 'Snow Day', scheme: 'light', swBg: '#ffffff', swBg2: '#eef1f2', swAccent: '#8f5a2e', swText: '#1c2b33' },
   ];
 
+  let initialLoaded = $state(false);
+
   async function loadInitialSettings() {
     try {
-      const s = await invoke<{
-        includeBeta?: boolean;
-        backgroundUpdates?: boolean;
-        backgroundIntervalMinutes?: number;
-        startWithWindows?: boolean;
-        hasGithubToken?: boolean;
-        showTestRealms?: boolean;
-        theme?: string;
-      }>('get_settings');
-
+      const s = await invoke<Record<string, any>>('get_settings');
       if (s) {
-        if (s.includeBeta !== undefined) includeBeta = s.includeBeta;
-        if (s.backgroundUpdates !== undefined) backgroundUpdates = s.backgroundUpdates;
+        if (s.releaseType !== undefined) includeBeta = Number(s.releaseType) >= 2;
+        else if (s.includeBeta !== undefined) includeBeta = Boolean(s.includeBeta);
+
+        if (s.backgroundUpdates !== undefined) backgroundUpdates = Boolean(s.backgroundUpdates);
         if (s.backgroundIntervalMinutes) backgroundInterval = String(s.backgroundIntervalMinutes);
-        if (s.startWithWindows !== undefined) startWithWindows = s.startWithWindows;
-        if (s.hasGithubToken !== undefined) hasGithubToken = s.hasGithubToken;
-        if (s.showTestRealms !== undefined) showTestRealms = s.showTestRealms;
+        if (s.runAtStartup !== undefined) startWithWindows = Boolean(s.runAtStartup);
+        else if (s.startWithWindows !== undefined) startWithWindows = Boolean(s.startWithWindows);
+
+        if (s.appUpdateAutoInstall !== undefined) autoAppUpdate = Boolean(s.appUpdateAutoInstall);
+        if (s.showTestRealms !== undefined) showTestRealms = Boolean(s.showTestRealms);
+        if (s.adFilter !== undefined) cfAdFilter = Boolean(s.adFilter);
+        if (s.cfFocus !== undefined) cfSearchOnly = Boolean(s.cfFocus);
+        if (s.hasGithubToken !== undefined) hasGithubToken = Boolean(s.hasGithubToken);
       }
     } catch {
       // Mock fallback
+    } finally {
+      initialLoaded = true;
     }
 
     scanUntracked();
   }
+
+  async function updateSetting(key: string, value: any) {
+    if (!initialLoaded) return;
+    try {
+      await invoke('update_settings', { key, value });
+    } catch (err) {
+      console.warn(`Failed persisting setting ${key}:`, err);
+    }
+  }
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    updateSetting('releaseType', includeBeta ? 2 : 1);
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    invoke('set_background_updates', { enabled: backgroundUpdates }).catch(() => {});
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    const mins = parseInt(backgroundInterval, 10);
+    if (!isNaN(mins)) {
+      updateSetting('backgroundIntervalMinutes', mins);
+    }
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    if (startWithWindows) {
+      invoke('autostart_enable').catch(() => {});
+      backgroundUpdates = true;
+    } else {
+      invoke('autostart_disable').catch(() => {});
+    }
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    updateSetting('appUpdateAutoInstall', autoAppUpdate);
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    updateSetting('showTestRealms', showTestRealms);
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    updateSetting('adFilter', cfAdFilter);
+  });
+
+  $effect(() => {
+    if (!initialLoaded) return;
+    updateSetting('cfFocus', cfSearchOnly);
+  });
 
   async function scanUntracked() {
     scanningUntracked = true;

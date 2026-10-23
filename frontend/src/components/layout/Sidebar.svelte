@@ -11,6 +11,7 @@
     notBuiltCount: number;
     isGameActive: boolean;
     appInfo: AppInfo | null;
+    showTestRealms?: boolean;
     onSelectView: (view: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings') => void;
     onSelectFlavour: (flavour: string) => void;
     onCheckNow: () => void;
@@ -26,11 +27,16 @@
     notBuiltCount,
     isGameActive,
     appInfo,
+    showTestRealms = false,
     onSelectView,
     onSelectFlavour,
     onCheckNow,
     onUpdateAll,
   }: Props = $props();
+
+  let visibleFlavours = $derived(
+    flavours.filter(f => showTestRealms || !['ptr', 'xptr', 'beta'].includes(f.id.toLowerCase()))
+  );
 </script>
 
 <aside class="app-sidebar" aria-label="Main Navigation">
@@ -51,11 +57,11 @@
     </div>
   </div>
 
-  {#if flavours && flavours.length > 1}
+  {#if visibleFlavours && visibleFlavours.length > 1}
     <div class="flavour-section">
       <div class="section-label">Game Version</div>
       <div class="flavour-list" role="tablist">
-        {#each flavours as fl (fl.id)}
+        {#each visibleFlavours as fl (fl.id)}
           <button
             type="button"
             role="tab"

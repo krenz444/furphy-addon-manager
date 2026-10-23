@@ -21,9 +21,16 @@
     onPinVersion,
   }: Props = $props();
 
+  interface ScreenshotItem {
+    url: string;
+    title?: string;
+  }
+
   let activeTab = $state<'overview' | 'versions' | 'changelog' | 'screenshots' | 'saved-settings'>('overview');
   let versions = $state<VersionItem[]>([]);
   let snapshots = $state<WtfSnapshot[]>([]);
+  let screenshots = $state<ScreenshotItem[]>([]);
+  let enrichedDescription = $state<string | null>(null);
   let loadingTab = $state(false);
 
   // WTF Restore Preview Modal State
@@ -41,6 +48,8 @@
 
   $effect(() => {
     if (addon) {
+      screenshots = [];
+      enrichedDescription = null;
       loadTabData(activeTab);
     }
   });
@@ -53,6 +62,40 @@
         versions = await invoke<VersionItem[]>('list_files', { id: addon.id });
       } else if (tab === 'saved-settings') {
         snapshots = await invoke<WtfSnapshot[]>('list_wtf_snapshots', { addon_id: addon.id });
+      } else if (tab === 'screenshots' || tab === 'overview') {
+        if (screenshots.length === 0 && !enrichedDescription) {
+          if (addon.source === 'curseforge' || addon.project_id) {
+            const pid = addon.project_id || parseInt(addon.id, 10);
+            if (pid && !isNaN(pid)) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const enriched = await invoke<any>('cf_enrich', { addon_id: pid });
+              if (enriched?.summary) {
+                enrichedDescription = enriched.summary;
+              }
+              if (Array.isArray(enriched?.screenshots)) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                screenshots = enriched.screenshots.map((s: any) => ({
+                  url: s.url || s.thumbnailUrl,
+                  title: s.title || s.description,
+                }));
+              }
+            }
+          } else if (addon.source === 'wago' || addon.wago_slug) {
+            const slug = addon.wago_slug || addon.id;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const wagoData = await invoke<any>('wago_addon', { slug_or_id: slug });
+            if (wagoData?.description) {
+              enrichedDescription = wagoData.description;
+            }
+            if (Array.isArray(wagoData?.screenshots)) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              screenshots = wagoData.screenshots.map((s: any) => ({
+                url: s.url,
+                title: s.title,
+              }));
+            }
+          }
+        }
       }
     } catch (err) {
       console.warn('Failed loading tab data:', err);
@@ -203,6 +246,16 @@
         <button
           type="button"
           role="tab"
+          aria-selected={activeTab === 'screenshots'}
+          class="tab-btn"
+          class:is-active={activeTab === 'screenshots'}
+          onclick={() => handleTabChange('screenshots')}
+        >
+          Screenshots
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={activeTab === 'saved-settings'}
           class="tab-btn"
           class:is-active={activeTab === 'saved-settings'}
@@ -241,9 +294,13 @@
             <div class="description-section">
               <h3 class="section-title">Description</h3>
               <div class="rich-content">
-                {@html sanitizeHtml(
-                  `<p>Addon <strong>${addon.name || addon.id}</strong> installed in <em>${addon.flavour}</em>.</p><p>Package contains ${addon.folders.length} folder(s). Kept up to date via Furphy.</p>`
-                )}
+                {#if enrichedDescription}
+                  {@html sanitizeHtml(enrichedDescription)}
+                {:else}
+                  {@html sanitizeHtml(
+                    `<p>Addon <strong>${addon.name || addon.id}</strong> installed in <em>${addon.flavour}</em>.</p><p>Package contains ${addon.folders.length} folder(s). Kept up to date via Furphy.</p>`
+                  )}
+                {/if}
               </div>
             </div>
           </div>
@@ -300,6 +357,27 @@
                 `<h4>Version ${addon.version || '1.0.0'}</h4><ul><li>Compatibility update for game client.</li><li>Bug fixes and performance improvements.</li></ul>`
               )}
             </div>
+          </div>
+        {:else if activeTab === 'screenshots'}
+          <div class="screenshots-section">
+            {#if loadingTab}
+              <p class="loading-state">Loading screenshots…</p>
+            {:else if screenshots.length === 0}
+              <div class="empty-state">
+                <p>No screenshots available for this addon.</p>
+              </div>
+            {:else}
+              <div class="gallery-grid">
+                {#each screenshots as shot}
+                  <div class="screenshot-card">
+                    <img src={shot.url} alt={shot.title || 'Addon screenshot'} loading="lazy" />
+                    {#if shot.title}
+                      <span class="screenshot-caption">{shot.title}</span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
           </div>
         {:else if activeTab === 'saved-settings'}
           <div class="saved-settings-section">
@@ -833,5 +911,37 @@
     padding: 32px 16px;
     color: var(--text-muted);
     font-size: 13px;
+  }
+
+  .gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+
+  .screenshot-card {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .screenshot-card img {
+    width: 100%;
+    height: 130px;
+    object-fit: cover;
+    display: block;
+  }
+
+  .screenshot-caption {
+    padding: 6px 8px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

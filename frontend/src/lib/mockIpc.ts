@@ -557,6 +557,25 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         pagination: { totalCount: 2 },
       } as T;
 
+    case 'cf_enrich':
+      return {
+        id: args.addon_id,
+        summary: 'Enriched addon details from CurseForge.',
+        screenshots: [
+          { url: 'https://media.forgecdn.net/attachments/mock1.png', title: 'Main Interface' },
+          { url: 'https://media.forgecdn.net/attachments/mock2.png', title: 'Configuration Panel' },
+        ],
+      } as T;
+
+    case 'wago_addon':
+      return {
+        id: args.slug_or_id,
+        description: 'Enriched addon description from Wago.',
+        screenshots: [
+          { url: 'https://media.wago.io/addons/mock1.png', title: 'In-game Display' },
+        ],
+      } as T;
+
     default:
       console.warn(`[MockIPC] Unhandled command: ${cmd}`);
       return undefined as T;

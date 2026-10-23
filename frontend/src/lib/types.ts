@@ -18,6 +18,7 @@ export interface Addon {
   update_file_id?: string | null;
   check_status?: string | null;
   is_old_patch?: boolean;
+  missing_deps?: string[];
   wago_slug?: string | null;
   repo?: string | null;
 }

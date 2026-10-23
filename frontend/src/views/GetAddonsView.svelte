@@ -28,6 +28,7 @@
   let wagoSearchQuery = $state('');
   let wagoSort = $state<'popular' | 'updated' | 'name' | 'gaining'>('popular');
   let wagoCategory = $state<string>('');
+  let wagoCategories = $state<{ id: string; label: string }[]>([]);
   let wagoResults = $state<WagoAddonItem[]>([]);
   let loadingWago = $state(false);
   let wagoError = $state<string | null>(null);
@@ -39,6 +40,17 @@
   // GitHub tab state
   let githubInput = $state('');
   let githubError = $state<string | null>(null);
+
+  async function loadCategories() {
+    try {
+      const cats = await invoke<{ id: string; label: string }[]>('wago_categories');
+      if (cats && Array.isArray(cats)) {
+        wagoCategories = cats;
+      }
+    } catch {
+      // Mock fallback
+    }
+  }
 
   async function searchWago() {
     loadingWago = true;
@@ -134,6 +146,7 @@
 
   // Initial load
   $effect(() => {
+    loadCategories();
     if (activeTab === 'wago' && wagoResults.length === 0 && !loadingWago) {
       searchWago();
     }
@@ -190,6 +203,15 @@
               onkeydown={(e) => e.key === 'Enter' && searchWago()}
             />
           </div>
+
+          {#if wagoCategories.length > 0}
+            <select class="toolbar-select" bind:value={wagoCategory} onchange={searchWago}>
+              <option value="">All Categories</option>
+              {#each wagoCategories as cat}
+                <option value={cat.id}>{cat.label}</option>
+              {/each}
+            </select>
+          {/if}
 
           <select class="toolbar-select" bind:value={wagoSort} onchange={searchWago}>
             <option value="popular">Popular</option>

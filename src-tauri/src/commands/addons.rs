@@ -40,6 +40,7 @@ pub struct AddonDto {
     pub update_file_id: Option<String>,
     pub check_status: Option<String>,
     pub is_old_patch: bool,
+    pub missing_deps: Vec<String>,
     pub wago_slug: Option<String>,
     pub repo: Option<String>,
 }
@@ -74,13 +75,42 @@ pub struct AppStateDto {
     pub app_info: AppInfoDto,
 }
 
-fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<AddonDto>, String> {
+pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<AddonDto>, String> {
+    let (mut client_interface, mut client_build): (Option<i32>, Option<String>) = conn
+        .query_row(
+            "SELECT client_interface, client_build FROM flavours WHERE id = ?1",
+            rusqlite::params![flavour],
+            |r| {
+                let ci: Option<i32> = r
+                    .get::<_, Option<String>>(0)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .or_else(|| r.get::<_, Option<i32>>(0).ok().flatten());
+                let cb: Option<String> = r.get::<_, Option<String>>(1).ok().flatten();
+                Ok((ci, cb))
+            },
+        )
+        .unwrap_or((None, None));
+
+    if client_interface.is_none() {
+        if let Ok(wow_root) = detect_wow_root(None) {
+            let installed = detect_installed_flavours_in_root(&wow_root);
+            if let Some(target) = installed.iter().find(|f| f.id == flavour) {
+                client_interface = target.client_interface;
+                if client_build.is_none() {
+                    client_build = target.client_build.clone();
+                }
+            }
+        }
+    }
+
     let mut stmt = conn
         .prepare(
             "SELECT a.id, a.flavour, a.name, a.author, a.source, a.version, a.project_id, \
              a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
              a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
-             c.update_version, c.update_file_id, c.status \
+             c.update_version, c.update_file_id, c.status, a.latest_game_versions \
              FROM addons a \
              LEFT JOIN check_results c ON a.id = c.addon_id \
              WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
@@ -108,12 +138,13 @@ fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<Add
             let update_version: Option<String> = row.get(16)?;
             let update_file_id: Option<String> = row.get(17)?;
             let check_status: Option<String> = row.get(18)?;
+            let latest_gv_json: Option<String> = row.get(19)?;
 
             Ok((
                 addon_id, flavour_id, name, author, source, version,
                 project_id, file_id, file_name, installed_at, adopted,
                 ignore_updates, pinned_file_id, release_type, wago_slug,
-                repo, update_version, update_file_id, check_status,
+                repo, update_version, update_file_id, check_status, latest_gv_json,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -124,7 +155,7 @@ fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<Add
             addon_id, flavour_id, name, author, source, version,
             project_id, file_id, file_name, installed_at, adopted,
             ignore_updates, pinned_file_id, release_type, wago_slug,
-            repo, update_version, update_file_id, check_status,
+            repo, update_version, update_file_id, check_status, latest_gv_json,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut folder_stmt = conn
@@ -136,6 +167,23 @@ fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<Add
             .query_map(rusqlite::params![flavour_id, addon_id], |fr| fr.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         let folders: Vec<String> = frows.flatten().collect();
+
+        let is_old_patch = if client_interface.is_some() {
+            let latest_gv: Vec<String> = latest_gv_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            !crate::engine::compat::is_addon_built_for_patch(
+                client_interface,
+                None,
+                &latest_gv,
+                client_build.as_deref(),
+            )
+        } else {
+            false
+        };
+
+        let missing_deps = crate::engine::deps::check_missing_dependencies(conn, &flavour_id, &addon_id)
+            .unwrap_or_default();
 
         result.push(AddonDto {
             id: addon_id,
@@ -156,7 +204,8 @@ fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<Add
             update_version,
             update_file_id,
             check_status,
-            is_old_patch: false,
+            is_old_patch,
+            missing_deps,
             wago_slug,
             repo,
         });
@@ -263,12 +312,17 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
         )
         .ok();
 
-    // Untracked count
+    // Untracked count: count ONLY identifiable groups per §2.E
     let untracked_count = if let Ok(wow_root) = detect_wow_root(None) {
         let installed = detect_installed_flavours_in_root(&wow_root);
         if let Some(target_flv) = installed.iter().find(|f| f.id == active_flavour) {
             scan_untracked_addons(&conn, &target_flv.addons_path, &active_flavour, target_flv.client_interface)
-                .map(|cands| cands.len())
+                .map(|cands| {
+                    cands
+                        .iter()
+                        .filter(|c| c.source.is_some() || c.project_id.is_some() || c.wago_id.is_some())
+                        .count()
+                })
                 .unwrap_or(0)
         } else {
             0

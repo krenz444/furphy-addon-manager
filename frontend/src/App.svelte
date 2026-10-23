@@ -62,15 +62,36 @@
   let protocolFileId = $state<number | null>(null);
   let protocolAddonName = $state<string | null>(null);
 
+  let isWindowFocused = $state<boolean>(true);
+  let showTestRealms = $state<boolean>(false);
+
   // Computed Tallies
   let updatesCount = $derived(freshness?.updates_count ?? addons.filter(a => !!a.update_version).length);
   let notBuiltCount = $derived(compatList.length > 0 ? compatList.length : addons.filter(a => a.is_old_patch).length);
 
-  // Apply Theme & Density to DOM
+  // Listen to Window Focus/Blur for Animation Pausing (§2.F, §4.7)
+  $effect(() => {
+    const onFocus = () => { isWindowFocused = true; };
+    const onBlur = () => { isWindowFocused = false; };
+    const onVis = () => { isWindowFocused = !document.hidden; };
+
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onVis);
+
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  });
+
+  // Apply Theme & Density & Pause Attributes to DOM
   $effect(() => {
     document.documentElement.dataset.theme = currentTheme;
     document.documentElement.dataset.density = density;
     document.documentElement.dataset.gameActive = String(isGameActive);
+    document.documentElement.dataset.windowInactive = String(!isWindowFocused);
   });
 
   function addToast(type: 'info' | 'success' | 'warning' | 'error', message: string, durationMs = 4000) {
@@ -93,6 +114,14 @@
           identifier: 'krenzcreative.furphy.addonmanager.dev',
         };
       }
+
+      try {
+        const s = await invoke<Record<string, any>>('get_settings');
+        if (s) {
+          if (s.showTestRealms !== undefined) showTestRealms = Boolean(s.showTestRealms);
+          if (s.hostTheme) currentTheme = s.hostTheme;
+        }
+      } catch {}
 
       try {
         const fl = await invoke<Flavour[]>('get_flavours');
@@ -340,19 +369,38 @@
   }
 
   async function handleExportAddonList(includeWtf: boolean): Promise<string> {
-    const res = await invoke<{ path: string }>('export_list', { flavour: activeFlavour, include_wtf: includeWtf });
+    const res = await invoke<string | { path: string }>('export_list', { flavour: activeFlavour, include_wtf: includeWtf });
     addToast('success', 'Addon list exported.');
-    return res?.path || 'Exported successfully';
+    if (typeof res === 'string') return res;
+    return (res as any)?.path || 'Exported successfully';
   }
 
   async function handleImportAddonList() {
     try {
-      await invoke('import_list', { flavour: activeFlavour });
-      addToast('success', 'Addon list imported successfully.');
+      const count = await invoke<number>('import_list', { flavour: activeFlavour, path: null });
+      addToast('success', `Imported ${count} addon(s) successfully.`);
       await refreshFlavourData(activeFlavour);
     } catch (err) {
       addToast('error', `Import failed: ${err}`);
     }
+  }
+
+  async function handleRollbackAddon(addon: Addon) {
+    confirmTitle = `Roll back ${addon.name ?? addon.id}?`;
+    confirmMessage = `Are you sure you want to restore the previous backup of this addon?`;
+    confirmDetail = `Previous version backup will be restored. Your SavedVariables settings are preserved.`;
+    confirmDanger = false;
+    confirmAction = async () => {
+      try {
+        await invoke('start_job', { kind: 'rollback', flavour: activeFlavour, params: { addon_id: addon.id } });
+        addToast('success', `Rolled back ${addon.name ?? addon.id}`);
+        await refreshFlavourData(activeFlavour);
+      } catch (err) {
+        addToast('error', `Rollback failed: ${err}`);
+      }
+      confirmOpen = false;
+    };
+    confirmOpen = true;
   }
 
   async function handleManageAllUntracked() {
@@ -400,6 +448,7 @@
     {notBuiltCount}
     {isGameActive}
     {appInfo}
+    {showTestRealms}
     onSelectView={(v) => (activeView = v)}
     onSelectFlavour={handleFlavourChange}
     onCheckNow={handleCheckNow}
@@ -435,6 +484,7 @@
           onUninstallSelected={handleUninstallSelected}
           onTogglePin={handleTogglePin}
           onToggleIgnore={handleToggleIgnore}
+          onRollbackAddon={handleRollbackAddon}
           onOpenAddonDrawer={handleOpenAddonDrawer}
           onOpenAddDialog={() => (addDialogOpen = true)}
           onOpenSource={handleOpenSource}

@@ -215,10 +215,52 @@ impl JobRunner {
                     .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
 
                 let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-                let only_ids: Option<Vec<String>> = params
+                let mut only_ids: Option<Vec<String>> = params
                     .get("only")
+                    .or_else(|| params.get("addon_ids"))
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect());
+
+                if only_ids.is_none() {
+                    if let Some(single_id) = params.get("addon_id").and_then(|v| v.as_str()) {
+                        only_ids = Some(vec![single_id.to_string()]);
+                    }
+                }
+
+                if kind == "install" {
+                    let file_id_str = params
+                        .get("file_id")
+                        .and_then(|v| {
+                            if let Some(s) = v.as_str() {
+                                Some(s.to_string())
+                            } else if let Some(n) = v.as_i64() {
+                                Some(n.to_string())
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(fid) = file_id_str {
+                        let target_addon_id: Option<String> = if let Some(ref ids) = only_ids {
+                            ids.first().cloned()
+                        } else if let Some(aid) = params.get("addon_id").and_then(|v| v.as_str()) {
+                            Some(aid.to_string())
+                        } else if let Some(pid) = params.get("project_id").and_then(|v| v.as_i64()) {
+                            conn.query_row(
+                                "SELECT id FROM addons WHERE flavour = ?1 AND project_id = ?2",
+                                rusqlite::params![flv, pid],
+                                |r| r.get(0),
+                            ).ok()
+                        } else {
+                            None
+                        };
+
+                        if let Some(ref aid) = target_addon_id {
+                            let _ = crate::engine::pin::pin_addon(conn, aid, &fid);
+                            only_ids = Some(vec![aid.clone()]);
+                        }
+                    }
+                }
 
                 let report = run_sync_for_flavour(
                     conn,

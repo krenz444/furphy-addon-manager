@@ -7,14 +7,18 @@
     onUnpin?: (addon: Addon) => void;
     onUnignore?: (addon: Addon) => void;
     onRetry?: (addon: Addon) => void;
+    onViewDetails?: (addon: Addon) => void;
   }
 
-  let { addon, onUpdate, onUnpin, onUnignore, onRetry }: Props = $props();
+  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails }: Props = $props();
+
+  let hasMissingDeps = $derived((addon.missing_deps && addon.missing_deps.length > 0) ?? false);
 
   let statusType = $derived.by(() => {
     if (addon.pinned_file_id) return 'pinned';
     if (addon.ignore_updates) return 'ignored';
     if (addon.update_version) return 'update';
+    if (hasMissingDeps) return 'needs_dep';
     if (addon.is_old_patch) return 'old_patch';
     if (addon.check_status === 'failed') return 'failed';
     return 'up_to_date';
@@ -30,6 +34,8 @@
       onUnignore(addon);
     } else if (statusType === 'failed' && onRetry) {
       onRetry(addon);
+    } else if ((statusType === 'needs_dep' || statusType === 'old_patch') && onViewDetails) {
+      onViewDetails(addon);
     }
   }
 </script>
@@ -62,13 +68,24 @@
   >
     Ignored
   </button>
+{:else if statusType === 'needs_dep'}
+  <button
+    type="button"
+    class="status-pill pill-needs-dep"
+    onclick={handleClick}
+    title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to view details."
+  >
+    Needs a dependency
+  </button>
 {:else if statusType === 'old_patch'}
-  <span
+  <button
+    type="button"
     class="status-pill pill-old-patch"
-    title="Not built for current game client patch."
+    onclick={handleClick}
+    title="Not built for current game client patch. Click to view compatibility."
   >
     Old patch
-  </span>
+  </button>
 {:else if statusType === 'failed'}
   <button
     type="button"
@@ -155,10 +172,24 @@
     background: var(--bg-3);
   }
 
+  .pill-needs-dep {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border-color: rgba(255, 179, 71, 0.4);
+  }
+
+  .pill-needs-dep:hover {
+    background: rgba(255, 179, 71, 0.25);
+  }
+
   .pill-old-patch {
     background: var(--warning-tint);
     color: var(--warning);
     border-color: rgba(255, 179, 71, 0.35);
+  }
+
+  .pill-old-patch:hover {
+    background: rgba(255, 179, 71, 0.25);
   }
 
   .pill-failed {

@@ -89,14 +89,33 @@ pub fn export_list(
 }
 
 #[tauri::command]
-pub fn import_list(path: String, flavour: String) -> Result<usize, String> {
+pub fn import_list(path: Option<String>, flavour: String) -> Result<usize, String> {
     let db_path = get_db_path();
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    let p = PathBuf::from(&path);
-    if !p.exists() {
-        return Err(format!("Import file not found: {}", path));
+    let target_path = if let Some(p) = path {
+        PathBuf::from(p)
+    } else {
+        let data_dir = get_data_dir();
+        let mut newest: Option<PathBuf> = None;
+        if let Ok(entries) = std::fs::read_dir(&data_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("furphy-addons-") || name.starts_with("addons-") {
+                            newest = Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        newest.ok_or_else(|| "No export file specified and none found in data folder".to_string())?
+    };
+
+    if !target_path.exists() {
+        return Err(format!("Import file not found: {}", target_path.display()));
     }
-    let count = import_addon_list(&mut conn, &flavour, &p).map_err(|e| e.to_string())?;
+    let count = import_addon_list(&mut conn, &flavour, &target_path).map_err(|e| e.to_string())?;
     Ok(count)
 }
 

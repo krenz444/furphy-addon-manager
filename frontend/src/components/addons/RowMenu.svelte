@@ -7,6 +7,8 @@
     onViewDetails?: (addon: Addon, tab?: string) => void;
     onTogglePin?: (addon: Addon) => void;
     onToggleIgnore?: (addon: Addon) => void;
+    onRollback?: (addon: Addon) => void;
+    onSwitchSource?: (addon: Addon) => void;
     onOpenSource?: (addon: Addon) => void;
     onUninstall?: (addon: Addon) => void;
   }
@@ -17,6 +19,8 @@
     onViewDetails,
     onTogglePin,
     onToggleIgnore,
+    onRollback,
+    onSwitchSource,
     onOpenSource,
     onUninstall,
   }: Props = $props();
@@ -111,6 +115,28 @@
       >
         {addon.ignore_updates ? 'Stop ignoring updates' : 'Ignore updates'}
       </button>
+
+      {#if onRollback}
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitem"
+          onclick={(e) => { e.stopPropagation(); closeMenu(); onRollback?.(addon); }}
+        >
+          Roll back…
+        </button>
+      {/if}
+
+      {#if onSwitchSource && (addon.source === 'curseforge' || addon.source === 'wago')}
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitem"
+          onclick={(e) => { e.stopPropagation(); closeMenu(); onSwitchSource?.(addon); }}
+        >
+          Switch to {addon.source === 'curseforge' ? 'Wago' : 'CurseForge'}…
+        </button>
+      {/if}
 
       <button
         type="button"

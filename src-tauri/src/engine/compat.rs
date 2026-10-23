@@ -42,6 +42,13 @@ pub fn is_addon_built_for_patch(
         }
     }
 
+    let client_int_str = client_int.to_string();
+    for gv in latest_game_versions {
+        if *gv == client_int_str {
+            return true;
+        }
+    }
+
     false
 }
 
