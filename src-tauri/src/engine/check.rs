@@ -156,10 +156,23 @@ pub async fn run_check_for_flavour(
                         Ok(files) => {
                             if let Some(chosen) = select_cf_file(&files, a.release_type, type_id, prefix) {
                                 let chosen_id_str = chosen.id.to_string();
-                                if a.file_id.as_deref() != Some(&chosen_id_str) {
+                                let is_same_id = a.file_id.as_deref() == Some(&chosen_id_str);
+                                let is_older = if let Some(curr_fid_str) = a.file_id.as_deref() {
+                                    if let Ok(curr_fid) = curr_fid_str.parse::<i64>() {
+                                        curr_fid >= chosen.id
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+                                let chosen_ver = chosen.display_name.clone().or(chosen.file_name.clone());
+                                let is_same_ver = a.version.is_some() && a.version.as_deref() == chosen_ver.as_deref();
+
+                                if !is_same_id && !is_older && !is_same_ver {
                                     outcome_status = "Would-update".to_string();
                                     upd_file = Some(chosen_id_str);
-                                    upd_ver = chosen.display_name.clone().or(chosen.file_name.clone());
+                                    upd_ver = chosen_ver;
                                 }
                             }
                         }
@@ -195,10 +208,13 @@ pub async fn run_check_for_flavour(
                     }
 
                     if let Some(chosen) = found_selection {
-                        if a.file_id.as_deref() != Some(&chosen.id) {
+                        let chosen_ver = chosen.version.clone().or(chosen.name.clone());
+                        let is_same_id = a.file_id.as_deref() == Some(&chosen.id);
+                        let is_same_ver = a.version.is_some() && a.version.as_deref() == chosen_ver.as_deref();
+                        if !is_same_id && !is_same_ver {
                             outcome_status = "Would-update".to_string();
                             upd_file = Some(chosen.id);
-                            upd_ver = chosen.version.clone().or(chosen.name.clone());
+                            upd_ver = chosen_ver;
                         }
                     }
                 }
@@ -280,9 +296,9 @@ pub async fn run_check_for_flavour(
     let overall_state = if would_update_count > 0 {
         "updates_ready"
     } else if failed_count > 0 && up_to_date_count == 0 {
-        "error"
+        "failed"
     } else {
-        "up_to_date"
+        "clean"
     };
 
     tx.execute(

@@ -147,6 +147,12 @@ pub async fn run_sync_for_flavour(
         // If the addon has no remote provider configured (e.g. locally adopted addon without upstream source):
         if a.project_id.is_none() && a.wago_slug.is_none() && a.repo.is_none() {
             up_to_date_count += 1;
+            let now_str = Utc::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                 VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                params![a.id, now_str],
+            );
             results.push(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
@@ -203,8 +209,26 @@ pub async fn run_sync_for_flavour(
 
                     if let Some(cf_file) = target_file {
                         let cf_id_str = cf_file.id.to_string();
-                        if !force && a.file_id.as_deref() == Some(&cf_id_str) {
+                        let is_already_current_or_newer = if let Some(ref curr_fid) = a.file_id {
+                            if curr_fid == &cf_id_str {
+                                true
+                            } else if let Ok(c_id) = curr_fid.parse::<i64>() {
+                                c_id >= cf_file.id
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !force && is_already_current_or_newer {
                             up_to_date_count += 1;
+                            let now_str = Utc::now().to_rfc3339();
+                            let _ = conn.execute(
+                                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                                 VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                                params![a.id, now_str],
+                            );
                             results.push(AddonSyncResult {
                                 addon_id: a.id.clone(),
                                 name: a.name.clone(),
@@ -277,6 +301,12 @@ pub async fn run_sync_for_flavour(
                     if let Some(wago_rel) = target_release {
                         if !force && a.file_id.as_deref() == Some(&wago_rel.id) {
                             up_to_date_count += 1;
+                            let now_str = Utc::now().to_rfc3339();
+                            let _ = conn.execute(
+                                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                                 VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                                params![a.id, now_str],
+                            );
                             results.push(AddonSyncResult {
                                 addon_id: a.id.clone(),
                                 name: a.name.clone(),
@@ -316,6 +346,12 @@ pub async fn run_sync_for_flavour(
                                 if let Some(chosen) = select_github_release(&releases, a.release_type, pin_ref) {
                                     if !force && (a.file_id.as_deref() == Some(&chosen.tag_name) || a.version.as_deref() == Some(&chosen.tag_name)) {
                                         up_to_date_count += 1;
+                                        let now_str = Utc::now().to_rfc3339();
+                                        let _ = conn.execute(
+                                            "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                                             VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                                            params![a.id, now_str],
+                                        );
                                         results.push(AddonSyncResult {
                                             addon_id: a.id.clone(),
                                             name: a.name.clone(),
@@ -631,6 +667,39 @@ pub async fn run_sync_for_flavour(
     }
 
     let finished_at = Utc::now().to_rfc3339();
+
+    // Refresh freshness table so UI knows if updates remain or if all is clean
+    let remaining_updates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM check_results cr \
+             JOIN addons a ON a.id = cr.addon_id \
+             WHERE a.flavour = ?1 AND cr.status = 'Would-update' \
+             AND (cr.update_file_id IS NOT NULL AND cr.update_file_id != a.file_id) \
+             AND (cr.update_version IS NOT NULL AND cr.update_version != a.version)",
+            params![flavour],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let overall_state = if remaining_updates > 0 {
+        "updates_ready"
+    } else if failed_count > 0 && updated_count == 0 && up_to_date_count == 0 {
+        "failed"
+    } else {
+        "clean"
+    };
+
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO freshness (flavour, state, checked_at, last_success_at, last_error) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            flavour,
+            overall_state,
+            finished_at,
+            if failed_count == 0 { Some(finished_at.clone()) } else { None },
+            if failed_count > 0 { Some(format!("{} sync(s) failed", failed_count)) } else { None }
+        ],
+    );
 
     append_sync_log(
         Some(flavour),

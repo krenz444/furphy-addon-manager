@@ -20,7 +20,10 @@
     if (addon.error || addon.check_status === 'failed') return 'failed';
     if (addon.pinned_file_id) return 'pinned';
     if (addon.ignore_updates) return 'ignored';
-    if (addon.update_version) return 'update';
+    let hasActualUpdate = addon.update_version &&
+      addon.update_version !== addon.version &&
+      !(addon.update_file_id && addon.update_file_id === addon.file_id);
+    if (hasActualUpdate) return 'update';
     if (hasMissingDeps) return 'needs_dep';
     if (addon.is_old_patch) return 'old_patch';
     return 'up_to_date';

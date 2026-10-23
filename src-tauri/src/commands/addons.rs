@@ -196,6 +196,26 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
+        let is_error = error.is_some() || check_status.as_deref() == Some("failed");
+        let is_up_to_date = !is_error && match (&file_id, &update_file_id, &version, &update_version) {
+            (Some(fid), Some(ufid), _, _) if fid == ufid => true,
+            (_, _, Some(ver), Some(uver)) if ver == uver => true,
+            (Some(fid), Some(ufid), _, _) => {
+                if let (Ok(installed_fid), Ok(target_fid)) = (fid.parse::<i64>(), ufid.parse::<i64>()) {
+                    installed_fid >= target_fid
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        let (final_update_version, final_update_file_id, final_check_status) = if is_up_to_date {
+            (None, None, Some("up_to_date".to_string()))
+        } else {
+            (update_version, update_file_id, check_status)
+        };
+
         result.push(AddonDto {
             id: addon_id,
             flavour: flavour_id,
@@ -212,9 +232,9 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             ignore_updates,
             pinned_file_id,
             release_type,
-            update_version,
-            update_file_id,
-            check_status,
+            update_version: final_update_version,
+            update_file_id: final_update_file_id,
+            check_status: final_check_status,
             error,
             is_old_patch,
             missing_deps,
@@ -294,8 +314,16 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
             }
         });
 
+    let effective_freshness_state = if updates_count > 0 {
+        "updates_ready".to_string()
+    } else if freshness_state == "updates_ready" || freshness_state == "up_to_date" {
+        "clean".to_string()
+    } else {
+        freshness_state
+    };
+
     let freshness = FreshnessDto {
-        state: freshness_state,
+        state: effective_freshness_state,
         checked_at,
         updates_count,
         last_error,
@@ -1033,5 +1061,67 @@ mod tests {
         assert_eq!(dto.name.as_deref(), Some("FailedAddon"));
         assert_eq!(dto.check_status.as_deref(), Some("failed"));
         assert_eq!(dto.error.as_deref(), Some("Network timeout connecting to provider"));
+    }
+
+    #[test]
+    fn test_fetch_addons_with_details_clears_stale_update_when_already_installed_or_newer() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        // 1. Addon with identical file_id and version in check_results
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, version, file_id) VALUES ('addon-same', 'retail', 'SameAddon', 'v427.8', '9299959')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO check_results (addon_id, checked_at, update_file_id, update_version, status) \
+             VALUES ('addon-same', '2026-10-23T00:00:00Z', '9299959', 'v427.8', 'Would-update')",
+            [],
+        ).unwrap();
+
+        // 2. Addon installed with newer numeric file_id than check_results
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, version, file_id) VALUES ('addon-newer', 'retail', 'NewerAddon', '6.3.20', '9301495')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO check_results (addon_id, checked_at, update_file_id, update_version, status) \
+             VALUES ('addon-newer', '2026-10-23T00:00:00Z', '9300069', '6.3.18', 'Would-update')",
+            [],
+        ).unwrap();
+
+        // 3. Addon with genuine pending update
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, version, file_id) VALUES ('addon-update', 'retail', 'UpdateAddon', '1.0.0', '9200000')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO check_results (addon_id, checked_at, update_file_id, update_version, status) \
+             VALUES ('addon-update', '2026-10-23T00:00:00Z', '9300000', '1.1.0', 'Would-update')",
+            [],
+        ).unwrap();
+
+        let dtos = fetch_addons_with_details(&conn, "retail").unwrap();
+        assert_eq!(dtos.len(), 3);
+
+        let same = dtos.iter().find(|d| d.id == "addon-same").unwrap();
+        assert_eq!(same.update_version, None);
+        assert_eq!(same.update_file_id, None);
+        assert_eq!(same.check_status.as_deref(), Some("up_to_date"));
+
+        let newer = dtos.iter().find(|d| d.id == "addon-newer").unwrap();
+        assert_eq!(newer.update_version, None);
+        assert_eq!(newer.update_file_id, None);
+        assert_eq!(newer.check_status.as_deref(), Some("up_to_date"));
+
+        let update = dtos.iter().find(|d| d.id == "addon-update").unwrap();
+        assert_eq!(update.update_version.as_deref(), Some("1.1.0"));
+        assert_eq!(update.update_file_id.as_deref(), Some("9300000"));
+        assert_eq!(update.check_status.as_deref(), Some("Would-update"));
     }
 }

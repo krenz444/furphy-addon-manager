@@ -60,13 +60,20 @@
   let errorDialogAddon = $state<Addon | null>(null);
   let errorCopied = $state(false);
 
+  function isAddonUpdatable(a: Addon): boolean {
+    if (!a.update_version || a.ignore_updates || a.pinned_file_id) return false;
+    if (a.update_version === a.version) return false;
+    if (a.update_file_id && a.file_id && a.update_file_id === a.file_id) return false;
+    return true;
+  }
+
   // Filtered addons
   let filteredAddons = $derived.by(() => {
     let list = addons;
 
     // Filter chip
     if (activeFilter === 'updates') {
-      list = list.filter(a => !!a.update_version);
+      list = list.filter(isAddonUpdatable);
     } else if (activeFilter === 'needs_deps') {
       list = list.filter(a => !!(a.missing_deps && a.missing_deps.length > 0));
     } else if (activeFilter === 'pinned') {
@@ -100,7 +107,7 @@
       } else if (sortBy === 'status') {
         const priority = (item: Addon) => {
           if (item.error || item.check_status === 'failed') return 1;
-          if (item.update_version) return 2;
+          if (isAddonUpdatable(item)) return 2;
           if (item.missing_deps && item.missing_deps.length > 0) return 3;
           if (item.is_old_patch) return 4;
           if (item.pinned_file_id) return 5;
@@ -118,7 +125,7 @@
   });
 
   // Tallies for filter chips
-  let updatesCount = $derived(addons.filter(a => !!a.update_version).length);
+  let updatesCount = $derived(addons.filter(isAddonUpdatable).length);
   let missingDepsCount = $derived(addons.filter(a => !!(a.missing_deps && a.missing_deps.length > 0)).length);
   let pinnedCount = $derived(addons.filter(a => !!a.pinned_file_id).length);
   let ignoredCount = $derived(addons.filter(a => a.ignore_updates).length);

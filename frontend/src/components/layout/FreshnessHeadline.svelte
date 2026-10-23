@@ -33,12 +33,12 @@
         </button>
       {/if}
     {/if}
-  {:else if state === 'clean'}
+  {:else if state === 'clean' || state === 'up_to_date'}
     <span class="freshness-dot is-success" aria-label="Up to date"></span>
     {#if !dotOnly}
       <span class="freshness-text">Everything’s up to date</span>
     {/if}
-  {:else if state === 'failed'}
+  {:else if state === 'failed' || state === 'error'}
     <span class="freshness-dot is-danger" aria-label="Failed check"></span>
     {#if !dotOnly}
       <span class="freshness-text error-text">
