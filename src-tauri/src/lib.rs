@@ -140,6 +140,22 @@ pub fn run() {
         }
     }
 
+    // Single-instance enforcement for GUI
+    let _single_instance_guard = match system::window::acquire_single_instance_mutex() {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
+            // Another instance is already running
+            if !args.iter().any(|a| a == "--tray") {
+                system::window::activate_existing_instance();
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("[WARN] Single instance mutex check failed: {}", e);
+            None
+        }
+    };
+
     let mut context = tauri::generate_context!();
     if paths::is_dev() {
         context.config_mut().identifier = "krenzcreative.furphy.addonmanager.dev".to_string();

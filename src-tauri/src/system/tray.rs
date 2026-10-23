@@ -51,6 +51,8 @@ pub struct TraySelftestMarker {
     pub uninstall_dry_run: UninstallDryRunDto,
 }
 
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../../icons/32x32.png");
+
 pub fn get_tray_menu_items(status_text: &str) -> Vec<String> {
     vec![
         "Open Furphy Addon Manager".to_string(),
@@ -345,10 +347,15 @@ pub fn setup_tray<R: tauri::Runtime>(
         .menu(&menu)
         .show_menu_on_left_click(false);
 
-    if let Some(icon) = app.default_window_icon().cloned() {
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .or_else(|| tauri::image::Image::from_bytes(TRAY_ICON_PNG).ok())
+        .or_else(|| tauri::image::Image::from_app_icon_resource(32).ok());
+    if let Some(icon) = icon {
         builder = builder.icon(icon);
-    } else if let Ok(icon) = tauri::image::Image::from_app_icon_resource(32) {
-        builder = builder.icon(icon);
+    } else {
+        eprintln!("[WARN] Failed to load tray icon from default, embedded bytes, or resource");
     }
 
     let _tray = builder

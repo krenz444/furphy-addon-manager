@@ -10,8 +10,134 @@ use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadI
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetWindowThreadProcessId,
-    SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_ALL, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_ALL, SW_RESTORE, SW_SHOW,
 };
+
+#[cfg(windows)]
+pub struct SingleInstanceGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub struct SingleInstanceGuard;
+
+pub fn acquire_single_instance_mutex() -> Result<Option<SingleInstanceGuard>, String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+
+        let mutex_name = if crate::paths::is_dev() {
+            "Local\\FurphyAddonManager_Dev_SingleInstance\0"
+        } else {
+            "Local\\FurphyAddonManager_SingleInstance\0"
+        };
+
+        let wide_name: Vec<u16> = mutex_name.encode_utf16().collect();
+        let handle = unsafe {
+            CreateMutexW(std::ptr::null(), 1, wide_name.as_ptr())
+        };
+
+        if handle == 0 {
+            return Err("Failed to create single-instance mutex".to_string());
+        }
+
+        let err = unsafe { GetLastError() };
+        if err == ERROR_ALREADY_EXISTS {
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Ok(None);
+        }
+
+        Ok(Some(SingleInstanceGuard { handle }))
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(Some(SingleInstanceGuard))
+    }
+}
+
+#[cfg(windows)]
+pub fn find_furphy_window() -> Option<windows_sys::Win32::Foundation::HWND> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowW, GetWindowTextW};
+
+    let title_str = if crate::paths::is_dev() {
+        "Furphy Dev"
+    } else {
+        "Furphy Addon Manager"
+    };
+
+    let wide_title: Vec<u16> = format!("{}\0", title_str).encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide_title.as_ptr()) };
+    if hwnd != 0 {
+        return Some(hwnd);
+    }
+
+    struct SearchContext {
+        target_prefix: String,
+        found_hwnd: Option<HWND>,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam as *mut SearchContext);
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+        if len > 0 {
+            if let Ok(text) = String::from_utf16(&buf[..len as usize]) {
+                if text.starts_with(&ctx.target_prefix) {
+                    ctx.found_hwnd = Some(hwnd);
+                    return 0;
+                }
+            }
+        }
+        1
+    }
+
+    let mut ctx = SearchContext {
+        target_prefix: title_str.to_string(),
+        found_hwnd: None,
+    };
+
+    unsafe {
+        EnumWindows(Some(enum_proc), &mut ctx as *mut _ as LPARAM);
+    }
+
+    ctx.found_hwnd
+}
+
+pub fn activate_existing_instance() -> bool {
+    #[cfg(windows)]
+    {
+        if let Some(hwnd) = find_furphy_window() {
+            unsafe {
+                ShowWindow(hwnd, SW_RESTORE);
+                ShowWindow(hwnd, SW_SHOW);
+            }
+            let _ = bring_window_to_front(hwnd as isize);
+            return true;
+        }
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
 pub const MIN_WIDTH_96_DPI: u32 = 1040;
 pub const MIN_HEIGHT_96_DPI: u32 = 660;

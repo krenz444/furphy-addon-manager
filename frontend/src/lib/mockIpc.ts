@@ -221,7 +221,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'get_app_info':
       return {
         name: 'Furphy Addon Manager',
-        version: '2.0.0',
+        version: '2.0.1',
         is_dev: false,
         identifier: 'krenzcreative.furphy.addonmanager',
       } as T;
@@ -253,7 +253,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         is_game_active: false,
         app_info: {
           name: 'Furphy Addon Manager',
-          version: '2.0.0',
+          version: '2.0.1',
           is_dev: false,
           identifier: 'krenzcreative.furphy.addonmanager',
         },
@@ -579,7 +579,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_check':
       return {
         status: 'available',
-        current_version: '2.0.0',
+        current_version: '2.0.1',
         update_version: '2.0.1',
         release_notes: '• Modernized Svelte 5 frontend with custom Tokyo Rain theme\n• Enhanced WTF SavedVariables snapshot protection\n• Direct CurseForge & Wago updates with rate-limit fallback',
         published_at: '2026-10-23T00:00:00Z',
@@ -593,7 +593,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_status':
       return {
         status: 'idle',
-        current_version: '2.0.0',
+        current_version: '2.0.1',
         update_version: null,
         release_notes: null,
         published_at: null,

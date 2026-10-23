@@ -80,6 +80,14 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
 
     // Copy executable if not already running from the destination
     if current_exe != dest_exe {
+        #[cfg(windows)]
+        if !is_test {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", &format!("{}.exe", APP_TITLE)])
+                .output();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
         fs::copy(&current_exe, &dest_exe)
             .map_err(|e| format!("Failed copying binary to '{}': {}", dest_exe.display(), e))?;
     }

@@ -153,56 +153,79 @@
   }
 
   let rowHeight = $derived(density === 'compact' ? 38 : 48);
+
+  let isDepsDismissed = $state(false);
+  let isUntrackedDismissed = $state(false);
+
+  $effect(() => {
+    // Reset banner dismissal when active flavour changes
+    flavour;
+    isDepsDismissed = false;
+    isUntrackedDismissed = false;
+  });
 </script>
 
 <div class="my-addons-view">
-  {#if untrackedCount > 0}
-    <UntrackedAddonsBanner
-      count={untrackedCount}
-      {flavour}
-      onManageAll={onManageAllUntracked}
-      onViewUntracked={onViewUntracked}
-    />
-  {/if}
+  {#if (untrackedCount > 0 && !isUntrackedDismissed) || (missingDepsCount > 0 && !isDepsDismissed)}
+    <div class="banners-stack">
+      {#if untrackedCount > 0 && !isUntrackedDismissed}
+        <UntrackedAddonsBanner
+          count={untrackedCount}
+          {flavour}
+          onManageAll={onManageAllUntracked}
+          onViewUntracked={onViewUntracked}
+          onDismiss={() => (isUntrackedDismissed = true)}
+        />
+      {/if}
 
-  {#if missingDepsCount > 0}
-    <aside class="missing-deps-banner" role="status" aria-label="Missing Dependencies Notice">
-      <div class="banner-content">
-        <div class="banner-icon-col">
-          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="10" cy="10" r="8" />
-            <line x1="10" y1="6" x2="10" y2="10" />
-            <line x1="10" y1="14" x2="10.01" y2="14" />
-          </svg>
-        </div>
-        <div class="banner-text-col">
-          <strong class="banner-headline">
-            {missingDepsCount} {missingDepsCount === 1 ? 'addon has' : 'addons have'} missing dependencies
-          </strong>
-          <span class="banner-subtext">
-            Required dependencies must be installed for these addons to work in {flavour}.
-          </span>
-        </div>
-      </div>
-      <div class="banner-actions">
-        <button
-          type="button"
-          class="btn-banner-filter"
-          onclick={() => (activeFilter = 'needs_deps')}
-        >
-          View ({missingDepsCount})
-        </button>
-        {#if onInstallDeps}
-          <button
-            type="button"
-            class="btn-banner-install"
-            onclick={() => onInstallDeps?.()}
-          >
-            Install Missing Dependencies
-          </button>
-        {/if}
-      </div>
-    </aside>
+      {#if missingDepsCount > 0 && !isDepsDismissed}
+        <aside class="missing-deps-banner" role="status" aria-label="Missing Dependencies Notice">
+          <div class="banner-content">
+            <div class="banner-icon-col">
+              <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="10" cy="10" r="8" />
+                <line x1="10" y1="6" x2="10" y2="10" />
+                <line x1="10" y1="14" x2="10.01" y2="14" />
+              </svg>
+            </div>
+            <div class="banner-text-col">
+              <strong class="banner-headline">
+                {missingDepsCount} {missingDepsCount === 1 ? 'addon has' : 'addons have'} missing dependencies
+              </strong>
+              <span class="banner-subtext">
+                Required dependencies must be installed for these addons to work in {flavour}.
+              </span>
+            </div>
+          </div>
+          <div class="banner-actions">
+            <button
+              type="button"
+              class="btn-banner btn-banner-filter"
+              onclick={() => (activeFilter = 'needs_deps')}
+            >
+              View ({missingDepsCount})
+            </button>
+            {#if onInstallDeps}
+              <button
+                type="button"
+                class="btn-banner btn-banner-install"
+                onclick={() => onInstallDeps?.()}
+              >
+                Install Missing
+              </button>
+            {/if}
+            <button
+              type="button"
+              class="dismiss-btn"
+              aria-label="Dismiss missing dependencies banner"
+              onclick={() => (isDepsDismissed = true)}
+            >
+              ✕
+            </button>
+          </div>
+        </aside>
+      {/if}
+    </div>
   {/if}
 
   <header class="toolbar">
@@ -706,6 +729,15 @@
     background: var(--accent-hover);
   }
 
+  /* Banners stack container */
+  .banners-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 1.25rem 4px 1.25rem;
+    flex-shrink: 0;
+  }
+
   /* Missing dependencies banner */
   .missing-deps-banner {
     display: flex;
@@ -713,11 +745,14 @@
     justify-content: space-between;
     gap: 16px;
     padding: 10px 16px;
+    min-height: 52px;
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0;
     background: var(--bg-1);
     border: 1px solid var(--warning);
     border-radius: var(--radius);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-    margin: 10px 1.25rem 4px 1.25rem;
     flex-wrap: wrap;
   }
 
@@ -725,46 +760,66 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    min-width: 0;
+    flex: 1;
   }
 
   .missing-deps-banner .banner-icon-col {
     color: var(--warning);
     display: flex;
     align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
   }
 
   .missing-deps-banner .banner-text-col {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
   }
 
   .missing-deps-banner .banner-headline {
     color: var(--text);
     font-size: 13px;
+    font-weight: 600;
+    line-height: 1.3;
   }
 
   .missing-deps-banner .banner-subtext {
     color: var(--text-muted);
     font-size: 12px;
+    line-height: 1.3;
   }
 
   .missing-deps-banner .banner-actions {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .btn-banner {
+    font-size: 12px;
+    font-weight: 600;
+    height: 28px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--fast), color var(--fast), border-color var(--fast);
+    box-sizing: border-box;
+    white-space: nowrap;
   }
 
   .btn-banner-filter {
     background: transparent;
     color: var(--text);
     border: 1px solid var(--border);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background var(--fast);
   }
 
   .btn-banner-filter:hover {
@@ -780,12 +835,6 @@
     background: var(--warning-tint);
     color: var(--warning);
     border: 1px solid var(--warning);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background var(--fast), color var(--fast);
   }
 
   .btn-banner-install:hover {
@@ -796,6 +845,33 @@
   .btn-banner-install:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
+  }
+
+  .missing-deps-banner .dismiss-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    font-size: 14px;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    transition: background var(--fast), color var(--fast);
+    box-sizing: border-box;
+  }
+
+  .missing-deps-banner .dismiss-btn:hover {
+    color: var(--text);
+    background: var(--bg-2);
+  }
+
+  .missing-deps-banner .dismiss-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 
   .bulk-action-bar {

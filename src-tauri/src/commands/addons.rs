@@ -521,6 +521,20 @@ pub fn delete_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(
         let target = flv.addons_path.join(clean);
         if target.is_dir() {
             std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+            for _ in 0..50 {
+                if !target.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        } else if target.is_file() {
+            std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+            for _ in 0..50 {
+                if !target.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         let _ = conn.execute(
             "DELETE FROM ignored_untracked_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)",
@@ -797,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_ignored_dependency_lifecycle() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempdir().unwrap();
         let orig_local = std::env::var("LOCALAPPDATA").ok();
         std::env::set_var("LOCALAPPDATA", temp.path().to_str().unwrap());
@@ -867,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_ignored_untracked_folders_lifecycle() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempdir().unwrap();
         let orig_local = std::env::var("LOCALAPPDATA").ok();
         std::env::set_var("LOCALAPPDATA", temp.path().to_str().unwrap());
@@ -910,7 +924,7 @@ mod tests {
 
     #[test]
     fn test_delete_untracked_addon_success_and_tracked_guard() {
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let orig_fake_wow = std::env::var("FURPHY_DEV_FAKE_WOW").ok();
         std::env::remove_var("FURPHY_DEV_FAKE_WOW");
         let temp_local = tempdir().unwrap();
@@ -944,6 +958,13 @@ mod tests {
             "retail".to_string(),
             vec!["UntrackedFolder1".to_string(), "UntrackedFolder2".to_string()],
         ).unwrap();
+
+        for _ in 0..50 {
+            if !dir1.exists() && !dir2.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         assert!(!dir1.exists());
         assert!(!dir2.exists());
