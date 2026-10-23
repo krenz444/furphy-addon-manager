@@ -68,6 +68,16 @@ $stableSetupPath = Join-Path $OutputDir $stableSetupName
 Copy-Item -Path $targetExe -Destination $versionedSetupPath -Force
 Copy-Item -Path $targetExe -Destination $stableSetupPath -Force
 
+# Copy runtime DLLs to output directory
+$llvmBin = "E:\mingw\llvm-mingw-20260908-ucrt-x86_64\bin"
+if (Test-Path "$llvmBin\libunwind.dll") {
+    Copy-Item -Path "$llvmBin\libunwind.dll" -Destination (Join-Path $OutputDir "libunwind.dll") -Force
+}
+$targetReleaseDir = Split-Path -Parent $targetExe
+if (Test-Path (Join-Path $targetReleaseDir "WebView2Loader.dll")) {
+    Copy-Item -Path (Join-Path $targetReleaseDir "WebView2Loader.dll") -Destination (Join-Path $OutputDir "WebView2Loader.dll") -Force
+}
+
 # Generate SHA256 for Setup (bare lowercase hex per DISTRIBUTION-SPEC.md)
 $setupHash = (Get-FileHash -Path $versionedSetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $setupHash | Set-Content -LiteralPath "$versionedSetupPath.sha256" -Encoding Ascii -NoNewline
@@ -84,6 +94,12 @@ Set-Content -Path (Join-Path $bridgeDir "VERSION") -Value $Version -NoNewline
 # Copy Setup and .sha256 into bridge package
 Copy-Item -Path $versionedSetupPath -Destination (Join-Path $bridgeDir $versionedSetupName) -Force
 Copy-Item -Path "$versionedSetupPath.sha256" -Destination (Join-Path $bridgeDir "$versionedSetupName.sha256") -Force
+if (Test-Path "$llvmBin\libunwind.dll") {
+    Copy-Item -Path "$llvmBin\libunwind.dll" -Destination (Join-Path $bridgeDir "libunwind.dll") -Force
+}
+if (Test-Path (Join-Path $targetReleaseDir "WebView2Loader.dll")) {
+    Copy-Item -Path (Join-Path $targetReleaseDir "WebView2Loader.dll") -Destination (Join-Path $bridgeDir "WebView2Loader.dll") -Force
+}
 
 # Create Bridge install.ps1
 $bridgeInstallPs1 = @'

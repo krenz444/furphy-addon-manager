@@ -27,17 +27,18 @@ pub fn create_shortcut(target_exe: &Path, shortcut_path: &Path, description: &st
             let _ = fs::create_dir_all(parent);
         }
         let working_dir = target_exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let p_esc = shortcut_path.to_string_lossy().replace("'", "''");
+        let t_esc = target_exe.to_string_lossy().replace("'", "''");
+        let d_esc = description.replace("'", "''");
+        let w_esc = working_dir.replace("'", "''");
+
+        let script = format!(
+            "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('{}'); $sc.TargetPath = '{}'; $sc.Description = '{}'; $sc.WorkingDirectory = '{}'; $sc.Save()",
+            p_esc, t_esc, d_esc, w_esc
+        );
+
         let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "& { param($p, $t, $d, $w); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($p); $sc.TargetPath = $t; $sc.Description = $d; $sc.WorkingDirectory = $w; $sc.Save() }",
-                &shortcut_path.to_string_lossy(),
-                &target_exe.to_string_lossy(),
-                description,
-                &working_dir,
-            ])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .map_err(|e| format!("Failed executing shortcut script: {}", e))?;
 
@@ -77,6 +78,17 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
     if current_exe != dest_exe {
         fs::copy(&current_exe, &dest_exe)
             .map_err(|e| format!("Failed copying binary to '{}': {}", dest_exe.display(), e))?;
+    }
+
+    // Copy runtime dependencies alongside the executable
+    if let Some(parent) = current_exe.parent() {
+        for dll in &["libunwind.dll", "WebView2Loader.dll"] {
+            let src_dll = parent.join(dll);
+            if src_dll.exists() {
+                let dest_dll = install_dir.join(dll);
+                let _ = fs::copy(&src_dll, &dest_dll);
+            }
+        }
     }
 
     // 1. Create Desktop Shortcut
