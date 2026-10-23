@@ -123,9 +123,9 @@ pub fn run() {
                 }
             }
 
-            // Initialize Scheduler and Tray
+            // Initialize Scheduler, Policy, Runner and Tray
             let policy = std::sync::Arc::new(net::policy::NetworkPolicy::default());
-            let runner = std::sync::Arc::new(jobs::runner::JobRunner::new(policy));
+            let runner = std::sync::Arc::new(jobs::runner::JobRunner::new(policy.clone()));
             let initial_state = {
                 let db_path = paths::get_db_path();
                 if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -134,9 +134,11 @@ pub fn run() {
                     system::tray_status::TrayStateSnapshot::default()
                 }
             };
-            let scheduler = std::sync::Arc::new(system::schedule::Scheduler::new(runner, initial_state));
+            let scheduler = std::sync::Arc::new(system::schedule::Scheduler::new(runner.clone(), initial_state));
             let _ = system::tray::setup_tray(app.handle(), scheduler.clone());
             scheduler.clone().start_background_loop();
+            app.manage(policy);
+            app.manage(runner);
             app.manage(scheduler);
 
             Ok(())
@@ -155,6 +157,40 @@ pub fn run() {
             commands::addons::get_addons,
             commands::addons::get_flavours,
             commands::addons::get_app_info,
+            commands::addons::get_state,
+            commands::addons::set_ignore,
+            commands::addons::unpin,
+            commands::addons::pin_version,
+            commands::addons::list_files,
+            commands::addons::scan_untracked,
+            commands::addons::delete_untracked_folder,
+            commands::addons::adopt_untracked,
+            commands::addons::adopt_all_untracked,
+            commands::addons::list_not_built_for_patch,
+            commands::jobs::start_job,
+            commands::jobs::list_jobs,
+            commands::jobs::get_job,
+            commands::wtf::list_wtf_snapshots,
+            commands::wtf::preview_wtf_restore,
+            commands::wtf::restore_wtf_snapshot,
+            commands::open::open_target,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::settings::export_list,
+            commands::settings::import_list,
+            commands::settings::run_diagnostics,
+            commands::settings::list_migration_backups,
+            commands::settings::delete_migration_backups,
+            commands::settings::quit_app,
+            commands::settings::set_window_theme,
+            commands::settings::app_update_check,
+            commands::settings::app_update_install,
+            commands::settings::app_update_status,
+            commands::browse::wago_search,
+            commands::browse::wago_categories,
+            commands::browse::wago_addon,
+            commands::browse::cf_browse,
+            commands::browse::cf_enrich,
             commands::system::autostart_enable,
             commands::system::autostart_disable,
             commands::system::autostart_status,

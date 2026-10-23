@@ -1,9 +1,17 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use crate::db::repo::{get_addons_by_flavour, get_installed_flavours_db, AddonDto, FlavourDto};
-use crate::paths::{get_db_path, is_dev};
+use crate::db::repo::{get_installed_flavours_db, FlavourDto};
+use crate::engine::adopt::adopt_candidate_group;
+use crate::engine::compat::{list_not_built_for_patch as engine_compat, PatchCompatStatus};
+use crate::engine::flavours::detect_installed_flavours_in_root;
+use crate::engine::ignore::set_ignore_updates;
+use crate::engine::pin::{pin_addon, unpin_addon};
+use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
+use crate::jobs::runner::JobRecord;
+use crate::paths::{detect_wow_root, get_db_path, is_dev};
+use crate::system::game::is_wow_running;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfoDto {
     pub name: String,
     pub version: String,
@@ -11,12 +19,158 @@ pub struct AppInfoDto {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonDto {
+    pub id: String,
+    pub flavour: String,
+    pub name: Option<String>,
+    pub author: Option<String>,
+    pub source: Option<String>,
+    pub version: Option<String>,
+    pub project_id: Option<i64>,
+    pub file_id: Option<String>,
+    pub file_name: Option<String>,
+    pub folders: Vec<String>,
+    pub installed_at: Option<String>,
+    pub adopted: bool,
+    pub ignore_updates: bool,
+    pub pinned_file_id: Option<String>,
+    pub release_type: Option<i64>,
+    pub update_version: Option<String>,
+    pub update_file_id: Option<String>,
+    pub check_status: Option<String>,
+    pub is_old_patch: bool,
+    pub wago_slug: Option<String>,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionItemDto {
+    pub file_id: String,
+    pub version: String,
+    pub kind: String,
+    pub date: Option<String>,
+    pub is_current: bool,
+    pub is_pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreshnessDto {
+    pub state: String,
+    pub checked_at: Option<String>,
+    pub updates_count: usize,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppStateDto {
+    pub addons: Vec<AddonDto>,
+    pub flavours: Vec<FlavourDto>,
+    pub active_flavour: String,
+    pub freshness: FreshnessDto,
+    pub running_job: Option<JobRecord>,
+    pub untracked_count: usize,
+    pub is_game_active: bool,
+    pub app_info: AppInfoDto,
+}
+
+fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec<AddonDto>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, a.flavour, a.name, a.author, a.source, a.version, a.project_id, \
+             a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
+             a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
+             c.update_version, c.update_file_id, c.status \
+             FROM addons a \
+             LEFT JOIN check_results c ON a.id = c.addon_id \
+             WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![flavour], |row| {
+            let addon_id: String = row.get(0)?;
+            let flavour_id: String = row.get(1)?;
+            let name: Option<String> = row.get(2)?;
+            let author: Option<String> = row.get(3)?;
+            let source: Option<String> = row.get(4)?;
+            let version: Option<String> = row.get(5)?;
+            let project_id: Option<i64> = row.get(6)?;
+            let file_id: Option<String> = row.get(7)?;
+            let file_name: Option<String> = row.get(8)?;
+            let installed_at: Option<String> = row.get(9)?;
+            let adopted: bool = row.get::<_, i32>(10)? != 0;
+            let ignore_updates: bool = row.get::<_, i32>(11)? != 0;
+            let pinned_file_id: Option<String> = row.get(12)?;
+            let release_type: Option<i64> = row.get(13)?;
+            let wago_slug: Option<String> = row.get(14)?;
+            let repo: Option<String> = row.get(15)?;
+            let update_version: Option<String> = row.get(16)?;
+            let update_file_id: Option<String> = row.get(17)?;
+            let check_status: Option<String> = row.get(18)?;
+
+            Ok((
+                addon_id, flavour_id, name, author, source, version,
+                project_id, file_id, file_name, installed_at, adopted,
+                ignore_updates, pinned_file_id, release_type, wago_slug,
+                repo, update_version, update_file_id, check_status,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for r in rows {
+        let (
+            addon_id, flavour_id, name, author, source, version,
+            project_id, file_id, file_name, installed_at, adopted,
+            ignore_updates, pinned_file_id, release_type, wago_slug,
+            repo, update_version, update_file_id, check_status,
+        ) = r.map_err(|e| e.to_string())?;
+
+        let mut folder_stmt = conn
+            .prepare(
+                "SELECT folder FROM addon_folders WHERE flavour = ?1 AND addon_id = ?2 ORDER BY folder COLLATE NOCASE ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let frows = folder_stmt
+            .query_map(rusqlite::params![flavour_id, addon_id], |fr| fr.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let folders: Vec<String> = frows.flatten().collect();
+
+        result.push(AddonDto {
+            id: addon_id,
+            flavour: flavour_id,
+            name,
+            author,
+            source,
+            version,
+            project_id,
+            file_id,
+            file_name,
+            folders,
+            installed_at,
+            adopted,
+            ignore_updates,
+            pinned_file_id,
+            release_type,
+            update_version,
+            update_file_id,
+            check_status,
+            is_old_patch: false,
+            wago_slug,
+            repo,
+        });
+    }
+
+    Ok(result)
+}
+
 #[tauri::command]
 pub fn get_addons(flavour: Option<String>) -> Result<Vec<AddonDto>, String> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_flavour = flavour.unwrap_or_else(|| "retail".into());
-    get_addons_by_flavour(&conn, &active_flavour).map_err(|e| e.to_string())
+    fetch_addons_with_details(&conn, &active_flavour)
 }
 
 #[tauri::command]
@@ -30,7 +184,11 @@ pub fn get_flavours() -> Result<Vec<FlavourDto>, String> {
 pub fn get_app_info() -> Result<AppInfoDto, String> {
     let dev = is_dev();
     Ok(AppInfoDto {
-        name: if dev { "Furphy Dev".into() } else { "Furphy Addon Manager".into() },
+        name: if dev {
+            "Furphy Dev".into()
+        } else {
+            "Furphy Addon Manager".into()
+        },
         version: "2.0.0-dev".into(),
         is_dev: dev,
         identifier: if dev {
@@ -39,4 +197,309 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
             "krenzcreative.furphy.addonmanager".into()
         },
     })
+}
+
+#[tauri::command]
+pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_flavour = flavour.unwrap_or_else(|| "retail".into());
+
+    let addons = fetch_addons_with_details(&conn, &active_flavour)?;
+    let flavours = get_installed_flavours_db(&conn).unwrap_or_default();
+
+    // Freshness calculation
+    let mut updates_count = 0;
+    for a in &addons {
+        if a.update_version.is_some() && !a.ignore_updates && a.pinned_file_id.is_none() {
+            updates_count += 1;
+        }
+    }
+
+    let (freshness_state, checked_at, last_error): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT state, checked_at, last_error FROM freshness WHERE flavour = ?1",
+            rusqlite::params![active_flavour],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or_else(|_| {
+            if updates_count > 0 {
+                ("updates_ready".into(), None, None)
+            } else if !addons.is_empty() {
+                ("clean".into(), None, None)
+            } else {
+                ("not_checked".into(), None, None)
+            }
+        });
+
+    let freshness = FreshnessDto {
+        state: freshness_state,
+        checked_at,
+        updates_count,
+        last_error,
+    };
+
+    // Running job
+    let running_job = conn
+        .query_row(
+            "SELECT id, kind, flavour, params, state, started_at, finished_at, error, results, reload_needed, log_path \
+             FROM jobs WHERE state = 'running' ORDER BY started_at DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(JobRecord {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    flavour: r.get(2)?,
+                    params: r.get(3)?,
+                    state: r.get(4)?,
+                    started_at: r.get(5)?,
+                    finished_at: r.get(6)?,
+                    error: r.get(7)?,
+                    results: r.get(8)?,
+                    reload_needed: r.get::<_, i32>(9)? != 0,
+                    log_path: r.get(10)?,
+                })
+            },
+        )
+        .ok();
+
+    // Untracked count
+    let untracked_count = if let Ok(wow_root) = detect_wow_root(None) {
+        let installed = detect_installed_flavours_in_root(&wow_root);
+        if let Some(target_flv) = installed.iter().find(|f| f.id == active_flavour) {
+            scan_untracked_addons(&conn, &target_flv.addons_path, &active_flavour, target_flv.client_interface)
+                .map(|cands| cands.len())
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let is_game_active = is_wow_running();
+    let app_info = get_app_info()?;
+
+    Ok(AppStateDto {
+        addons,
+        flavours,
+        active_flavour,
+        freshness,
+        running_job,
+        untracked_count,
+        is_game_active,
+        app_info,
+    })
+}
+
+#[tauri::command]
+pub fn set_ignore(id: String, ignore: bool) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    set_ignore_updates(&conn, &id, ignore).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn unpin(id: String) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    unpin_addon(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn pin_version(id: String, file_id: String) -> Result<(), String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    pin_addon(&conn, &id, &file_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_files(id: String) -> Result<Vec<VersionItemDto>, String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    let (current_file_id, current_version, pinned_file_id): (Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT file_id, version, pinned_file_id FROM addons WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut versions = Vec::new();
+
+    // 1. Current version
+    if let (Some(fid), Some(ver)) = (&current_file_id, &current_version) {
+        versions.push(VersionItemDto {
+            file_id: fid.clone(),
+            version: ver.clone(),
+            kind: "installed".into(),
+            date: None,
+            is_current: true,
+            is_pinned: pinned_file_id.as_deref() == Some(fid.as_str()),
+        });
+    }
+
+    // 2. Backup versions
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_id, version, kind, created_at FROM backups WHERE addon_id = ?1 ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for r in rows.flatten() {
+        if let (Some(fid), Some(ver)) = (r.0, r.1) {
+            if !versions.iter().any(|v: &VersionItemDto| v.file_id == fid) {
+                versions.push(VersionItemDto {
+                    file_id: fid.clone(),
+                    version: ver,
+                    kind: r.2,
+                    date: r.3,
+                    is_current: current_file_id.as_deref() == Some(fid.as_str()),
+                    is_pinned: pinned_file_id.as_deref() == Some(fid.as_str()),
+                });
+            }
+        }
+    }
+
+    Ok(versions)
+}
+
+#[tauri::command]
+pub fn scan_untracked(flavour: Option<String>) -> Result<Vec<ScannedCandidateGroup>, String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let flv_id = flavour.unwrap_or_else(|| "retail".into());
+    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
+    let installed = detect_installed_flavours_in_root(&wow_root);
+    let target_flv = match installed.iter().find(|f| f.id == flv_id) {
+        Some(f) => f,
+        None => return Ok(Vec::new()),
+    };
+    scan_untracked_addons(
+        &conn,
+        &target_flv.addons_path,
+        &flv_id,
+        target_flv.client_interface,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_untracked_folder(flavour: String, folder: String) -> Result<(), String> {
+    if folder.trim().is_empty()
+        || folder == "."
+        || folder == ".."
+        || folder.contains('/')
+        || folder.contains('\\')
+        || folder.contains("..")
+        || folder.contains(':')
+    {
+        return Err("Invalid folder name: path separators and directory traversal are rejected".into());
+    }
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM addon_folders WHERE flavour = ?1 AND LOWER(folder) = LOWER(?2)")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(rusqlite::params![flavour, folder])
+        .map_err(|e| e.to_string())?;
+    if rows.next().map_err(|e| e.to_string())?.is_some() {
+        return Err(format!(
+            "Folder '{}' is tracked by an existing addon and cannot be deleted as untracked",
+            folder
+        ));
+    }
+
+    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
+    let installed = detect_installed_flavours_in_root(&wow_root);
+    let flv = installed
+        .iter()
+        .find(|f| f.id == flavour)
+        .ok_or_else(|| format!("Flavour '{}' not installed", flavour))?;
+    let target = flv.addons_path.join(&folder);
+    if target.is_dir() {
+        std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn adopt_untracked(
+    flavour: String,
+    candidate: ScannedCandidateGroup,
+) -> Result<String, String> {
+    let db_path = get_db_path();
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    adopt_candidate_group(&mut conn, &flavour, &candidate).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn adopt_all_untracked(flavour: String) -> Result<usize, String> {
+    let db_path = get_db_path();
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
+    let installed = detect_installed_flavours_in_root(&wow_root);
+    let target_flv = installed
+        .iter()
+        .find(|f| f.id == flavour)
+        .ok_or_else(|| format!("Flavour '{}' not installed", flavour))?;
+
+    let candidates = scan_untracked_addons(
+        &conn,
+        &target_flv.addons_path,
+        &flavour,
+        target_flv.client_interface,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut count = 0;
+    for c in &candidates {
+        if c.source.is_some() || c.project_id.is_some() || c.wago_id.is_some() {
+            if adopt_candidate_group(&mut conn, &flavour, c).is_ok() {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+pub fn list_not_built_for_patch(
+    flavour: Option<String>,
+) -> Result<Vec<PatchCompatStatus>, String> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let flv = flavour.unwrap_or_else(|| "retail".into());
+
+    let wow_root = detect_wow_root(None).ok();
+    let mut client_interface = None;
+    let mut client_build = None;
+    if let Some(ref root) = wow_root {
+        let installed = detect_installed_flavours_in_root(root);
+        if let Some(target) = installed.iter().find(|f| f.id == flv) {
+            client_interface = target.client_interface;
+            client_build = target.client_build.clone();
+        }
+    }
+
+    engine_compat(
+        &conn,
+        &flv,
+        client_interface,
+        client_build.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
