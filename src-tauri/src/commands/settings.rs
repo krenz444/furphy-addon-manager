@@ -150,14 +150,17 @@ pub async fn run_diagnostics(
 
     // 3. Database
     let db_path = get_db_path();
-    let db_ok = match open_connection(&db_path) {
-        Ok(c) => c.execute("SELECT 1", []).is_ok(),
-        Err(_) => false,
+    let (db_ok, db_detail) = match open_connection(&db_path) {
+        Ok(c) => match c.query_row("SELECT 1", [], |_| Ok(())) {
+            Ok(_) => (true, db_path.to_string_lossy().to_string()),
+            Err(e) => (false, format!("{} ({})", db_path.display(), e)),
+        },
+        Err(e) => (false, format!("{} ({})", db_path.display(), e)),
     };
     list.push(DiagnosticItemDto {
         name: "SQLite Database".into(),
         ok: db_ok,
-        detail: db_path.to_string_lossy().to_string(),
+        detail: db_detail,
     });
 
     // 4. CurseForge Policy & 24h Fallback (ADR-312)

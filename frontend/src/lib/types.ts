@@ -61,26 +61,6 @@ export interface JobRecord {
   log_path: string | null;
 }
 
-export interface AddonSyncResultItem {
-  addon_id: string;
-  name: string;
-  status: string;
-  previous_version?: string | null;
-  new_version?: string | null;
-  error?: string | null;
-}
-
-export interface SyncJobReport {
-  flavour?: string;
-  started_at?: string;
-  finished_at?: string;
-  updated?: number;
-  up_to_date?: number;
-  failed?: number;
-  reload_needed?: boolean;
-  results?: AddonSyncResultItem[];
-}
-
 export interface WtfSnapshot {
   id: string;
   addon_id: string;

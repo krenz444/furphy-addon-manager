@@ -88,9 +88,10 @@ fn unescape_html(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&#039;", "'")
         .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
 }
 
-pub fn extract_inertia_version_from_html(html: &str) -> Option<String> {
+pub fn extract_data_page_json_from_html(html: &str) -> Option<Value> {
     let marker = "data-page";
     let mut search_start = 0;
     while let Some(pos) = html[search_start..].find(marker) {
@@ -105,9 +106,7 @@ pub fn extract_inertia_version_from_html(html: &str) -> Option<String> {
                     if let Some(end) = content_start.find(quote_char) {
                         let json_str = unescape_html(&content_start[..end]);
                         if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                            if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
-                                return Some(ver.to_string());
-                            }
+                            return Some(parsed);
                         }
                     }
                 }
@@ -118,6 +117,11 @@ pub fn extract_inertia_version_from_html(html: &str) -> Option<String> {
     None
 }
 
+pub fn extract_inertia_version_from_html(html: &str) -> Option<String> {
+    extract_data_page_json_from_html(html)
+        .and_then(|v| v.get("version").and_then(|ver| ver.as_str().map(|s| s.to_string())))
+}
+
 pub async fn refresh_inertia_version(
     policy: &NetworkPolicy,
     client: &Client,
@@ -125,7 +129,11 @@ pub async fn refresh_inertia_version(
     slug: &str,
 ) -> Result<String, String> {
     let base_url = get_wago_base_url();
-    let url = format!("{}/addons/{}/versions?page=1", base_url, slug);
+    let url = if slug.trim().is_empty() {
+        format!("{}/?game_version=retail", base_url)
+    } else {
+        format!("{}/addons/{}/versions?page=1", base_url, slug.trim())
+    };
     let host = reqwest::Url::parse(&url)
         .map_err(|e| e.to_string())?
         .host_str()

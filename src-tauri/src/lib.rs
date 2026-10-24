@@ -260,7 +260,6 @@ pub fn run() {
             commands::system::protocol_register,
             commands::system::protocol_unregister,
             commands::system::protocol_status,
-            commands::system::protocol_check_consent,
             commands::system::get_tray_status,
             commands::system::tray_status,
             commands::system::set_background_updates,

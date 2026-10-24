@@ -43,6 +43,13 @@ mod tests {
 
         let bt: i32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
         assert_eq!(bt, 5000, "busy_timeout PRAGMA must be 5000ms");
+
+        // Verify SELECT query probe with query_row succeeds
+        assert!(conn.query_row("SELECT 1", [], |_| Ok(())).is_ok());
+
+        // Document why conn.execute fails on SELECT queries: rusqlite returns ExecuteReturnedResults
+        let exec_res = conn.execute("SELECT 1", []);
+        assert!(matches!(exec_res, Err(rusqlite::Error::ExecuteReturnedResults)));
     }
 
     fn compute_dir_fingerprint(dir: &Path) -> Vec<(String, u64)> {

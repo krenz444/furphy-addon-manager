@@ -5,8 +5,7 @@ use crate::system::autostart::{
 };
 use crate::system::game::is_wow_running;
 use crate::system::protocol::{
-    check_protocol_consent, get_protocol_status, parse_protocol_url, register_protocol,
-    unregister_protocol, ProtocolConsentInfo, ProtocolStatusDto,
+    get_protocol_status, register_protocol, unregister_protocol, ProtocolStatusDto,
 };
 use crate::system::schedule::Scheduler;
 use crate::system::tray_status::TrayStateSnapshot;
@@ -63,18 +62,6 @@ pub fn protocol_unregister() -> Result<(), String> {
 #[tauri::command]
 pub fn protocol_status() -> Result<ProtocolStatusDto, String> {
     get_protocol_status(None)
-}
-
-#[tauri::command]
-pub fn protocol_check_consent(
-    url: String,
-    flavour: Option<String>,
-) -> Result<ProtocolConsentInfo, String> {
-    let req = parse_protocol_url(&url, None)?;
-    let db_path = get_db_path();
-    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
-    let flv = flavour.unwrap_or_else(|| "retail".into());
-    check_protocol_consent(&conn, &req, &flv)
 }
 
 #[tauri::command]
