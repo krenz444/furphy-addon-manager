@@ -31,3 +31,10 @@ host/smoke-result.txt
 # Rust build target directories
 target/
 src-tauri/target/
+
+
+# Playwright test outputs
+test-results/
+playwright-report/
+frontend/test-results/
+frontend/playwright-report/
