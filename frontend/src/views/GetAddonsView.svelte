@@ -128,6 +128,38 @@
     cfInput = '';
   }
 
+  function openCurseForgeBrowser(query?: string) {
+    const raw = (query !== undefined ? query : cfInput).trim();
+    let targetUrl: string;
+
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      targetUrl = raw;
+    } else if (raw.length > 0 && !/^\d+$/.test(raw)) {
+      targetUrl = `https://www.curseforge.com/wow/search?class=addons&search=${encodeURIComponent(raw)}`;
+    } else if (/^\d+$/.test(raw)) {
+      targetUrl = `https://www.curseforge.com/projects/${raw}`;
+    } else {
+      targetUrl = 'https://www.curseforge.com/wow/search?class=addons';
+    }
+
+    invoke('open_target', { what: 'url', args: [targetUrl] }).catch((err: unknown) => {
+      console.error('Failed to open CurseForge search in browser:', err);
+    });
+  }
+
+  function handleCfKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      const trimmed = cfInput.trim();
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || /^\d+$/.test(trimmed)) {
+        handleCfInstall();
+      } else if (trimmed) {
+        openCurseForgeBrowser(trimmed);
+      } else {
+        handleCfInstall();
+      }
+    }
+  }
+
   function handleGithubInstall() {
     githubError = null;
     const raw = githubInput.trim();
@@ -282,15 +314,15 @@
           </p>
 
           <div class="cf-form">
-            <label for="cf-id-input" class="form-label">CurseForge Project ID or URL:</label>
+            <label for="cf-id-input" class="form-label">CurseForge Project ID, URL, or Search:</label>
             <div class="input-row">
               <input
                 id="cf-id-input"
                 type="text"
                 class="form-input"
-                placeholder="e.g. 3358 or https://www.curseforge.com/wow/addons/deadly-boss-mods"
+                placeholder="e.g. 3358, addon URL, or search term"
                 bind:value={cfInput}
-                onkeydown={(e) => e.key === 'Enter' && handleCfInstall()}
+                onkeydown={handleCfKeydown}
               />
               <button
                 type="button"
@@ -299,10 +331,34 @@
               >
                 Install Addon
               </button>
+              <button
+                type="button"
+                class="btn-secondary"
+                title="Open search page on CurseForge in your default web browser"
+                onclick={() => openCurseForgeBrowser()}
+              >
+                Search in Browser ↗
+              </button>
             </div>
             {#if cfError}
               <div class="form-error">{cfError}</div>
             {/if}
+          </div>
+
+          <div class="cf-search-callout">
+            <div class="callout-content">
+              <h4>Browse & Search on CurseForge</h4>
+              <p>
+                Browse addons directly on CurseForge's search page in your browser. Click <strong>Install</strong> on any addon page to send it to Furphy, or copy the URL back here.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="btn-secondary btn-open-search"
+              onclick={() => openCurseForgeBrowser()}
+            >
+              Open CurseForge Search ↗
+            </button>
           </div>
 
           <div class="cf-tips">
@@ -645,6 +701,42 @@
     color: var(--accent);
   }
 
+  .cf-search-callout {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    padding: 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1.25rem;
+  }
+
+  .cf-search-callout .callout-content h4 {
+    margin: 0 0 0.35rem 0;
+    color: var(--text);
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  .cf-search-callout .callout-content p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .btn-open-search {
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 600px) {
+    .cf-search-callout {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }
+
   .btn-primary, .btn-secondary {
     border-radius: var(--radius-sm, 4px);
     font-size: 0.85rem;
@@ -673,10 +765,16 @@
     background: var(--bg-3);
     color: var(--text);
     border: 1px solid var(--border);
+    white-space: nowrap;
   }
 
   .btn-secondary:hover {
     background: var(--border-hover);
+  }
+
+  .btn-secondary:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 
   .state-message {

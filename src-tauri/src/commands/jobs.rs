@@ -15,10 +15,13 @@ pub async fn start_job(
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(Err(format!("Failed to build async runtime for job: {}", e)));
+                return;
+            }
+        };
 
         rt.block_on(async move {
             let db_path = get_db_path();

@@ -92,6 +92,30 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         )?;
 
         tx.commit()?;
+        current_version = 2;
+    }
+
+    if current_version < 3 {
+        let tx = conn.transaction()?;
+
+        tx.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_addons_flavour ON addons(flavour);
+            CREATE INDEX IF NOT EXISTS idx_addon_folders_addon_id ON addon_folders(addon_id);
+            CREATE INDEX IF NOT EXISTS idx_addon_folders_folder ON addon_folders(folder);
+            CREATE INDEX IF NOT EXISTS idx_backups_addon_id ON backups(addon_id);
+            CREATE INDEX IF NOT EXISTS idx_check_results_addon_id ON check_results(addon_id);
+            CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_id ON wtf_snapshots(addon_id);
+            CREATE INDEX IF NOT EXISTS idx_jobs_flavour_state ON jobs(flavour, state);
+            "#,
+        )?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')",
+            [],
+        )?;
+
+        tx.commit()?;
     }
 
     Ok(())
@@ -107,7 +131,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
@@ -137,5 +161,27 @@ mod tests {
             )
             .unwrap();
         assert!(table_exists);
+
+        // Verify all 7 indexes exist
+        let expected_indexes = [
+            "idx_addons_flavour",
+            "idx_addon_folders_addon_id",
+            "idx_addon_folders_folder",
+            "idx_backups_addon_id",
+            "idx_check_results_addon_id",
+            "idx_wtf_snapshots_addon_id",
+            "idx_jobs_flavour_state",
+        ];
+
+        for idx in expected_indexes {
+            let index_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(index_exists, "Expected index {} to exist", idx);
+        }
     }
 }

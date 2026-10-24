@@ -198,4 +198,38 @@ test.describe('Furphy Addon Manager - Addons Workflow E2E', () => {
     await expect(dbDiag).toBeVisible();
     await expect(dbDiag.locator('.diag-status')).toHaveText('PASS');
   });
+
+  test('7. Get Addons - CurseForge Browser Search: verifies open in browser and search callout on CurseForge install page', async ({ page }) => {
+    // Navigate to Get Addons view
+    const getAddonsNavItem = page.locator('nav.sidebar-nav button.nav-item').filter({ hasText: 'Get Addons' });
+    await getAddonsNavItem.click();
+
+    // Switch to CurseForge tab
+    const cfTab = page.locator('.tab-btn').filter({ hasText: 'CurseForge' });
+    await expect(cfTab).toBeVisible();
+    await cfTab.click();
+    await expect(cfTab).toHaveAttribute('aria-selected', 'true');
+
+    // Verify form input and action buttons
+    const cfInput = page.locator('#cf-id-input');
+    await expect(cfInput).toBeVisible();
+    const installBtn = page.locator('.cf-form button', { hasText: 'Install Addon' });
+    await expect(installBtn).toBeVisible();
+    const browserSearchBtn = page.locator('.cf-form button', { hasText: 'Search in Browser ↗' });
+    await expect(browserSearchBtn).toBeVisible();
+
+    // Verify dedicated browse & search callout box
+    const searchCallout = page.locator('.cf-search-callout');
+    await expect(searchCallout).toBeVisible();
+    await expect(searchCallout).toContainText('Browse & Search on CurseForge');
+    const openSearchBtn = searchCallout.locator('button', { hasText: 'Open CurseForge Search ↗' });
+    await expect(openSearchBtn).toBeVisible();
+
+    // Test clicking Open CurseForge Search does not crash
+    await openSearchBtn.click();
+
+    // Test entering a search query and clicking Search in Browser
+    await cfInput.fill('deadly boss mods');
+    await browserSearchBtn.click();
+  });
 });

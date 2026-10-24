@@ -139,4 +139,12 @@ CREATE TABLE IF NOT EXISTS wtf_snapshots (
     restored_at TEXT,
     FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_addons_flavour ON addons(flavour);
+CREATE INDEX IF NOT EXISTS idx_addon_folders_addon_id ON addon_folders(addon_id);
+CREATE INDEX IF NOT EXISTS idx_addon_folders_folder ON addon_folders(folder);
+CREATE INDEX IF NOT EXISTS idx_backups_addon_id ON backups(addon_id);
+CREATE INDEX IF NOT EXISTS idx_check_results_addon_id ON check_results(addon_id);
+CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_id ON wtf_snapshots(addon_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_flavour_state ON jobs(flavour, state);
 "#;
