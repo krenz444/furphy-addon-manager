@@ -120,9 +120,8 @@ pub fn import_list(path: Option<String>, flavour: String) -> Result<usize, Strin
     Ok(count)
 }
 
-#[tauri::command]
-pub async fn run_diagnostics(
-    policy: tauri::State<'_, Arc<NetworkPolicy>>,
+pub async fn execute_diagnostics(
+    policy: &NetworkPolicy,
 ) -> Result<Vec<DiagnosticItemDto>, String> {
     let mut list = Vec::new();
 
@@ -203,6 +202,13 @@ pub async fn run_diagnostics(
     });
 
     Ok(list)
+}
+
+#[tauri::command]
+pub async fn run_diagnostics(
+    policy: tauri::State<'_, Arc<NetworkPolicy>>,
+) -> Result<Vec<DiagnosticItemDto>, String> {
+    execute_diagnostics(&policy).await
 }
 
 #[tauri::command]
@@ -313,4 +319,66 @@ pub fn app_update_status() -> Result<Value, String> {
         );
     }
     Ok(val)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use crate::system::game::TEST_ENV_LOCK;
+
+    #[tokio::test]
+    async fn test_execute_diagnostics_fresh_install_lifecycle() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let temp = tempdir().unwrap();
+        let fake_data = temp.path().join("AppData (Test User)").join("Local");
+        let fake_wow = temp.path().join("World of Warcraft (Fresh Test)");
+        let retail_addons = fake_wow.join("_retail_").join("Interface").join("AddOns");
+        std::fs::create_dir_all(&retail_addons).unwrap();
+        std::fs::create_dir_all(&fake_data).unwrap();
+
+        let old_appdata = std::env::var_os("LOCALAPPDATA");
+        let old_wowroot = std::env::var_os("FURPHY_DEV_WOWROOT");
+
+        std::env::set_var("LOCALAPPDATA", &fake_data);
+        std::env::set_var("FURPHY_DEV_WOWROOT", &fake_wow);
+
+        // Run migrations on fresh db path
+        let db_path = get_db_path();
+        let mut conn = open_connection(&db_path).unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+
+        let policy = NetworkPolicy::new();
+        let diag_res = execute_diagnostics(&policy).await;
+
+        // Restore env vars before asserting
+        if let Some(v) = old_appdata {
+            std::env::set_var("LOCALAPPDATA", v);
+        } else {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+        if let Some(v) = old_wowroot {
+            std::env::set_var("FURPHY_DEV_WOWROOT", v);
+        } else {
+            std::env::remove_var("FURPHY_DEV_WOWROOT");
+        }
+
+        assert!(diag_res.is_ok(), "execute_diagnostics failed: {:?}", diag_res);
+        let items = diag_res.unwrap();
+
+        // 1. WoW Root must pass
+        let wow_item = items.iter().find(|i| i.name == "World of Warcraft Root").unwrap();
+        assert!(wow_item.ok, "WoW Root must be OK: {:?}", wow_item);
+
+        // 2. Data directory must pass
+        let data_item = items.iter().find(|i| i.name == "Data Directory").unwrap();
+        assert!(data_item.ok, "Data directory must exist: {:?}", data_item);
+
+        // 3. SQLite Database must PASS on fresh install and not fail with ExecuteReturnedResults
+        let db_item = items.iter().find(|i| i.name == "SQLite Database").unwrap();
+        assert!(db_item.ok, "SQLite Database must PASS on fresh install, detail: {}", db_item.detail);
+        assert!(!db_item.detail.contains("ExecuteReturnedResults"), "Detail contains ExecuteReturnedResults error: {}", db_item.detail);
+        assert!(db_item.detail.ends_with("furphy.db"));
+    }
 }

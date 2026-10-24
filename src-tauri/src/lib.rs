@@ -193,9 +193,11 @@ pub fn run() {
                 logging::append_app_log("INFO", "setup_tray succeeded");
             }
             scheduler.clone().start_background_loop();
+            let wago_session = std::sync::Arc::new(net::wago::WagoSession::new());
             app.manage(policy);
             app.manage(runner);
             app.manage(scheduler);
+            app.manage(wago_session);
 
             Ok(())
         })

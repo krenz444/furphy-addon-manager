@@ -191,5 +191,11 @@ test.describe('Furphy Addon Manager - Addons Workflow E2E', () => {
     const wowRootDiag = page.locator('.diag-row').filter({ hasText: 'World of Warcraft Root' });
     await expect(wowRootDiag).toBeVisible({ timeout: 5000 });
     await expect(wowRootDiag).toContainText('World of Warcraft');
+
+    // Invariant: Verify all diagnostics report PASS (no FAIL statuses on healthy/new install)
+    await expect(page.locator('.diag-status.fail')).toHaveCount(0);
+    const dbDiag = page.locator('.diag-row').filter({ hasText: 'SQLite Database' });
+    await expect(dbDiag).toBeVisible();
+    await expect(dbDiag.locator('.diag-status')).toHaveText('PASS');
   });
 });

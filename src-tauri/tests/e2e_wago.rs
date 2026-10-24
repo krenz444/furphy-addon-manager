@@ -97,24 +97,38 @@ async fn spawn_mock_wago_server(zip_bytes: Vec<u8>) -> (String, tokio::sync::one
                                 let _ = socket.write_all(resp_header.as_bytes()).await;
                                 let _ = socket.write_all(&zip_data).await;
                             } else if req.contains("X-Inertia") || req.contains("x-inertia") {
-                                let body = serde_json::json!({
-                                    "props": {
-                                        "releases": {
-                                            "data": [
-                                                {
-                                                    "id": "rel-plater-v1",
-                                                    "name": "Plater",
-                                                    "version": "1.0.0",
-                                                    "stability": "stable",
-                                                    "size": zip_data.len(),
-                                                    "url": format!("{}/download/plater.zip", base_clone),
-                                                    "supported_retail_patches": ["11.0.2", "12.1.5"]
-                                                }
-                                            ],
-                                            "next_page_url": null
+                                let body = if path.starts_with("/?") || path == "/" {
+                                    serde_json::json!({
+                                        "props": {
+                                            "addons": {
+                                                "current_page": 1,
+                                                "data": [
+                                                    "<a href=\"https://addons.wago.io/addons/plater-nameplates\"><h3>Plater Nameplates</h3><p>Nameplates addon</p><strong>Author:</strong> Terciob</span><strong>Downloads:</strong> 1000</span></a>"
+                                                ],
+                                                "total": 1
+                                            }
                                         }
-                                    }
-                                }).to_string();
+                                    }).to_string()
+                                } else {
+                                    serde_json::json!({
+                                        "props": {
+                                            "releases": {
+                                                "data": [
+                                                    {
+                                                        "id": "rel-plater-v1",
+                                                        "name": "Plater",
+                                                        "version": "1.0.0",
+                                                        "stability": "stable",
+                                                        "size": zip_data.len(),
+                                                        "url": format!("{}/download/plater.zip", base_clone),
+                                                        "supported_retail_patches": ["11.0.2", "12.1.5"]
+                                                    }
+                                                ],
+                                                "next_page_url": null
+                                            }
+                                        }
+                                    }).to_string()
+                                };
                                 let resp = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                     body.len(),
@@ -122,7 +136,11 @@ async fn spawn_mock_wago_server(zip_bytes: Vec<u8>) -> (String, tokio::sync::one
                                 );
                                 let _ = socket.write_all(resp.as_bytes()).await;
                             } else {
-                                let body = r#"<!DOCTYPE html><html><body><div id="app" data-page='{"version":"mock_inertia_ver"}'></div></body></html>"#;
+                                let body = if path.starts_with("/?") || path == "/" {
+                                    r#"<!DOCTYPE html><html><body><div id="app" data-page='{"version":"mock_inertia_ver","props":{"addons":{"data":["<a href=\"https://addons.wago.io/addons/plater-nameplates\"><h3>Plater Nameplates</h3><p>Nameplates addon</p><strong>Author:</strong> Terciob</span><strong>Downloads:</strong> 1000</span></a>"],"total":1}}}'></div></body></html>"#
+                                } else {
+                                    r#"<!DOCTYPE html><html><body><div id="app" data-page='{"version":"mock_inertia_ver"}'></div></body></html>"#
+                                };
                                 let resp = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                     body.len(),
@@ -200,6 +218,25 @@ async fn test_e2e_wago_full_lifecycle() {
     let zip_bytes = build_plater_zip();
     let (mock_base_url, _shutdown) = spawn_mock_wago_server(zip_bytes).await;
     std::env::set_var("FURPHY_TEST_WAGO_BASEURL", &mock_base_url);
+
+    // Verify Wago browse & search works against the mock server
+    let wago_client = furphy_lib::net::wago::create_wago_client().unwrap();
+    let wago_session = furphy_lib::net::wago::WagoSession::new();
+    let (search_items, total) = furphy_lib::net::wago::search_wago_addons(
+        &policy,
+        &wago_client,
+        &wago_session,
+        "retail",
+        Some("plater"),
+        None,
+        Some("popular"),
+        1,
+    ).await.expect("search_wago_addons should succeed");
+    assert_eq!(total, 1);
+    assert_eq!(search_items.len(), 1);
+    assert_eq!(search_items[0].slug, "plater-nameplates");
+    assert_eq!(search_items[0].name, "Plater Nameplates");
+    assert_eq!(search_items[0].author, "Terciob");
 
     // 5. Run install/add job for Wago addon (slug: "plater-nameplates")
     let res = runner.run_job(

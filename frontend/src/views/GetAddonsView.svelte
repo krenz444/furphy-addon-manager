@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from '../lib/ipc';
+  import { invoke, isMockMode } from '../lib/ipc';
 
   interface WagoAddonItem {
     id: string;
@@ -80,8 +80,8 @@
       }
     } catch (err: unknown) {
       wagoError = err instanceof Error ? err.message : String(err);
-      // Fallback sample for mock mode
-      if (wagoResults.length === 0) {
+      // Fallback sample for mock mode only
+      if (isMockMode()) {
         wagoResults = [
           {
             id: 'details',
@@ -111,6 +111,8 @@
             downloads: 870000,
           },
         ];
+      } else {
+        wagoResults = [];
       }
     } finally {
       loadingWago = false;
