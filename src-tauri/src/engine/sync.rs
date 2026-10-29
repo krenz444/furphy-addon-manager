@@ -321,6 +321,7 @@ pub async fn run_sync_for_flavour(
 
                         chosen_file_id = Some(wago_rel.id.clone());
                         chosen_version = wago_rel.version.clone().or(wago_rel.name.clone());
+                        chosen_file_name = Some(format!("{}-{}.zip", slug, wago_rel.id));
 
                         if let Some(dl_url) = wago_rel.url {
                             if let Err(e) = download_wago_release(&policy, &wago_client, &dl_url, wago_rel.size, &download_zip_path).await {

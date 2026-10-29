@@ -17,9 +17,11 @@ pub const WAGO_USER_AGENT: &str =
 pub struct WagoRelease {
     pub id: String,
     pub name: Option<String>,
+    #[serde(alias = "label")]
     pub version: Option<String>,
     pub stability: Option<String>,
     pub size: Option<u64>,
+    #[serde(alias = "download_link", alias = "download_url")]
     pub url: Option<String>,
     #[serde(default)]
     pub supported_retail_patches: Option<Vec<String>>,
@@ -781,5 +783,26 @@ mod tests {
         assert_eq!(item.description.as_deref(), Some("A description with \"quotes\" & stuff."));
         assert_eq!(item.downloads, Some(12345));
         assert_eq!(item.avatar_url, None); // Placeholder should be ignored
+    }
+
+    #[test]
+    fn test_wago_release_deserialization_with_aliases() {
+        let json_data = r#"{
+            "id": "vd7JX1NQ",
+            "addon_id": 5082,
+            "size": 4928372,
+            "label": "EXBoss-v26.10.28.2259",
+            "stability": "stable",
+            "download_link": "https://addons.wago.io/download/vd7JX1NQ?signature=xyz",
+            "supported_retail_patches": ["12.1.5"]
+        }"#;
+
+        let release: WagoRelease = serde_json::from_str(json_data).expect("Failed to deserialize WagoRelease");
+        assert_eq!(release.id, "vd7JX1NQ");
+        assert_eq!(release.version.as_deref(), Some("EXBoss-v26.10.28.2259"));
+        assert_eq!(release.url.as_deref(), Some("https://addons.wago.io/download/vd7JX1NQ?signature=xyz"));
+        assert_eq!(release.size, Some(4928372));
+        assert_eq!(release.stability.as_deref(), Some("stable"));
+        assert_eq!(release.supported_retail_patches.as_deref(), Some(&vec!["12.1.5".to_string()][..]));
     }
 }
