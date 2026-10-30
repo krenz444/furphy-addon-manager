@@ -12,7 +12,7 @@ use crate::engine::ownership::{check_folder_ownership_conflicts, get_protected_f
 use crate::engine::select::{select_cf_file, select_github_release, select_wago_release};
 use crate::engine::staging::prepare_flavour_staging_dir;
 use crate::engine::swap::execute_atomic_swap;
-use crate::engine::toc::{find_primary_toc, parse_toc_file};
+use crate::engine::toc::{find_primary_toc, parse_toc_file, strip_wow_formatting};
 use crate::engine::wtf::take_wtf_snapshot;
 use crate::logging::append_sync_log;
 use crate::net::curseforge::{create_cf_client, download_cf_file, get_cf_file_by_id, get_cf_files, CfFile};
@@ -183,6 +183,9 @@ pub async fn run_sync_for_flavour(
         let mut chosen_version: Option<String> = None;
         let mut chosen_file_name: Option<String> = None;
         let mut sync_error: Option<String> = None;
+
+        let mut target_addon_id = a.id.clone();
+        let mut target_addon_name = a.name.clone();
 
         // Step 1: Query and download
         match src {
@@ -472,7 +475,7 @@ pub async fn run_sync_for_flavour(
         };
 
         // Step 3: Ownership conflict check
-        let conflicts = match check_folder_ownership_conflicts(conn, flavour, &candidate_folders, Some(&a.id)) {
+        let mut conflicts = match check_folder_ownership_conflicts(conn, flavour, &candidate_folders, Some(&target_addon_id)) {
             Ok(c) => c,
             Err(e) => {
                 failed_count += 1;
@@ -481,11 +484,11 @@ pub async fn run_sync_for_flavour(
                 let _ = conn.execute(
                     "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
                      VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
-                    params![a.id, now_str, a.file_id, a.version, &emsg],
+                    params![target_addon_id, now_str, a.file_id, a.version, &emsg],
                 );
                 results.push(AddonSyncResult {
-                    addon_id: a.id.clone(),
-                    name: a.name.clone(),
+                    addon_id: target_addon_id.clone(),
+                    name: target_addon_name.clone(),
                     status: "Failed".to_string(),
                     previous_version: a.version.clone(),
                     new_version: None,
@@ -496,6 +499,70 @@ pub async fn run_sync_for_flavour(
         };
 
         if !conflicts.is_empty() {
+            let mut can_adopt_existing = false;
+            let mut existing_addon_id_to_replace: Option<String> = None;
+
+            if a.file_id.is_none() {
+                let mut stmt_find_owners = conn.prepare(
+                    "SELECT DISTINCT addon_id FROM addon_folders WHERE flavour = ?1 AND folder = ?2 COLLATE NOCASE"
+                ).ok();
+                if let Some(ref mut stmt) = stmt_find_owners {
+                    let mut owners = std::collections::HashSet::new();
+                    for folder in &candidate_folders {
+                        if let Ok(mut rows) = stmt.query(params![flavour, folder]) {
+                            while let Ok(Some(row)) = rows.next() {
+                                if let Ok(owner_id) = row.get::<_, String>(0) {
+                                    owners.insert(owner_id);
+                                }
+                            }
+                        }
+                    }
+
+                    if owners.len() == 1 {
+                        let conflicting_id = owners.into_iter().next().unwrap();
+                        let mut stmt_owned = conn.prepare(
+                            "SELECT folder FROM addon_folders WHERE flavour = ?1 AND addon_id = ?2"
+                        ).ok();
+                        if let Some(ref mut s_owned) = stmt_owned {
+                            if let Ok(owned_rows) = s_owned.query_map(params![flavour, conflicting_id], |r| r.get::<_, String>(0)) {
+                                let owned_folders: Vec<String> = owned_rows.flatten().collect();
+                                let all_owned_in_candidates = !owned_folders.is_empty() && owned_folders.iter().all(|of| {
+                                    candidate_folders.iter().any(|cf| cf.eq_ignore_ascii_case(of))
+                                });
+
+                                if all_owned_in_candidates {
+                                    can_adopt_existing = true;
+                                    existing_addon_id_to_replace = Some(conflicting_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if can_adopt_existing {
+                if let Some(existing_id) = existing_addon_id_to_replace {
+                    append_sync_log(
+                        Some(flavour),
+                        "INFO",
+                        &format!("Upgrading existing addon {} to {} (source: {})", existing_id, target_addon_name, src),
+                    );
+
+                    let _ = conn.execute(
+                        "UPDATE addons SET source = ?1, project_id = ?2, wago_slug = ?3, wago_id = ?4, repo = ?5, name = ?6 WHERE id = ?7",
+                        params![a.source, a.project_id, a.wago_slug, a._wago_id, a.repo, target_addon_name, existing_id],
+                    );
+
+                    let _ = conn.execute("DELETE FROM addons WHERE id = ?1", params![target_addon_id]);
+                    let _ = conn.execute("DELETE FROM check_results WHERE addon_id = ?1", params![target_addon_id]);
+
+                    target_addon_id = existing_id;
+                    conflicts.clear();
+                }
+            }
+        }
+
+        if !conflicts.is_empty() {
             failed_count += 1;
             let (f, owner) = &conflicts[0];
             let emsg = format!("Folder '{}' is already owned by {}", f, owner);
@@ -503,17 +570,17 @@ pub async fn run_sync_for_flavour(
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
                  VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
-                params![a.id, now_str, a.file_id, a.version, &emsg],
+                params![target_addon_id, now_str, a.file_id, a.version, &emsg],
             );
             results.push(AddonSyncResult {
-                addon_id: a.id.clone(),
-                name: a.name.clone(),
+                addon_id: target_addon_id.clone(),
+                name: target_addon_name.clone(),
                 status: "Failed".to_string(),
                 previous_version: a.version.clone(),
                 new_version: None,
                 error: Some(emsg.clone()),
             });
-            append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, emsg));
+            append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", target_addon_name, emsg));
             continue;
         }
 
@@ -599,6 +666,13 @@ pub async fn run_sync_for_flavour(
                 if chosen_version.is_none() {
                     chosen_version = toc_meta.version;
                 }
+                if let Some(ref t) = toc_meta.title {
+                    let cleaned = strip_wow_formatting(t);
+                    if !cleaned.is_empty() && (target_addon_name == "CurseForge Addon" || target_addon_name.starts_with("CurseForge project ")) {
+                        target_addon_name = cleaned;
+                        let _ = conn.execute("UPDATE addons SET name = ?1 WHERE id = ?2", params![target_addon_name, target_addon_id]);
+                    }
+                }
             }
         }
 
@@ -617,15 +691,15 @@ pub async fn run_sync_for_flavour(
                 req_deps_json,
                 a.file_id,
                 a.version,
-                a.id
+                target_addon_id
             ],
         );
 
-        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", params![a.id]);
+        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", params![target_addon_id]);
         for f in &installed_folders {
             let _ = conn.execute(
                 "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES (?1, ?2, ?3)",
-                params![flavour, f, a.id],
+                params![flavour, f, target_addon_id],
             );
         }
 
@@ -633,7 +707,7 @@ pub async fn run_sync_for_flavour(
         let _ = conn.execute(
             "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
              VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
-            params![a.id, now_str],
+            params![target_addon_id, now_str],
         );
 
         updated_count += 1;
@@ -643,8 +717,8 @@ pub async fn run_sync_for_flavour(
 
         let outcome_status = if a.file_id.is_none() { "Installed" } else { "Updated" };
         results.push(AddonSyncResult {
-            addon_id: a.id.clone(),
-            name: a.name.clone(),
+            addon_id: target_addon_id.clone(),
+            name: target_addon_name.clone(),
             status: outcome_status.to_string(),
             previous_version: a.version.clone(),
             new_version: chosen_version.clone(),
@@ -654,7 +728,7 @@ pub async fn run_sync_for_flavour(
         append_sync_log(
             Some(flavour),
             "INFO",
-            &format!("{}: {} to {:?}", a.name, outcome_status, chosen_version),
+            &format!("{}: {} to {:?}", target_addon_name, outcome_status, chosen_version),
         );
     }
 

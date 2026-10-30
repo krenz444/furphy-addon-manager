@@ -116,6 +116,24 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         )?;
 
         tx.commit()?;
+        current_version = 3;
+    }
+
+    if current_version < 4 {
+        let tx = conn.transaction()?;
+
+        // Clean up any corrupt addon rows mistakenly created as Wago slugs from CurseForge URLs
+        let _ = tx.execute(
+            "DELETE FROM addons WHERE source = 'wago' AND (wago_slug LIKE 'http://%' OR wago_slug LIKE 'https://%')",
+            [],
+        );
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')",
+            [],
+        )?;
+
+        tx.commit()?;
     }
 
     Ok(())
@@ -131,7 +149,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();

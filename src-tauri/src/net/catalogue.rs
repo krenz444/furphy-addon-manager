@@ -11,10 +11,13 @@ pub fn get_catalogue_url() -> String {
     if let Ok(val) = std::env::var("FURPHY_TEST_CF_CATALOGUE_BASEURL") {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
-            return format!("{}/cf_catalogue.json", trimmed.trim_end_matches('/'));
+            if trimmed.ends_with(".json") {
+                return trimmed.to_string();
+            }
+            return format!("{}/layday/instawow-data/data/base-catalogue-v8.compact.json", trimmed.trim_end_matches('/'));
         }
     }
-    "https://raw.githubusercontent.com/layday/instawow-data/master/curseforge.json".to_string()
+    "https://raw.githubusercontent.com/layday/instawow-data/data/base-catalogue-v8.compact.json".to_string()
 }
 
 pub struct Catalogue {
@@ -24,10 +27,20 @@ pub struct Catalogue {
 
 impl Catalogue {
     pub fn new() -> Self {
-        Self {
+        let mut cat = Self {
             slug_to_id: HashMap::new(),
             id_to_slug: HashMap::new(),
-        }
+        };
+
+        // Static built-in fallback mappings for core/critical libraries
+        cat.insert(1650514, "excore".to_string());
+        cat.insert(1650514, "exwindcore".to_string());
+        cat.insert(61288, "details".to_string());
+        cat.insert(13345, "ace3".to_string());
+        cat.insert(13346, "libsharedmedia-3-0".to_string());
+        cat.insert(13347, "callbackhandler-1-0".to_string());
+
+        cat
     }
 
     pub fn insert(&mut self, id: i64, slug: String) {
@@ -94,10 +107,39 @@ pub async fn load_or_refresh_catalogue(
     if cache_file.exists() {
         if let Ok(content) = fs::read_to_string(&cache_file) {
             if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                if let Some(obj) = val.as_object() {
+                // Format 1: instawow-data compact format { "entries": [ { "id": "1650514", "slug": "excore", "source": "curse" } ] }
+                if let Some(entries) = val.get("entries").and_then(|v| v.as_array()) {
+                    for entry in entries {
+                        let source = entry.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                        if source == "curse" || source == "curseforge" || source.is_empty() {
+                            let slug = entry.get("slug").and_then(|v| v.as_str());
+                            let id = entry.get("id").and_then(|v| {
+                                if let Some(n) = v.as_i64() {
+                                    Some(n)
+                                } else if let Some(s) = v.as_str() {
+                                    s.parse::<i64>().ok()
+                                } else {
+                                    None
+                                }
+                            });
+                            if let (Some(s), Some(i)) = (slug, id) {
+                                cat.insert(i, s.to_string());
+                            }
+                        }
+                    }
+                }
+                // Format 2: direct map { "slug": id } (used in unit tests and compact cache fixtures)
+                else if let Some(obj) = val.as_object() {
                     for (slug, id_val) in obj {
-                        if let Some(id) = id_val.as_i64() {
-                            cat.insert(id, slug.clone());
+                        let id = if let Some(n) = id_val.as_i64() {
+                            Some(n)
+                        } else if let Some(s) = id_val.as_str() {
+                            s.parse::<i64>().ok()
+                        } else {
+                            None
+                        };
+                        if let Some(i) = id {
+                            cat.insert(i, slug.clone());
                         }
                     }
                 }
@@ -106,4 +148,59 @@ pub async fn load_or_refresh_catalogue(
     }
 
     Ok(cat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_catalogue_built_in_fallbacks() {
+        let cat = Catalogue::new();
+        assert_eq!(cat.get_id_by_slug("excore"), Some(1650514));
+        assert_eq!(cat.get_id_by_slug("exwindcore"), Some(1650514));
+        assert_eq!(cat.get_id_by_slug("details"), Some(61288));
+        assert_eq!(cat.get_id_by_slug("ace3"), Some(13345));
+    }
+
+    #[tokio::test]
+    async fn test_catalogue_parse_instawow_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let cache_file = cache_dir.join("cf_catalogue.json");
+
+        let json = serde_json::json!({
+            "version": 8,
+            "entries": [
+                {
+                    "source": "curse",
+                    "slug": "excore",
+                    "id": "1650514",
+                    "name": "EXCore"
+                },
+                {
+                    "source": "curse",
+                    "slug": "details",
+                    "id": 61288,
+                    "name": "Details! Damage Meter"
+                },
+                {
+                    "source": "wago",
+                    "slug": "weakauras",
+                    "id": "12345"
+                }
+            ]
+        });
+        fs::write(&cache_file, json.to_string()).unwrap();
+
+        let policy = NetworkPolicy::new();
+        let client = Client::new();
+        let cat = load_or_refresh_catalogue(&policy, &client, temp.path()).await.unwrap();
+
+        assert_eq!(cat.get_id_by_slug("excore"), Some(1650514));
+        assert_eq!(cat.get_id_by_slug("details"), Some(61288));
+        // Wago entry must not be loaded into CurseForge catalogue
+        assert_eq!(cat.get_id_by_slug("weakauras"), None);
+    }
 }

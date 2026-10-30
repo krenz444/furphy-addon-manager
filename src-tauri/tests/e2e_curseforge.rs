@@ -197,3 +197,95 @@ async fn test_e2e_curseforge_full_lifecycle() {
 
     // 15. Teardown handles cleanup
 }
+
+#[tokio::test]
+async fn test_e2e_curseforge_excore_url_install_and_upgrade() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let orig_wowroot = std::env::var("FURPHY_DEV_WOWROOT").ok();
+    let orig_localappdata = std::env::var("LOCALAPPDATA").ok();
+    let orig_wow_running = std::env::var("FURPHY_TEST_WOW_RUNNING").ok();
+    std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
+
+    let temp = std::env::temp_dir().join(format!("furphy test wow (excore-{})", uuid::Uuid::new_v4()));
+    let local_data = std::env::temp_dir().join(format!("furphy_excore_data_{}", uuid::Uuid::new_v4()));
+    let retail_addons = temp.join("_retail_").join("Interface").join("AddOns");
+    let retail_wtf = temp.join("_retail_").join("WTF");
+    std::fs::create_dir_all(&retail_addons).unwrap();
+    std::fs::create_dir_all(&retail_wtf).unwrap();
+    std::fs::create_dir_all(&local_data).unwrap();
+    std::fs::write(temp.join(".build.info"), "Product|Version\nwow|12.1.0.56819\n").unwrap();
+
+    std::env::set_var("FURPHY_DEV_WOWROOT", temp.to_str().unwrap());
+    std::env::set_var("LOCALAPPDATA", local_data.to_str().unwrap());
+    let _cleanup = TestGuard {
+        wow_path: temp.clone(),
+        data_path: local_data.clone(),
+        orig_wowroot,
+        orig_localappdata,
+    };
+
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+    conn.execute(
+        "INSERT INTO flavours (id, folder, label, installed, client_build, client_interface) \
+         VALUES ('retail', '_retail_', 'Retail', 1, '12.1.0', '120100')",
+        [],
+    ).unwrap();
+
+    // Pre-insert an existing GitHub tracked addon for ExwindCore
+    let existing_id = "test-github-exwindcore";
+    conn.execute(
+        "INSERT INTO addons (id, flavour, source, repo, name, version, file_id, release_type, ignore_updates) \
+         VALUES (?1, 'retail', 'github', 'Ex-wind/EXWINDCORE', 'ExwindCore', 'main', 'main', 1, 0)",
+        [existing_id],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'ExwindCore', ?1)",
+        [existing_id],
+    ).unwrap();
+
+    let policy = Arc::new(NetworkPolicy::new());
+    let runner = JobRunner::new(policy.clone());
+
+    // Run "add" job with the exact CurseForge URL the user reported
+    let res = runner.run_job(
+        &mut conn,
+        "add",
+        Some("retail"),
+        json!({ "target": "https://www.curseforge.com/wow/addons/excore" }),
+    ).await;
+
+    assert!(res.is_ok(), "add job failed: {:?}", res);
+    let record = res.unwrap();
+    assert_eq!(record.state, "completed");
+    assert!(record.error.is_none(), "Job reported error: {:?}", record.error);
+
+    // Verify existing record was upgraded to CurseForge project 1650514
+    let (src, pid, ver, fid): (Option<String>, Option<i64>, Option<String>, Option<String>) = conn.query_row(
+        "SELECT source, project_id, version, file_id FROM addons WHERE id = ?1",
+        [existing_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+
+    assert_eq!(src.as_deref(), Some("curseforge"));
+    assert_eq!(pid, Some(1650514));
+    assert!(fid.is_some() && fid.as_ref().unwrap() != "main", "file_id should be updated to CurseForge file ID");
+    assert!(ver.is_some(), "version should be populated");
+
+    // Verify folder on disk exists and contains ExwindCore.toc
+    let folder_path = retail_addons.join("ExwindCore");
+    assert!(folder_path.is_dir(), "ExwindCore folder must exist on disk");
+    assert!(folder_path.join("ExwindCore.toc").is_file(), "ExwindCore.toc must exist");
+
+    // Verify no stray duplicate addon rows
+    let total_addons: i64 = conn.query_row("SELECT COUNT(*) FROM addons", [], |r| r.get(0)).unwrap();
+    assert_eq!(total_addons, 1, "There should be exactly 1 addon row after upgrade");
+
+    if let Some(w) = orig_wow_running {
+        std::env::set_var("FURPHY_TEST_WOW_RUNNING", w);
+    } else {
+        std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
+    }
+}

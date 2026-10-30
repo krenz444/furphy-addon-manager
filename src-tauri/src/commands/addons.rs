@@ -819,6 +819,10 @@ mod tests {
 
     #[test]
     fn test_delete_untracked_addon_traversal_rejection() {
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_wow_running = std::env::var("FURPHY_TEST_WOW_RUNNING").ok();
+        std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
+
         let bad = [
             "../SavedVariables",
             "../../Windows",
@@ -840,6 +844,12 @@ mod tests {
                 "Unexpected error message: {}",
                 err
             );
+        }
+
+        if let Some(w) = orig_wow_running {
+            std::env::set_var("FURPHY_TEST_WOW_RUNNING", w);
+        } else {
+            std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
         }
     }
 
@@ -961,6 +971,8 @@ mod tests {
         let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let orig_fake_wow = std::env::var("FURPHY_DEV_FAKE_WOW").ok();
         std::env::remove_var("FURPHY_DEV_FAKE_WOW");
+        let orig_wow_running = std::env::var("FURPHY_TEST_WOW_RUNNING").ok();
+        std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
         let temp_local = tempdir().unwrap();
         let orig_local = std::env::var("LOCALAPPDATA").ok();
         std::env::set_var("LOCALAPPDATA", temp_local.path().to_str().unwrap());
@@ -1029,6 +1041,11 @@ mod tests {
             std::env::set_var("FURPHY_DEV_FAKE_WOW", fw);
         } else {
             std::env::remove_var("FURPHY_DEV_FAKE_WOW");
+        }
+        if let Some(w) = orig_wow_running {
+            std::env::set_var("FURPHY_TEST_WOW_RUNNING", w);
+        } else {
+            std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
         }
         if let Some(l) = orig_local {
             std::env::set_var("LOCALAPPDATA", l);
