@@ -30,7 +30,7 @@ pub fn get_dependency_alias_target(dep_name: &str) -> Option<AddonTarget> {
     let norm = normalize_dep_slug(dep_name);
     match norm.as_str() {
         "exwindcore" | "exwind-core" | "exwind" | "excore" => {
-            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+            Some(AddonTarget::CurseForge(1650514))
         }
         _ => None,
     }
@@ -597,11 +597,15 @@ mod tests {
 
         assert_eq!(
             get_dependency_alias_target("ExwindCore"),
-            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+            Some(AddonTarget::CurseForge(1650514))
         );
         assert_eq!(
             get_dependency_alias_target("exwind"),
-            Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+            Some(AddonTarget::CurseForge(1650514))
+        );
+        assert_eq!(
+            get_dependency_alias_target("excore"),
+            Some(AddonTarget::CurseForge(1650514))
         );
         assert_eq!(get_dependency_alias_target("Ace3"), None);
     }
@@ -771,5 +775,14 @@ mod tests {
         let missing = check_missing_dependencies(&conn, "retail", "addon-parent").unwrap();
         // exwindcore was ignored, Ace3 is present, so only MissingLib-1.0 remains
         assert_eq!(missing, vec!["MissingLib-1.0".to_string()]);
+    }
+
+    #[test]
+    fn test_exboss_dependency_resolution_target() {
+        let target = get_dependency_alias_target("ExwindCore");
+        assert_eq!(target, Some(AddonTarget::CurseForge(1650514)));
+
+        let alias = get_dependency_alias("ExwindCore");
+        assert_eq!(alias, Some("excore"));
     }
 }

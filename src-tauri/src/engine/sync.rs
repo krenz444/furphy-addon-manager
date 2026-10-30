@@ -657,12 +657,26 @@ pub async fn run_sync_for_flavour(
             }
         };
 
-        // Step 7: Parse installed primary .toc to refresh required deps and version
-        let mut required_deps = Vec::new();
-        if let Some(first_folder) = installed_folders.first() {
-            if let Some(primary_toc) = find_primary_toc(&addons_path.join(first_folder), flavour, client_interface) {
+        // Step 7: Parse installed .toc files across all installed folders to collect required deps and identify primary title/version
+        let mut required_deps: Vec<String> = Vec::new();
+
+        // Find primary folder that best matches addon identity (e.g. name or slug)
+        let primary_folder = installed_folders
+            .iter()
+            .find(|f| {
+                let fl = f.to_ascii_lowercase();
+                let name_lower = target_addon_name.to_ascii_lowercase();
+                fl == name_lower
+                    || a.wago_slug
+                        .as_ref()
+                        .map(|s| fl == s.to_ascii_lowercase())
+                        .unwrap_or(false)
+            })
+            .or_else(|| installed_folders.first());
+
+        if let Some(pf) = primary_folder {
+            if let Some(primary_toc) = find_primary_toc(&addons_path.join(pf), flavour, client_interface) {
                 let toc_meta = parse_toc_file(&primary_toc);
-                required_deps = toc_meta.required_deps;
                 if chosen_version.is_none() {
                     chosen_version = toc_meta.version;
                 }
@@ -671,6 +685,20 @@ pub async fn run_sync_for_flavour(
                     if !cleaned.is_empty() && (target_addon_name == "CurseForge Addon" || target_addon_name.starts_with("CurseForge project ")) {
                         target_addon_name = cleaned;
                         let _ = conn.execute("UPDATE addons SET name = ?1 WHERE id = ?2", params![target_addon_name, target_addon_id]);
+                    }
+                }
+            }
+        }
+
+        // Aggregate required_deps from all installed folders in this addon
+        for folder in &installed_folders {
+            if let Some(toc_path) = find_primary_toc(&addons_path.join(folder), flavour, client_interface) {
+                let toc_meta = parse_toc_file(&toc_path);
+                for dep in toc_meta.required_deps {
+                    // Filter out internal folders that belong to this addon itself
+                    let is_internal = installed_folders.iter().any(|f| f.eq_ignore_ascii_case(&dep));
+                    if !is_internal && !required_deps.iter().any(|d| d.eq_ignore_ascii_case(&dep)) {
+                        required_deps.push(dep);
                     }
                 }
             }

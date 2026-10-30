@@ -134,6 +134,33 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         )?;
 
         tx.commit()?;
+        current_version = 4;
+    }
+
+    if current_version < 5 {
+        let tx = conn.transaction()?;
+
+        // 1. Upgrade any existing ExwindCore GitHub records to official CurseForge project 1650514
+        let _ = tx.execute(
+            "UPDATE addons SET source = 'curseforge', project_id = 1650514, repo = NULL \
+             WHERE (LOWER(name) = 'exwindcore' OR repo = 'Ex-wind/EXWINDCORE') AND source = 'github'",
+            [],
+        );
+
+        // 2. Populate required_deps for ExBoss if missing or empty
+        let _ = tx.execute(
+            "UPDATE addons SET required_deps = '[\"ExwindCore\"]' \
+             WHERE (wago_slug = 'exboss' OR LOWER(name) LIKE '%exboss%') \
+               AND (required_deps IS NULL OR required_deps = '[]' OR required_deps = '')",
+            [],
+        );
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')",
+            [],
+        )?;
+
+        tx.commit()?;
     }
 
     Ok(())
@@ -149,7 +176,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
