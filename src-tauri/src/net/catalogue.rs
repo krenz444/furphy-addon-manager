@@ -35,6 +35,7 @@ impl Catalogue {
         // Static built-in fallback mappings for core/critical libraries
         cat.insert(1650514, "excore".to_string());
         cat.insert(1650514, "exwindcore".to_string());
+        cat.insert(1450635, "exwindtools".to_string());
         cat.insert(61288, "details".to_string());
         cat.insert(13345, "ace3".to_string());
         cat.insert(13346, "libsharedmedia-3-0".to_string());
@@ -159,6 +160,7 @@ mod tests {
         let cat = Catalogue::new();
         assert_eq!(cat.get_id_by_slug("excore"), Some(1650514));
         assert_eq!(cat.get_id_by_slug("exwindcore"), Some(1650514));
+        assert_eq!(cat.get_id_by_slug("exwindtools"), Some(1450635));
         assert_eq!(cat.get_id_by_slug("details"), Some(61288));
         assert_eq!(cat.get_id_by_slug("ace3"), Some(13345));
     }

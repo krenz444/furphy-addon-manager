@@ -37,6 +37,9 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
             if slug.eq_ignore_ascii_case("excore") || slug.eq_ignore_ascii_case("exwindcore") {
                 return Some(AddonTarget::CurseForge(1650514));
             }
+            if slug.eq_ignore_ascii_case("exwindtools") {
+                return Some(AddonTarget::CurseForge(1450635));
+            }
             return None;
         }
 
@@ -53,6 +56,9 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
             }
             if seg.eq_ignore_ascii_case("excore") || seg.eq_ignore_ascii_case("exwindcore") {
                 return Some(AddonTarget::CurseForge(1650514));
+            }
+            if seg.eq_ignore_ascii_case("exwindtools") {
+                return Some(AddonTarget::CurseForge(1450635));
             }
             return None;
         }
@@ -123,6 +129,9 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
     if t.eq_ignore_ascii_case("excore") || t.eq_ignore_ascii_case("exwindcore") {
         return Some(AddonTarget::CurseForge(1650514));
     }
+    if t.eq_ignore_ascii_case("exwindtools") {
+        return Some(AddonTarget::CurseForge(1450635));
+    }
 
     // Fallback: assume Wago slug ONLY if it looks like a clean identifier (no slashes, colons, or URLs)
     if !t.contains('/') && !t.contains(':') && !t.contains(' ') && !t.starts_with("http") {
@@ -151,7 +160,13 @@ pub fn create_addon_record(
             }
 
             let id = Uuid::new_v4().to_string();
-            let default_name = name.unwrap_or(if pid == 1650514 { "EXCore" } else { "CurseForge Addon" });
+            let default_name = name.unwrap_or(if pid == 1650514 {
+                "EXCore"
+            } else if pid == 1450635 {
+                "ExwindTools"
+            } else {
+                "CurseForge Addon"
+            });
             conn.execute(
                 "INSERT INTO addons (id, flavour, source, project_id, name, installed_at, release_type, ignore_updates) \
                  VALUES (?1, ?2, 'curseforge', ?3, ?4, ?5, 1, 0)",
@@ -247,6 +262,12 @@ mod tests {
         match parse_addon_target("https://www.curseforge.com/wow/addons/excore", None) {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 1650514),
             other => panic!("Expected CurseForge(1650514), got {:?}", other),
+        }
+
+        // CurseForge exwindtools URL (slug resolution / alias)
+        match parse_addon_target("https://www.curseforge.com/wow/addons/exwindtools", None) {
+            Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 1450635),
+            other => panic!("Expected CurseForge(1450635), got {:?}", other),
         }
 
         // CurseForge numeric addon URL

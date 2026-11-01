@@ -18,6 +18,7 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
             || a == "--tray-selftest"
             || a == "--protocol"
             || a == "--sign-file"
+            || a == "--add"
     });
 
     if !is_cli {
@@ -212,6 +213,70 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
     let policy = Arc::new(NetworkPolicy::new());
     let runner = JobRunner::new(policy);
 
+    // Handle --add <target>
+    for i in 0..args.len() {
+        if args[i] == "--add" {
+            if i + 1 >= args.len() {
+                eprintln!("[ERROR] Missing target for --add");
+                return Err(2);
+            }
+            let target = &args[i + 1];
+            let flv = flavour_filter.as_deref().unwrap_or("retail");
+            let params = serde_json::json!({ "target": target });
+
+            match runner
+                .run_job(&mut conn, "add", Some(flv), params)
+                .await
+            {
+                Ok(rec) => {
+                    let val: Value = rec
+                        .results
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(Value::Null);
+
+                    if is_json {
+                        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                    } else {
+                        let failed = val.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if failed > 0 {
+                            let err_msg = rec.error.as_deref().unwrap_or("Unknown error during add");
+                            eprintln!("[ERROR] Add failed: {}", err_msg);
+                            return Err(1);
+                        } else {
+                            let name = val.get("results")
+                                .and_then(|r| r.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|item| item.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(target);
+                            let ver = val.get("results")
+                                .and_then(|r| r.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|item| item.get("version"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            if ver.is_empty() {
+                                println!("Added {} (flavour: {})", name, flv);
+                            } else {
+                                println!("Added {} ({}) to flavour: {}", name, ver, flv);
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
+                Err(JobError::Busy(id)) => {
+                    eprintln!("Operation busy: job {} currently running", id);
+                    return Err(1);
+                }
+                Err(e) => {
+                    eprintln!("Add failed for flavour {}: {}", flv, e);
+                    return Err(1);
+                }
+            }
+        }
+    }
+
     // Handle --check
     if args.iter().any(|a| a == "--check") {
         let flavours = get_installed_flavours_db(&conn).map_err(|_| 2)?;
@@ -382,5 +447,14 @@ mod tests {
             "curseforge://install?addonId=bad&fileId=12345".to_string(),
         ];
         assert_eq!(handle_cli_args(&invalid_args).await, Err(2));
+    }
+
+    #[tokio::test]
+    async fn test_cli_add_missing_target_returns_exit_code_2() {
+        let args = vec![
+            "furphy.exe".to_string(),
+            "--add".to_string(),
+        ];
+        assert_eq!(handle_cli_args(&args).await, Err(2));
     }
 }
