@@ -519,6 +519,12 @@ pub async fn search_wago_addons(
             Some("popular") => {
                 qp.append_pair("sort", "popular");
             }
+            Some("updated") => {
+                qp.append_pair("sort", "updated");
+            }
+            Some("gaining") => {
+                qp.append_pair("sort", "gaining");
+            }
             _ => {}
         }
     }

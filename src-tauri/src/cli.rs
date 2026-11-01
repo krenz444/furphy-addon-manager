@@ -253,7 +253,7 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
                             let ver = val.get("results")
                                 .and_then(|r| r.as_array())
                                 .and_then(|arr| arr.first())
-                                .and_then(|item| item.get("version"))
+                                .and_then(|item| item.get("new_version").or_else(|| item.get("version")))
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("");
                             if ver.is_empty() {
@@ -374,6 +374,10 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
                     r.get("failed").and_then(|v| v.as_u64()).unwrap_or(0)
                 );
             }
+        }
+        let any_failed = reports.iter().any(|r| r.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
+        if any_failed {
+            return Err(1);
         }
         return Ok(true);
     }

@@ -12,51 +12,6 @@ struct Placement {
     aside_path: Option<PathBuf>,
 }
 
-pub fn restore_interrupted_folder_swaps(addons_path: &Path) {
-    if !addons_path.exists() {
-        return;
-    }
-
-    let entries = match fs::read_dir(addons_path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry_res in entries.flatten() {
-        let path = entry_res.path();
-        if path.is_dir() {
-            let name = entry_res.file_name().to_string_lossy().to_string();
-            if name.starts_with(".furphy-staging-") {
-                let _ = fs::remove_dir_all(&path);
-                append_app_log("INFO", &format!("Removed interrupted staging folder '{}'", name));
-            } else if let Some(pos) = name.find(".furphy-old-") {
-                let original_name = &name[..pos];
-                let original_path = addons_path.join(original_name);
-
-                if !original_path.exists() {
-                    // Original missing, restore aside
-                    if fs::rename(&path, &original_path).is_ok() {
-                        append_app_log(
-                            "WARN",
-                            &format!(
-                                "Restored folder '{}' from an interrupted earlier update ('{}')",
-                                original_name, name
-                            ),
-                        );
-                    }
-                } else {
-                    // Original exists, delete leftover aside
-                    let _ = fs::remove_dir_all(&path);
-                    append_app_log(
-                        "INFO",
-                        &format!("Removed leftover '{}' from an earlier update", name),
-                    );
-                }
-            }
-        }
-    }
-}
-
 #[cfg(windows)]
 fn set_writable_recursive(path: &Path) {
     if let Ok(entries) = fs::read_dir(path) {
@@ -78,6 +33,74 @@ fn set_writable_recursive(path: &Path) {
         if perms.readonly() {
             perms.set_readonly(false);
             let _ = fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_writable_recursive(_path: &Path) {}
+
+pub fn remove_dir_all_safe(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    set_writable_recursive(path);
+    fs::remove_dir_all(path)
+}
+
+pub fn restore_interrupted_folder_swaps(addons_path: &Path) {
+    if !addons_path.exists() {
+        return;
+    }
+
+    let entries = match fs::read_dir(addons_path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    // Group asides by base folder name with timestamps
+    let mut asides: std::collections::HashMap<String, Vec<(PathBuf, std::time::SystemTime)>> = std::collections::HashMap::new();
+
+    for entry_res in entries.flatten() {
+        let path = entry_res.path();
+        if path.is_dir() {
+            let name = entry_res.file_name().to_string_lossy().to_string();
+            if name.starts_with(".furphy-staging-") {
+                let _ = remove_dir_all_safe(&path);
+                append_app_log("INFO", &format!("Removed interrupted staging folder '{}'", name));
+            } else if let Some(pos) = name.find(".furphy-old-") {
+                let original_name = name[..pos].to_string();
+                let mtime = entry_res.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                asides.entry(original_name).or_default().push((path, mtime));
+            }
+        }
+    }
+
+    for (original_name, mut aside_list) in asides {
+        let original_path = addons_path.join(&original_name);
+        // Sort asides newest first
+        aside_list.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if !original_path.exists() {
+            // Restore freshest aside
+            if let Some((freshest, _)) = aside_list.first() {
+                if fs::rename(freshest, &original_path).is_ok() {
+                    append_app_log(
+                        "WARN",
+                        &format!("Restored folder '{}' from interrupted earlier update", original_name),
+                    );
+                }
+            }
+            // Delete remaining older asides
+            for (older, _) in aside_list.iter().skip(1) {
+                let _ = remove_dir_all_safe(older);
+            }
+        } else {
+            // Original exists, delete all leftover asides
+            for (aside, _) in aside_list {
+                let _ = remove_dir_all_safe(&aside);
+                append_app_log("INFO", &format!("Removed leftover aside '{}'", aside.display()));
+            }
         }
     }
 }
@@ -197,7 +220,7 @@ pub fn execute_atomic_swap(
     if let Some(failed) = failed_folder {
         // Rollback all already swapped folders
         for placement in placements.into_iter().rev() {
-            let _ = fs::remove_dir_all(&placement.dest_path);
+            let _ = remove_dir_all_safe(&placement.dest_path);
             if let Some(aside) = placement.aside_path {
                 let _ = move_directory_atomic(&aside, &placement.dest_path);
             }
@@ -211,7 +234,7 @@ pub fn execute_atomic_swap(
     // Commit: delete all aside copies
     for placement in placements {
         if let Some(aside) = placement.aside_path {
-            let _ = fs::remove_dir_all(aside);
+            let _ = remove_dir_all_safe(&aside);
         }
     }
 
@@ -232,9 +255,7 @@ pub fn execute_atomic_swap(
 
             let old_path = addons_path.join(old_folder);
             if old_path.exists() {
-                #[cfg(windows)]
-                set_writable_recursive(&old_path);
-                let _ = fs::remove_dir_all(&old_path);
+                let _ = remove_dir_all_safe(&old_path);
                 append_app_log("INFO", &format!("Removed stale folder '{}'", old_folder));
             }
         }

@@ -160,21 +160,52 @@ pub fn take_wtf_snapshot(
     let mut zip = ZipWriter::new(zip_file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
+    let mut write_err = None;
     for f in &files {
-        zip.start_file(&f.relative_to_wtf, options)
-            .map_err(|e| e.to_string())?;
-        let mut source_file = File::open(&f.absolute_path).map_err(|e| e.to_string())?;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = source_file.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
+        if let Err(e) = zip.start_file(&f.relative_to_wtf, options) {
+            write_err = Some(e.to_string());
+            break;
+        }
+        match File::open(&f.absolute_path) {
+            Ok(mut source_file) => {
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    match source_file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Err(e) = zip.write_all(&buf[..n]) {
+                                write_err = Some(e.to_string());
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            write_err = Some(e.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                write_err = Some(e.to_string());
                 break;
             }
-            zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        }
+        if write_err.is_some() {
+            break;
         }
     }
 
-    zip.finish().map_err(|e| e.to_string())?;
+    if let Some(err) = write_err {
+        drop(zip);
+        let _ = fs::remove_file(&zip_path);
+        return Err(format!("Aborted WTF snapshot due to I/O error: {}", err));
+    }
+
+    if let Err(e) = zip.finish() {
+        let _ = fs::remove_file(&zip_path);
+        return Err(e.to_string());
+    }
+
     let final_meta = fs::metadata(&zip_path).map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
@@ -205,7 +236,7 @@ pub fn take_wtf_snapshot(
     if kind == "pre-update" {
         let mut stmt = conn
             .prepare(
-                "SELECT id, path FROM wtf_snapshots WHERE addon_id = ?1 AND kind = 'pre-update' ORDER BY created_at DESC",
+                "SELECT id, path FROM wtf_snapshots WHERE addon_id = ?1 AND kind = 'pre-update' ORDER BY created_at DESC, rowid DESC",
             )
             .map_err(|e| e.to_string())?;
 

@@ -100,7 +100,7 @@ pub fn record_and_prune_backup(
 
     // Retention: keep last 2 backups per addon for this kind
     let mut stmt = conn.prepare(
-        "SELECT id, path FROM backups WHERE addon_id = ?1 AND kind = ?2 ORDER BY created_at DESC",
+        "SELECT id, path FROM backups WHERE addon_id = ?1 AND kind = ?2 ORDER BY created_at DESC, rowid DESC",
     )?;
     let rows = stmt.query_map(params![addon_id, kind], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

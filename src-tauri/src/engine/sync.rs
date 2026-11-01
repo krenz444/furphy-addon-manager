@@ -186,6 +186,8 @@ pub async fn run_sync_for_flavour(
 
         let mut target_addon_id = a.id.clone();
         let mut target_addon_name = a.name.clone();
+        let mut prev_backup_file_id = a.file_id.clone();
+        let mut prev_backup_version = a.version.clone();
 
         // Step 1: Query and download
         match src {
@@ -548,6 +550,12 @@ pub async fn run_sync_for_flavour(
                         &format!("Upgrading existing addon {} to {} (source: {})", existing_id, target_addon_name, src),
                     );
 
+                    let existing_backup_info: Option<(Option<String>, Option<String>)> = conn.query_row(
+                        "SELECT file_id, version FROM addons WHERE id = ?1",
+                        params![existing_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    ).ok();
+
                     let _ = conn.execute(
                         "UPDATE addons SET source = ?1, project_id = ?2, wago_slug = ?3, wago_id = ?4, repo = ?5, name = ?6 WHERE id = ?7",
                         params![a.source, a.project_id, a.wago_slug, a._wago_id, a.repo, target_addon_name, existing_id],
@@ -557,6 +565,12 @@ pub async fn run_sync_for_flavour(
                     let _ = conn.execute("DELETE FROM check_results WHERE addon_id = ?1", params![target_addon_id]);
 
                     target_addon_id = existing_id;
+                    if let Some((ex_fid, ex_ver)) = existing_backup_info {
+                        if ex_fid.is_some() || ex_ver.is_some() {
+                            prev_backup_file_id = ex_fid;
+                            prev_backup_version = ex_ver;
+                        }
+                    }
                     conflicts.clear();
                 }
             }
@@ -595,7 +609,7 @@ pub async fn run_sync_for_flavour(
             conn,
             wow_root,
             flavour_folder,
-            &a.id,
+            &target_addon_id,
             &snapshot_folders,
             data_dir,
             "pre-update",
@@ -603,19 +617,24 @@ pub async fn run_sync_for_flavour(
 
         // Step 5: Backup outgoing version
         if !previous_folders.is_empty() {
-            let backup_dir = data_dir.join("backups").join(flavour).join(&safe_id);
-            let safe_file_id = a.file_id.as_deref().unwrap_or("backup").replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let target_safe_id = target_addon_id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let backup_dir = data_dir.join("backups").join(flavour).join(&target_safe_id);
+            let safe_file_id = if let Some(ref fid) = prev_backup_file_id {
+                fid.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_")
+            } else {
+                format!("backup_{}", Utc::now().format("%Y%m%d_%H%M%S"))
+            };
             let backup_file = backup_dir.join(format!("{}.zip", safe_file_id));
             let kind = if a.adopted { "pre-adopt" } else { "update" };
 
             if let Ok(size) = create_backup_zip(addons_path, &previous_folders, &backup_file) {
                 let _ = record_and_prune_backup(
                     conn,
-                    &a.id,
+                    &target_addon_id,
                     flavour,
                     kind,
-                    a.file_id.as_deref(),
-                    a.version.as_deref(),
+                    prev_backup_file_id.as_deref(),
+                    prev_backup_version.as_deref(),
                     &backup_file,
                     size,
                 );
@@ -623,7 +642,7 @@ pub async fn run_sync_for_flavour(
         }
 
         // Step 6: Atomic swap
-        let protected = match get_protected_folders(conn, flavour, Some(&a.id)) {
+        let protected = match get_protected_folders(conn, flavour, Some(&target_addon_id)) {
             Ok(p) => p,
             Err(_) => HashSet::new(),
         };
@@ -733,8 +752,8 @@ pub async fn run_sync_for_flavour(
                 chosen_file_name,
                 now,
                 req_deps_json,
-                a.file_id,
-                a.version,
+                prev_backup_file_id,
+                prev_backup_version,
                 target_addon_id
             ],
         );
