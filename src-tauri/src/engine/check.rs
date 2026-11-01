@@ -36,6 +36,34 @@ pub struct CheckRunReport {
     pub outcomes: Vec<AddonCheckOutcome>,
 }
 
+pub fn normalize_version_token(v: &str) -> String {
+    let trimmed = v.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let stripped_prefix = lower.strip_prefix('v').unwrap_or(&lower);
+    let stripped_ext = stripped_prefix.strip_suffix(".zip").unwrap_or(stripped_prefix);
+    stripped_ext.trim().to_string()
+}
+
+pub fn is_version_equivalent(local_ver: Option<&str>, remote_ver: Option<&str>) -> bool {
+    match (local_ver, remote_ver) {
+        (Some(l), Some(r)) => {
+            if l.eq_ignore_ascii_case(r) {
+                return true;
+            }
+            let norm_l = normalize_version_token(l);
+            let norm_r = normalize_version_token(r);
+            if !norm_l.is_empty() && norm_l == norm_r {
+                return true;
+            }
+            if !norm_l.is_empty() && norm_r.contains(&norm_l) {
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 pub async fn run_check_for_flavour(
     conn: &mut Connection,
     flavour: &str,
@@ -63,14 +91,16 @@ pub async fn run_check_for_flavour(
         repo: Option<String>,
         file_id: Option<String>,
         version: Option<String>,
+        installed_tag: Option<String>,
         pinned_file_id: Option<String>,
         ignore_updates: bool,
         release_type: i64,
+        github_rate_limited_until: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -87,9 +117,11 @@ pub async fn run_check_for_flavour(
                 repo: r.get(6)?,
                 file_id: r.get(7)?,
                 version: r.get(8)?,
-                pinned_file_id: r.get(9)?,
-                ignore_updates: r.get::<_, i32>(10)? != 0,
-                release_type: r.get::<_, Option<i64>>(11)?.unwrap_or(1),
+                installed_tag: r.get(9)?,
+                pinned_file_id: r.get(10)?,
+                ignore_updates: r.get::<_, i32>(11)? != 0,
+                release_type: r.get::<_, Option<i64>>(12)?.unwrap_or(1),
+                github_rate_limited_until: r.get(13)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -156,20 +188,19 @@ pub async fn run_check_for_flavour(
                         Ok(files) => {
                             if let Some(chosen) = select_cf_file(&files, a.release_type, type_id, prefix) {
                                 let chosen_id_str = chosen.id.to_string();
-                                let is_same_id = a.file_id.as_deref() == Some(&chosen_id_str);
-                                let is_older = if let Some(curr_fid_str) = a.file_id.as_deref() {
-                                    if let Ok(curr_fid) = curr_fid_str.parse::<i64>() {
-                                        curr_fid >= chosen.id
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                };
                                 let chosen_ver = chosen.display_name.clone().or(chosen.file_name.clone());
-                                let is_same_ver = a.version.is_some() && a.version.as_deref() == chosen_ver.as_deref();
 
-                                if !is_same_id && !is_older && !is_same_ver {
+                                let is_up_to_date = match (a.file_id.as_deref().and_then(|s| s.parse::<i64>().ok()), Some(chosen.id)) {
+                                    (Some(curr_fid), Some(target_fid)) => {
+                                        curr_fid >= target_fid
+                                    }
+                                    _ => {
+                                        a.file_id.as_deref() == Some(&chosen_id_str)
+                                            || is_version_equivalent(a.version.as_deref(), chosen_ver.as_deref())
+                                    }
+                                };
+
+                                if !is_up_to_date {
                                     outcome_status = "Would-update".to_string();
                                     upd_file = Some(chosen_id_str);
                                     upd_ver = chosen_ver;
@@ -209,9 +240,9 @@ pub async fn run_check_for_flavour(
 
                     if let Some(chosen) = found_selection {
                         let chosen_ver = chosen.version.clone().or(chosen.name.clone());
-                        let is_same_id = a.file_id.as_deref() == Some(&chosen.id);
-                        let is_same_ver = a.version.is_some() && a.version.as_deref() == chosen_ver.as_deref();
-                        if !is_same_id && !is_same_ver {
+                        let is_up_to_date = a.file_id.as_deref() == Some(&chosen.id)
+                            || is_version_equivalent(a.version.as_deref(), chosen_ver.as_deref());
+                        if !is_up_to_date {
                             outcome_status = "Would-update".to_string();
                             upd_file = Some(chosen.id);
                             upd_ver = chosen_ver;
@@ -221,21 +252,56 @@ pub async fn run_check_for_flavour(
             }
             "github" => {
                 if let Some(ref repo) = a.repo {
-                    let parts: Vec<&str> = repo.split('/').collect();
-                    if parts.len() == 2 {
-                        match get_github_releases(&policy, &github_client, parts[0], parts[1], github_token.as_deref()).await {
-                            Ok(releases) => {
-                                if let Some(chosen) = select_github_release(&releases, a.release_type, None) {
-                                    if a.file_id.as_deref() != Some(&chosen.tag_name) && a.version.as_deref() != Some(&chosen.tag_name) {
-                                        outcome_status = "Would-update".to_string();
-                                        upd_file = Some(chosen.tag_name.clone());
-                                        upd_ver = Some(chosen.tag_name);
+                    let mut is_rate_limited = false;
+                    if let Some(ref until_str) = a.github_rate_limited_until {
+                        if let Ok(until_dt) = chrono::DateTime::parse_from_rfc3339(until_str) {
+                            if Utc::now() < until_dt.with_timezone(&Utc) {
+                                append_sync_log(
+                                    Some(flavour),
+                                    "INFO",
+                                    &format!("{}: GitHub rate limited until {}, skipping check", a.name, until_str),
+                                );
+                                outcome_status = "Failed".to_string();
+                                err_msg = Some(format!("GitHub rate limited until {}", until_str));
+                                is_rate_limited = true;
+                            }
+                        }
+                    }
+
+                    if !is_rate_limited {
+                        let parts: Vec<&str> = repo.split('/').collect();
+                        if parts.len() == 2 {
+                            match get_github_releases(&policy, &github_client, parts[0], parts[1], github_token.as_deref()).await {
+                                Ok(releases) => {
+                                    if let Some(chosen) = select_github_release(&releases, a.release_type, None) {
+                                        let is_same_tag = a.installed_tag.as_deref() == Some(&chosen.tag_name);
+                                        let is_same_ver = a.version.as_deref() == Some(&chosen.tag_name);
+                                        let is_same_file = a.file_id.as_deref() == Some(&chosen.tag_name);
+
+                                        if !is_same_tag && !is_same_ver && !is_same_file {
+                                            outcome_status = "Would-update".to_string();
+                                            upd_file = Some(chosen.tag_name.clone());
+                                            upd_ver = Some(chosen.tag_name);
+                                        }
+                                    }
+
+                                    if a.github_rate_limited_until.is_some() {
+                                        let _ = conn.execute(
+                                            "UPDATE addons SET github_rate_limited_until = NULL WHERE id = ?1",
+                                            params![a.id],
+                                        );
                                     }
                                 }
-                            }
-                            Err((e, _)) => {
-                                outcome_status = "Failed".to_string();
-                                err_msg = Some(e);
+                                Err((e, limited_until)) => {
+                                    outcome_status = "Failed".to_string();
+                                    err_msg = Some(e);
+                                    if let Some(until) = limited_until {
+                                        let _ = conn.execute(
+                                            "UPDATE addons SET github_rate_limited_until = ?1 WHERE id = ?2",
+                                            params![until.to_rfc3339(), a.id],
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

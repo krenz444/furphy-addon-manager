@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use crate::engine::add::{create_addon_record, parse_addon_target};
+use crate::engine::add::{create_addon_record, parse_addon_target, AddonTarget};
 use crate::engine::adopt::adopt_candidate_group;
 use crate::engine::check::run_check_for_flavour;
 use crate::engine::flavours::detect_installed_flavours_in_root;
@@ -505,13 +505,46 @@ impl JobRunner {
 
                 let raw_target = params
                     .get("target")
+                    .or_else(|| params.get("slug"))
+                    .or_else(|| params.get("wago_slug"))
                     .and_then(|v| v.as_str())
                     .ok_or("Missing target parameter")?;
 
-                let cf_client = create_cf_client().map_err(|e| e.to_string())?;
-                let cat = load_or_refresh_catalogue(&self.policy, &cf_client, &data_dir).await.ok();
-                let parsed = parse_addon_target(raw_target, cat.as_ref())
-                    .ok_or_else(|| format!("Could not parse target '{}'", raw_target))?;
+                let parsed = if let Some(source) = params.get("source").and_then(|v| v.as_str()) {
+                    match source.to_ascii_lowercase().as_str() {
+                        "wago" => {
+                            let clean = raw_target.strip_prefix("wago:").unwrap_or(raw_target);
+                            AddonTarget::Wago(clean.to_string())
+                        }
+                        "github" => {
+                            let clean = raw_target.strip_prefix("github:").unwrap_or(raw_target);
+                            AddonTarget::GitHub(clean.to_string())
+                        }
+                        "curseforge" | "curse" => {
+                            let clean = raw_target
+                                .strip_prefix("curseforge:")
+                                .or_else(|| raw_target.strip_prefix("curse:"))
+                                .unwrap_or(raw_target);
+                            let cf_client = create_cf_client().map_err(|e| e.to_string())?;
+                            let cat = load_or_refresh_catalogue(&self.policy, &cf_client, &data_dir).await.ok();
+                            parse_addon_target(clean, cat.as_ref())
+                                .ok_or_else(|| format!("Could not parse CurseForge target '{}'", raw_target))?
+                        }
+                        _ => {
+                            let cf_client = create_cf_client().map_err(|e| e.to_string())?;
+                            let cat = load_or_refresh_catalogue(&self.policy, &cf_client, &data_dir).await.ok();
+                            parse_addon_target(raw_target, cat.as_ref())
+                                .ok_or_else(|| format!("Could not parse target '{}'", raw_target))?
+                        }
+                    }
+                } else if let Some(wago_slug) = params.get("wago_slug").and_then(|v| v.as_str()) {
+                    AddonTarget::Wago(wago_slug.to_string())
+                } else {
+                    let cf_client = create_cf_client().map_err(|e| e.to_string())?;
+                    let cat = load_or_refresh_catalogue(&self.policy, &cf_client, &data_dir).await.ok();
+                    parse_addon_target(raw_target, cat.as_ref())
+                        .ok_or_else(|| format!("Could not parse target '{}'", raw_target))?
+                };
 
                 let addon_id = create_addon_record(conn, flv, parsed, None)?;
 

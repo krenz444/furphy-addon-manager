@@ -251,6 +251,10 @@ pub fn normalize_github_zipball(
     let mut archive =
         zip::ZipArchive::new(raw_file).map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
 
+    if archive.len() > MAX_ENTRIES_COUNT {
+        return Err(ArchiveError::EntryCountExceeded);
+    }
+
     // 1. Identify the single wrapper folder
     let mut wrapper_prefix: Option<String> = None;
     for i in 0..archive.len() {
@@ -258,6 +262,10 @@ pub fn normalize_github_zipball(
             .by_index(i)
             .map_err(|e| ArchiveError::ZipRead(e.to_string()))?;
         let name = entry.name().replace('\\', "/");
+        if !is_safe_entry_name(&name) {
+            return Err(ArchiveError::ZipSlip(name));
+        }
+
         if let Some(first_part) = name.split('/').next() {
             if !first_part.is_empty() {
                 if let Some(ref p) = wrapper_prefix {
@@ -301,6 +309,8 @@ pub fn normalize_github_zipball(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    let mut total_uncompressed_bytes: u64 = 0;
+
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -314,11 +324,20 @@ pub fn normalize_github_zipball(
             continue;
         }
 
+        // Drop root files (README, LICENSE, .gitignore) when wrapper does not own its .toc
+        if !wrapper_has_own_toc && !rel.contains('/') && !entry.is_dir() {
+            continue;
+        }
+
         let new_name = if wrapper_has_own_toc {
             format!("{}/{}", clean_repo_name, rel)
         } else {
             rel.to_string()
         };
+
+        if !is_safe_entry_name(&new_name) {
+            return Err(ArchiveError::ZipSlip(new_name));
+        }
 
         if entry.is_dir() {
             writer
@@ -333,6 +352,10 @@ pub fn normalize_github_zipball(
                 let n = entry.read(&mut buf)?;
                 if n == 0 {
                     break;
+                }
+                total_uncompressed_bytes += n as u64;
+                if total_uncompressed_bytes > MAX_TOTAL_UNCOMPRESSED_BYTES {
+                    return Err(ArchiveError::TotalSizeExceeded);
                 }
                 writer.write_all(&buf[..n])?;
             }

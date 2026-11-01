@@ -15,13 +15,29 @@ pub struct InstallDepsResult {
 }
 
 pub fn normalize_dep_slug(dep_name: &str) -> String {
-    dep_name.to_ascii_lowercase().replace('.', "-").replace('_', "-")
+    dep_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['.', '_', ' '], "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
 }
 
 pub fn get_dependency_alias(dep_name: &str) -> Option<&'static str> {
     let norm = normalize_dep_slug(dep_name);
     match norm.as_str() {
         "exwindcore" | "exwind-core" | "exwind" => Some("excore"),
+        "excore" => Some("exwindcore"),
+        "exwind-tools" => Some("exwindtools"),
+        "ace-3-0" | "ace-3" | "ace3-3-0" | "acegui-3-0" | "acedb-3-0" => Some("ace3"),
+        "libsharedmedia" | "lsm30" | "libsharedmedia30" => Some("libsharedmedia-3-0"),
+        "callbackhandler" => Some("callbackhandler-1-0"),
+        "libdatabroker" | "ldb" => Some("libdatabroker-1-1"),
+        "libdbicon" => Some("libdbicon-1-0"),
+        "herebedragons-2-0" | "herebedragons-1-0" | "hbd" => Some("herebedragons"),
+        "weakauras2" | "weakauras" => Some("weakauras-2"),
+        "details-damage-meter" => Some("details"),
         _ => None,
     }
 }
@@ -29,9 +45,8 @@ pub fn get_dependency_alias(dep_name: &str) -> Option<&'static str> {
 pub fn get_dependency_alias_target(dep_name: &str) -> Option<AddonTarget> {
     let norm = normalize_dep_slug(dep_name);
     match norm.as_str() {
-        "exwindcore" | "exwind-core" | "exwind" | "excore" => {
-            Some(AddonTarget::CurseForge(1650514))
-        }
+        "exwindcore" | "exwind-core" | "exwind" | "excore" => Some(AddonTarget::CurseForge(1650514)),
+        "exwindtools" | "exwind-tools" => Some(AddonTarget::CurseForge(1450635)),
         _ => None,
     }
 }
@@ -146,50 +161,43 @@ async fn resolve_dependency_target_direct(
         }
     }
 
-    // 3. If still not found, check Wago search /api/search?q={dep_name} -> AddonTarget::Wago(slug)
+    // 3. Fallback: Search Wago via WagoSession + search_wago_addons (addons.wago.io Inertia protocol)
     if let Ok(wago_client) = crate::net::wago::create_wago_client() {
-        let base_wago = crate::net::wago::get_wago_base_url();
-        let parsed_wago = reqwest::Url::parse_with_params(
-            &format!("{}/api/search", base_wago),
-            &[("q", dep_trimmed), ("sort", "popular"), ("page", "1")],
-        );
+        let wago_session = crate::net::wago::WagoSession::new();
+        if let Ok((items, _total)) = crate::net::wago::search_wago_addons(
+            policy,
+            &wago_client,
+            &wago_session,
+            "retail",
+            Some(dep_trimmed),
+            None,
+            Some("name"),
+            1,
+        ).await {
+            let matched = items.iter().find(|item| {
+                item.slug.eq_ignore_ascii_case(dep_trimmed)
+                    || item.slug.eq_ignore_ascii_case(&norm)
+                    || item.name.eq_ignore_ascii_case(dep_trimmed)
+                    || normalize_dep_slug(&item.slug) == norm
+                    || normalize_dep_slug(&item.name) == norm
+            });
 
-        if let Ok(parsed_url) = parsed_wago {
-            let host = parsed_url.host_str().unwrap_or("").to_string();
-            let wago_url = parsed_url.to_string();
-            if let Ok(_permit) = policy.acquire_permit(&host).await {
-                match wago_client.get(&wago_url).send().await {
-                    Ok(resp) => {
-                        policy.breaker.register_http_response(&host);
-                        if resp.status().is_success() {
-                            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                                let results = json.get("results").and_then(|v| v.as_array())
-                                    .or_else(|| json.as_array());
-                                if let Some(items) = results {
-                                    if !items.is_empty() {
-                                        let matched = items.iter().find(|item| {
-                                            let slug = item.get("slug").and_then(|s| s.as_str()).unwrap_or("");
-                                            let name = item.get("name").and_then(|s| s.as_str()).unwrap_or("");
-                                            slug.eq_ignore_ascii_case(dep_trimmed)
-                                                || slug.eq_ignore_ascii_case(&norm)
-                                                || name.eq_ignore_ascii_case(dep_trimmed)
-                                        }).or_else(|| items.first());
+            if let Some(item) = matched {
+                return Some(AddonTarget::Wago(item.slug.clone()));
+            }
+        }
 
-                                        if let Some(item) = matched {
-                                            if let Some(slug) = item.get("slug").and_then(|v| v.as_str()) {
-                                                return Some(AddonTarget::Wago(slug.to_string()));
-                                            } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                                return Some(AddonTarget::Wago(id.to_string()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        policy.breaker.register_connectivity_failure(&host);
-                    }
+        // Direct slug verification fallback if search yielded no hits
+        if !norm.contains('/') && !norm.contains(' ') {
+            if let Ok((releases, _)) = crate::net::wago::get_wago_releases_page(
+                policy,
+                &wago_client,
+                &wago_session,
+                &norm,
+                1,
+            ).await {
+                if !releases.is_empty() {
+                    return Some(AddonTarget::Wago(norm));
                 }
             }
         }
@@ -222,10 +230,26 @@ pub async fn resolve_dependency_target(
 }
 
 fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
-    let dep_lower = dep_name.to_ascii_lowercase();
-    let norm = normalize_dep_slug(dep_name);
+    let dep_trimmed = dep_name.trim();
+    if dep_trimmed.is_empty() {
+        return false;
+    }
+    let dep_lower = dep_trimmed.to_ascii_lowercase();
+    let norm = normalize_dep_slug(dep_trimmed);
 
-    // 1. Check addon_folders table
+    // 1. Fast check against addon_folders table
+    let fast_folder_match = conn.query_row(
+        "SELECT 1 FROM addon_folders WHERE flavour = ?1 AND (
+            LOWER(folder) = ?2 OR LOWER(folder) = ?3
+        ) LIMIT 1",
+        params![flavour, dep_lower, norm],
+        |_| Ok(true),
+    ).unwrap_or(false);
+
+    if fast_folder_match {
+        return true;
+    }
+
     if let Ok(mut stmt) = conn.prepare("SELECT folder FROM addon_folders WHERE flavour = ?1") {
         if let Ok(rows) = stmt.query_map(params![flavour], |r| r.get::<_, String>(0)) {
             for f in rows.flatten() {
@@ -242,7 +266,10 @@ fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_na
         "SELECT 1 FROM addons WHERE flavour = ?1 AND (
             LOWER(name) = ?2 OR LOWER(name) = ?3 OR
             LOWER(wago_slug) = ?2 OR LOWER(wago_slug) = ?3 OR
-            LOWER(id) = ?2
+            LOWER(wago_id) = ?2 OR
+            LOWER(curse_id) = ?2 OR LOWER(curse_id) = ?3 OR
+            LOWER(id) = ?2 OR
+            LOWER(repo) = ?2 OR LOWER(repo) LIKE '%/' || ?2
         ) LIMIT 1",
         params![flavour, dep_lower, norm],
         |_| Ok(true),
@@ -251,15 +278,20 @@ fn is_dependency_already_present_direct(conn: &Connection, flavour: &str, dep_na
 }
 
 pub fn is_dependency_already_present(conn: &Connection, flavour: &str, dep_name: &str) -> bool {
-    if is_dependency_already_present_direct(conn, flavour, dep_name) {
+    let dep_trimmed = dep_name.trim();
+    if dep_trimmed.is_empty() {
+        return false;
+    }
+
+    if is_dependency_already_present_direct(conn, flavour, dep_trimmed) {
         return true;
     }
-    if let Some(target) = get_dependency_alias_target(dep_name) {
+    if let Some(target) = get_dependency_alias_target(dep_trimmed) {
         if is_target_already_present(conn, flavour, &target) {
             return true;
         }
     }
-    if let Some(alias) = get_dependency_alias(dep_name) {
+    if let Some(alias) = get_dependency_alias(dep_trimmed) {
         if is_dependency_already_present_direct(conn, flavour, alias) {
             return true;
         }
@@ -388,24 +420,26 @@ pub async fn install_missing_dependencies_for_addon(
                         queue.push_back((new_addon_id, depth + 1));
                     }
                     Ok(rep) => {
+                        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", rusqlite::params![new_addon_id]);
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
                         crate::logging::append_sync_log(
                             Some(flavour),
                             "WARN",
                             &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
                         );
-                        if !unresolved.contains(&dep) {
+                        if !installed.contains(&dep) && !unresolved.contains(&dep) {
                             unresolved.push(dep.clone());
                         }
                     }
                     Err(e) => {
+                        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", rusqlite::params![new_addon_id]);
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
                         crate::logging::append_sync_log(
                             Some(flavour),
                             "WARN",
                             &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
                         );
-                        if !unresolved.contains(&dep) {
+                        if !installed.contains(&dep) && !unresolved.contains(&dep) {
                             unresolved.push(dep.clone());
                         }
                     }
@@ -534,24 +568,26 @@ pub async fn install_all_missing_dependencies_for_flavour(
                         queue.push_back((new_addon_id, depth + 1));
                     }
                     Ok(rep) => {
+                        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", rusqlite::params![new_addon_id]);
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
                         crate::logging::append_sync_log(
                             Some(flavour),
                             "WARN",
                             &format!("Failed to sync dependency '{}' (failed count: {}), rolled back addon stub", dep, rep.failed),
                         );
-                        if !total_unresolved.contains(&dep) {
+                        if !total_installed.contains(&dep) && !total_unresolved.contains(&dep) {
                             total_unresolved.push(dep.clone());
                         }
                     }
                     Err(e) => {
+                        let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", rusqlite::params![new_addon_id]);
                         let _ = conn.execute("DELETE FROM addons WHERE id = ?1", rusqlite::params![new_addon_id]);
                         crate::logging::append_sync_log(
                             Some(flavour),
                             "WARN",
                             &format!("Failed to sync dependency '{}': {}, rolled back addon stub", dep, e),
                         );
-                        if !total_unresolved.contains(&dep) {
+                        if !total_installed.contains(&dep) && !total_unresolved.contains(&dep) {
                             total_unresolved.push(dep.clone());
                         }
                     }

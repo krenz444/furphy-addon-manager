@@ -40,6 +40,11 @@ impl Catalogue {
         cat.insert(13345, "ace3".to_string());
         cat.insert(13346, "libsharedmedia-3-0".to_string());
         cat.insert(13347, "callbackhandler-1-0".to_string());
+        cat.insert(14410, "libstub".to_string());
+        cat.insert(14197, "libdatabroker-1-1".to_string());
+        cat.insert(14352, "libdbicon-1-0".to_string());
+        cat.insert(299236, "herebedragons".to_string());
+        cat.insert(65375, "weakauras-2".to_string());
 
         cat
     }

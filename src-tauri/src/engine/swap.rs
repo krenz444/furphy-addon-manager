@@ -57,6 +57,31 @@ pub fn restore_interrupted_folder_swaps(addons_path: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn set_writable_recursive(path: &Path) {
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                set_writable_recursive(&p);
+            } else if let Ok(metadata) = fs::metadata(&p) {
+                let mut perms = metadata.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = fs::set_permissions(&p, perms);
+                }
+            }
+        }
+    }
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut perms = metadata.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+    }
+}
+
 fn move_directory_atomic(source: &Path, dest: &Path) -> std::io::Result<()> {
     if fs::rename(source, dest).is_ok() {
         return Ok(());
@@ -66,16 +91,22 @@ fn move_directory_atomic(source: &Path, dest: &Path) -> std::io::Result<()> {
     let parent = dest.parent().unwrap_or(dest);
     let tmp_dest = parent.join(format!(".furphy-staging-{}", Uuid::new_v4().simple()));
     if tmp_dest.exists() {
+        #[cfg(windows)]
+        set_writable_recursive(&tmp_dest);
         let _ = fs::remove_dir_all(&tmp_dest);
     }
 
     copy_dir_all(source, &tmp_dest)?;
 
     if let Err(e) = fs::rename(&tmp_dest, dest) {
+        #[cfg(windows)]
+        set_writable_recursive(&tmp_dest);
         let _ = fs::remove_dir_all(&tmp_dest);
         return Err(e);
     }
 
+    #[cfg(windows)]
+    set_writable_recursive(source);
     let _ = fs::remove_dir_all(source);
     Ok(())
 }
@@ -186,7 +217,7 @@ pub fn execute_atomic_swap(
 
     // Stale cleanup: remove old folders that are not in candidate_folders and not protected
     for old_folder in previous_folders {
-        if !candidate_folders.contains(old_folder) {
+        if !candidate_folders.iter().any(|c| c.eq_ignore_ascii_case(old_folder)) {
             let lower_old = old_folder.to_ascii_lowercase();
             if protected_folders.contains(&lower_old) {
                 append_app_log(
@@ -201,6 +232,8 @@ pub fn execute_atomic_swap(
 
             let old_path = addons_path.join(old_folder);
             if old_path.exists() {
+                #[cfg(windows)]
+                set_writable_recursive(&old_path);
                 let _ = fs::remove_dir_all(&old_path);
                 append_app_log("INFO", &format!("Removed stale folder '{}'", old_folder));
             }

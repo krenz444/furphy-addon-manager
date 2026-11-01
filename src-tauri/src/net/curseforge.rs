@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 use chrono::Utc;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, REFERER, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, REFERER, RETRY_AFTER, USER_AGENT};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +12,26 @@ use crate::net::policy::NetworkPolicy;
 
 pub const CF_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
+
+fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    if let Some(val) = resp.headers().get(RETRY_AFTER).and_then(|v| v.to_str().ok()) {
+        if let Ok(secs) = val.trim().parse::<u64>() {
+            return Some(Duration::from_secs(secs.clamp(1, 60)));
+        }
+    }
+    None
+}
+
+fn is_cloudflare_challenge(status: reqwest::StatusCode, headers: &HeaderMap) -> bool {
+    let is_html = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false);
+
+    let has_cf_header = headers.contains_key("cf-mitigated") || headers.contains_key("cf-chl-bypass");
+    (status.as_u16() == 403 || status.as_u16() == 429 || status.as_u16() == 503) && is_html || has_cf_header
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +92,7 @@ pub async fn execute_cf_request(
 
     loop {
         attempt += 1;
-        let _permit = policy.acquire_permit(&host).await?;
+        let permit = policy.acquire_permit(&host).await?;
 
         let res = client
             .get(url)
@@ -80,29 +100,45 @@ pub async fn execute_cf_request(
             .send()
             .await;
 
+        drop(permit);
+
         match res {
             Ok(resp) => {
                 let status = resp.status();
+                let headers = resp.headers().clone();
                 policy.breaker.register_http_response(&host);
 
-                if status.is_success() {
-                    return Ok(resp);
-                }
+                let is_cf_block = status.as_u16() == 403
+                    || status.as_u16() == 429
+                    || is_cloudflare_challenge(status, &headers);
 
-                if status.as_u16() == 403 || status.as_u16() == 429 {
+                if is_cf_block {
                     if attempt < max_attempts {
+                        let wait_duration = parse_retry_after(&resp).unwrap_or(Duration::from_secs(5));
                         append_app_log(
                             "WARN",
-                            &format!("HTTP {} from {} - waiting 5 seconds and retrying", status.as_u16(), url),
+                            &format!(
+                                "CurseForge/Cloudflare rate restriction (HTTP {}) from {} - sleeping {:?} before retry",
+                                status.as_u16(),
+                                url,
+                                wait_duration
+                            ),
                         );
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        tokio::time::sleep(wait_duration).await;
                         continue;
                     } else {
                         // ADR-312: Survival of 403/429 switches to 24h fallback
                         let fallback_until = Utc::now() + chrono::Duration::hours(24);
                         policy.set_cf_fallback(fallback_until).await;
-                        return Err(format!("CurseForge request failed with HTTP {}", status.as_u16()));
+                        return Err(format!(
+                            "CurseForge request failed with HTTP {} (Cloudflare restriction; activated 24h fallback rule)",
+                            status.as_u16()
+                        ));
                     }
+                }
+
+                if status.is_success() {
+                    return Ok(resp);
                 }
 
                 if status.is_server_error() && attempt < max_attempts {
@@ -181,6 +217,13 @@ pub async fn get_cf_file_by_id(
     }
 }
 
+pub fn create_cf_download_client() -> reqwest::Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300))
+        .build()
+}
+
 pub async fn download_cf_file(
     policy: &NetworkPolicy,
     client: &Client,
@@ -192,27 +235,47 @@ pub async fn download_cf_file(
     let download_url = format!("{}/api/v1/mods/{}/files/{}/download", base_url, project_id, file.id);
 
     if let Some(parent) = dest_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|e| format!("Failed creating directory: {}", e))?;
     }
 
+    let part_path = dest_path.with_extension(format!("part.{}", uuid::Uuid::new_v4()));
+
     let resp = execute_cf_request(policy, client, &download_url).await?;
+    let content_length = resp.content_length();
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
 
     if bytes.is_empty() {
         return Err(format!("Downloaded file is zero-length for project {} file {}", project_id, file.id));
     }
 
-    if let Some(expected_len) = file.file_length {
-        if expected_len > 0 && (bytes.len() as u64) != expected_len {
+    // Verify ZIP Magic Signature: PK\x03\x04
+    if bytes.len() < 4 || &bytes[0..4] != [0x50, 0x4B, 0x03, 0x04] {
+        return Err(format!(
+            "Payload for project {} file {} is not a valid ZIP archive (magic header mismatch, possible Cloudflare HTML challenge)",
+            project_id, file.id
+        ));
+    }
+
+    let expected_len = file.file_length.filter(|&l| l > 0).or(content_length);
+    if let Some(expected) = expected_len {
+        if (bytes.len() as u64) != expected {
             return Err(format!(
                 "Downloaded file size mismatch for project {} file {} (expected {}, got {})",
-                project_id, file.id, expected_len, bytes.len()
+                project_id, file.id, expected, bytes.len()
             ));
         }
     }
 
-    let mut out_file = File::create(dest_path).map_err(|e| e.to_string())?;
-    out_file.write_all(&bytes).map_err(|e| e.to_string())?;
+    {
+        let mut out_file = File::create(&part_path).map_err(|e| format!("Failed creating temporary staging file: {}", e))?;
+        out_file.write_all(&bytes).map_err(|e| format!("Failed writing bytes to staging file: {}", e))?;
+        out_file.flush().map_err(|e| format!("Failed flushing staging file: {}", e))?;
+    }
+
+    fs::rename(&part_path, dest_path).map_err(|e| {
+        let _ = fs::remove_file(&part_path);
+        format!("Atomic rename from staging to destination failed: {}", e)
+    })?;
 
     Ok(bytes.len() as u64)
 }

@@ -84,22 +84,46 @@ pub async fn wago_addon(
 #[tauri::command]
 pub async fn cf_browse(
     policy: State<'_, Arc<NetworkPolicy>>,
-    _category: Option<String>,
-    _sort: Option<String>,
+    category: Option<String>,
+    sort: Option<String>,
     page: Option<u32>,
     search: Option<String>,
 ) -> Result<Value, String> {
     let client = crate::net::curseforge::create_cf_client().map_err(|e| e.to_string())?;
     let base = crate::net::curseforge::get_cf_base_url();
-    let page_num = page.unwrap_or(1);
-    let q = search.unwrap_or_default();
-    let url = format!(
-        "{}/api/v1/mods/search?gameId=1&pageSize=20&index={}&searchFilter={}",
-        base,
-        (page_num - 1) * 20,
-        q
-    );
-    let resp = execute_cf_request(&policy, &client, &url).await?;
+    let page_num = page.unwrap_or(1).max(1);
+    let page_index = (page_num - 1) * 20;
+
+    let mut url = reqwest::Url::parse(&format!("{}/api/v1/mods/search", base.trim_end_matches('/')))
+        .map_err(|e| format!("Malformed CurseForge base URL: {}", e))?;
+
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("gameId", "1");
+        pairs.append_pair("pageSize", "20");
+        pairs.append_pair("index", &page_index.to_string());
+
+        if let Some(ref q) = search {
+            let trimmed = q.trim();
+            if !trimmed.is_empty() {
+                pairs.append_pair("searchFilter", trimmed);
+            }
+        }
+        if let Some(ref cat) = category {
+            let trimmed = cat.trim();
+            if !trimmed.is_empty() && trimmed != "0" {
+                pairs.append_pair("categoryId", trimmed);
+            }
+        }
+        if let Some(ref s) = sort {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                pairs.append_pair("sortField", trimmed);
+            }
+        }
+    }
+
+    let resp = execute_cf_request(&policy, &client, url.as_str()).await?;
     if resp.status().is_success() {
         return resp.json::<Value>().await.map_err(|e| e.to_string());
     }

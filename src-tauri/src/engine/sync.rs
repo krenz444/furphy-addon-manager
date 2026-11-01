@@ -9,7 +9,7 @@ use crate::engine::archive::extract_addon_archive;
 use crate::engine::backups::{cleanup_orphaned_backups, create_backup_zip, record_and_prune_backup};
 use crate::engine::flavours::get_flavour_mapping;
 use crate::engine::ownership::{check_folder_ownership_conflicts, get_protected_folders};
-use crate::engine::select::{select_cf_file, select_github_release, select_wago_release};
+use crate::engine::select::{select_cf_file, select_github_asset, select_github_release, select_wago_release};
 use crate::engine::staging::prepare_flavour_staging_dir;
 use crate::engine::swap::execute_atomic_swap;
 use crate::engine::toc::{find_primary_toc, parse_toc_file, strip_wow_formatting};
@@ -371,8 +371,8 @@ pub async fn run_sync_for_flavour(
                                     chosen_file_id = Some(chosen.tag_name.clone());
                                     chosen_version = Some(chosen.tag_name.clone());
 
-                                    // Pick first asset with .zip, else zipball
-                                    let asset_opt = chosen.assets.iter().find(|ast| ast.name.ends_with(".zip"));
+                                    // Pick best asset with .zip, else zipball
+                                    let asset_opt = select_github_asset(&chosen, &repo);
                                     let is_zipball = asset_opt.is_none();
                                     let dl_url = asset_opt
                                         .map(|ast| ast.url.clone())
@@ -397,7 +397,7 @@ pub async fn run_sync_for_flavour(
                                         {
                                             sync_error = Some(e);
                                         } else if is_zipball {
-                                            let repo_name = parts[1].trim_end_matches(".git");
+                                            let repo_name = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
                                             if let Err(e) = crate::engine::archive::normalize_github_zipball(
                                                 &target_dl_path,
                                                 repo_name,
@@ -691,13 +691,29 @@ pub async fn run_sync_for_flavour(
         }
 
         // Aggregate required_deps from all installed folders in this addon
+        let target_norm = crate::engine::deps::normalize_dep_slug(&target_addon_name);
         for folder in &installed_folders {
             if let Some(toc_path) = find_primary_toc(&addons_path.join(folder), flavour, client_interface) {
                 let toc_meta = parse_toc_file(&toc_path);
                 for dep in toc_meta.required_deps {
-                    // Filter out internal folders that belong to this addon itself
-                    let is_internal = installed_folders.iter().any(|f| f.eq_ignore_ascii_case(&dep));
-                    if !is_internal && !required_deps.iter().any(|d| d.eq_ignore_ascii_case(&dep)) {
+                    let dep_norm = crate::engine::deps::normalize_dep_slug(&dep);
+
+                    // Comprehensive internal submodule detection
+                    let is_internal = installed_folders.iter().any(|f| {
+                        f.eq_ignore_ascii_case(&dep)
+                            || crate::engine::deps::normalize_dep_slug(f) == dep_norm
+                            || crate::engine::deps::get_dependency_alias(f).map(|a| a == dep_norm).unwrap_or(false)
+                            || crate::engine::deps::get_dependency_alias(&dep).map(|a| a == crate::engine::deps::normalize_dep_slug(f)).unwrap_or(false)
+                    })
+                    || target_addon_name.eq_ignore_ascii_case(&dep)
+                    || target_norm == dep_norm
+                    || a.wago_slug.as_ref().map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm).unwrap_or(false)
+                    || a.repo.as_ref().map(|r| {
+                        r.eq_ignore_ascii_case(&dep)
+                            || r.split('/').last().map(|rn| rn.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(rn) == dep_norm).unwrap_or(false)
+                    }).unwrap_or(false);
+
+                    if !is_internal && !required_deps.iter().any(|d| d.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(d) == dep_norm) {
                         required_deps.push(dep);
                     }
                 }
@@ -776,9 +792,12 @@ pub async fn run_sync_for_flavour(
         .query_row(
             "SELECT COUNT(*) FROM check_results cr \
              JOIN addons a ON a.id = cr.addon_id \
-             WHERE a.flavour = ?1 AND cr.status = 'Would-update' \
-             AND (cr.update_file_id IS NOT NULL AND cr.update_file_id != a.file_id) \
-             AND (cr.update_version IS NOT NULL AND cr.update_version != a.version)",
+             WHERE a.flavour = ?1 \
+               AND (cr.status = 'Would-update' OR cr.status = 'would_update') \
+               AND ( \
+                 (cr.update_file_id IS NOT NULL AND cr.update_file_id != IFNULL(a.file_id, '')) \
+                 OR (cr.update_version IS NOT NULL AND cr.update_version != IFNULL(a.version, '')) \
+               )",
             params![flavour],
             |r| r.get(0),
         )

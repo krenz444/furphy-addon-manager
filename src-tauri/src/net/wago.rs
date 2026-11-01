@@ -85,12 +85,16 @@ pub fn create_wago_client() -> reqwest::Result<Client> {
 
 fn unescape_html(s: &str) -> String {
     s.replace("&quot;", "\"")
-        .replace("&amp;", "&")
+        .replace("&#34;", "\"")
+        .replace("&#x22;", "\"")
+        .replace("&#039;", "'")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&#x27;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace("&#039;", "'")
-        .replace("&apos;", "'")
         .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
 }
 
 pub fn extract_data_page_json_from_html(html: &str) -> Option<Value> {
@@ -105,10 +109,21 @@ pub fn extract_data_page_json_from_html(html: &str) -> Option<Value> {
             if let Some(quote_char) = after_eq.chars().next() {
                 if quote_char == '"' || quote_char == '\'' {
                     let content_start = &after_eq[quote_char.len_utf8()..];
-                    if let Some(end) = content_start.find(quote_char) {
-                        let json_str = unescape_html(&content_start[..end]);
+                    let mut cursor = 0;
+                    while let Some(rel_end) = content_start[cursor..].find(quote_char) {
+                        let end = cursor + rel_end;
+                        let raw_slice = &content_start[..end];
+                        let json_str = unescape_html(raw_slice);
                         if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
                             return Some(parsed);
+                        }
+                        let double_unescaped = unescape_html(&json_str);
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&double_unescaped) {
+                            return Some(parsed);
+                        }
+                        cursor = end + quote_char.len_utf8();
+                        if raw_slice.contains('>') {
+                            break;
                         }
                     }
                 }
@@ -223,7 +238,19 @@ pub async fn get_wago_releases_page(
                 }
 
                 let text = r.text().await.map_err(|e| e.to_string())?;
-                let val: Value = serde_json::from_str(&text).map_err(|e| format!("Invalid JSON from Wago: {}", e))?;
+                let val: Value = match serde_json::from_str::<Value>(&text) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        if let Some(parsed) = extract_data_page_json_from_html(&text) {
+                            if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
+                                session.set_cached_version(ver.to_string());
+                            }
+                            parsed
+                        } else {
+                            return Err(format!("Invalid JSON or data-page from Wago for {}", slug));
+                        }
+                    }
+                };
 
                 let releases_obj = val
                     .get("props")
@@ -282,10 +309,15 @@ pub async fn download_wago_release(
         .map_err(|e| e.to_string())?;
 
     policy.breaker.register_http_response(&host);
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Wago download failed with HTTP {}", status));
+    }
+
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
 
-    if bytes.is_empty() {
-        return Err("Downloaded Wago release is zero-length".to_string());
+    if bytes.len() < 22 || !bytes.starts_with(b"PK") {
+        return Err("Downloaded Wago release is not a valid ZIP archive".to_string());
     }
 
     if let Some(expected) = expected_size {
@@ -476,12 +508,18 @@ pub async fn search_wago_addons(
         }
         if let Some(cat) = category {
             let trimmed = cat.trim();
-            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) && trimmed != "0" {
                 qp.append_pair("category", trimmed);
             }
         }
-        if sort == Some("name") {
-            qp.append_pair("sort", "name");
+        match sort {
+            Some("name") => {
+                qp.append_pair("sort", "name");
+            }
+            Some("popular") => {
+                qp.append_pair("sort", "popular");
+            }
+            _ => {}
         }
     }
     let url = parsed_url.to_string();
@@ -534,28 +572,17 @@ pub async fn search_wago_addons(
                 }
 
                 let text = r.text().await.map_err(|e| e.to_string())?;
-                let val: Value = if cached_ver.is_some() {
-                    match serde_json::from_str::<Value>(&text) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            if let Some(parsed) = extract_data_page_json_from_html(&text) {
-                                if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
-                                    session.set_cached_version(ver.to_string());
-                                }
-                                parsed
-                            } else {
-                                return Err("Invalid JSON from Wago search".to_string());
+                let val: Value = match serde_json::from_str::<Value>(&text) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        if let Some(parsed) = extract_data_page_json_from_html(&text) {
+                            if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
+                                session.set_cached_version(ver.to_string());
                             }
+                            parsed
+                        } else {
+                            return Err("Failed to parse JSON or extract data-page from Wago search response".to_string());
                         }
-                    }
-                } else {
-                    if let Some(parsed) = extract_data_page_json_from_html(&text) {
-                        if let Some(ver) = parsed.get("version").and_then(|v| v.as_str()) {
-                            session.set_cached_version(ver.to_string());
-                        }
-                        parsed
-                    } else {
-                        return Err("Failed to extract data-page from Wago HTML".to_string());
                     }
                 };
 

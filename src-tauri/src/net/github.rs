@@ -43,9 +43,63 @@ pub fn get_github_base_url() -> String {
     "https://api.github.com".to_string()
 }
 
+/// Computes backoff duration and reset timestamp per GITHUB-SOURCE-SPEC.md section 3.4a.
+pub fn extract_github_rate_limit_backoff(
+    headers: &HeaderMap,
+    now: DateTime<Utc>,
+) -> (u64, DateTime<Utc>) {
+    let mut backoff_seconds: i64 = 3600;
+
+    if let Some(val) = headers.get("retry-after") {
+        if let Ok(s) = val.to_str() {
+            if let Ok(secs) = s.trim().parse::<i64>() {
+                if secs > 0 {
+                    backoff_seconds = secs;
+                }
+            }
+        }
+    } else if let Some(val) = headers.get("x-ratelimit-reset") {
+        if let Ok(s) = val.to_str() {
+            if let Ok(epoch) = s.trim().parse::<i64>() {
+                let diff = epoch - now.timestamp();
+                backoff_seconds = diff.max(0);
+            }
+        }
+    }
+
+    let clamped_secs = backoff_seconds.clamp(60, 21600) as u64;
+    let reset_at = now + chrono::Duration::seconds(clamped_secs as i64);
+    (clamped_secs, reset_at)
+}
+
+pub fn parse_clean_sha256(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let token = trimmed.split_whitespace().next().unwrap_or(trimmed);
+    let clean = token.strip_prefix("sha256:").unwrap_or(token).to_ascii_lowercase();
+
+    if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(clean)
+    } else {
+        None
+    }
+}
+
 pub fn create_github_client() -> reqwest::Result<Client> {
+    let custom_redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("Too many redirects")
+        } else {
+            attempt.follow()
+        }
+    });
+
     Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(custom_redirect_policy)
         .build()
 }
 
@@ -127,29 +181,34 @@ pub async fn execute_github_request(
                 }
 
                 if status.as_u16() == 403 || status.as_u16() == 429 {
-                    let mut wait_secs = 5;
-                    if let Some(retry_after) = r.headers().get("Retry-After") {
-                        if let Ok(s) = retry_after.to_str() {
-                            if let Ok(parsed) = s.parse::<u64>() {
-                                wait_secs = parsed.clamp(5, 10);
-                            }
-                        }
-                    }
+                    let now = Utc::now();
+                    let (backoff_secs, limited_until) = extract_github_rate_limit_backoff(r.headers(), now);
 
-                    if attempt < 2 {
+                    if backoff_secs <= 10 && attempt < 2 {
                         append_app_log(
                             "WARN",
-                            &format!("GitHub rate limit ({}) - waiting {} seconds and retrying", status.as_u16(), wait_secs),
+                            &format!(
+                                "GitHub secondary rate limit ({}) - waiting {}s and retrying",
+                                status.as_u16(),
+                                backoff_secs
+                            ),
                         );
-                        tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                         continue;
-                    } else {
-                        let limited_until = Utc::now() + chrono::Duration::seconds(wait_secs as i64);
-                        return Err((
-                            format!("GitHub rate limited ({})", status.as_u16()),
-                            Some(limited_until),
-                        ));
                     }
+
+                    append_app_log(
+                        "WARN",
+                        &format!(
+                            "GitHub rate limited ({}) - backing off until {}",
+                            status.as_u16(),
+                            limited_until.to_rfc3339()
+                        ),
+                    );
+                    return Err((
+                        format!("GitHub rate limited ({}) until {}", status.as_u16(), limited_until.to_rfc3339()),
+                        Some(limited_until),
+                    ));
                 }
 
                 if status.is_server_error() && attempt < 2 {
@@ -242,10 +301,8 @@ pub async fn download_github_asset(
         return Err("Downloaded GitHub release asset is zero-length".to_string());
     }
 
-    if let Some(expected) = expected_digest {
-        let trimmed = expected.trim();
-        if !trimmed.is_empty() {
-            let clean_expected = trimmed.strip_prefix("sha256:").unwrap_or(trimmed).to_ascii_lowercase();
+    if let Some(expected_raw) = expected_digest {
+        if let Some(clean_expected) = parse_clean_sha256(expected_raw) {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&bytes);

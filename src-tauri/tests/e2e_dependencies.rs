@@ -249,7 +249,7 @@ async fn test_e2e_dependency_resolution_and_lifecycle() {
     assert_eq!(get_dependency_alias("exwind-core"), Some("excore"));
     assert_eq!(
         get_dependency_alias_target("exwindcore"),
-        Some(AddonTarget::GitHub("Ex-wind/EXWINDCORE".to_string()))
+        Some(AddonTarget::CurseForge(1650514))
     );
 
     let policy = Arc::new(NetworkPolicy::new());

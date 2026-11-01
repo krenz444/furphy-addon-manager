@@ -10,55 +10,123 @@ pub enum AddonTarget {
     GitHub(String),    // "owner/repo"
 }
 
+/// Centralized identifier resolver for CurseForge IDs, slugs, and built-in aliases.
+pub fn resolve_cf_identifier(ident: &str, catalogue: Option<&Catalogue>) -> Option<i64> {
+    let clean = ident.trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    // Direct numeric ID
+    if let Ok(id) = clean.parse::<i64>() {
+        return Some(id);
+    }
+
+    // Offline / Instawow catalogue lookup
+    if let Some(cat) = catalogue {
+        if let Some(id) = cat.get_id_by_slug(clean) {
+            return Some(id);
+        }
+    }
+
+    // Built-in static aliases
+    match clean.to_ascii_lowercase().as_str() {
+        "excore" | "exwindcore" => Some(1650514),
+        "exwindtools" => Some(1450635),
+        "details" => Some(61288),
+        "ace3" => Some(13345),
+        "libsharedmedia-3-0" => Some(13346),
+        "callbackhandler-1-0" => Some(13347),
+        "libstub" => Some(14410),
+        "libdatabroker-1-1" => Some(14197),
+        "libdbicon-1-0" => Some(14352),
+        "herebedragons" => Some(299236),
+        "weakauras-2" | "weakauras" => Some(65375),
+        _ => None,
+    }
+}
+
+/// Validates and cleans owner/repo pairs per GITHUB-SOURCE-SPEC.md 3.1.
+pub fn clean_github_repo(owner: &str, repo_raw: &str) -> Option<String> {
+    let owner = owner.trim();
+    let mut repo = repo_raw.trim();
+
+    // Strip trailing query parameters or fragments
+    if let Some(pos) = repo.find(['?', '#']) {
+        repo = &repo[..pos];
+    }
+    // Safely strip .git suffix without char-set trimming bug
+    if let Some(stripped) = repo.strip_suffix(".git") {
+        repo = stripped;
+    }
+    repo = repo.trim_end_matches('/');
+
+    // Validate owner: 1-39 chars, alphanumeric or single hyphens, no leading hyphen
+    if owner.is_empty() || owner.len() > 39 || owner.starts_with('-') {
+        return None;
+    }
+    if !owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+
+    // Validate repo: 1-100 chars, alphanumeric, ., _, -; cannot be purely dots (., ..)
+    if repo.is_empty() || repo.len() > 100 || repo.chars().all(|c| c == '.') {
+        return None;
+    }
+    if !repo.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        return None;
+    }
+
+    Some(format!("{}/{}", owner, repo))
+}
+
 pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option<AddonTarget> {
     let t = target.trim();
     if t.is_empty() {
         return None;
     }
 
+    let lower = t.to_ascii_lowercase();
+
     // 1. Direct numeric ID -> CurseForge
     if let Ok(id) = t.parse::<i64>() {
         return Some(AddonTarget::CurseForge(id));
     }
 
-    // 2. URL parsing: CurseForge
-    if t.contains("curseforge.com") {
-        if let Some(pos) = t.find("/addons/") {
-            let rest = &t[pos + "/addons/".len()..];
-            let slug = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-            if let Ok(id) = slug.parse::<i64>() {
-                return Some(AddonTarget::CurseForge(id));
-            }
-            if let Some(cat) = catalogue {
-                if let Some(id) = cat.get_id_by_slug(slug) {
-                    return Some(AddonTarget::CurseForge(id));
+    // 2. CurseForge deep links: curseforge://install?addonId=61288 or curseforge://addons/<slug_or_id>
+    if lower.starts_with("curseforge://") {
+        if let Ok(url) = reqwest::Url::parse(t) {
+            for (k, v) in url.query_pairs() {
+                if k.eq_ignore_ascii_case("addonid") || k.eq_ignore_ascii_case("projectid") {
+                    if let Ok(id) = v.parse::<i64>() {
+                        return Some(AddonTarget::CurseForge(id));
+                    }
                 }
             }
-            if slug.eq_ignore_ascii_case("excore") || slug.eq_ignore_ascii_case("exwindcore") {
-                return Some(AddonTarget::CurseForge(1650514));
+            let path_seg = url.path().trim_matches('/');
+            let seg = path_seg.split(['/', '?', '#']).next().unwrap_or(path_seg);
+            if let Some(id) = resolve_cf_identifier(seg, catalogue) {
+                return Some(AddonTarget::CurseForge(id));
             }
-            if slug.eq_ignore_ascii_case("exwindtools") {
-                return Some(AddonTarget::CurseForge(1450635));
+        }
+    }
+
+    // 3. HTTP URL parsing: CurseForge (www.curseforge.com, wow.curseforge.com)
+    if lower.contains("curseforge.com") {
+        if let Some(pos) = lower.find("/addons/") {
+            let rest = &t[pos + "/addons/".len()..];
+            let seg = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            if let Some(id) = resolve_cf_identifier(seg, catalogue) {
+                return Some(AddonTarget::CurseForge(id));
             }
             return None;
         }
 
-        if let Some(pos) = t.find("/projects/") {
+        if let Some(pos) = lower.find("/projects/") {
             let rest = &t[pos + "/projects/".len()..];
             let seg = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-            if let Ok(id) = seg.parse::<i64>() {
+            if let Some(id) = resolve_cf_identifier(seg, catalogue) {
                 return Some(AddonTarget::CurseForge(id));
-            }
-            if let Some(cat) = catalogue {
-                if let Some(id) = cat.get_id_by_slug(seg) {
-                    return Some(AddonTarget::CurseForge(id));
-                }
-            }
-            if seg.eq_ignore_ascii_case("excore") || seg.eq_ignore_ascii_case("exwindcore") {
-                return Some(AddonTarget::CurseForge(1650514));
-            }
-            if seg.eq_ignore_ascii_case("exwindtools") {
-                return Some(AddonTarget::CurseForge(1450635));
             }
             return None;
         }
@@ -66,11 +134,11 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
         return None;
     }
 
-    // 3. URL parsing: Wago
-    if t.contains("wago.io") {
-        if let Some(pos) = t.find("/addons/") {
+    // 4. HTTP URL parsing: Wago
+    if lower.contains("wago.io") {
+        if let Some(pos) = lower.find("/addons/") {
             let rest = &t[pos + "/addons/".len()..];
-            let slug = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            let slug = rest.split(['/', '?', '#', ' ']).next().unwrap_or(rest);
             if !slug.is_empty() {
                 return Some(AddonTarget::Wago(slug.to_string()));
             }
@@ -78,63 +146,74 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
         return None;
     }
 
-    // 4. URL parsing: GitHub
-    if t.contains("github.com") {
-        if let Some(pos) = t.find("github.com/") {
-            let rest = &t[pos + "github.com/".len()..];
-            let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-            if parts.len() >= 2 {
-                let repo = format!("{}/{}", parts[0], parts[1].trim_end_matches(".git"));
-                return Some(AddonTarget::GitHub(repo));
+    // 5. HTTP URL parsing: GitHub (https://github.com/owner/repo...)
+    if let Some(pos) = lower.find("github.com/") {
+        let rest = &t[pos + "github.com/".len()..];
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 {
+            if let Some(cleaned) = clean_github_repo(parts[0], parts[1]) {
+                return Some(AddonTarget::GitHub(cleaned));
             }
         }
         return None;
     }
 
-    // 5. Prefix matching: wago:slug, github:owner/repo, curse:id, curseforge:id
-    if let Some(stripped) = t.strip_prefix("curse:") {
-        if let Ok(id) = stripped.trim().parse::<i64>() {
+    // 6. Explicit prefix matching: curse:, curseforge:, wago:, github:
+    if let Some(stripped) = lower.strip_prefix("curse:").or_else(|| lower.strip_prefix("curseforge:")) {
+        let clean = stripped.trim();
+        if let Some(id) = resolve_cf_identifier(clean, catalogue) {
             return Some(AddonTarget::CurseForge(id));
         }
-    }
-
-    if let Some(stripped) = t.strip_prefix("curseforge:") {
-        if let Ok(id) = stripped.trim().parse::<i64>() {
-            return Some(AddonTarget::CurseForge(id));
-        }
+        return None;
     }
 
     if let Some(stripped) = t.strip_prefix("wago:") {
-        return Some(AddonTarget::Wago(stripped.trim().to_string()));
+        let trimmed = stripped.trim();
+        if !trimmed.is_empty() {
+            let clean_slug = if let Some(pos) = trimmed.find("/addons/") {
+                let rest = &trimmed[pos + "/addons/".len()..];
+                rest.split(['/', '?', '#', ' ']).next().unwrap_or(rest)
+            } else {
+                trimmed.split(['/', '?', '#', ' ']).next().unwrap_or(trimmed)
+            };
+            if !clean_slug.is_empty() {
+                return Some(AddonTarget::Wago(clean_slug.to_string()));
+            }
+        }
+        return None;
     }
 
     if let Some(stripped) = t.strip_prefix("github:") {
-        return Some(AddonTarget::GitHub(stripped.trim().to_string()));
+        let trimmed = stripped.trim();
+        let parts: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 {
+            if let Some(cleaned) = clean_github_repo(parts[0], parts[1]) {
+                return Some(AddonTarget::GitHub(cleaned));
+            }
+        }
+        return None;
     }
 
-    // 6. "owner/repo" shape
+    // 7. "owner/repo" shape -> GitHub
     if t.contains('/') && !t.contains(' ') && !t.starts_with("http") {
         let parts: Vec<&str> = t.split('/').collect();
-        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            return Some(AddonTarget::GitHub(t.to_string()));
+        if parts.len() == 2 {
+            if let Some(cleaned) = clean_github_repo(parts[0], parts[1]) {
+                return Some(AddonTarget::GitHub(cleaned));
+            }
         }
     }
 
-    // 7. Slug lookup in catalogue
-    if let Some(cat) = catalogue {
-        if let Some(id) = cat.get_id_by_slug(t) {
-            return Some(AddonTarget::CurseForge(id));
-        }
-    }
-    if t.eq_ignore_ascii_case("excore") || t.eq_ignore_ascii_case("exwindcore") {
-        return Some(AddonTarget::CurseForge(1650514));
-    }
-    if t.eq_ignore_ascii_case("exwindtools") {
-        return Some(AddonTarget::CurseForge(1450635));
+    // 8. Plain slug resolution against CurseForge catalogue / aliases
+    if let Some(id) = resolve_cf_identifier(t, catalogue) {
+        return Some(AddonTarget::CurseForge(id));
     }
 
-    // Fallback: assume Wago slug ONLY if it looks like a clean identifier (no slashes, colons, or URLs)
-    if !t.contains('/') && !t.contains(':') && !t.contains(' ') && !t.starts_with("http") {
+    // 9. Fallback: assume Wago slug ONLY if it is a valid, clean ASCII slug identifier
+    if !t.is_empty()
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !t.chars().all(|c| c.is_ascii_digit())
+    {
         return Some(AddonTarget::Wago(t.to_string()));
     }
 

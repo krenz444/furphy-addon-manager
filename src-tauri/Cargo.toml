@@ -1,6 +1,6 @@
 [package]
 name = "furphy-addon-manager"
-version = "2.0.9"
+version = "2.0.10"
 description = "Furphy Addon Manager v2"
 authors = ["Eric Krenz"]
 edition = "2021"

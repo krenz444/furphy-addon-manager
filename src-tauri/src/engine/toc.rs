@@ -86,18 +86,18 @@ pub fn parse_toc_file(toc_path: &Path) -> TocMetadata {
                 "x-flavor" => {
                     meta.x_flavor = Some(value.to_string());
                 }
-                "requireddeps" | "dependencies" => {
-                    for dep in value.split([',', ' ']) {
+                "requireddeps" | "dependencies" | "x-requireddeps" | "x-dependencies" => {
+                    for dep in value.split([',', ' ', '\t']) {
                         let d = dep.trim();
-                        if !d.is_empty() && !meta.required_deps.contains(&d.to_string()) {
+                        if !d.is_empty() && !meta.required_deps.iter().any(|existing| existing.eq_ignore_ascii_case(d)) {
                             meta.required_deps.push(d.to_string());
                         }
                     }
                 }
-                "optionaldeps" => {
-                    for dep in value.split([',', ' ']) {
+                "optionaldeps" | "x-optionaldeps" => {
+                    for dep in value.split([',', ' ', '\t']) {
                         let d = dep.trim();
-                        if !d.is_empty() && !meta.optional_deps.contains(&d.to_string()) {
+                        if !d.is_empty() && !meta.optional_deps.iter().any(|existing| existing.eq_ignore_ascii_case(d)) {
                             meta.optional_deps.push(d.to_string());
                         }
                     }

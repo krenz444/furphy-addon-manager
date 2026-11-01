@@ -243,7 +243,7 @@ async fn test_e2e_wago_full_lifecycle() {
         &mut conn,
         "add",
         Some("retail"),
-        json!({ "target": "plater-nameplates", "slug": "plater-nameplates" }),
+        json!({ "target": "plater-nameplates", "slug": "plater-nameplates", "source": "wago" }),
     ).await;
 
     // 6. Verify job succeeds, DB record created with wago_slug, files extracted into AddOns/Plater
