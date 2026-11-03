@@ -13,16 +13,18 @@
   $effect(() => {
     if (!sentinelEl || props.disabled) return;
 
+    let triggered = false;
     const observer = new IntersectionObserver(
       (entries) => {
         const first = entries[0];
-        if (first?.isIntersecting && !props.disabled) {
+        if (first?.isIntersecting && !props.disabled && !triggered) {
+          triggered = true;
           props.onTrigger();
         }
       },
       {
         root: props.root || null,
-        rootMargin: props.rootMargin || '400px',
+        rootMargin: props.rootMargin || '200px',
         threshold: 0,
       }
     );

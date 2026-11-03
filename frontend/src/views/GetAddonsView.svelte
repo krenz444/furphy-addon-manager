@@ -77,21 +77,30 @@
     }
   }
 
+  let isFetching = false;
+  let lastLoadMoreTime = 0;
+
   async function searchWago(isFirstPage: boolean = true) {
+    if (isFetching) return;
+    isFetching = true;
+
     if (isFirstPage) {
       loadingWago = true;
       wagoError = null;
+      wagoPage = 1;
     } else {
       loadingMore = true;
       footerError = null;
     }
+
+    const targetPage = isFirstPage ? 1 : wagoPage;
 
     try {
       const raw = await wagoSearch({
         query: wagoSearchQuery,
         sort: wagoSort,
         category: wagoCategory || undefined,
-        page: wagoPage,
+        page: targetPage,
         flavour,
       });
 
@@ -99,12 +108,29 @@
       totalCount = raw?.total ?? 0;
       hasMore = Boolean(raw?.has_more);
 
+      // Extra client-side filter: if browsing forever / classic, purge any retail-only addons
+      const isClassicOrForever = flavour === 'forever' || flavour === 'classic' || flavour === 'classic_era';
+      const filteredItems = isClassicOrForever
+        ? newItems.filter((item) => {
+            const s = (item.slug || '').toLowerCase();
+            return !s.startsWith('raiderio') && !s.includes('mythic-plus') && !s.includes('mythic-dungeon-tools');
+          })
+        : newItems;
+
       if (isFirstPage) {
-        wagoResults = newItems;
+        wagoResults = filteredItems;
+        if (filteredItems.length === 0) {
+          hasMore = false;
+        }
       } else {
         const existingSlugs = new Set(wagoResults.map((r) => r.slug));
-        const uniqueNew = newItems.filter((r) => !existingSlugs.has(r.slug));
-        wagoResults = [...wagoResults, ...uniqueNew];
+        const uniqueNew = filteredItems.filter((r) => !existingSlugs.has(r.slug));
+        if (uniqueNew.length === 0) {
+          // No new addons found on this page, stop further pagination
+          hasMore = false;
+        } else {
+          wagoResults = [...wagoResults, ...uniqueNew];
+        }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -151,6 +177,8 @@
         }
       } else {
         footerError = msg;
+        // Roll back page counter on failure so retry uses the same page
+        wagoPage = Math.max(1, wagoPage - 1);
       }
     } finally {
       if (isFirstPage) {
@@ -158,9 +186,16 @@
       } else {
         loadingMore = false;
       }
-      tick().then(() => {
-        checkAutoFill();
-      });
+      isFetching = false;
+
+      // Auto-fill test: ONLY after the first page loads on high-resolution displays
+      // where 14 cards do not yet cause vertical scrolling.
+      // NEVER runs on subsequent pages or if an error occurred!
+      if (isFirstPage && !wagoError && hasMore) {
+        setTimeout(() => {
+          checkAutoFill();
+        }, 350);
+      }
     }
   }
 
@@ -206,32 +241,32 @@
   function checkAutoFill() {
     if (
       scrollContainerEl &&
-      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 150 &&
+      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 40 &&
       hasMore &&
       !loadingMore &&
       !loadingWago &&
+      !footerError &&
+      !isFetching &&
       wagoResults.length > 0 &&
-      wagoPage < 10
+      wagoPage === 1
     ) {
       handleLoadMore();
     }
   }
 
-  function handleContainerScroll() {
-    if (!scrollContainerEl || loadingWago || loadingMore || !hasMore) return;
-    const { scrollTop, scrollHeight, clientHeight } = scrollContainerEl;
-    if (scrollHeight - scrollTop - clientHeight < 400) {
-      handleLoadMore();
-    }
-  }
-
   function handleRetryLoadMore() {
-    if (loadingWago || loadingMore || !hasMore) return;
+    if (isFetching || loadingWago || loadingMore || !hasMore) return;
+    footerError = null;
+    wagoPage += 1;
     searchWago(false);
   }
 
   function handleLoadMore() {
-    if (loadingWago || loadingMore || !hasMore) return;
+    if (isFetching || loadingWago || loadingMore || !hasMore || footerError) return;
+    const now = Date.now();
+    if (now - lastLoadMoreTime < 600) return;
+    lastLoadMoreTime = now;
+
     wagoPage += 1;
     searchWago(false);
   }
@@ -405,6 +440,11 @@
   {#if activeTab === 'wago'}
     <div class="wago-toolbar-strip">
       <WagoToolbar
+        selectedFlavour={flavour}
+        {flavours}
+        onFlavourChange={(newFlv) => {
+          onSelectFlavour?.(newFlv);
+        }}
         searchQuery={wagoSearchQuery}
         selectedCategory={wagoCategory}
         selectedSort={wagoSort}
@@ -421,7 +461,7 @@
     </div>
   {/if}
 
-  <div class="tab-content" bind:this={scrollContainerEl} onscroll={handleContainerScroll}>
+  <div class="tab-content" bind:this={scrollContainerEl}>
     {#if activeTab === 'wago'}
       <div class="wago-pane">
         {#if loadingWago && wagoResults.length === 0}

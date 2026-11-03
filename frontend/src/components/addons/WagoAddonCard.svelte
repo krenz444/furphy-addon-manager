@@ -47,8 +47,18 @@
         <div class="card-subtitle">
           <span class="card-author">by {addon.author}</span>
           {#if addon.game_version}
-            <span class="version-tag" class:classic={addon.game_version === 'classic'}>
-              {addon.game_version === 'classic' ? 'Classic / Forever' : 'Retail'}
+            <span
+              class="version-tag"
+              class:forever={addon.game_version === 'forever'}
+              class:classic={addon.game_version === 'classic' || addon.game_version === 'classic_era'}
+            >
+              {#if addon.game_version === 'forever'}
+                WoW Forever
+              {:else if addon.game_version === 'classic' || addon.game_version === 'classic_era'}
+                Classic
+              {:else}
+                Retail
+              {/if}
             </span>
           {/if}
         </div>
@@ -202,6 +212,12 @@
   .version-tag.classic {
     background: rgba(245, 158, 11, 0.15);
     color: #f59e0b;
+  }
+
+  .version-tag.forever {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
   }
 
   .card-desc {

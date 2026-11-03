@@ -467,6 +467,15 @@ pub fn extract_avatar_url_from_card(html: &str) -> Option<String> {
     None
 }
 
+pub fn is_retail_only_wago_addon(slug: &str) -> bool {
+    let s = slug.to_lowercase();
+    s.starts_with("raiderio")
+        || s.contains("mythic-plus")
+        || s.contains("mythic-dungeon-tools")
+        || s == "astral-keys"
+        || s == "keystone-guru"
+}
+
 pub fn parse_wago_card_html(html: &str, game_version: Option<&str>) -> Option<WagoSearchItem> {
     let slug = extract_slug_from_card(html)?;
     let name = extract_name_from_card(html).unwrap_or_else(|| slug.clone());
@@ -591,7 +600,12 @@ pub async fn search_wago_addons(
                 if let Some(cards_array) = addons_obj.get("data").and_then(|d| d.as_array()) {
                     for card_val in cards_array {
                         if let Some(card_html) = card_val.as_str() {
-                            if let Some(item) = parse_wago_card_html(card_html, Some(&query_params.game_version)) {
+                            if let Some(item) = parse_wago_card_html(card_html, Some(flavour)) {
+                                if (flavour == "forever" || flavour == "classic" || flavour == "classic_era")
+                                    && is_retail_only_wago_addon(&item.slug)
+                                {
+                                    continue;
+                                }
                                 results.push(item);
                             }
                         }
@@ -611,8 +625,11 @@ pub async fn search_wago_addons(
                     });
                 }
 
-                let page_size = results.len().max(1) as u64;
-                let has_more = !results.is_empty() && (total > (page as u64 * page_size) || (results.len() >= 10 && total > results.len() as u64));
+                let has_next_page = addons_obj
+                    .get("next_page_url")
+                    .and_then(|u| u.as_str())
+                    .map_or(false, |s| !s.is_empty());
+                let has_more = !results.is_empty() && has_next_page;
 
                 return Ok((results, total, has_more));
             }

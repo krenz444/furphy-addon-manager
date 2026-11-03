@@ -197,6 +197,9 @@
       try {
         const s = await invoke<Record<string, any>>('get_settings');
         if (s) {
+          if (s.activeFlavour && typeof s.activeFlavour === 'string') {
+            activeFlavour = s.activeFlavour;
+          }
           if (s.showTestRealms !== undefined) showTestRealms = Boolean(s.showTestRealms);
           if (s.hostTheme) currentTheme = s.hostTheme;
         }
@@ -287,6 +290,9 @@
 
   function handleFlavourChange(flavourId: string) {
     activeFlavour = flavourId;
+    invoke('update_settings', { key: 'activeFlavour', value: flavourId }).catch((err) => {
+      console.warn('Failed to persist activeFlavour setting:', err);
+    });
     refreshFlavourData(flavourId);
   }
 

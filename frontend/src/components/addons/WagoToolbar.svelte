@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { WagoSortOption } from '../../lib/types';
+  import type { Flavour, WagoSortOption } from '../../lib/types';
 
   interface Props {
     searchQuery: string;
@@ -9,6 +9,9 @@
     loading: boolean;
     destinationLabel?: string;
     isClassicOrForever?: boolean;
+    selectedFlavour?: string;
+    flavours?: Flavour[];
+    onFlavourChange?: (flavour: string) => void;
     onQueryChange: (query: string) => void;
     onCategoryChange: (category: string) => void;
     onSortChange: (sort: WagoSortOption) => void;
@@ -24,6 +27,9 @@
     loading,
     destinationLabel,
     isClassicOrForever = false,
+    selectedFlavour,
+    flavours = [],
+    onFlavourChange,
     onQueryChange,
     onCategoryChange,
     onSortChange,
@@ -100,15 +106,61 @@
     {loading ? 'Searching…' : 'Search'}
   </button>
 
-  {#if destinationLabel}
+  {#if flavours && flavours.length > 0}
+    <div class="flavour-selector-wrap" title="Select which game version to browse and install addons for">
+      <label for="wago-target-flavour-select" class="flavour-label-badge">
+        <span class="indicator-dot" class:classic={isClassicOrForever}></span>
+        <span>Game:</span>
+      </label>
+      <select
+        id="wago-target-flavour-select"
+        class="toolbar-select flavour-select"
+        class:classic={isClassicOrForever}
+        value={selectedFlavour}
+        onchange={(e) => onFlavourChange?.((e.target as HTMLSelectElement).value)}
+        aria-label="Select game client to browse and install addons for"
+      >
+        {#each flavours as fl (fl.id)}
+          <option value={fl.id}>
+            {fl.label} {fl.custom_root ? '(Custom)' : `(${fl.folder})`}
+          </option>
+        {/each}
+      </select>
+    </div>
+  {:else if destinationLabel}
     <div class="target-indicator" class:classic={isClassicOrForever} title={`Browsing addons compatible with ${destinationLabel}`}>
-      <span class="indicator-dot"></span>
+      <span class="indicator-dot" class:classic={isClassicOrForever}></span>
       <span class="indicator-text">{destinationLabel}</span>
     </div>
   {/if}
 </div>
 
 <style>
+  .flavour-selector-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+
+  .flavour-label-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .flavour-select {
+    font-weight: 600;
+  }
+
+  .flavour-select.classic {
+    border-color: rgba(245, 158, 11, 0.4);
+    color: #f59e0b;
+  }
+
   .target-indicator {
     display: inline-flex;
     align-items: center;
@@ -133,7 +185,11 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--accent);
+  }
+
+  .indicator-dot.classic {
+    background: #f59e0b;
   }
 
   .indicator-text {

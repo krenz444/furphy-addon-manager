@@ -19,6 +19,8 @@ impl WagoQueryParams {
     ) -> Self {
         let game_version = match flavour.unwrap_or("retail") {
             "classic_era" | "forever" | "classic" => "classic".to_string(),
+            "cata" => "cata".to_string(),
+            "wotlk" => "wotlk".to_string(),
             _ => "retail".to_string(),
         };
 
