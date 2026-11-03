@@ -903,6 +903,45 @@ async fn test_search_with_no_matches_returns_empty_without_error() {
     assert!(!has_more);
 }
 
+#[tokio::test]
+async fn test_popular_sort_pages_do_not_repeat_the_first_page() {
+    // The default sort used to be sent upstream as sort=popular. Wago answers that with a redirect
+    // that also drops `page`, so page 2 and 3 were the same first page, the de-duplicating UI found
+    // nothing new and "load more" stopped at the first page (12 cards after the client filter).
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = MockWagoServer::spawn().await;
+    let _env = EnvGuard::new(&server.base_url);
+    let policy = Arc::new(NetworkPolicy::new());
+    let client = create_wago_client().expect("Failed creating reqwest client");
+    let session = WagoSession::new();
+
+    let mut pages: Vec<Vec<String>> = Vec::new();
+    let mut more: Vec<bool> = Vec::new();
+    for page in 1..=3u32 {
+        let (items, _, has_more) = search_wago_addons(
+            &policy,
+            &client,
+            &session,
+            "forever",
+            None,
+            None,
+            Some("popular"),
+            page,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("page {} failed: {}", page, e));
+        assert!(!items.is_empty(), "page {} must not be empty", page);
+        pages.push(items.iter().map(|i| i.slug.clone()).collect());
+        more.push(has_more);
+    }
+
+    assert_ne!(pages[0], pages[1], "page 2 must not repeat page 1");
+    let unique: HashSet<&String> = pages.iter().flatten().collect();
+    let total_returned: usize = pages.iter().map(|p| p.len()).sum();
+    assert_eq!(unique.len(), total_returned, "no addon may appear on two pages");
+    assert_eq!(more, vec![true, true, false], "has_more must follow the real last page");
+}
+
 /// Manual live canary hitting the real https://addons.wago.io.
 /// Run explicitly with: cargo test --test e2e_wago_search -- --ignored
 #[tokio::test]
@@ -989,4 +1028,66 @@ async fn live_canary_wago_real_upstream() {
         forever_slugs, retail_slugs,
         "Live forever and retail queries for 'details' must return different lists"
     );
+}
+
+/// Manual live canary: browsing WoW Forever with the default sort must walk real pages.
+/// Run with: cargo test --test e2e_wago_search -- --ignored
+#[tokio::test]
+#[ignore]
+async fn live_canary_wago_forever_browse_pages_do_not_repeat() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let orig_baseurl = std::env::var("FURPHY_TEST_WAGO_BASEURL").ok();
+    std::env::remove_var("FURPHY_TEST_WAGO_BASEURL");
+
+    struct RestoreGuard(Option<String>);
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            if let Some(ref val) = self.0 {
+                std::env::set_var("FURPHY_TEST_WAGO_BASEURL", val);
+            } else {
+                std::env::remove_var("FURPHY_TEST_WAGO_BASEURL");
+            }
+        }
+    }
+    let _restore = RestoreGuard(orig_baseurl);
+
+    let policy = Arc::new(NetworkPolicy::new());
+    let client = create_wago_client().expect("Failed creating reqwest client");
+    let session = WagoSession::new();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut returned = 0usize;
+    for page in 1..=3u32 {
+        let (items, total, has_more) = search_wago_addons(
+            &policy,
+            &client,
+            &session,
+            "forever",
+            None,
+            None,
+            Some("popular"),
+            page,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("live page {} failed: {}", page, e));
+
+        assert!(items.len() >= 10, "live page {} returned only {} cards", page, items.len());
+        assert!(total > 100, "live browse total should be Wago's cap (1000), got {}", total);
+        assert!(has_more, "live page {} must report more pages", page);
+        returned += items.len();
+        for item in items {
+            seen.insert(item.slug);
+        }
+    }
+
+    // Wago's download-ordered pages can shift an addon across a page boundary between requests,
+    // so allow a couple of repeats; the old bug repeated all of page 1 on every page.
+    assert!(
+        seen.len() + 2 >= returned,
+        "pages repeated each other: {} unique of {} returned",
+        seen.len(),
+        returned
+    );
+    assert!(seen.len() >= 30, "expected at least 30 distinct addons over 3 pages, got {}", seen.len());
 }
