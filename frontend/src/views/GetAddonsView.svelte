@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { invoke, isMockMode, wagoSearch } from '../lib/ipc';
   import type { Addon, Flavour, WagoAddonItem, WagoSortOption } from '../lib/types';
   import { debounce } from '../lib/hooks/useDebounce';
@@ -94,6 +94,7 @@
       loadingWago = true;
       loadingMore = false;
       wagoError = null;
+      footerError = null;
       wagoPage = 1;
     } else {
       loadingMore = true;
@@ -212,12 +213,25 @@
     }
   }
 
-  const debouncedSearch = debounce(() => {
+  // The filters a search is run for. Typing is not part of it: the debounce below owns the text,
+  // so a keystroke does not start a request of its own.
+  let activeSearchKey = '';
+
+  function currentSearchKey(): string {
+    return `${flavour}|${wagoCategory}|${wagoSort}`;
+  }
+
+  // The one way to start a fresh first-page search. It records the filters in force so the
+  // reactive effect further down does not start the same search a second time.
+  function startSearch() {
+    activeSearchKey = currentSearchKey();
     wagoPage = 1;
     wagoResults = [];
     hasMore = true;
     searchWago(true);
-  }, 300);
+  }
+
+  const debouncedSearch = debounce(() => startSearch(), 300);
 
   function handleQueryChange(newQuery: string) {
     wagoSearchQuery = newQuery;
@@ -226,19 +240,13 @@
 
   function handleTriggerSearch() {
     debouncedSearch.cancel();
-    wagoPage = 1;
-    wagoResults = [];
-    hasMore = true;
-    searchWago(true);
+    startSearch();
   }
 
   function handleClearQuery() {
     debouncedSearch.cancel();
     wagoSearchQuery = '';
-    wagoPage = 1;
-    wagoResults = [];
-    hasMore = true;
-    searchWago(true);
+    startSearch();
   }
 
   function handleCategoryChange(newCat: string) {
@@ -300,25 +308,13 @@
     });
   }
 
-  // Reactive search controller: reactively triggers search when activeTab, flavour, query, category, or sort changes
-  let activeSearchKey = '';
-
+  // Reactive search controller: a change of tab, client, category or sort starts a new search.
+  // The search itself reads the query text, so it runs untracked (typing is debounced instead).
   $effect(() => {
     if (activeTab !== 'wago') return;
 
-    // Track all query dependencies reactively
-    const targetFlavour = flavour;
-    const query = wagoSearchQuery.trim();
-    const category = wagoCategory;
-    const sort = wagoSort;
-    const key = `${targetFlavour}|${query}|${category}|${sort}`;
-
-    if (key !== activeSearchKey) {
-      activeSearchKey = key;
-      wagoPage = 1;
-      wagoResults = [];
-      hasMore = true;
-      searchWago(true);
+    if (currentSearchKey() !== activeSearchKey) {
+      untrack(() => startSearch());
     }
   });
 
@@ -330,6 +326,7 @@
     if (initialSearchQuery && initialSearchQuery !== wagoSearchQuery) {
       activeTab = 'wago';
       wagoSearchQuery = initialSearchQuery;
+      untrack(() => handleTriggerSearch());
     }
   });
 

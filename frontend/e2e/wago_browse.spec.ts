@@ -65,6 +65,14 @@ test.describe('Furphy Wago browse', () => {
     await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).toBeVisible();
   });
 
+  test('2b Typing character by character ends on the results for the final text', async ({ page }) => {
+    const searchInput = page.getByLabel('Search Wago addons');
+    await searchInput.pressSequentially('Plater', { delay: 40 });
+
+    await expect(page.locator('.addon-card')).toHaveCount(1);
+    await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).toBeVisible();
+  });
+
   test('3 Switching target game client re-queries appropriate pool', async ({ page }) => {
     // Retail pool cards are initially visible
     await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).toBeVisible();
