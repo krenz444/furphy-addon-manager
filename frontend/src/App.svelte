@@ -1104,12 +1104,16 @@
     flex-direction: column;
     height: 100%;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
     position: relative;
   }
 
   .view-container {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
     min-height: 0;
     overflow: hidden;
   }

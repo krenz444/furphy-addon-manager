@@ -101,9 +101,6 @@
 
       if (isFirstPage) {
         wagoResults = newItems;
-        tick().then(() => {
-          checkAutoFill();
-        });
       } else {
         const existingSlugs = new Set(wagoResults.map((r) => r.slug));
         const uniqueNew = newItems.filter((r) => !existingSlugs.has(r.slug));
@@ -161,6 +158,9 @@
       } else {
         loadingMore = false;
       }
+      tick().then(() => {
+        checkAutoFill();
+      });
     }
   }
 
@@ -206,12 +206,12 @@
   function checkAutoFill() {
     if (
       scrollContainerEl &&
-      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 100 &&
+      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 150 &&
       hasMore &&
       !loadingMore &&
       !loadingWago &&
       wagoResults.length > 0 &&
-      wagoPage < 3
+      wagoPage < 10
     ) {
       handleLoadMore();
     }
@@ -220,7 +220,7 @@
   function handleContainerScroll() {
     if (!scrollContainerEl || loadingWago || loadingMore || !hasMore) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerEl;
-    if (scrollHeight - scrollTop - clientHeight < 350) {
+    if (scrollHeight - scrollTop - clientHeight < 400) {
       handleLoadMore();
     }
   }
@@ -252,28 +252,36 @@
     });
   }
 
-  // Reactive flavour synchronization: whenever active flavour changes, immediately reset and re-query
-  let previousFlavour = $state<string | null>(null);
+  // Reactive search controller: reactively triggers search when activeTab, flavour, query, category, or sort changes
+  let activeSearchKey = '';
+
   $effect(() => {
-    const current = flavour;
-    if (previousFlavour !== null && current !== previousFlavour) {
-      previousFlavour = current;
-      if (activeTab === 'wago') {
-        wagoPage = 1;
-        wagoResults = [];
-        hasMore = true;
-        searchWago(true);
-      }
-    } else if (previousFlavour === null) {
-      previousFlavour = current;
+    if (activeTab !== 'wago') return;
+
+    // Track all query dependencies reactively
+    const targetFlavour = flavour;
+    const query = wagoSearchQuery.trim();
+    const category = wagoCategory;
+    const sort = wagoSort;
+    const key = `${targetFlavour}|${query}|${category}|${sort}`;
+
+    if (key !== activeSearchKey) {
+      activeSearchKey = key;
+      wagoPage = 1;
+      wagoResults = [];
+      hasMore = true;
+      searchWago(true);
     }
   });
 
   $effect(() => {
-    if (initialSearchQuery) {
+    loadCategories();
+  });
+
+  $effect(() => {
+    if (initialSearchQuery && initialSearchQuery !== wagoSearchQuery) {
       activeTab = 'wago';
       wagoSearchQuery = initialSearchQuery;
-      handleTriggerSearch();
     }
   });
 
@@ -330,13 +338,7 @@
     githubInput = '';
   }
 
-  // Initial load
-  $effect(() => {
-    loadCategories();
-    if (activeTab === 'wago' && wagoResults.length === 0 && !loadingWago) {
-      searchWago(true);
-    }
-  });
+
 </script>
 
 <div class="get-addons-view">
@@ -400,32 +402,36 @@
     </div>
   </header>
 
+  {#if activeTab === 'wago'}
+    <div class="wago-toolbar-strip">
+      <WagoToolbar
+        searchQuery={wagoSearchQuery}
+        selectedCategory={wagoCategory}
+        selectedSort={wagoSort}
+        categories={wagoCategories}
+        loading={loadingWago}
+        destinationLabel={displayLabel}
+        isClassicOrForever={flavour === 'forever' || flavour === 'classic' || flavour === 'classic_era'}
+        onQueryChange={handleQueryChange}
+        onCategoryChange={handleCategoryChange}
+        onSortChange={handleSortChange}
+        onTriggerSearch={handleTriggerSearch}
+        onClearQuery={handleClearQuery}
+      />
+    </div>
+  {/if}
+
   <div class="tab-content" bind:this={scrollContainerEl} onscroll={handleContainerScroll}>
     {#if activeTab === 'wago'}
       <div class="wago-pane">
-        <WagoToolbar
-          searchQuery={wagoSearchQuery}
-          selectedCategory={wagoCategory}
-          selectedSort={wagoSort}
-          categories={wagoCategories}
-          loading={loadingWago}
-          destinationLabel={displayLabel}
-          isClassicOrForever={flavour === 'forever' || flavour === 'classic' || flavour === 'classic_era'}
-          onQueryChange={handleQueryChange}
-          onCategoryChange={handleCategoryChange}
-          onSortChange={handleSortChange}
-          onTriggerSearch={handleTriggerSearch}
-          onClearQuery={handleClearQuery}
-        />
-
-        {#if loadingWago}
+        {#if loadingWago && wagoResults.length === 0}
           <WagoCardSkeleton count={8} />
         {:else if wagoError && wagoResults.length === 0}
           <div class="state-message error-message">
             <p>Couldn’t load results from Wago.io: {wagoError}</p>
             <button type="button" class="btn-secondary" onclick={handleTriggerSearch}>Retry</button>
           </div>
-        {:else if wagoResults.length === 0}
+        {:else if !loadingWago && wagoResults.length === 0}
           <div class="state-message">
             <p>No addons found matching "{wagoSearchQuery}" for {displayLabel}.</p>
           </div>
@@ -568,6 +574,7 @@
 
 <style>
   .get-addons-view {
+    flex: 1;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -576,6 +583,7 @@
   }
 
   .tab-header {
+    flex-shrink: 0;
     background: var(--bg-1);
     border-bottom: 1px solid var(--border);
     padding: 0 1.25rem;
@@ -668,10 +676,17 @@
     outline: 2px solid var(--focus-ring);
   }
 
+  .wago-toolbar-strip {
+    flex-shrink: 0;
+    background: var(--bg-0);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 1.25rem;
+  }
+
   .tab-content {
     flex: 1;
     min-height: 0;
-    overflow-y: scroll;
+    overflow-y: auto;
     overflow-x: hidden;
     padding: 1.25rem;
     scrollbar-gutter: stable;
@@ -681,6 +696,7 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    min-height: min-content;
   }
 
   .addons-grid {

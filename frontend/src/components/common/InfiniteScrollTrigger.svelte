@@ -22,7 +22,7 @@
       },
       {
         root: props.root || null,
-        rootMargin: props.rootMargin || '350px',
+        rootMargin: props.rootMargin || '400px',
         threshold: 0,
       }
     );
