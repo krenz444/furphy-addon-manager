@@ -540,7 +540,7 @@ async fn test_downloads_rating_gaining_are_never_forwarded() {
 
     let baseline_slugs: Vec<_> = baseline_items.iter().map(|i| i.slug.clone()).collect();
 
-    for sort_val in ["downloads", "rating", "gaining"] {
+    for sort_val in ["popular", "downloads", "rating", "gaining"] {
         server.recorded_requests.lock().unwrap().clear();
 
         let (items, total, _) = search_wago_addons(
@@ -829,6 +829,78 @@ async fn test_hostile_upstream_dropping_filters_is_reported_as_error() {
         "Error message must contain 'did not apply', got: {}",
         err
     );
+}
+
+#[tokio::test]
+async fn test_name_sort_combined_with_search_keeps_both_filters() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = MockWagoServer::spawn().await;
+    let _env = EnvGuard::new(&server.base_url);
+    let policy = Arc::new(NetworkPolicy::new());
+    let client = create_wago_client().expect("Failed creating reqwest client");
+    let session = WagoSession::new();
+
+    let (items, total, _) = search_wago_addons(
+        &policy,
+        &client,
+        &session,
+        "forever",
+        Some("alpha"),
+        None,
+        Some("name"),
+        1,
+    )
+    .await
+    .expect("sort=name with a search must succeed");
+
+    assert!(!items.is_empty(), "Expected results matching 'alpha'");
+    assert_eq!(total, items.len() as u64);
+    for item in &items {
+        assert!(
+            item.name.to_lowercase().contains("alpha"),
+            "'{}' does not match 'alpha'",
+            item.name
+        );
+    }
+    for window in items.windows(2) {
+        assert!(window[0].name.to_lowercase() <= window[1].name.to_lowercase());
+    }
+
+    let reqs = server.recorded_requests.lock().unwrap();
+    assert!(
+        reqs.iter().any(|r| r.contains("sort=name")
+            && r.contains("search=alpha")
+            && r.contains("game_version=classic")),
+        "sort=name, search and game_version must travel together, got: {:?}",
+        *reqs
+    );
+}
+
+#[tokio::test]
+async fn test_search_with_no_matches_returns_empty_without_error() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = MockWagoServer::spawn().await;
+    let _env = EnvGuard::new(&server.base_url);
+    let policy = Arc::new(NetworkPolicy::new());
+    let client = create_wago_client().expect("Failed creating reqwest client");
+    let session = WagoSession::new();
+
+    let (items, total, has_more) = search_wago_addons(
+        &policy,
+        &client,
+        &session,
+        "retail",
+        Some("zzzz-no-such-addon"),
+        None,
+        Some("popular"),
+        1,
+    )
+    .await
+    .expect("a search without matches is not an error");
+
+    assert!(items.is_empty());
+    assert_eq!(total, 0);
+    assert!(!has_more);
 }
 
 /// Manual live canary hitting the real https://addons.wago.io.

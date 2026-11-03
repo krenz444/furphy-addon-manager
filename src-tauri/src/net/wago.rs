@@ -578,7 +578,9 @@ fn compute_has_more(addons_obj: &Value, current_page: u64, total: u64, returned:
     if let Some(next) = addons_obj.get("next_page_url") {
         return next.as_str().map_or(false, |s| !s.is_empty());
     }
-    returned > 0 && total > current_page.saturating_mul(returned as u64)
+    let per_page = addons_obj.get("per_page").and_then(|v| v.as_u64()).unwrap_or(15);
+    let seen = current_page.saturating_sub(1).saturating_mul(per_page) + returned as u64;
+    returned > 0 && total > seen
 }
 
 pub async fn search_wago_addons(
@@ -924,6 +926,10 @@ mod tests {
         assert!(compute_has_more(&none, 1, 40, 14));
         assert!(!compute_has_more(&none, 1, 14, 14));
         assert!(!compute_has_more(&none, 1, 0, 0));
+        // A short final page: 20 results at 15 per page, page 2 returned only 5.
+        let paged = serde_json::json!({ "per_page": 15 });
+        assert!(compute_has_more(&paged, 1, 20, 15));
+        assert!(!compute_has_more(&paged, 2, 20, 5));
     }
 
     #[test]
