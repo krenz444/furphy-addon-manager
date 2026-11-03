@@ -570,6 +570,33 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
             { id: 'wa-raiderio', slug: 'raiderio-mythic-plus-raid-progress-and-recruitment', name: 'Raider.IO Mythic Plus & Raid', author: 'RaiderIO', description: 'Inspect mythic plus scores, raid progression, and profiles.', downloads: 6200000, version: 'v20261102', game_version: 'retail', wago_url: 'https://addons.wago.io/addons/raiderio-mythic-plus-raid-progress-and-recruitment' },
           ];
 
+      // A large category (3 pages of 15 different addons, like Wago's own pagination) so the UI's
+      // infinite scroll can be exercised for real; the small pools above fit on one page.
+      if (String(args?.category || '') === 'combat') {
+        const perPage = 15;
+        const all = Array.from({ length: 45 }, (_, i) => {
+          const n = String(i + 1).padStart(2, '0');
+          return {
+            id: `wa-combat-${n}`,
+            slug: `combat-addon-${n}`,
+            name: `Combat Addon ${n}`,
+            author: 'Mock Author',
+            description: `Mock combat addon number ${n}.`,
+            downloads: 1000000 - i * 1000,
+            version: '1.0.0',
+            game_version: isClassicOrForever ? 'classic' : 'retail',
+            wago_url: `https://addons.wago.io/addons/combat-addon-${n}`,
+          };
+        });
+        const start = (page - 1) * perPage;
+        return {
+          results: all.slice(start, start + perPage),
+          total: all.length,
+          page,
+          has_more: start + perPage < all.length,
+        } as T;
+      }
+
       const q = String(args?.query || '').trim().toLowerCase();
       const filtered = q
         ? mockPool.filter((a) => a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q))

@@ -209,6 +209,9 @@
             checkAutoFill();
           }, 350);
         }
+
+        // A page that finishes while the user is already at the bottom must not wait for another scroll.
+        tick().then(loadMoreIfNearBottom);
       }
     }
   }
@@ -228,6 +231,8 @@
     wagoPage = 1;
     wagoResults = [];
     hasMore = true;
+    // A load-more of the list being replaced must not throttle the first load-more of the new one.
+    lastLoadMoreTime = 0;
     searchWago(true);
   }
 
@@ -284,12 +289,31 @@
 
   function handleLoadMore() {
     if (isFetching || loadingWago || loadingMore || !hasMore || footerError) return;
-    const now = Date.now();
-    if (now - lastLoadMoreTime < 600) return;
-    lastLoadMoreTime = now;
+    const wait = 600 - (Date.now() - lastLoadMoreTime);
+    if (wait > 0) {
+      // Declined, not forgotten: look again once the throttle has expired.
+      setTimeout(loadMoreIfNearBottom, wait + 20);
+      return;
+    }
+    lastLoadMoreTime = Date.now();
 
     wagoPage += 1;
     searchWago(false);
+  }
+
+  // Level-triggered paging. The sentinel only fires when it comes into view, and only once per
+  // observer: when handleLoadMore declined (a fetch in flight, the throttle) the observer was used
+  // up and never fired again, which stranded a list at its first page. Re-checking on every scroll
+  // event and after every page makes a declined attempt harmless. It only acts when the list really
+  // overflows its container, so a container that is not height-bounded cannot make it fetch page
+  // after page.
+  function loadMoreIfNearBottom() {
+    const el = scrollContainerEl;
+    if (!el || !hasMore || isFetching || loadingWago || loadingMore || footerError) return;
+    const overflows = el.scrollHeight > el.clientHeight + 40;
+    if (overflows && el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
+      handleLoadMore();
+    }
   }
 
   function isAddonInstalled(slug: string, name: string): boolean {
@@ -471,7 +495,7 @@
     </div>
   {/if}
 
-  <div class="tab-content" bind:this={scrollContainerEl}>
+  <div class="tab-content" bind:this={scrollContainerEl} onscroll={loadMoreIfNearBottom}>
     {#if activeTab === 'wago'}
       <div class="wago-pane">
         {#if loadingWago && wagoResults.length === 0}

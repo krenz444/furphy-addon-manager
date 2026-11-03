@@ -133,4 +133,27 @@ test.describe('Furphy Wago browse', () => {
       return scrollContainer.evaluate((el) => el.scrollTop);
     }).toBeGreaterThan(0);
   });
+
+  test('5 Scrolling a large category keeps loading pages instead of stopping at the first', async ({ page }) => {
+    // The mock serves "Combat" as 45 different addons in 3 pages of 15.
+    await page.setViewportSize({ width: 1100, height: 600 });
+    await page.getByLabel('Filter by category').selectOption('combat');
+
+    const cards = page.locator('.addon-card');
+    await expect(cards.first()).toBeVisible();
+    const scrollContainer = page.locator('.tab-content');
+
+    // Scroll to the bottom repeatedly; every page that loads must add new cards until all 45 are shown.
+    await expect
+      .poll(
+        async () => {
+          await scrollContainer.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+          return cards.count();
+        },
+        { timeout: 20000, intervals: [300, 500, 800] },
+      )
+      .toBe(45);
+
+    await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 45' })).toBeVisible();
+  });
 });
