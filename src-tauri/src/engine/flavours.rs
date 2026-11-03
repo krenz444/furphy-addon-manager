@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,7 @@ pub const FLAVOUR_DEFS: &[FlavourDef] = &[
     FlavourDef { id: "retail", folder: "_retail_", label: "Retail", product: "wow" },
     FlavourDef { id: "classic", folder: "_classic_", label: "Classic", product: "wow_classic" },
     FlavourDef { id: "classic_era", folder: "_classic_era_", label: "Classic Era", product: "wow_classic_era" },
+    FlavourDef { id: "forever", folder: "_forever_", label: "WoW Forever", product: "wowf" },
     FlavourDef { id: "ptr", folder: "_ptr_", label: "PTR", product: "wowt" },
     FlavourDef { id: "xptr", folder: "_xptr_", label: "PTR (2)", product: "wowxptr" },
     FlavourDef { id: "beta", folder: "_beta_", label: "Beta", product: "wow_beta" },
@@ -38,6 +40,15 @@ pub fn resolve_classic_progression(interface: Option<i32>) -> ClassicProgression
                     type_id: Some(67408),
                     wago_value: Some("classic".to_string()),
                     version_prefix: Some("1.15.".to_string()),
+                };
+            }
+            if (16000..=16999).contains(&ival) {
+                return ClassicProgression {
+                    era_key: "forever".to_string(),
+                    era_label: "WoW Forever".to_string(),
+                    type_id: Some(67408),
+                    wago_value: Some("classic".to_string()),
+                    version_prefix: Some("1.60.".to_string()),
                 };
             }
             if (20500..=20599).contains(&ival) {
@@ -132,6 +143,13 @@ pub fn get_flavour_mapping(flavour: &str, client_interface: Option<i32>) -> Flav
             era_label: "Classic Era (Vanilla)".to_string(),
             era_key: "classic_era".to_string(),
         },
+        "forever" => FlavourMapping {
+            type_id: Some(67408),
+            version_prefix: Some("1.60.".to_string()),
+            wago_field: Some("classic".to_string()),
+            era_label: "WoW Forever".to_string(),
+            era_key: "forever".to_string(),
+        },
         "classic" => {
             let prog = resolve_classic_progression(client_interface);
             FlavourMapping {
@@ -215,6 +233,24 @@ pub fn detect_installed_flavours_in_root(wow_root: &Path) -> Vec<InstalledFlavou
                 }
             }
 
+            if client_build.is_none() {
+                let flavor_file = folder_path.join(".flavor.info");
+                if let Ok(content) = fs::read_to_string(&flavor_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.contains('!') {
+                            for (prod, ver) in &build_info_rows {
+                                if prod.eq_ignore_ascii_case(trimmed) {
+                                    client_build = Some(ver.clone());
+                                    client_interface = convert_to_interface_number(ver);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             result.push(InstalledFlavourInfo {
                 id: def.id.to_string(),
                 folder: def.folder.to_string(),
@@ -227,6 +263,55 @@ pub fn detect_installed_flavours_in_root(wow_root: &Path) -> Vec<InstalledFlavou
     }
 
     result
+}
+
+pub fn sync_installed_flavours_to_db(
+    conn: &mut Connection,
+    installed: &[InstalledFlavourInfo],
+) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction()?;
+
+    for flv in installed {
+        tx.execute(
+            "INSERT INTO flavours (id, folder, label, installed, client_build, client_interface) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5) \
+             ON CONFLICT(id) DO UPDATE SET \
+                folder = excluded.folder, \
+                label = excluded.label, \
+                installed = 1, \
+                client_build = COALESCE(excluded.client_build, flavours.client_build), \
+                client_interface = COALESCE(excluded.client_interface, flavours.client_interface)",
+            rusqlite::params![flv.id, flv.folder, flv.label, flv.client_build, flv.client_interface],
+        )?;
+    }
+
+    let detected_ids: Vec<&str> = installed.iter().map(|f| f.id.as_str()).collect();
+    let active_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT id FROM flavours WHERE installed = 1")?;
+        let ids: Result<Vec<String>, _> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect();
+        ids?
+    };
+
+    for db_id in active_ids {
+        if !detected_ids.contains(&db_id.as_str()) {
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM addons WHERE flavour = ?1",
+                rusqlite::params![db_id],
+                |r| r.get(0),
+            ).unwrap_or(0);
+            if count == 0 {
+                tx.execute(
+                    "UPDATE flavours SET installed = 0 WHERE id = ?1",
+                    rusqlite::params![db_id],
+                )?;
+            }
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -243,6 +328,13 @@ mod tests {
         let cata = resolve_classic_progression(Some(40402));
         assert_eq!(cata.era_key, "cata");
         assert_eq!(cata.type_id, Some(77522));
+
+        let forever = resolve_classic_progression(Some(16001));
+        assert_eq!(forever.era_key, "forever");
+        assert_eq!(forever.era_label, "WoW Forever");
+        assert_eq!(forever.type_id, Some(67408));
+        assert_eq!(forever.wago_value.as_deref(), Some("classic"));
+        assert_eq!(forever.version_prefix.as_deref(), Some("1.60."));
 
         let unknown = resolve_classic_progression(Some(99999));
         assert_eq!(unknown.era_key, "unknown");

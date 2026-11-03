@@ -7,7 +7,7 @@ use crate::db::open_connection;
 use crate::db::repo::{get_installed_flavours_db, FlavourDto};
 use crate::engine::adopt::adopt_candidate_group;
 use crate::engine::compat::{list_not_built_for_patch as engine_compat, PatchCompatStatus};
-use crate::engine::flavours::detect_installed_flavours_in_root;
+use crate::engine::flavours::{detect_installed_flavours_in_root, sync_installed_flavours_to_db};
 use crate::engine::ignore::set_ignore_updates;
 use crate::engine::pin::{pin_addon, unpin_addon};
 use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
@@ -258,7 +258,11 @@ pub fn get_addons(flavour: Option<String>) -> Result<Vec<AddonDto>, String> {
 #[tauri::command]
 pub fn get_flavours() -> Result<Vec<FlavourDto>, String> {
     let db_path = get_db_path();
-    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    if let Ok(wow_root) = detect_wow_root(None) {
+        let installed = detect_installed_flavours_in_root(&wow_root);
+        let _ = sync_installed_flavours_to_db(&mut conn, &installed);
+    }
     get_installed_flavours_db(&conn).map_err(|e| e.to_string())
 }
 
@@ -284,7 +288,11 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
 #[tauri::command]
 pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
     let db_path = get_db_path();
-    let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+    if let Ok(wow_root) = detect_wow_root(None) {
+        let installed = detect_installed_flavours_in_root(&wow_root);
+        let _ = sync_installed_flavours_to_db(&mut conn, &installed);
+    }
     let active_flavour = flavour.unwrap_or_else(|| "retail".into());
 
     let addons = fetch_addons_with_details(&conn, &active_flavour)?;

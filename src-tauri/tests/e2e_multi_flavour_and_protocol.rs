@@ -125,7 +125,7 @@ pub fn parse_and_validate_protocol_dispatch(url_str: &str) -> Result<ProtocolDis
                     file_id = val.parse::<i64>().ok();
                 } else if key == "flavour" || key == "flavor" {
                     let flv_clean = val.to_ascii_lowercase();
-                    if flv_clean != "retail" && flv_clean != "classic" && flv_clean != "classic_era" {
+                    if flv_clean != "retail" && flv_clean != "classic" && flv_clean != "classic_era" && flv_clean != "forever" {
                         return Err(format!("Unknown or unsupported flavour '{}'", val));
                     }
                     flavour = flv_clean;
@@ -159,6 +159,7 @@ fn test_e2e_multi_flavour_directory_isolation() {
     let retail_addons = wow_root.join("_retail_").join("Interface").join("AddOns");
     let classic_addons = wow_root.join("_classic_").join("Interface").join("AddOns");
     let classic_era_addons = wow_root.join("_classic_era_").join("Interface").join("AddOns");
+    let forever_addons = wow_root.join("_forever_").join("Interface").join("AddOns");
 
     fs::create_dir_all(&retail_addons).unwrap();
     fs::create_dir_all(wow_root.join("_retail_").join("WTF")).unwrap();
@@ -166,23 +167,27 @@ fn test_e2e_multi_flavour_directory_isolation() {
     fs::create_dir_all(wow_root.join("_classic_").join("WTF")).unwrap();
     fs::create_dir_all(&classic_era_addons).unwrap();
     fs::create_dir_all(wow_root.join("_classic_era_").join("WTF")).unwrap();
+    fs::create_dir_all(&forever_addons).unwrap();
+    fs::create_dir_all(wow_root.join("_forever_").join("WTF")).unwrap();
 
-    // Create .build.info with version strings for all 3 flavours
+    // Create .build.info with version strings for all 4 flavours
     let build_info_content = "\
 Product | Version
 wow | 11.0.2.56456
 wow_classic | 4.4.2.55555
 wow_classic_era | 1.15.3.56000
+wowf | 1.60.1.70707
 ";
     fs::write(wow_root.join(".build.info"), build_info_content).unwrap();
 
-    // 2. Detect flavours: verify all 3 identified with distinct interface versions and folder paths
+    // 2. Detect flavours: verify all 4 identified with distinct interface versions and folder paths
     let flavours = detect_installed_flavours_in_root(&wow_root);
-    assert_eq!(flavours.len(), 3, "All 3 flavours must be detected");
+    assert_eq!(flavours.len(), 4, "All 4 flavours must be detected");
 
     let retail_flv = flavours.iter().find(|f| f.id == "retail").expect("retail flavour missing");
     let classic_flv = flavours.iter().find(|f| f.id == "classic").expect("classic flavour missing");
     let classic_era_flv = flavours.iter().find(|f| f.id == "classic_era").expect("classic_era flavour missing");
+    let forever_flv = flavours.iter().find(|f| f.id == "forever").expect("forever flavour missing");
 
     assert_eq!(retail_flv.folder, "_retail_");
     assert_eq!(retail_flv.client_build.as_deref(), Some("11.0.2.56456"));
@@ -198,6 +203,11 @@ wow_classic_era | 1.15.3.56000
     assert_eq!(classic_era_flv.client_build.as_deref(), Some("1.15.3.56000"));
     assert_eq!(classic_era_flv.client_interface, Some(11503));
     assert_eq!(classic_era_flv.addons_path, classic_era_addons);
+
+    assert_eq!(forever_flv.folder, "_forever_");
+    assert_eq!(forever_flv.client_build.as_deref(), Some("1.60.1.70707"));
+    assert_eq!(forever_flv.client_interface, Some(16001));
+    assert_eq!(forever_flv.addons_path, forever_addons);
 
     // Verify distinct directories
     assert_ne!(retail_flv.addons_path, classic_flv.addons_path);
@@ -237,7 +247,7 @@ wow_classic_era | 1.15.3.56000
         [],
     ).unwrap();
 
-    // Verify filesystem isolation: present in retail, strictly absent in classic and classic_era
+    // Verify filesystem isolation: present in retail, strictly absent in classic, classic_era, and forever
     assert!(retail_addon_dir.exists(), "Addon directory must exist in retail");
     assert!(
         !classic_addons.join("RetailOnlyAddon").exists(),
@@ -246,6 +256,10 @@ wow_classic_era | 1.15.3.56000
     assert!(
         !classic_era_addons.join("RetailOnlyAddon").exists(),
         "Retail addon MUST NOT appear in classic_era AddOns directory"
+    );
+    assert!(
+        !forever_addons.join("RetailOnlyAddon").exists(),
+        "Retail addon MUST NOT appear in forever AddOns directory"
     );
 
     // Verify SQLite database query isolation

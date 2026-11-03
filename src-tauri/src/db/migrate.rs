@@ -163,6 +163,14 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
 
+    // Ensure all predefined flavours exist in flavours table
+    for def in FLAVOUR_DEFS {
+        conn.execute(
+            "INSERT OR IGNORE INTO flavours (id, folder, label, product, installed) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![def.id, def.folder, def.label, Option::<String>::None],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -180,7 +188,7 @@ mod tests {
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
 
         // Verify foreign keys enabled
         let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();

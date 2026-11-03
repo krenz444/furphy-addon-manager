@@ -30,12 +30,13 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
     let mut conn = db::open_connection(&db_path)?;
     db::migrate::run_migrations(&mut conn)?;
 
-    // 3. Crash recovery: recover interrupted folder swaps & unfinished jobs
+    // 3. Crash recovery: recover interrupted folder swaps & sync installed flavours
     if let Ok(ref root) = wow_root_res {
         let installed = detect_installed_flavours_in_root(root);
-        for flv in installed {
+        for flv in &installed {
             restore_interrupted_folder_swaps(&flv.addons_path);
         }
+        let _ = engine::flavours::sync_installed_flavours_to_db(&mut conn, &installed);
     }
     let _ = JobRunner::recover_unfinished_jobs(&conn);
 

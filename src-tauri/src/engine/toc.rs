@@ -121,7 +121,7 @@ fn get_era_selector(flavour: &str, client_interface: Option<i32>) -> EraSelector
             x_flavor_tag: "Mainline",
             suffixes: &["_Mainline", "-Mainline"],
         },
-        "classic_era" => EraSelector {
+        "classic_era" | "forever" => EraSelector {
             x_flavor_tag: "Vanilla",
             suffixes: &["_Vanilla", "_Classic", "-Classic"],
         },
@@ -144,7 +144,7 @@ fn get_era_selector(flavour: &str, client_interface: Option<i32>) -> EraSelector
                     x_flavor_tag: "Mists",
                     suffixes: &["_Mists"],
                 },
-                "classic_era" => EraSelector {
+                "classic_era" | "forever" => EraSelector {
                     x_flavor_tag: "Vanilla",
                     suffixes: &["_Vanilla", "_Classic", "-Classic"],
                 },

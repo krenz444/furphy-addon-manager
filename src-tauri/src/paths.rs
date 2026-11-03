@@ -12,6 +12,7 @@ pub const FLAVOUR_DEFS: &[FlavourDef] = &[
     FlavourDef { id: "retail", folder: "_retail_", label: "Retail", first_class: true },
     FlavourDef { id: "classic", folder: "_classic_", label: "Classic", first_class: true },
     FlavourDef { id: "classic_era", folder: "_classic_era_", label: "Classic Era", first_class: true },
+    FlavourDef { id: "forever", folder: "_forever_", label: "WoW Forever", first_class: true },
     FlavourDef { id: "ptr", folder: "_ptr_", label: "PTR", first_class: false },
     FlavourDef { id: "xptr", folder: "_xptr_", label: "PTR (2)", first_class: false },
     FlavourDef { id: "beta", folder: "_beta_", label: "Beta", first_class: false },

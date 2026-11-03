@@ -489,7 +489,7 @@ pub async fn search_wago_addons(
 ) -> Result<(Vec<WagoSearchItem>, u64), String> {
     let base_url = get_wago_base_url();
     let wago_game_version = match flavour {
-        "classic_era" => "classic",
+        "classic_era" | "forever" => "classic",
         "classic" => "classic",
         _ => "retail",
     };
