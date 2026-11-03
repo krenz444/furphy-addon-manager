@@ -79,13 +79,20 @@
 
   let isFetching = false;
   let lastLoadMoreTime = 0;
+  // Every search gets a sequence number; only the newest one may touch the list.
+  let searchSeq = 0;
 
   async function searchWago(isFirstPage: boolean = true) {
-    if (isFetching) return;
+    // Load-more never overlaps another fetch, but a new query (first page) supersedes whatever
+    // is in flight instead of being dropped: a client, sort, category or query change made while
+    // the auto-fill page was loading used to be lost, leaving the previous client's list on screen.
+    if (!isFirstPage && isFetching) return;
+    const seq = ++searchSeq;
     isFetching = true;
 
     if (isFirstPage) {
       loadingWago = true;
+      loadingMore = false;
       wagoError = null;
       wagoPage = 1;
     } else {
@@ -94,6 +101,7 @@
     }
 
     const targetPage = isFirstPage ? 1 : wagoPage;
+    const requestFlavour = flavour;
 
     try {
       const raw = await wagoSearch({
@@ -101,15 +109,16 @@
         sort: wagoSort,
         category: wagoCategory || undefined,
         page: targetPage,
-        flavour,
+        flavour: requestFlavour,
       });
+      if (seq !== searchSeq) return; // superseded by a newer search
 
       const newItems = raw?.results || [];
       totalCount = raw?.total ?? 0;
       hasMore = Boolean(raw?.has_more);
 
       // Extra client-side filter: if browsing forever / classic, purge any retail-only addons
-      const isClassicOrForever = flavour === 'forever' || flavour === 'classic' || flavour === 'classic_era';
+      const isClassicOrForever = requestFlavour === 'forever' || requestFlavour === 'classic' || requestFlavour === 'classic_era';
       const filteredItems = isClassicOrForever
         ? newItems.filter((item) => {
             const s = (item.slug || '').toLowerCase();
@@ -133,6 +142,7 @@
         }
       }
     } catch (err: unknown) {
+      if (seq !== searchSeq) return; // a failure of a superseded search is irrelevant
       const msg = err instanceof Error ? err.message : String(err);
       if (isFirstPage) {
         wagoError = msg;
@@ -181,20 +191,23 @@
         wagoPage = Math.max(1, wagoPage - 1);
       }
     } finally {
-      if (isFirstPage) {
-        loadingWago = false;
-      } else {
-        loadingMore = false;
-      }
-      isFetching = false;
+      // Only the newest search owns the loading flags; a superseded one must not clear them.
+      if (seq === searchSeq) {
+        if (isFirstPage) {
+          loadingWago = false;
+        } else {
+          loadingMore = false;
+        }
+        isFetching = false;
 
-      // Auto-fill test: ONLY after the first page loads on high-resolution displays
-      // where 14 cards do not yet cause vertical scrolling.
-      // NEVER runs on subsequent pages or if an error occurred!
-      if (isFirstPage && !wagoError && hasMore) {
-        setTimeout(() => {
-          checkAutoFill();
-        }, 350);
+        // Auto-fill test: ONLY after the first page loads on high-resolution displays
+        // where 14 cards do not yet cause vertical scrolling.
+        // NEVER runs on subsequent pages or if an error occurred!
+        if (isFirstPage && !wagoError && hasMore) {
+          setTimeout(() => {
+            checkAutoFill();
+          }, 350);
+        }
       }
     }
   }
