@@ -149,7 +149,8 @@ export interface AppUpdateInfo {
   first_run_update?: string | null;
 }
 
-export type WagoSortOption = 'popular' | 'downloads' | 'rating' | 'updated' | 'name' | 'gaining';
+// Wago exposes no rating or trend data and rejects those sort values (DEC-FURPHY-010, amended 2026-11-03).
+export type WagoSortOption = 'popular' | 'downloads' | 'updated' | 'name';
 
 export interface WagoAddonItem {
   id: string;

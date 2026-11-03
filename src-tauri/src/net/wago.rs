@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::logging::append_app_log;
 use crate::net::policy::NetworkPolicy;
+use crate::net::wago_query::WagoQueryParams;
 
 pub const WAGO_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
@@ -502,6 +503,84 @@ pub fn parse_wago_card_html(html: &str, game_version: Option<&str>) -> Option<Wa
     })
 }
 
+/// Wago echoes the filters it actually applied in `props.search`, `props.game_version`,
+/// `props.category` and `props.sort`. When it rejects a request (for example an
+/// unsupported `sort`) it redirects to `/` and every echo comes back null while the
+/// body is still a valid, unfiltered listing, so the caller would present Wago's
+/// default list as if it answered the query. Verified live 2026-11-03.
+///
+/// A key that is absent from `props` (test doubles, a future layout change) is not
+/// judged: only a present-but-different echo counts as a dropped filter.
+pub fn verify_wago_filter_echo(props: &Value, params: &WagoQueryParams) -> Result<(), String> {
+    fn echoed(props: &Value, key: &str) -> Option<Option<String>> {
+        props.get(key).map(|v| match v {
+            Value::Null => None,
+            Value::String(s) => Some(s.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            other => Some(other.to_string()),
+        })
+    }
+    fn differs(echo: Option<Option<String>>, expected: &str) -> bool {
+        match echo {
+            None => false,
+            Some(None) => true,
+            Some(Some(got)) => got.to_lowercase() != expected.trim().to_lowercase(),
+        }
+    }
+
+    let mut dropped: Vec<&str> = Vec::new();
+    if differs(echoed(props, "game_version"), &params.game_version) {
+        dropped.push("game_version");
+    }
+    if let Some(ref s) = params.search {
+        if differs(echoed(props, "search"), s) {
+            dropped.push("search");
+        }
+    }
+    if let Some(ref c) = params.category {
+        if differs(echoed(props, "category"), c) {
+            dropped.push("category");
+        }
+    }
+    if let Some(s) = params.upstream_sort() {
+        if differs(echoed(props, "sort"), s) {
+            dropped.push("sort");
+        }
+    }
+
+    if dropped.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Wago did not apply the requested filters ({}). Its default list would be misleading, so no results are shown.",
+            dropped.join(", ")
+        ))
+    }
+}
+
+/// Newest first; items without a parseable "Mon D, YYYY" date go last (stable sort).
+pub fn sort_by_updated_desc(items: &mut [WagoSearchItem]) {
+    let parse = |d: &Option<String>| {
+        d.as_ref()
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s.trim(), "%b %d, %Y").ok())
+    };
+    items.sort_by(|a, b| parse(&b.updated_at).cmp(&parse(&a.updated_at)));
+}
+
+/// Uses Wago's own pagination metadata: `last_page`, else a non-empty `next_page_url`
+/// (null on the final page). Without either (test doubles) it compares the reported total
+/// with what has been returned so far. It does not depend on how many cards survived
+/// client-side filtering, so an emptied page cannot end paging early.
+fn compute_has_more(addons_obj: &Value, current_page: u64, total: u64, returned: usize) -> bool {
+    if let Some(last_page) = addons_obj.get("last_page").and_then(|v| v.as_u64()) {
+        return current_page < last_page;
+    }
+    if let Some(next) = addons_obj.get("next_page_url") {
+        return next.as_str().map_or(false, |s| !s.is_empty());
+    }
+    returned > 0 && total > current_page.saturating_mul(returned as u64)
+}
+
 pub async fn search_wago_addons(
     policy: &NetworkPolicy,
     client: &Client,
@@ -589,6 +668,10 @@ pub async fn search_wago_addons(
                 };
 
                 let props = val.get("props").unwrap_or(&val);
+                if let Err(msg) = verify_wago_filter_echo(props, &query_params) {
+                    append_app_log("WARN", &format!("{} [{}]", msg, url));
+                    return Err(msg);
+                }
                 let addons_obj = match props.get("addons") {
                     Some(a) => a,
                     None => return Ok((Vec::new(), 0, false)),
@@ -612,24 +695,17 @@ pub async fn search_wago_addons(
                     }
                 }
 
-                if sort == Some("updated") {
-                    results.sort_by(|a, b| {
-                        let parse_date = |d: &Option<String>| {
-                            d.as_ref().and_then(|s| {
-                                chrono::NaiveDate::parse_from_str(s.trim(), "%b %d, %Y").ok()
-                            })
-                        };
-                        let da = parse_date(&a.updated_at);
-                        let db = parse_date(&b.updated_at);
-                        db.cmp(&da)
-                    });
+                // "updated" is never sent upstream (see WagoQueryParams::upstream_sort), so the
+                // page Wago returned is in its popularity order; order it here.
+                if query_params.sort.as_deref() == Some("updated") {
+                    sort_by_updated_desc(&mut results);
                 }
 
-                let has_next_page = addons_obj
-                    .get("next_page_url")
-                    .and_then(|u| u.as_str())
-                    .map_or(false, |s| !s.is_empty());
-                let has_more = !results.is_empty() && has_next_page;
+                let current_page = addons_obj
+                    .get("current_page")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(page as u64);
+                let has_more = compute_has_more(addons_obj, current_page, total, results.len());
 
                 return Ok((results, total, has_more));
             }
@@ -762,6 +838,92 @@ mod tests {
         // Missing version
         let html4 = r#"<div id="app" data-page='{"component":"Versions"}'></div>"#;
         assert_eq!(extract_inertia_version_from_html(html4), None);
+    }
+
+    fn echo_params(flavour: &str, q: Option<&str>, cat: Option<&str>, sort: Option<&str>) -> WagoQueryParams {
+        WagoQueryParams::new(Some(flavour), Some(1), q, cat, sort)
+    }
+
+    #[test]
+    fn test_filter_echo_accepts_applied_filters() {
+        let props = serde_json::json!({ "game_version": "classic", "search": "details", "category": 16, "sort": "name" });
+        let p = echo_params("forever", Some("details"), Some("16"), Some("name"));
+        assert!(verify_wago_filter_echo(&props, &p).is_ok());
+    }
+
+    #[test]
+    fn test_filter_echo_detects_wago_dropping_every_filter() {
+        // Shape observed live when sort=popular was sent: every echo is null.
+        let props = serde_json::json!({ "game_version": null, "search": null, "category": null, "sort": null });
+        let p = echo_params("retail", Some("plater"), Some("16"), Some("name"));
+        let err = verify_wago_filter_echo(&props, &p).unwrap_err();
+        for key in ["game_version", "search", "category", "sort"] {
+            assert!(err.contains(key), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_filter_echo_ignores_absent_keys_and_unrequested_filters() {
+        let p = echo_params("retail", None, None, None);
+        assert!(verify_wago_filter_echo(&serde_json::json!({}), &p).is_ok());
+        assert!(verify_wago_filter_echo(&serde_json::json!({ "game_version": "retail", "search": null }), &p).is_ok());
+    }
+
+    #[test]
+    fn test_filter_echo_is_case_insensitive_and_catches_wrong_game_version() {
+        let props = serde_json::json!({ "game_version": "retail", "search": "DETAILS" });
+        assert!(verify_wago_filter_echo(&props, &echo_params("retail", Some("details"), None, None)).is_ok());
+        let err = verify_wago_filter_echo(&props, &echo_params("forever", Some("details"), None, None)).unwrap_err();
+        assert!(err.contains("game_version"), "{err}");
+    }
+
+    fn item(slug: &str, updated: Option<&str>) -> WagoSearchItem {
+        WagoSearchItem {
+            id: slug.into(),
+            slug: slug.into(),
+            name: slug.into(),
+            description: None,
+            author: "author".into(),
+            version: None,
+            downloads: None,
+            updated_at: updated.map(String::from),
+            avatar_url: None,
+            wago_url: None,
+            game_version: None,
+        }
+    }
+
+    #[test]
+    fn test_sort_by_updated_desc_newest_first_undated_last() {
+        let mut v = vec![
+            item("old", Some("Oct 16, 2026")),
+            item("none", None),
+            item("new", Some("Nov 3, 2026")),
+            item("mid", Some("Oct 30, 2026")),
+        ];
+        sort_by_updated_desc(&mut v);
+        let order: Vec<&str> = v.iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(order, vec!["new", "mid", "old", "none"]);
+    }
+
+    #[test]
+    fn test_compute_has_more_prefers_wago_pagination_meta() {
+        let meta = serde_json::json!({ "current_page": 2, "last_page": 3 });
+        assert!(compute_has_more(&meta, 2, 1000, 14));
+        assert!(!compute_has_more(&meta, 3, 1000, 14));
+        // 30 results are 2 pages: the final page must not claim there is more.
+        let last = serde_json::json!({ "current_page": 2, "last_page": 2 });
+        assert!(!compute_has_more(&last, 2, 30, 15));
+        // next_page_url alone (null on the final page) is honoured when last_page is absent.
+        let next_only = serde_json::json!({ "next_page_url": "https://addons.wago.io?page=3" });
+        assert!(compute_has_more(&next_only, 2, 0, 0));
+        let final_page = serde_json::json!({ "next_page_url": null });
+        assert!(!compute_has_more(&final_page, 3, 1000, 14));
+        // Without metadata (test doubles) fall back to total versus what was returned.
+        let none = serde_json::json!({});
+        assert!(compute_has_more(&none, 1, 40, 14));
+        assert!(!compute_has_more(&none, 1, 14, 14));
+        assert!(!compute_has_more(&none, 1, 0, 0));
     }
 
     #[test]

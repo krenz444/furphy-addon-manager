@@ -222,7 +222,7 @@ async fn test_e2e_wago_full_lifecycle() {
     // Verify Wago browse & search works against the mock server
     let wago_client = furphy_lib::net::wago::create_wago_client().unwrap();
     let wago_session = furphy_lib::net::wago::WagoSession::new();
-    let (search_items, total) = furphy_lib::net::wago::search_wago_addons(
+    let (search_items, total, _has_more) = furphy_lib::net::wago::search_wago_addons(
         &policy,
         &wago_client,
         &wago_session,

@@ -6,6 +6,8 @@ pub struct WagoQueryParams {
     pub page: u32,
     pub search: Option<String>,
     pub category: Option<String>,
+    /// The sort the user asked for (UI vocabulary). Not necessarily sent to Wago:
+    /// see [`WagoQueryParams::upstream_sort`].
     pub sort: Option<String>,
 }
 
@@ -52,6 +54,18 @@ impl WagoQueryParams {
         }
     }
 
+    /// The only `sort` value Wago's listing honours is `name` (`updated` is accepted but
+    /// returns an empty list). Any other value (`popular`, `downloads`, `rating`,
+    /// `gaining`) makes Wago redirect to `/` and drop `search`, `game_version` and
+    /// `category`, returning its unfiltered default listing. Verified live 2026-11-03.
+    /// Wago's default order is already by downloads, so omitting `sort` is "popular".
+    pub fn upstream_sort(&self) -> Option<&'static str> {
+        match self.sort.as_deref() {
+            Some("name") => Some("name"),
+            _ => None,
+        }
+    }
+
     pub fn apply_to_url(&self, url: &mut Url) {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("game_version", &self.game_version);
@@ -65,7 +79,7 @@ impl WagoQueryParams {
             qp.append_pair("category", c);
         }
 
-        if let Some(ref s) = self.sort {
+        if let Some(s) = self.upstream_sort() {
             qp.append_pair("sort", s);
         }
     }
@@ -94,5 +108,42 @@ mod tests {
         let p_invalid_sort = WagoQueryParams::new(None, Some(0), None, None, Some("unsupported_sort"));
         assert_eq!(p_invalid_sort.page, 1);
         assert_eq!(p_invalid_sort.sort, None);
+    }
+
+    fn url_for(p: &WagoQueryParams) -> String {
+        let mut url = Url::parse("https://addons.wago.io/").unwrap();
+        p.apply_to_url(&mut url);
+        url.to_string()
+    }
+
+    #[test]
+    fn test_only_name_sort_is_sent_upstream() {
+        for sort in ["popular", "downloads", "rating", "updated", "gaining"] {
+            let p = WagoQueryParams::new(Some("retail"), None, Some("plater"), None, Some(sort));
+            let url = url_for(&p);
+            assert!(!url.contains("sort="), "sort={sort} must not reach Wago: {url}");
+            assert!(
+                url.contains("search=plater") && url.contains("game_version=retail"),
+                "filters must survive: {url}"
+            );
+        }
+        let named = WagoQueryParams::new(Some("retail"), None, None, None, Some("name"));
+        assert!(url_for(&named).contains("sort=name"));
+    }
+
+    #[test]
+    fn test_requested_sort_is_kept_for_client_side_ordering() {
+        let p = WagoQueryParams::new(None, None, None, None, Some("Updated"));
+        assert_eq!(p.sort.as_deref(), Some("updated"));
+        assert_eq!(p.upstream_sort(), None);
+    }
+
+    #[test]
+    fn test_flavour_changes_game_version_and_search_is_url_encoded() {
+        let retail = url_for(&WagoQueryParams::new(Some("retail"), Some(2), Some("Boss Mods"), Some("14"), None));
+        assert!(retail.contains("game_version=retail") && retail.contains("page=2"), "{retail}");
+        assert!(retail.contains("search=Boss+Mods") && retail.contains("category=14"), "{retail}");
+        let forever = url_for(&WagoQueryParams::new(Some("forever"), None, None, None, None));
+        assert!(forever.contains("game_version=classic"), "{forever}");
     }
 }

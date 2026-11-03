@@ -91,10 +91,8 @@
   >
     <option value="popular">Most Popular</option>
     <option value="downloads">Most Downloads</option>
-    <option value="rating">Highest Rated</option>
     <option value="updated">Recently Updated</option>
     <option value="name">Name A-Z</option>
-    <option value="gaining">Gaining this week</option>
   </select>
 
   <button
