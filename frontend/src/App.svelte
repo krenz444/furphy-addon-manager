@@ -967,6 +967,7 @@
           {flavours}
           flavourLabel={flavours.find(f => f.id === activeFlavour)?.label || activeFlavour}
           initialSearchQuery={browseSearchQuery}
+          installedAddons={addons}
           onSelectFlavour={handleFlavourChange}
           onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`, activeFlavour)}
           onInstallCurseForge={(target) => handleAddAddon(String(target), activeFlavour)}

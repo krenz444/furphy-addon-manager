@@ -164,7 +164,7 @@ async fn resolve_dependency_target_direct(
     // 3. Fallback: Search Wago via WagoSession + search_wago_addons (addons.wago.io Inertia protocol)
     if let Ok(wago_client) = crate::net::wago::create_wago_client() {
         let wago_session = crate::net::wago::WagoSession::new();
-        if let Ok((items, _total)) = crate::net::wago::search_wago_addons(
+        if let Ok((items, _total, _has_more)) = crate::net::wago::search_wago_addons(
             policy,
             &wago_client,
             &wago_session,

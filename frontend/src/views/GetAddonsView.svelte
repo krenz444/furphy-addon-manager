@@ -1,25 +1,19 @@
 <script lang="ts">
-  import { invoke, isMockMode } from '../lib/ipc';
-
-  interface WagoAddonItem {
-    id: string;
-    slug: string;
-    name: string;
-    description?: string;
-    author: string;
-    version?: string;
-    downloads?: number;
-    updated_at?: string;
-    avatar_url?: string;
-  }
-
-  import type { Flavour } from '../lib/types';
+  import { invoke, isMockMode, wagoSearch } from '../lib/ipc';
+  import type { Addon, Flavour, WagoAddonItem, WagoSortOption } from '../lib/types';
+  import { debounce } from '../lib/hooks/useDebounce';
+  import WagoToolbar from '../components/addons/WagoToolbar.svelte';
+  import WagoAddonCard from '../components/addons/WagoAddonCard.svelte';
+  import WagoCardSkeleton from '../components/addons/WagoCardSkeleton.svelte';
+  import WagoListFooter from '../components/addons/WagoListFooter.svelte';
+  import InfiniteScrollTrigger from '../components/common/InfiniteScrollTrigger.svelte';
 
   interface Props {
     flavour: string;
     flavours?: Flavour[];
     flavourLabel?: string;
     initialSearchQuery?: string;
+    installedAddons?: Addon[];
     onSelectFlavour?: (flavour: string) => void;
     onInstallWago: (slug: string) => void;
     onInstallCurseForge: (target: string) => void;
@@ -31,6 +25,7 @@
     flavours = [],
     flavourLabel,
     initialSearchQuery = '',
+    installedAddons = [],
     onSelectFlavour,
     onInstallWago,
     onInstallCurseForge,
@@ -49,20 +44,17 @@
 
   // Wago tab state
   let wagoSearchQuery = $state('');
-
-  $effect(() => {
-    if (initialSearchQuery) {
-      activeTab = 'wago';
-      wagoSearchQuery = initialSearchQuery;
-      searchWago();
-    }
-  });
-  let wagoSort = $state<'popular' | 'updated' | 'name' | 'gaining'>('popular');
+  let wagoSort = $state<WagoSortOption>('popular');
   let wagoCategory = $state<string>('');
   let wagoCategories = $state<{ id: string; label: string }[]>([]);
   let wagoResults = $state<WagoAddonItem[]>([]);
+  let wagoPage = $state(1);
+  let totalCount = $state(0);
+  let hasMore = $state(true);
   let loadingWago = $state(false);
+  let loadingMore = $state(false);
   let wagoError = $state<string | null>(null);
+  let footerError = $state<string | null>(null);
 
   // CurseForge tab state
   let cfInput = $state('');
@@ -83,63 +75,175 @@
     }
   }
 
-  async function searchWago() {
-    loadingWago = true;
-    wagoError = null;
+  async function searchWago(isFirstPage: boolean = true) {
+    if (isFirstPage) {
+      loadingWago = true;
+      wagoError = null;
+    } else {
+      loadingMore = true;
+      footerError = null;
+    }
+
     try {
-      const raw = await invoke<WagoAddonItem[] | { results: WagoAddonItem[] }>('wago_search', {
+      const raw = await wagoSearch({
         query: wagoSearchQuery,
         sort: wagoSort,
         category: wagoCategory || undefined,
+        page: wagoPage,
         flavour,
       });
-      if (Array.isArray(raw)) {
-        wagoResults = raw;
-      } else if (raw && Array.isArray((raw as { results: WagoAddonItem[] }).results)) {
-        wagoResults = (raw as { results: WagoAddonItem[] }).results;
+
+      const newItems = raw?.results || [];
+      totalCount = raw?.total ?? 0;
+      hasMore = Boolean(raw?.has_more);
+
+      if (isFirstPage) {
+        wagoResults = newItems;
       } else {
-        wagoResults = [];
+        const existingSlugs = new Set(wagoResults.map((r) => r.slug));
+        const uniqueNew = newItems.filter((r) => !existingSlugs.has(r.slug));
+        wagoResults = [...wagoResults, ...uniqueNew];
       }
     } catch (err: unknown) {
-      wagoError = err instanceof Error ? err.message : String(err);
-      // Fallback sample for mock mode only
-      if (isMockMode()) {
-        wagoResults = [
-          {
-            id: 'details',
-            slug: 'details',
-            name: 'Details! Damage Meter',
-            description: 'Advanced damage and combat meter with deep analysis tools.',
-            author: 'Terciob',
-            version: '11.0.2',
-            downloads: 1420000,
-          },
-          {
-            id: 'plater',
-            slug: 'plater-nameplates',
-            name: 'Plater Nameplates',
-            description: 'Nameplate addon with full customization and scripting support.',
-            author: 'Terciob',
-            version: '11.0.5',
-            downloads: 980000,
-          },
-          {
-            id: 'method-raid-tools',
-            slug: 'method-raid-tools',
-            name: 'Method Raid Tools',
-            description: 'Raid leader tools, cooldown tracking, note displays.',
-            author: 'Exorsus',
-            version: '11.0.0',
-            downloads: 870000,
-          },
-        ];
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isFirstPage) {
+        wagoError = msg;
+        if (isMockMode()) {
+          wagoResults = [
+            {
+              id: 'details',
+              slug: 'details-damage-meter-standalone',
+              name: 'Details! Damage Meter',
+              description: 'Advanced damage and combat meter with deep analysis tools.',
+              author: 'Terciob',
+              version: '11.0.2',
+              downloads: 1420000,
+              wago_url: 'https://addons.wago.io/addons/details-damage-meter-standalone',
+              game_version: 'retail',
+            },
+            {
+              id: 'plater',
+              slug: 'plater-nameplates',
+              name: 'Plater Nameplates',
+              description: 'Nameplate addon with full customization and scripting support.',
+              author: 'Terciob',
+              version: '11.0.5',
+              downloads: 980000,
+              wago_url: 'https://addons.wago.io/addons/plater-nameplates',
+              game_version: 'retail',
+            },
+            {
+              id: 'method-raid-tools',
+              slug: 'method-raid-tools',
+              name: 'Method Raid Tools',
+              description: 'Raid leader tools, cooldown tracking, note displays.',
+              author: 'Exorsus',
+              version: '11.0.0',
+              downloads: 870000,
+              wago_url: 'https://addons.wago.io/addons/method-raid-tools',
+              game_version: 'retail',
+            },
+          ];
+        } else {
+          wagoResults = [];
+        }
       } else {
-        wagoResults = [];
+        footerError = msg;
       }
     } finally {
-      loadingWago = false;
+      if (isFirstPage) {
+        loadingWago = false;
+      } else {
+        loadingMore = false;
+      }
     }
   }
+
+  const debouncedSearch = debounce(() => {
+    wagoPage = 1;
+    wagoResults = [];
+    hasMore = true;
+    searchWago(true);
+  }, 300);
+
+  function handleQueryChange(newQuery: string) {
+    wagoSearchQuery = newQuery;
+    debouncedSearch();
+  }
+
+  function handleTriggerSearch() {
+    debouncedSearch.cancel();
+    wagoPage = 1;
+    wagoResults = [];
+    hasMore = true;
+    searchWago(true);
+  }
+
+  function handleClearQuery() {
+    debouncedSearch.cancel();
+    wagoSearchQuery = '';
+    wagoPage = 1;
+    wagoResults = [];
+    hasMore = true;
+    searchWago(true);
+  }
+
+  function handleCategoryChange(newCat: string) {
+    wagoCategory = newCat;
+    handleTriggerSearch();
+  }
+
+  function handleSortChange(newSort: WagoSortOption) {
+    wagoSort = newSort;
+    handleTriggerSearch();
+  }
+
+  function handleLoadMore() {
+    if (loadingWago || loadingMore || !hasMore) return;
+    wagoPage += 1;
+    searchWago(false);
+  }
+
+  function isAddonInstalled(slug: string, name: string): boolean {
+    if (!installedAddons || installedAddons.length === 0) return false;
+    const cleanSlug = slug.toLowerCase().trim();
+    const cleanName = name.toLowerCase().trim();
+    return installedAddons.some((a) => {
+      const aSlug = a.wago_slug?.toLowerCase().trim();
+      const aName = a.name?.toLowerCase().trim();
+      const aId = a.id?.toLowerCase().trim();
+      return (
+        (aSlug && aSlug === cleanSlug) ||
+        (aName && aName === cleanName) ||
+        (aId && aId === cleanSlug)
+      );
+    });
+  }
+
+  // Reactive flavour synchronization: whenever active flavour changes, immediately reset and re-query
+  let previousFlavour = $state<string | null>(null);
+  $effect(() => {
+    const current = flavour;
+    if (previousFlavour !== null && current !== previousFlavour) {
+      previousFlavour = current;
+      if (activeTab === 'wago') {
+        wagoPage = 1;
+        wagoResults = [];
+        hasMore = true;
+        searchWago(true);
+      }
+    } else if (previousFlavour === null) {
+      previousFlavour = current;
+    }
+  });
+
+  $effect(() => {
+    if (initialSearchQuery) {
+      activeTab = 'wago';
+      wagoSearchQuery = initialSearchQuery;
+      handleTriggerSearch();
+    }
+  });
 
   function handleCfInstall() {
     cfError = null;
@@ -198,7 +302,7 @@
   $effect(() => {
     loadCategories();
     if (activeTab === 'wago' && wagoResults.length === 0 && !loadingWago) {
-      searchWago();
+      searchWago(true);
     }
   });
 </script>
@@ -267,88 +371,51 @@
   <div class="tab-content">
     {#if activeTab === 'wago'}
       <div class="wago-pane">
-        <div class="wago-toolbar">
-          <div class="search-box">
-            <span class="search-icon">🔍</span>
-            <input
-              type="search"
-              class="search-input"
-              placeholder="Search Wago addons…"
-              bind:value={wagoSearchQuery}
-              onkeydown={(e) => e.key === 'Enter' && searchWago()}
-            />
-          </div>
-
-          {#if wagoCategories.length > 0}
-            <select class="toolbar-select" bind:value={wagoCategory} onchange={searchWago}>
-              <option value="">All Categories</option>
-              {#each wagoCategories as cat}
-                <option value={cat.id}>{cat.label}</option>
-              {/each}
-            </select>
-          {/if}
-
-          <select class="toolbar-select" bind:value={wagoSort} onchange={searchWago}>
-            <option value="popular">Popular</option>
-            <option value="updated">Recently updated</option>
-            <option value="name">Name A-Z</option>
-            <option value="gaining">Gaining this week</option>
-          </select>
-
-          <button type="button" class="btn-primary" onclick={searchWago}>
-            Search
-          </button>
-        </div>
+        <WagoToolbar
+          searchQuery={wagoSearchQuery}
+          selectedCategory={wagoCategory}
+          selectedSort={wagoSort}
+          categories={wagoCategories}
+          loading={loadingWago}
+          onQueryChange={handleQueryChange}
+          onCategoryChange={handleCategoryChange}
+          onSortChange={handleSortChange}
+          onTriggerSearch={handleTriggerSearch}
+          onClearQuery={handleClearQuery}
+        />
 
         {#if loadingWago}
-          <div class="state-message">
-            <p>Searching Wago.io…</p>
-          </div>
+          <WagoCardSkeleton count={8} />
         {:else if wagoError && wagoResults.length === 0}
           <div class="state-message error-message">
             <p>Couldn’t load results from Wago.io: {wagoError}</p>
-            <button type="button" class="btn-secondary" onclick={searchWago}>
-              Retry
-            </button>
+            <button type="button" class="btn-secondary" onclick={handleTriggerSearch}>Retry</button>
           </div>
         {:else if wagoResults.length === 0}
           <div class="state-message">
-            <p>No addons found matching "{wagoSearchQuery}".</p>
+            <p>No addons found matching "{wagoSearchQuery}" for {displayLabel}.</p>
           </div>
         {:else}
           <div class="addons-grid">
             {#each wagoResults as addon (addon.id || addon.slug)}
-              <div class="addon-card">
-                <div class="card-main">
-                  <div class="card-title-row">
-                    <h3 class="card-title">{addon.name}</h3>
-                    {#if addon.version}
-                      <span class="card-version font-mono">{addon.version}</span>
-                    {/if}
-                  </div>
-                  <div class="card-author">by {addon.author}</div>
-                  {#if addon.description}
-                    <p class="card-desc">{addon.description}</p>
-                  {/if}
-                </div>
-
-                <div class="card-footer">
-                  {#if addon.downloads}
-                    <span class="download-count">
-                      {(addon.downloads / 1000).toFixed(0)}k downloads
-                    </span>
-                  {/if}
-                  <button
-                    type="button"
-                    class="btn-install"
-                    onclick={() => onInstallWago(addon.slug)}
-                  >
-                    Install to {displayLabel}
-                  </button>
-                </div>
-              </div>
+              <WagoAddonCard
+                {addon}
+                destinationLabel={displayLabel}
+                isInstalled={isAddonInstalled(addon.slug, addon.name)}
+                onInstall={onInstallWago}
+              />
             {/each}
           </div>
+
+          <InfiniteScrollTrigger onTrigger={handleLoadMore} disabled={!hasMore || loadingMore || loadingWago} />
+
+          <WagoListFooter
+            {loadingMore}
+            {hasMore}
+            resultsCount={wagoResults.length}
+            error={footerError}
+            onRetry={handleLoadMore}
+          />
         {/if}
       </div>
 
@@ -573,144 +640,10 @@
     gap: 1rem;
   }
 
-  .wago-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .search-box {
-    position: relative;
-    flex: 1;
-    display: flex;
-    align-items: center;
-  }
-
-  .search-icon {
-    position: absolute;
-    left: 0.75rem;
-    color: var(--text-muted);
-  }
-
-  .search-input {
-    width: 100%;
-    padding: 0.5rem 1rem 0.5rem 2.25rem;
-    background: var(--bg-0);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 4px);
-    color: var(--text);
-    font-size: 0.85rem;
-    outline: none;
-  }
-
-  .search-input:focus-visible {
-    border-color: var(--focus-ring);
-  }
-
-  .toolbar-select {
-    background: var(--bg-0);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 4px);
-    color: var(--text);
-    padding: 0.5rem 0.75rem;
-    font-size: 0.85rem;
-    outline: none;
-  }
-
   .addons-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 1rem;
-  }
-
-  .addon-card {
-    background: var(--bg-1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius, 8px);
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 0.75rem;
-    transition: border-color var(--fast), transform var(--fast);
-  }
-
-  .addon-card:hover {
-    border-color: var(--border-hover);
-    transform: translateY(-2px);
-  }
-
-  .card-title-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 0.5rem;
-  }
-
-  .card-title {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  .card-version {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    background: var(--bg-2);
-    padding: 2px 5px;
-    border-radius: 3px;
-  }
-
-  .card-author {
-    font-size: 0.75rem;
-    color: var(--text-faint);
-    margin-top: 2px;
-  }
-
-  .card-desc {
-    margin: 0.5rem 0 0 0;
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    line-height: 1.4;
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .card-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-top: 1px solid var(--border-soft);
-    padding-top: 0.75rem;
-  }
-
-  .download-count {
-    font-size: 0.75rem;
-    color: var(--text-faint);
-  }
-
-  .btn-install {
-    background: var(--accent);
-    color: var(--accent-text);
-    border: none;
-    border-radius: var(--radius-sm, 4px);
-    padding: 0.35rem 0.85rem;
-    font-size: 0.8rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: background var(--fast);
-  }
-
-  .btn-install:hover {
-    background: var(--accent-hover);
-  }
-
-  .btn-install:focus-visible {
-    outline: 2px solid var(--focus-ring);
   }
 
   .cf-pane, .github-pane {
@@ -889,9 +822,5 @@
 
   .error-message {
     color: var(--danger);
-  }
-
-  .font-mono {
-    font-family: monospace;
   }
 </style>

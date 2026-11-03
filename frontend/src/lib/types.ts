@@ -148,3 +148,27 @@ export interface AppUpdateInfo {
   download_url?: string | null;
   first_run_update?: string | null;
 }
+
+export type WagoSortOption = 'popular' | 'downloads' | 'rating' | 'updated' | 'name' | 'gaining';
+
+export interface WagoAddonItem {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  author: string;
+  version?: string;
+  downloads?: number;
+  updated_at?: string;
+  avatar_url?: string;
+  wago_url?: string;
+  game_version?: string;
+  is_installed?: boolean;
+}
+
+export interface WagoSearchResponse {
+  results: WagoAddonItem[];
+  total: number;
+  page: number;
+  has_more: boolean;
+}

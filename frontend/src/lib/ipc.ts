@@ -194,3 +194,13 @@ export async function setFlavourInstallPath(flavour: string, path: string): Prom
 export async function resetFlavourInstallPath(flavour: string): Promise<Flavour> {
   return invoke<Flavour>('reset_flavour_install_path', { flavour });
 }
+
+export async function wagoSearch(params: {
+  query?: string;
+  sort?: string;
+  category?: string;
+  page?: number;
+  flavour?: string;
+}): Promise<import('./types').WagoSearchResponse> {
+  return invoke<import('./types').WagoSearchResponse>('wago_search', params);
+}

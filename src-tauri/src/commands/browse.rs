@@ -18,7 +18,7 @@ pub async fn wago_search(
     let page_num = page.unwrap_or(1);
     let flv = flavour.unwrap_or_else(|| "retail".into());
 
-    let (items, total) = crate::net::wago::search_wago_addons(
+    let (items, total, has_more) = crate::net::wago::search_wago_addons(
         &policy,
         &client,
         &session,
@@ -32,7 +32,9 @@ pub async fn wago_search(
 
     Ok(serde_json::json!({
         "results": items,
-        "total": total
+        "total": total,
+        "page": page_num,
+        "has_more": has_more
     }))
 }
 

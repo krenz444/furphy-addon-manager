@@ -347,6 +347,18 @@ pub struct WagoSearchItem {
     pub downloads: Option<u64>,
     pub updated_at: Option<String>,
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub wago_url: Option<String>,
+    #[serde(default)]
+    pub game_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WagoSearchPageResult {
+    pub results: Vec<WagoSearchItem>,
+    pub total: u64,
+    pub page: u32,
+    pub has_more: bool,
 }
 
 pub fn extract_slug_from_card(html: &str) -> Option<String> {
@@ -455,7 +467,7 @@ pub fn extract_avatar_url_from_card(html: &str) -> Option<String> {
     None
 }
 
-pub fn parse_wago_card_html(html: &str) -> Option<WagoSearchItem> {
+pub fn parse_wago_card_html(html: &str, game_version: Option<&str>) -> Option<WagoSearchItem> {
     let slug = extract_slug_from_card(html)?;
     let name = extract_name_from_card(html).unwrap_or_else(|| slug.clone());
     let author = extract_author_from_card(html).unwrap_or_else(|| "Unknown".to_string());
@@ -463,6 +475,8 @@ pub fn parse_wago_card_html(html: &str) -> Option<WagoSearchItem> {
     let avatar_url = extract_avatar_url_from_card(html);
     let updated_at = extract_updated_at_from_card(html);
     let downloads = extract_downloads_from_card(html);
+    let wago_url = Some(format!("https://addons.wago.io/addons/{}", slug));
+    let game_version = game_version.map(|gv| gv.to_string());
 
     Some(WagoSearchItem {
         id: slug.clone(),
@@ -474,6 +488,8 @@ pub fn parse_wago_card_html(html: &str) -> Option<WagoSearchItem> {
         downloads,
         updated_at,
         avatar_url,
+        wago_url,
+        game_version,
     })
 }
 
@@ -486,48 +502,19 @@ pub async fn search_wago_addons(
     category: Option<&str>,
     sort: Option<&str>,
     page: u32,
-) -> Result<(Vec<WagoSearchItem>, u64), String> {
+) -> Result<(Vec<WagoSearchItem>, u64, bool), String> {
     let base_url = get_wago_base_url();
-    let wago_game_version = match flavour {
-        "classic_era" | "forever" => "classic",
-        "classic" => "classic",
-        _ => "retail",
-    };
+    let query_params = crate::net::wago_query::WagoQueryParams::new(
+        Some(flavour),
+        Some(page),
+        query,
+        category,
+        sort,
+    );
 
     let mut parsed_url = reqwest::Url::parse(&format!("{}/", base_url.trim_end_matches('/')))
         .map_err(|e| e.to_string())?;
-    {
-        let mut qp = parsed_url.query_pairs_mut();
-        qp.append_pair("game_version", wago_game_version);
-        qp.append_pair("page", &page.to_string());
-        if let Some(q) = query {
-            let trimmed = q.trim();
-            if !trimmed.is_empty() {
-                qp.append_pair("search", trimmed);
-            }
-        }
-        if let Some(cat) = category {
-            let trimmed = cat.trim();
-            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) && trimmed != "0" {
-                qp.append_pair("category", trimmed);
-            }
-        }
-        match sort {
-            Some("name") => {
-                qp.append_pair("sort", "name");
-            }
-            Some("popular") => {
-                qp.append_pair("sort", "popular");
-            }
-            Some("updated") => {
-                qp.append_pair("sort", "updated");
-            }
-            Some("gaining") => {
-                qp.append_pair("sort", "gaining");
-            }
-            _ => {}
-        }
-    }
+    query_params.apply_to_url(&mut parsed_url);
     let url = parsed_url.to_string();
     let host = parsed_url.host_str().unwrap_or("").to_string();
 
@@ -595,7 +582,7 @@ pub async fn search_wago_addons(
                 let props = val.get("props").unwrap_or(&val);
                 let addons_obj = match props.get("addons") {
                     Some(a) => a,
-                    None => return Ok((Vec::new(), 0)),
+                    None => return Ok((Vec::new(), 0, false)),
                 };
 
                 let total = addons_obj.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
@@ -604,7 +591,7 @@ pub async fn search_wago_addons(
                 if let Some(cards_array) = addons_obj.get("data").and_then(|d| d.as_array()) {
                     for card_val in cards_array {
                         if let Some(card_html) = card_val.as_str() {
-                            if let Some(item) = parse_wago_card_html(card_html) {
+                            if let Some(item) = parse_wago_card_html(card_html, Some(&query_params.game_version)) {
                                 results.push(item);
                             }
                         }
@@ -624,7 +611,10 @@ pub async fn search_wago_addons(
                     });
                 }
 
-                return Ok((results, total));
+                let page_size = results.len().max(1) as u64;
+                let has_more = !results.is_empty() && (total > (page as u64 * page_size) || (results.len() >= 10 && total > results.len() as u64));
+
+                return Ok((results, total, has_more));
             }
             Err(e) => {
                 policy.breaker.register_connectivity_failure(&host);
@@ -782,13 +772,15 @@ mod tests {
     </div>
 </a>"#;
 
-        let item = parse_wago_card_html(card_html).expect("Expected card to parse successfully");
+        let item = parse_wago_card_html(card_html, Some("retail")).expect("Expected card to parse successfully");
         assert_eq!(item.slug, "details-damage-meter-standalone");
         assert_eq!(item.id, "details-damage-meter-standalone");
         assert_eq!(item.name, "Details! Damage Meter");
         assert_eq!(item.author, "Terciob");
         assert_eq!(item.downloads, Some(7707383));
         assert_eq!(item.updated_at.as_deref(), Some("Oct 16, 2026"));
+        assert_eq!(item.wago_url.as_deref(), Some("https://addons.wago.io/addons/details-damage-meter-standalone"));
+        assert_eq!(item.game_version.as_deref(), Some("retail"));
         assert_eq!(
             item.avatar_url.as_deref(),
             Some("https://cdn.wago.io/thumbnails/vaG3R9SlPb9XIVqDg6k2IfWGpKyBUPjnFKGf9A9V.png")
@@ -809,7 +801,7 @@ mod tests {
             </div>
         </a>"#;
 
-        let item = parse_wago_card_html(card_html).expect("Expected card to parse");
+        let item = parse_wago_card_html(card_html, None).expect("Expected card to parse");
         assert_eq!(item.slug, "my-cool-addon");
         assert_eq!(item.name, "My Cool Addon & More 'Stuff'");
         assert_eq!(item.author, "John & Jane");

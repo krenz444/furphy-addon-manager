@@ -552,30 +552,36 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         { id: 'unit-frames', label: 'Unit Frames' },
       ] as T;
 
-    case 'wago_search':
+    case 'wago_search': {
+      const page = Number(args?.page) || 1;
+      const flv = String(args?.flavour || 'retail');
+      const isClassicOrForever = flv === 'classic' || flv === 'classic_era' || flv === 'forever';
+      const mockPool = isClassicOrForever
+        ? [
+            { id: 'wa-details-c', slug: 'details-damage-meter-standalone', name: 'Details! Damage Meter (Classic)', author: 'Terciob', description: 'Advanced combat meter for Classic & WoW Forever.', downloads: 3500000, version: '1.15.2', game_version: 'classic', wago_url: 'https://addons.wago.io/addons/details-damage-meter-standalone' },
+            { id: 'wa-dbm-c', slug: 'deadly-boss-mods-dbm', name: 'Deadly Boss Mods (DBM) - Classic', author: 'MysticalOS', description: 'Raid & dungeon alerts for Vanilla/Classic.', downloads: 4100000, version: '1.15.0', game_version: 'classic', wago_url: 'https://addons.wago.io/addons/deadly-boss-mods-dbm' },
+            { id: 'wa-bigwigs-c', slug: 'bigwigs', name: 'BigWigs Bossmods', author: 'BigWigsMods', description: 'Modular boss encounter warnings.', downloads: 2800000, version: 'v12.1.2', game_version: 'classic', wago_url: 'https://addons.wago.io/addons/bigwigs' },
+            { id: 'wa-tomtom', slug: 'tomtom', name: 'TomTom (Classic)', author: 'Cladhaire', description: 'Personal navigation assistant with coordinate waypoints.', downloads: 2100000, version: 'v1.15.1', game_version: 'classic', wago_url: 'https://addons.wago.io/addons/tomtom' },
+          ]
+        : [
+            { id: 'wa-plater', slug: 'plater-nameplates', name: 'Plater Nameplates', author: 'Terciob', description: 'Highly customizable nameplate addon with script and mod support.', downloads: 4500200, version: '11.0.2', game_version: 'retail', wago_url: 'https://addons.wago.io/addons/plater-nameplates' },
+            { id: 'wa-mrt', slug: 'method-raid-tools', name: 'Method Raid Tools', author: 'Exorsus', description: 'Raid management tools, cooldown tracking, ready checks, and notes.', downloads: 3200100, version: '11.0.1', game_version: 'retail', wago_url: 'https://addons.wago.io/addons/method-raid-tools' },
+            { id: 'wa-details', slug: 'details-damage-meter-standalone', name: 'Details! Damage Meter', author: 'Terciob', description: 'Advanced damage and combat meter with deep analysis tools.', downloads: 7707383, version: '11.0.2', game_version: 'retail', wago_url: 'https://addons.wago.io/addons/details-damage-meter-standalone' },
+            { id: 'wa-raiderio', slug: 'raiderio-mythic-plus-raid-progress-and-recruitment', name: 'Raider.IO Mythic Plus & Raid', author: 'RaiderIO', description: 'Inspect mythic plus scores, raid progression, and profiles.', downloads: 6200000, version: 'v20261102', game_version: 'retail', wago_url: 'https://addons.wago.io/addons/raiderio-mythic-plus-raid-progress-and-recruitment' },
+          ];
+
+      const q = String(args?.query || '').trim().toLowerCase();
+      const filtered = q
+        ? mockPool.filter((a) => a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q))
+        : mockPool;
+
       return {
-        results: [
-          {
-            id: 'wa-addon-1',
-            name: 'Plater Nameplates',
-            author: 'Terciob',
-            summary: 'Highly customizable nameplate addon with script and mod support.',
-            downloads: 4500200,
-            version: '11.0.2',
-            categories: ['Unit Frames', 'Combat'],
-          },
-          {
-            id: 'wa-addon-2',
-            name: 'Method Raid Tools',
-            author: 'Exorsus',
-            summary: 'Raid management tools, cooldown tracking, ready checks, and notes.',
-            downloads: 3200100,
-            version: '11.0.1',
-            categories: ['Boss Encounters'],
-          },
-        ],
-        total: 2,
+        results: page > 2 ? [] : filtered,
+        total: filtered.length,
+        page,
+        has_more: page === 1 && filtered.length > 2,
       } as T;
+    }
 
     case 'cf_browse':
       return {

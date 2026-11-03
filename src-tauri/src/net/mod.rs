@@ -5,3 +5,4 @@ pub mod enrich;
 pub mod github;
 pub mod policy;
 pub mod wago;
+pub mod wago_query;

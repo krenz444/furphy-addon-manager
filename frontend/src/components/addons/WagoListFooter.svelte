@@ -1,0 +1,98 @@
+<script lang="ts">
+  interface Props {
+    loadingMore: boolean;
+    hasMore: boolean;
+    resultsCount: number;
+    error: string | null;
+    onRetry?: () => void;
+  }
+
+  let { loadingMore, hasMore, resultsCount, error, onRetry }: Props = $props();
+</script>
+
+<footer class="wago-list-footer">
+  {#if loadingMore}
+    <div class="footer-state loading" aria-live="polite">
+      <div class="spinner-sm" aria-hidden="true"></div>
+      <span>Loading more addons…</span>
+    </div>
+  {:else if error}
+    <div class="footer-state error" role="alert">
+      <span>Error loading more addons: {error}</span>
+      {#if onRetry}
+        <button type="button" class="btn-retry" onclick={onRetry}>Retry</button>
+      {/if}
+    </div>
+  {:else if !hasMore && resultsCount > 0}
+    <div class="footer-state end-of-list">
+      <span>Showing all {resultsCount} addons · End of results</span>
+    </div>
+  {/if}
+</footer>
+
+<style>
+  .wago-list-footer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 1.5rem 0;
+    min-height: 3rem;
+  }
+
+  .footer-state {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .footer-state.error {
+    color: var(--danger, #ef4444);
+    background: rgba(239, 68, 68, 0.1);
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+  }
+
+  .btn-retry {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.2rem 0.6rem;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+
+  .btn-retry:hover {
+    background: var(--bg-1);
+    color: var(--accent);
+  }
+
+  .btn-retry:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .spinner-sm {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .end-of-list {
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+    opacity: 0.75;
+  }
+</style>
