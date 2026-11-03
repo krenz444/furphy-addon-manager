@@ -1,30 +1,29 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-
   interface Props {
     onTrigger: () => void;
     disabled?: boolean;
     rootMargin?: string;
+    root?: HTMLElement | null;
   }
 
-  let { onTrigger, disabled = false, rootMargin = '250px' }: Props = $props();
+  let props: Props = $props();
 
   let sentinelEl: HTMLDivElement | null = $state(null);
 
-  onMount(() => {
-    if (!sentinelEl) return;
+  $effect(() => {
+    if (!sentinelEl || props.disabled) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
         const first = entries[0];
-        if (first?.isIntersecting && !disabled) {
-          onTrigger();
+        if (first?.isIntersecting && !props.disabled) {
+          props.onTrigger();
         }
       },
       {
-        root: null,
-        rootMargin,
-        threshold: 0.1,
+        root: props.root || null,
+        rootMargin: props.rootMargin || '350px',
+        threshold: 0,
       }
     );
 
@@ -41,7 +40,7 @@
 <style>
   .infinite-scroll-sentinel {
     width: 100%;
-    height: 1px;
+    height: 8px;
     pointer-events: none;
     opacity: 0;
   }

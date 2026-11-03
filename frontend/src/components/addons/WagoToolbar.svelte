@@ -7,6 +7,8 @@
     selectedSort: WagoSortOption;
     categories: { id: string; label: string }[];
     loading: boolean;
+    destinationLabel?: string;
+    isClassicOrForever?: boolean;
     onQueryChange: (query: string) => void;
     onCategoryChange: (category: string) => void;
     onSortChange: (sort: WagoSortOption) => void;
@@ -20,6 +22,8 @@
     selectedSort,
     categories,
     loading,
+    destinationLabel,
+    isClassicOrForever = false,
     onQueryChange,
     onCategoryChange,
     onSortChange,
@@ -95,9 +99,46 @@
   >
     {loading ? 'Searching…' : 'Search'}
   </button>
+
+  {#if destinationLabel}
+    <div class="target-indicator" class:classic={isClassicOrForever} title={`Browsing addons compatible with ${destinationLabel}`}>
+      <span class="indicator-dot"></span>
+      <span class="indicator-text">{destinationLabel}</span>
+    </div>
+  {/if}
 </div>
 
 <style>
+  .target-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-sm, 4px);
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: var(--accent);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-left: auto;
+  }
+
+  .target-indicator.classic {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.35);
+    color: #f59e0b;
+  }
+
+  .indicator-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .indicator-text {
+    white-space: nowrap;
+  }
   .wago-toolbar {
     display: flex;
     align-items: center;

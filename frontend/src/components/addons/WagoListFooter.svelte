@@ -4,10 +4,11 @@
     hasMore: boolean;
     resultsCount: number;
     error: string | null;
+    onLoadMore?: () => void;
     onRetry?: () => void;
   }
 
-  let { loadingMore, hasMore, resultsCount, error, onRetry }: Props = $props();
+  let { loadingMore, hasMore, resultsCount, error, onLoadMore, onRetry }: Props = $props();
 </script>
 
 <footer class="wago-list-footer">
@@ -19,9 +20,13 @@
   {:else if error}
     <div class="footer-state error" role="alert">
       <span>Error loading more addons: {error}</span>
-      {#if onRetry}
-        <button type="button" class="btn-retry" onclick={onRetry}>Retry</button>
-      {/if}
+      <button type="button" class="btn-retry" onclick={onRetry || onLoadMore}>Retry</button>
+    </div>
+  {:else if hasMore}
+    <div class="footer-state load-more-action">
+      <button type="button" class="btn-load-more" onclick={onLoadMore}>
+        Load More Addons ({resultsCount} loaded) ↓
+      </button>
     </div>
   {:else if !hasMore && resultsCount > 0}
     <div class="footer-state end-of-list">
@@ -35,8 +40,8 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    padding: 1.5rem 0;
-    min-height: 3rem;
+    padding: 1.5rem 0 2.5rem 0;
+    min-height: 4rem;
   }
 
   .footer-state {
@@ -45,6 +50,28 @@
     gap: 0.65rem;
     font-size: 0.85rem;
     color: var(--text-muted);
+  }
+
+  .btn-load-more {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.6rem 1.6rem;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    transition: background var(--fast, 150ms), border-color var(--fast, 150ms), color var(--fast, 150ms);
+  }
+
+  .btn-load-more:hover {
+    background: var(--bg-2);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .btn-load-more:focus-visible {
+    outline: 2px solid var(--focus-ring);
   }
 
   .footer-state.error {

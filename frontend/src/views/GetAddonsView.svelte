@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { invoke, isMockMode, wagoSearch } from '../lib/ipc';
   import type { Addon, Flavour, WagoAddonItem, WagoSortOption } from '../lib/types';
   import { debounce } from '../lib/hooks/useDebounce';
@@ -15,9 +16,9 @@
     initialSearchQuery?: string;
     installedAddons?: Addon[];
     onSelectFlavour?: (flavour: string) => void;
-    onInstallWago: (slug: string) => void;
-    onInstallCurseForge: (target: string) => void;
-    onInstallGitHub: (repoUrl: string) => void;
+    onInstallWago: (slug: string, targetFlavour?: string) => void;
+    onInstallCurseForge: (target: string, targetFlavour?: string) => void;
+    onInstallGitHub: (repoUrl: string, targetFlavour?: string) => void;
   }
 
   let {
@@ -55,6 +56,7 @@
   let loadingMore = $state(false);
   let wagoError = $state<string | null>(null);
   let footerError = $state<string | null>(null);
+  let scrollContainerEl = $state<HTMLDivElement | null>(null);
 
   // CurseForge tab state
   let cfInput = $state('');
@@ -99,6 +101,9 @@
 
       if (isFirstPage) {
         wagoResults = newItems;
+        tick().then(() => {
+          checkAutoFill();
+        });
       } else {
         const existingSlugs = new Set(wagoResults.map((r) => r.slug));
         const uniqueNew = newItems.filter((r) => !existingSlugs.has(r.slug));
@@ -196,6 +201,33 @@
   function handleSortChange(newSort: WagoSortOption) {
     wagoSort = newSort;
     handleTriggerSearch();
+  }
+
+  function checkAutoFill() {
+    if (
+      scrollContainerEl &&
+      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 100 &&
+      hasMore &&
+      !loadingMore &&
+      !loadingWago &&
+      wagoResults.length > 0 &&
+      wagoPage < 3
+    ) {
+      handleLoadMore();
+    }
+  }
+
+  function handleContainerScroll() {
+    if (!scrollContainerEl || loadingWago || loadingMore || !hasMore) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerEl;
+    if (scrollHeight - scrollTop - clientHeight < 350) {
+      handleLoadMore();
+    }
+  }
+
+  function handleRetryLoadMore() {
+    if (loadingWago || loadingMore || !hasMore) return;
+    searchWago(false);
   }
 
   function handleLoadMore() {
@@ -368,7 +400,7 @@
     </div>
   </header>
 
-  <div class="tab-content">
+  <div class="tab-content" bind:this={scrollContainerEl} onscroll={handleContainerScroll}>
     {#if activeTab === 'wago'}
       <div class="wago-pane">
         <WagoToolbar
@@ -377,6 +409,8 @@
           selectedSort={wagoSort}
           categories={wagoCategories}
           loading={loadingWago}
+          destinationLabel={displayLabel}
+          isClassicOrForever={flavour === 'forever' || flavour === 'classic' || flavour === 'classic_era'}
           onQueryChange={handleQueryChange}
           onCategoryChange={handleCategoryChange}
           onSortChange={handleSortChange}
@@ -402,19 +436,24 @@
                 {addon}
                 destinationLabel={displayLabel}
                 isInstalled={isAddonInstalled(addon.slug, addon.name)}
-                onInstall={onInstallWago}
+                onInstall={(slug) => onInstallWago(slug, flavour)}
               />
             {/each}
           </div>
 
-          <InfiniteScrollTrigger onTrigger={handleLoadMore} disabled={!hasMore || loadingMore || loadingWago} />
+          <InfiniteScrollTrigger
+            onTrigger={handleLoadMore}
+            disabled={!hasMore || loadingMore || loadingWago}
+            root={scrollContainerEl}
+          />
 
           <WagoListFooter
             {loadingMore}
             {hasMore}
             resultsCount={wagoResults.length}
             error={footerError}
-            onRetry={handleLoadMore}
+            onLoadMore={handleLoadMore}
+            onRetry={handleRetryLoadMore}
           />
         {/if}
       </div>
@@ -532,6 +571,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -630,8 +670,11 @@
 
   .tab-content {
     flex: 1;
-    overflow-y: auto;
+    min-height: 0;
+    overflow-y: scroll;
+    overflow-x: hidden;
     padding: 1.25rem;
+    scrollbar-gutter: stable;
   }
 
   .wago-pane {

@@ -969,9 +969,9 @@
           initialSearchQuery={browseSearchQuery}
           installedAddons={addons}
           onSelectFlavour={handleFlavourChange}
-          onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`, activeFlavour)}
-          onInstallCurseForge={(target) => handleAddAddon(String(target), activeFlavour)}
-          onInstallGitHub={(repoUrl) => handleAddAddon(repoUrl, activeFlavour)}
+          onInstallWago={(slug, flv) => handleAddAddon(`https://addons.wago.io/addons/${slug}`, flv || activeFlavour)}
+          onInstallCurseForge={(target, flv) => handleAddAddon(String(target), flv || activeFlavour)}
+          onInstallGitHub={(repoUrl, flv) => handleAddAddon(repoUrl, flv || activeFlavour)}
         />
       {:else if activeView === 'not_built_for_patch'}
         <NotBuiltForPatchView
