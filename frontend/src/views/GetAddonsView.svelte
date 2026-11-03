@@ -201,16 +201,8 @@
         }
         isFetching = false;
 
-        // Auto-fill test: ONLY after the first page loads on high-resolution displays
-        // where 14 cards do not yet cause vertical scrolling.
-        // NEVER runs on subsequent pages or if an error occurred!
-        if (isFirstPage && !wagoError && hasMore) {
-          setTimeout(() => {
-            checkAutoFill();
-          }, 350);
-        }
-
-        // A page that finishes while the user is already at the bottom must not wait for another scroll.
+        // A page that leaves the list short of the bottom (or shorter than the window) must not wait
+        // for a scroll or a click: look again as soon as the new cards are laid out.
         tick().then(loadMoreIfNearBottom);
       }
     }
@@ -264,22 +256,6 @@
     handleTriggerSearch();
   }
 
-  function checkAutoFill() {
-    if (
-      scrollContainerEl &&
-      scrollContainerEl.scrollHeight <= scrollContainerEl.clientHeight + 40 &&
-      hasMore &&
-      !loadingMore &&
-      !loadingWago &&
-      !footerError &&
-      !isFetching &&
-      wagoResults.length > 0 &&
-      wagoPage === 1
-    ) {
-      handleLoadMore();
-    }
-  }
-
   function handleRetryLoadMore() {
     if (isFetching || loadingWago || loadingMore || !hasMore) return;
     footerError = null;
@@ -304,14 +280,29 @@
   // Level-triggered paging. The sentinel only fires when it comes into view, and only once per
   // observer: when handleLoadMore declined (a fetch in flight, the throttle) the observer was used
   // up and never fired again, which stranded a list at its first page. Re-checking on every scroll
-  // event and after every page makes a declined attempt harmless. It only acts when the list really
-  // overflows its container, so a container that is not height-bounded cannot make it fetch page
-  // after page.
+  // event, after every page and when the window is resized makes a declined attempt harmless.
+  //
+  // Two cases load a page by themselves:
+  //  - the list overflows its container and the user is near the bottom (scrolling);
+  //  - the list does not even fill the container (a tall or high-resolution window), so there is
+  //    nothing to scroll and nothing would ever fire. Pages keep arriving until it overflows.
+  // A container that grows with its content never overflows, so the fill case only runs while the
+  // container sits inside the window, and stops at AUTOFILL_MAX_RESULTS as a last resort.
+  const AUTOFILL_MAX_RESULTS = 120;
+
   function loadMoreIfNearBottom() {
     const el = scrollContainerEl;
     if (!el || !hasMore || isFetching || loadingWago || loadingMore || footerError) return;
+    if (activeTab !== 'wago' || wagoResults.length === 0) return;
+
     const overflows = el.scrollHeight > el.clientHeight + 40;
-    if (overflows && el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
+    if (overflows) {
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) handleLoadMore();
+      return;
+    }
+
+    const containerBottom = el.getBoundingClientRect().bottom;
+    if (containerBottom <= window.innerHeight + 1 && wagoResults.length < AUTOFILL_MAX_RESULTS) {
       handleLoadMore();
     }
   }
@@ -409,6 +400,8 @@
 
 
 </script>
+
+<svelte:window onresize={loadMoreIfNearBottom} />
 
 <div class="get-addons-view">
   <header class="tab-header">

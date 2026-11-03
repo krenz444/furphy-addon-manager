@@ -156,4 +156,33 @@ test.describe('Furphy Wago browse', () => {
 
     await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 45' })).toBeVisible();
   });
+
+  test('6 A tall window fills itself with addons without scrolling or pressing Load More', async ({ page }) => {
+    // 15 cards do not fill a window this tall, so there is nothing to scroll and nothing for a
+    // scroll listener to fire on. The list has to keep asking for pages on its own.
+    await page.setViewportSize({ width: 1600, height: 3200 });
+    await page.getByLabel('Filter by category').selectOption('combat');
+
+    const cards = page.locator('.addon-card');
+    await expect(cards.first()).toBeVisible();
+
+    await expect(cards).toHaveCount(45, { timeout: 15000 });
+    await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 45' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Load More Addons/ })).toHaveCount(0);
+    await expect(page.getByText('End of results')).toBeVisible();
+  });
+
+  test('7 A small window pages on scroll only, and enlarging the window fills it', async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 600 });
+    await page.getByLabel('Filter by category').selectOption('combat');
+
+    const cards = page.locator('.addon-card');
+    await expect(cards).toHaveCount(15);
+    // The list overflows and the user has not scrolled: nothing may be fetched ahead of need.
+    await page.waitForTimeout(1500);
+    await expect(cards).toHaveCount(15);
+
+    await page.setViewportSize({ width: 1600, height: 3200 });
+    await expect(cards).toHaveCount(45, { timeout: 15000 });
+  });
 });
