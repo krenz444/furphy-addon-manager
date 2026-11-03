@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::engine::add::{create_addon_record, parse_addon_target, AddonTarget};
 use crate::engine::adopt::adopt_candidate_group;
 use crate::engine::check::run_check_for_flavour;
-use crate::engine::flavours::detect_installed_flavours_in_root;
+use crate::engine::flavours::detect_all_installed_flavours;
 use crate::engine::import_list::import_addon_list;
 use crate::engine::remove::remove_addon;
 use crate::engine::rollback::rollback_addon;
@@ -183,11 +183,17 @@ impl JobRunner {
         flavour: Option<&str>,
         params: &Value,
     ) -> Result<(String, bool, Option<String>), String> {
-        let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
+        let wow_root = detect_wow_root(None).ok();
         let data_dir = get_data_dir();
 
-        // Helper to get client build/interface
-        let installed_flavours = detect_installed_flavours_in_root(&wow_root);
+        // Helper to get client build/interface and custom roots
+        let installed_flavours = detect_all_installed_flavours(conn, wow_root.as_deref());
+
+        let resolve_flavour_root = |flv_info: &crate::engine::flavours::InstalledFlavourInfo| -> Result<PathBuf, String> {
+            flv_info.custom_root.clone()
+                .or_else(|| wow_root.clone())
+                .ok_or_else(|| format!("Could not find WoW installation for game version '{}'. Please configure its path in Settings.", flv_info.id))
+        };
 
         // Fetch settings for github token
         let github_token: Option<String> = conn
@@ -293,9 +299,10 @@ impl JobRunner {
                     }
                 }
 
+                let flv_root = resolve_flavour_root(target_flv)?;
                 let report = run_sync_for_flavour(
                     conn,
-                    &wow_root,
+                    &flv_root,
                     flv,
                     &target_flv.folder,
                     &target_flv.addons_path,
@@ -313,7 +320,7 @@ impl JobRunner {
                         for aid in ids {
                             let _ = crate::engine::deps::install_missing_dependencies_for_addon(
                                 conn,
-                                &wow_root,
+                                &flv_root,
                                 flv,
                                 &target_flv.folder,
                                 &target_flv.addons_path,
@@ -360,9 +367,14 @@ impl JobRunner {
                         continue;
                     }
 
+                    let flv_root = match resolve_flavour_root(flv_info) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+
                     let report = run_sync_for_flavour(
                         conn,
-                        &wow_root,
+                        &flv_root,
                         &flv_info.id,
                         &flv_info.folder,
                         &flv_info.addons_path,
@@ -433,6 +445,7 @@ impl JobRunner {
                     .iter()
                     .find(|f| f.id == flv)
                     .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
 
                 let addon_id = params
                     .get("addon_id")
@@ -441,7 +454,7 @@ impl JobRunner {
 
                 rollback_addon(
                     conn,
-                    &wow_root,
+                    &flv_root,
                     &target_flv.folder,
                     addon_id,
                     flv,
@@ -456,6 +469,7 @@ impl JobRunner {
                     .iter()
                     .find(|f| f.id == flv)
                     .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
 
                 let snapshot_id = params
                     .get("snapshot_id")
@@ -464,7 +478,7 @@ impl JobRunner {
 
                 crate::engine::wtf::restore_wtf_snapshot(
                     conn,
-                    &wow_root,
+                    &flv_root,
                     &target_flv.folder,
                     snapshot_id,
                     &data_dir,
@@ -546,12 +560,13 @@ impl JobRunner {
                         .ok_or_else(|| format!("Could not parse target '{}'", raw_target))?
                 };
 
+                let flv_root = resolve_flavour_root(target_flv)?;
                 let addon_id = create_addon_record(conn, flv, parsed, None)?;
 
                 // Immediately sync the newly added addon
                 let sync_rep = run_sync_for_flavour(
                     conn,
-                    &wow_root,
+                    &flv_root,
                     flv,
                     &target_flv.folder,
                     &target_flv.addons_path,
@@ -567,7 +582,7 @@ impl JobRunner {
                 // Automatically resolve and install missing dependencies if any
                 let _ = crate::engine::deps::install_missing_dependencies_for_addon(
                     conn,
-                    &wow_root,
+                    &flv_root,
                     flv,
                     &target_flv.folder,
                     &target_flv.addons_path,
@@ -598,6 +613,7 @@ impl JobRunner {
                     .iter()
                     .find(|f| f.id == flv)
                     .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
 
                 let addon_id = params
                     .get("addon_id")
@@ -614,7 +630,7 @@ impl JobRunner {
                 let deps_result = if let Some(ref aid) = addon_id {
                     crate::engine::deps::install_missing_dependencies_for_addon(
                         conn,
-                        &wow_root,
+                        &flv_root,
                         flv,
                         &target_flv.folder,
                         &target_flv.addons_path,
@@ -628,7 +644,7 @@ impl JobRunner {
                 } else {
                     crate::engine::deps::install_all_missing_dependencies_for_flavour(
                         conn,
-                        &wow_root,
+                        &flv_root,
                         flv,
                         &target_flv.folder,
                         &target_flv.addons_path,

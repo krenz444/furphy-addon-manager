@@ -55,6 +55,82 @@ pub fn update_settings(key: String, value: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn set_flavour_install_path(flavour: String, path: String) -> Result<crate::db::repo::FlavourDto, String> {
+    let clean_path = path.trim();
+    if clean_path.is_empty() {
+        return Err("Path cannot be empty".into());
+    }
+    let p = std::path::PathBuf::from(clean_path);
+    if !p.exists() {
+        return Err(format!("The specified directory does not exist: {}", clean_path));
+    }
+
+    let db_path = get_db_path();
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    if !crate::engine::flavours::FLAVOUR_DEFS.iter().any(|d| d.id == flavour) {
+        return Err(format!("Unknown game flavour: {}", flavour));
+    }
+
+    crate::db::repo::set_flavour_custom_root(&conn, &flavour, clean_path).map_err(|e| e.to_string())?;
+
+    let wow_root = detect_wow_root(None).ok();
+    let installed = crate::engine::flavours::detect_all_installed_flavours(&conn, wow_root.as_deref());
+    let _ = crate::engine::flavours::sync_installed_flavours_to_db(&mut conn, &installed);
+
+    let flavours = crate::db::repo::get_installed_flavours_db(&conn).map_err(|e| e.to_string())?;
+    let mut dto = flavours
+        .into_iter()
+        .find(|f| f.id == flavour)
+        .ok_or_else(|| format!("Flavour '{}' could not be resolved after update", flavour))?;
+
+    if let Some(inst) = installed.iter().find(|i| i.id == flavour) {
+        dto.addons_path = Some(inst.addons_path.to_string_lossy().to_string());
+    }
+
+    Ok(dto)
+}
+
+#[tauri::command]
+pub fn reset_flavour_install_path(flavour: String) -> Result<crate::db::repo::FlavourDto, String> {
+    let db_path = get_db_path();
+    let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
+
+    crate::db::repo::reset_flavour_custom_root(&conn, &flavour).map_err(|e| e.to_string())?;
+
+    let wow_root = detect_wow_root(None).ok();
+    let installed = crate::engine::flavours::detect_all_installed_flavours(&conn, wow_root.as_deref());
+    let _ = crate::engine::flavours::sync_installed_flavours_to_db(&mut conn, &installed);
+
+    let flavours = crate::db::repo::get_installed_flavours_db(&conn).map_err(|e| e.to_string())?;
+    let mut dto = flavours
+        .into_iter()
+        .find(|f| f.id == flavour)
+        .unwrap_or_else(|| {
+            let def = crate::engine::flavours::FLAVOUR_DEFS
+                .iter()
+                .find(|d| d.id == flavour);
+            crate::db::repo::FlavourDto {
+                id: flavour.clone(),
+                folder: def.map(|d| d.folder.to_string()).unwrap_or_default(),
+                label: def.map(|d| d.label.to_string()).unwrap_or_else(|| flavour.clone()),
+                product: def.map(|d| d.product.to_string()),
+                installed: false,
+                client_build: None,
+                client_interface: None,
+                custom_root: None,
+                addons_path: None,
+            }
+        });
+
+    if let Some(inst) = installed.iter().find(|i| i.id == flavour) {
+        dto.addons_path = Some(inst.addons_path.to_string_lossy().to_string());
+    }
+
+    Ok(dto)
+}
+
+#[tauri::command]
 pub fn export_list(
     flavour: String,
     include_wtf: bool,

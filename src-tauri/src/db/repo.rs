@@ -29,17 +29,41 @@ pub struct FlavourDto {
     pub label: String,
     pub product: Option<String>,
     pub installed: bool,
+    pub client_build: Option<String>,
+    pub client_interface: Option<i32>,
+    pub custom_root: Option<String>,
+    pub addons_path: Option<String>,
 }
 
 pub fn get_installed_flavours_db(conn: &Connection) -> Result<Vec<FlavourDto>> {
-    let mut stmt = conn.prepare("SELECT id, folder, label, product, installed FROM flavours WHERE installed = 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, folder, label, product, installed, client_build, client_interface, custom_root \
+         FROM flavours WHERE installed = 1"
+    )?;
     let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let folder: String = row.get(1)?;
+        let label: String = row.get(2)?;
+        let product: Option<String> = row.get(3)?;
+        let installed: bool = row.get::<_, i32>(4)? != 0;
+        let client_build: Option<String> = row.get(5).ok().flatten();
+        let client_interface: Option<i32> = row.get::<_, Option<String>>(6)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i32>().ok())
+            .or_else(|| row.get::<_, Option<i32>>(6).ok().flatten());
+        let custom_root: Option<String> = row.get(7).ok().flatten();
+
         Ok(FlavourDto {
-            id: row.get(0)?,
-            folder: row.get(1)?,
-            label: row.get(2)?,
-            product: row.get(3)?,
-            installed: row.get::<_, i32>(4)? != 0,
+            id,
+            folder,
+            label,
+            product,
+            installed,
+            client_build,
+            client_interface,
+            custom_root,
+            addons_path: None,
         })
     })?;
 
@@ -48,6 +72,22 @@ pub fn get_installed_flavours_db(conn: &Connection) -> Result<Vec<FlavourDto>> {
         result.push(r?);
     }
     Ok(result)
+}
+
+pub fn set_flavour_custom_root(conn: &Connection, flavour_id: &str, custom_root: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE flavours SET custom_root = ?1 WHERE id = ?2",
+        params![custom_root, flavour_id],
+    )?;
+    Ok(())
+}
+
+pub fn reset_flavour_custom_root(conn: &Connection, flavour_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE flavours SET custom_root = NULL WHERE id = ?1",
+        params![flavour_id],
+    )?;
+    Ok(())
 }
 
 pub fn get_addons_by_flavour(conn: &Connection, flavour: &str) -> Result<Vec<AddonDto>> {

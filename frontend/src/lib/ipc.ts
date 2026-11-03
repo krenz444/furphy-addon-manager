@@ -1,6 +1,6 @@
 import { isTauri, invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { handleMockInvoke } from './mockIpc';
-import type { JobRecord } from './types';
+import type { Flavour, JobRecord } from './types';
 
 export type JobDto = JobRecord;
 
@@ -185,4 +185,12 @@ export async function installDependencies(flavour: string, addonId?: string): Pr
     addonId: addonId ?? null,
     addon_id: addonId ?? null,
   });
+}
+
+export async function setFlavourInstallPath(flavour: string, path: string): Promise<Flavour> {
+  return invoke<Flavour>('set_flavour_install_path', { flavour, path });
+}
+
+export async function resetFlavourInstallPath(flavour: string): Promise<Flavour> {
+  return invoke<Flavour>('reset_flavour_install_path', { flavour });
 }

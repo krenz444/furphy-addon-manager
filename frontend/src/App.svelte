@@ -234,6 +234,7 @@
     try {
       const stateRes = await invoke<{
         addons?: Addon[];
+        flavours?: Flavour[];
         freshness?: Freshness;
         running_job?: JobRecord | null;
         untracked_count?: number;
@@ -241,6 +242,9 @@
       }>('get_state', { flavour: flavourId });
 
       if (stateRes) {
+        if (stateRes.flavours && stateRes.flavours.length > 0) {
+          flavours = stateRes.flavours;
+        }
         if (stateRes.addons) {
           addons = stateRes.addons;
           if (activeDrawerAddon) {
@@ -710,12 +714,13 @@
     }
   }
 
-  async function handleAddAddon(target: string) {
+  async function handleAddAddon(target: string, destinationFlavour?: string) {
+    const targetFlavour = destinationFlavour || activeFlavour;
     try {
       runningJob = {
         id: 'job-add-' + Date.now(),
         kind: 'add',
-        flavour: activeFlavour,
+        flavour: targetFlavour,
         params: JSON.stringify({ target }),
         state: 'running',
         started_at: new Date().toISOString(),
@@ -727,9 +732,9 @@
       };
       activeJobPhase = 'Installing';
       currentJobAddon = target;
-      jobLogs = [`[Add] Installing addon ${target}`];
+      jobLogs = [`[Add] Installing addon ${target} to ${targetFlavour}`];
 
-      const job = await invoke<JobRecord>('start_job', { kind: 'add', flavour: activeFlavour, params: { target } });
+      const job = await invoke<JobRecord>('start_job', { kind: 'add', flavour: targetFlavour, params: { target } });
       const finishedJob: JobRecord = job || {
         ...runningJob,
         state: 'completed',
@@ -737,8 +742,9 @@
       };
       runningJob = finishedJob;
       const hasError = handleJobResultToast(finishedJob);
+      const flvLabel = flavours.find(f => f.id === targetFlavour)?.label || targetFlavour;
       if (!hasError) {
-        addToast('success', 'Addon installed successfully');
+        addToast('success', `[${flvLabel}] Addon installed successfully`);
         setTimeout(() => {
           if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
             runningJob = null;
@@ -748,7 +754,10 @@
       if (isGameActive && finishedJob.reload_needed) {
         reloadNeeded = true;
       }
-      await refreshFlavourData(activeFlavour);
+      await refreshFlavourData(targetFlavour);
+      if (targetFlavour !== activeFlavour) {
+        activeFlavour = targetFlavour;
+      }
     } catch (err) {
       if (runningJob) {
         runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
@@ -955,10 +964,13 @@
       {:else if activeView === 'get_addons'}
         <GetAddonsView
           flavour={activeFlavour}
+          {flavours}
+          flavourLabel={flavours.find(f => f.id === activeFlavour)?.label || activeFlavour}
           initialSearchQuery={browseSearchQuery}
-          onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`)}
-          onInstallCurseForge={(target) => handleAddAddon(String(target))}
-          onInstallGitHub={(repoUrl) => handleAddAddon(repoUrl)}
+          onSelectFlavour={handleFlavourChange}
+          onInstallWago={(slug) => handleAddAddon(`https://addons.wago.io/addons/${slug}`, activeFlavour)}
+          onInstallCurseForge={(target) => handleAddAddon(String(target), activeFlavour)}
+          onInstallGitHub={(repoUrl) => handleAddAddon(repoUrl, activeFlavour)}
         />
       {:else if activeView === 'not_built_for_patch'}
         <NotBuiltForPatchView
@@ -976,6 +988,7 @@
       {:else if activeView === 'settings'}
         <SettingsView
           flavour={activeFlavour}
+          {flavours}
           {currentTheme}
           {density}
           onThemeChange={handleThemeChange}
@@ -984,6 +997,9 @@
           onImportList={handleImportAddonList}
           onToast={addToast}
           onUntrackedChange={async () => {
+            await refreshFlavourData(activeFlavour);
+          }}
+          onFlavoursChange={async () => {
             await refreshFlavourData(activeFlavour);
           }}
           onRequestUninstall={() => {
@@ -1029,6 +1045,8 @@
   <!-- Overlays & Modals -->
   <AddAddonDialog
     isOpen={addDialogOpen}
+    {activeFlavour}
+    {flavours}
     onClose={() => (addDialogOpen = false)}
     onAdd={handleAddAddon}
   />

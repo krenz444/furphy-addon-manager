@@ -161,6 +161,28 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         )?;
 
         tx.commit()?;
+        current_version = 5;
+    }
+
+    if current_version < 6 {
+        let tx = conn.transaction()?;
+
+        let has_custom_root: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('flavours') WHERE name = 'custom_root'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if !has_custom_root {
+            tx.execute("ALTER TABLE flavours ADD COLUMN custom_root TEXT", [])?;
+        }
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '6')",
+            [],
+        )?;
+
+        tx.commit()?;
     }
 
     // Ensure all predefined flavours exist in flavours table
@@ -184,7 +206,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();

@@ -2,7 +2,8 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use reqwest::Url;
-use crate::paths::{detect_wow_root, get_data_dir};
+use crate::db::open_connection;
+use crate::paths::{detect_wow_root, get_data_dir, get_db_path};
 
 pub fn open_url_or_file(target: &str) -> Result<(), String> {
     if std::env::var("FURPHY_TEST_NO_SPAWN").is_ok() {
@@ -97,12 +98,32 @@ pub fn open_target(what: String, args: Option<serde_json::Value>) -> Result<(), 
             open_url_or_file(&url_str)
         }
         "wowfolder" => {
+            if let Some(ref flv_id) = arg_str {
+                let db_path = get_db_path();
+                if let Ok(conn) = open_connection(&db_path) {
+                    let wow_root = detect_wow_root(None).ok();
+                    let installed = crate::engine::flavours::detect_all_installed_flavours(&conn, wow_root.as_deref());
+                    if let Some(flv) = installed.iter().find(|f| f.id == *flv_id) {
+                        if let Some(ref cr) = flv.custom_root {
+                            return open_folder_path(cr);
+                        }
+                    }
+                }
+            }
             let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
             open_folder_path(&wow_root)
         }
         "addons" => {
-            let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
             let flv = arg_str.unwrap_or_else(|| "retail".into());
+            let db_path = get_db_path();
+            if let Ok(conn) = open_connection(&db_path) {
+                let wow_root = detect_wow_root(None).ok();
+                let installed = crate::engine::flavours::detect_all_installed_flavours(&conn, wow_root.as_deref());
+                if let Some(target) = installed.iter().find(|f| f.id == flv) {
+                    return open_folder_path(&target.addons_path);
+                }
+            }
+            let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
             let flv_folder = if flv.starts_with('_') {
                 flv
             } else {

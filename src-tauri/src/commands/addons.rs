@@ -7,7 +7,7 @@ use crate::db::open_connection;
 use crate::db::repo::{get_installed_flavours_db, FlavourDto};
 use crate::engine::adopt::adopt_candidate_group;
 use crate::engine::compat::{list_not_built_for_patch as engine_compat, PatchCompatStatus};
-use crate::engine::flavours::{detect_installed_flavours_in_root, sync_installed_flavours_to_db};
+use crate::engine::flavours::{detect_all_installed_flavours, sync_installed_flavours_to_db};
 use crate::engine::ignore::set_ignore_updates;
 use crate::engine::pin::{pin_addon, unpin_addon};
 use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
@@ -100,13 +100,12 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
         .unwrap_or((None, None));
 
     if client_interface.is_none() {
-        if let Ok(wow_root) = detect_wow_root(None) {
-            let installed = detect_installed_flavours_in_root(&wow_root);
-            if let Some(target) = installed.iter().find(|f| f.id == flavour) {
-                client_interface = target.client_interface;
-                if client_build.is_none() {
-                    client_build = target.client_build.clone();
-                }
+        let wow_root = detect_wow_root(None).ok();
+        let installed = detect_all_installed_flavours(conn, wow_root.as_deref());
+        if let Some(target) = installed.iter().find(|f| f.id == flavour) {
+            client_interface = target.client_interface;
+            if client_build.is_none() {
+                client_build = target.client_build.clone();
             }
         }
     }
@@ -259,11 +258,17 @@ pub fn get_addons(flavour: Option<String>) -> Result<Vec<AddonDto>, String> {
 pub fn get_flavours() -> Result<Vec<FlavourDto>, String> {
     let db_path = get_db_path();
     let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
-    if let Ok(wow_root) = detect_wow_root(None) {
-        let installed = detect_installed_flavours_in_root(&wow_root);
-        let _ = sync_installed_flavours_to_db(&mut conn, &installed);
+    let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
+    let _ = sync_installed_flavours_to_db(&mut conn, &installed);
+
+    let mut flavours = get_installed_flavours_db(&conn).map_err(|e| e.to_string())?;
+    for f in &mut flavours {
+        if let Some(inst) = installed.iter().find(|i| i.id == f.id) {
+            f.addons_path = Some(inst.addons_path.to_string_lossy().to_string());
+        }
     }
-    get_installed_flavours_db(&conn).map_err(|e| e.to_string())
+    Ok(flavours)
 }
 
 #[tauri::command]
@@ -289,14 +294,18 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
 pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
     let db_path = get_db_path();
     let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
-    if let Ok(wow_root) = detect_wow_root(None) {
-        let installed = detect_installed_flavours_in_root(&wow_root);
-        let _ = sync_installed_flavours_to_db(&mut conn, &installed);
-    }
+    let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
+    let _ = sync_installed_flavours_to_db(&mut conn, &installed);
     let active_flavour = flavour.unwrap_or_else(|| "retail".into());
 
     let addons = fetch_addons_with_details(&conn, &active_flavour)?;
-    let flavours = get_installed_flavours_db(&conn).unwrap_or_default();
+    let mut flavours = get_installed_flavours_db(&conn).unwrap_or_default();
+    for f in &mut flavours {
+        if let Some(inst) = installed.iter().find(|i| i.id == f.id) {
+            f.addons_path = Some(inst.addons_path.to_string_lossy().to_string());
+        }
+    }
 
     // Freshness calculation
     let mut updates_count = 0;
@@ -362,20 +371,15 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
         .ok();
 
     // Untracked count: count ONLY identifiable groups per §2.E
-    let untracked_count = if let Ok(wow_root) = detect_wow_root(None) {
-        let installed = detect_installed_flavours_in_root(&wow_root);
-        if let Some(target_flv) = installed.iter().find(|f| f.id == active_flavour) {
-            scan_untracked_addons(&conn, &target_flv.addons_path, &active_flavour, target_flv.client_interface)
-                .map(|cands| {
-                    cands
-                        .iter()
-                        .filter(|c| c.source.is_some() || c.project_id.is_some() || c.wago_id.is_some())
-                        .count()
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        }
+    let untracked_count = if let Some(target_flv) = installed.iter().find(|f| f.id == active_flavour) {
+        scan_untracked_addons(&conn, &target_flv.addons_path, &active_flavour, target_flv.client_interface)
+            .map(|cands| {
+                cands
+                    .iter()
+                    .filter(|c| c.source.is_some() || c.project_id.is_some() || c.wago_id.is_some())
+                    .count()
+            })
+            .unwrap_or(0)
     } else {
         0
     };
@@ -489,8 +493,8 @@ pub fn scan_untracked(flavour: Option<String>) -> Result<Vec<ScannedCandidateGro
     let db_path = get_db_path();
     let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let flv_id = flavour.unwrap_or_else(|| "retail".into());
-    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
-    let installed = detect_installed_flavours_in_root(&wow_root);
+    let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
     let target_flv = match installed.iter().find(|f| f.id == flv_id) {
         Some(f) => f,
         None => return Ok(Vec::new()),
@@ -549,8 +553,8 @@ pub fn delete_untracked_addon(flavour: String, folders: Vec<String>) -> Result<(
         }
     }
 
-    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
-    let installed = detect_installed_flavours_in_root(&wow_root);
+    let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
     let flv = installed
         .iter()
         .find(|f| f.id == flavour)
@@ -723,8 +727,8 @@ pub fn adopt_untracked(
 pub fn adopt_all_untracked(flavour: String) -> Result<usize, String> {
     let db_path = get_db_path();
     let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
-    let wow_root = detect_wow_root(None).map_err(|e| e.to_string())?;
-    let installed = detect_installed_flavours_in_root(&wow_root);
+    let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
     let target_flv = installed
         .iter()
         .find(|f| f.id == flavour)
@@ -758,14 +762,12 @@ pub fn list_not_built_for_patch(
     let flv = flavour.unwrap_or_else(|| "retail".into());
 
     let wow_root = detect_wow_root(None).ok();
+    let installed = detect_all_installed_flavours(&conn, wow_root.as_deref());
     let mut client_interface = None;
     let mut client_build = None;
-    if let Some(ref root) = wow_root {
-        let installed = detect_installed_flavours_in_root(root);
-        if let Some(target) = installed.iter().find(|f| f.id == flv) {
-            client_interface = target.client_interface;
-            client_build = target.client_build.clone();
-        }
+    if let Some(target) = installed.iter().find(|f| f.id == flv) {
+        client_interface = target.client_interface;
+        client_build = target.client_build.clone();
     }
 
     engine_compat(

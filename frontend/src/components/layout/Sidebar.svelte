@@ -71,9 +71,25 @@
             onclick={() => onSelectFlavour(fl.id)}
           >
             <span class="flavour-label">{fl.label}</span>
-            <span class="flavour-folder">{fl.folder}</span>
+            {#if fl.custom_root}
+              <span class="flavour-badge-custom" title={fl.custom_root}>Custom</span>
+            {:else}
+              <span class="flavour-folder">{fl.folder}</span>
+            {/if}
           </button>
         {/each}
+      </div>
+    </div>
+  {:else if visibleFlavours && visibleFlavours.length === 1}
+    <div class="flavour-section">
+      <div class="section-label">Active Client</div>
+      <div class="flavour-single-card">
+        <span class="flavour-label">{visibleFlavours[0].label}</span>
+        {#if visibleFlavours[0].custom_root}
+          <span class="flavour-badge-custom" title={visibleFlavours[0].custom_root}>Custom</span>
+        {:else}
+          <span class="flavour-folder">{visibleFlavours[0].folder}</span>
+        {/if}
       </div>
     </div>
   {/if}
@@ -267,6 +283,29 @@
     font-size: 0.7rem;
     color: var(--text-faint);
     font-family: monospace;
+  }
+
+  .flavour-single-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.45rem 0.65rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    font-size: 0.8rem;
+    color: var(--text);
+  }
+
+  .flavour-badge-custom {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
   }
 
   .freshness-box {

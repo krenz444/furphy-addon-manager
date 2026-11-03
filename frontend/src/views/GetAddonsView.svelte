@@ -13,15 +13,37 @@
     avatar_url?: string;
   }
 
+  import type { Flavour } from '../lib/types';
+
   interface Props {
     flavour: string;
+    flavours?: Flavour[];
+    flavourLabel?: string;
     initialSearchQuery?: string;
+    onSelectFlavour?: (flavour: string) => void;
     onInstallWago: (slug: string) => void;
     onInstallCurseForge: (target: string) => void;
     onInstallGitHub: (repoUrl: string) => void;
   }
 
-  let { flavour, initialSearchQuery = '', onInstallWago, onInstallCurseForge, onInstallGitHub }: Props = $props();
+  let {
+    flavour,
+    flavours = [],
+    flavourLabel,
+    initialSearchQuery = '',
+    onSelectFlavour,
+    onInstallWago,
+    onInstallCurseForge,
+    onInstallGitHub,
+  }: Props = $props();
+
+  let activeFlavourObj = $derived(
+    flavours.find(f => f.id === flavour)
+  );
+
+  let displayLabel = $derived(
+    flavourLabel || activeFlavourObj?.label || flavour
+  );
 
   let activeTab = $state<'wago' | 'curseforge' | 'github'>('wago');
 
@@ -215,6 +237,31 @@
         GitHub Link
       </button>
     </div>
+
+    <div class="target-client-bar">
+      <span class="target-client-label">Target:</span>
+      {#if flavours && flavours.length > 1}
+        <select
+          class="target-client-select"
+          value={flavour}
+          onchange={(e) => onSelectFlavour?.((e.target as HTMLSelectElement).value)}
+          title="Select game version to install addons for"
+        >
+          {#each flavours as fl (fl.id)}
+            <option value={fl.id}>
+              {fl.label} {fl.custom_root ? '(Custom Path)' : `(${fl.folder})`}
+            </option>
+          {/each}
+        </select>
+      {:else}
+        <span class="target-client-pill">
+          {displayLabel}
+          {#if activeFlavourObj?.custom_root}
+            <span class="custom-tag">Custom</span>
+          {/if}
+        </span>
+      {/if}
+    </div>
   </header>
 
   <div class="tab-content">
@@ -296,7 +343,7 @@
                     class="btn-install"
                     onclick={() => onInstallWago(addon.slug)}
                   >
-                    Install
+                    Install to {displayLabel}
                   </button>
                 </div>
               </div>
@@ -329,7 +376,7 @@
                 class="btn-primary"
                 onclick={handleCfInstall}
               >
-                Install Addon
+                Install to {displayLabel}
               </button>
               <button
                 type="button"
@@ -394,7 +441,7 @@
                 class="btn-primary"
                 onclick={handleGithubInstall}
               >
-                Inspect & Install
+                Inspect & Install to {displayLabel}
               </button>
             </div>
             {#if githubError}
@@ -425,6 +472,63 @@
     background: var(--bg-1);
     border-bottom: 1px solid var(--border);
     padding: 0 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .target-client-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .target-client-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+
+  .target-client-select {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.25rem 0.6rem;
+    border-radius: var(--radius-sm, 4px);
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+
+  .target-client-select:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .target-client-pill {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.6rem;
+    border-radius: var(--radius-sm, 4px);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .custom-tag {
+    font-size: 0.65rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--accent);
+    text-transform: uppercase;
   }
 
   .tabs {

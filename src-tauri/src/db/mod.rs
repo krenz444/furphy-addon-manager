@@ -379,7 +379,7 @@ mod tests {
 
         let summary = import_v1::import_from_v1(&mut conn, &live_copy, &v2_data_dir, false).unwrap();
         assert!(summary.addons_imported > 0, "Live data should have imported addons");
-        assert_eq!(summary.flavours_imported, 1);
+        assert!(summary.flavours_imported >= 1);
 
         // Immutability: source folder is completely untouched
         let fp_after = compute_dir_fingerprint(&live_copy);

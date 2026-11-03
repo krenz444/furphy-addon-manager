@@ -190,6 +190,93 @@ pub struct InstalledFlavourInfo {
     pub addons_path: PathBuf,
     pub client_build: Option<String>,
     pub client_interface: Option<i32>,
+    pub custom_root: Option<PathBuf>,
+}
+
+pub fn resolve_custom_addons_path(custom_root: &Path) -> PathBuf {
+    if custom_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("AddOns"))
+        .unwrap_or(false)
+    {
+        return custom_root.to_path_buf();
+    }
+    let addons_sub = custom_root.join("Interface").join("AddOns");
+    if addons_sub.is_dir() {
+        return addons_sub;
+    }
+    let iface = custom_root.join("Interface");
+    if iface.is_dir() {
+        return iface.join("AddOns");
+    }
+    addons_sub
+}
+
+pub fn detect_flavour_info_at_path(flavour_id: &str, custom_root: &Path) -> Option<InstalledFlavourInfo> {
+    let def = FLAVOUR_DEFS.iter().find(|d| d.id == flavour_id)?;
+    let addons_path = resolve_custom_addons_path(custom_root);
+
+    let root_dir = if custom_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("AddOns"))
+        .unwrap_or(false)
+    {
+        custom_root
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(custom_root)
+    } else {
+        custom_root
+    };
+
+    let mut client_build = None;
+    let mut client_interface = None;
+
+    let build_info_rows = parse_build_info(&root_dir.join(".build.info"));
+    for (prod, ver) in &build_info_rows {
+        if prod == def.product {
+            client_build = Some(ver.clone());
+            client_interface = convert_to_interface_number(ver);
+            break;
+        }
+    }
+
+    if client_build.is_none() {
+        let flavor_file = root_dir.join(".flavor.info");
+        if let Ok(content) = fs::read_to_string(&flavor_file) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.contains('!') {
+                    for (prod, ver) in &build_info_rows {
+                        if prod.eq_ignore_ascii_case(trimmed) {
+                            client_build = Some(ver.clone());
+                            client_interface = convert_to_interface_number(ver);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if client_interface.is_none() && flavour_id == "forever" {
+        client_interface = Some(16001);
+        if client_build.is_none() {
+            client_build = Some("1.60.1.0".to_string());
+        }
+    }
+
+    Some(InstalledFlavourInfo {
+        id: def.id.to_string(),
+        folder: def.folder.to_string(),
+        label: def.label.to_string(),
+        addons_path,
+        client_build,
+        client_interface,
+        custom_root: Some(root_dir.to_path_buf()),
+    })
 }
 
 pub fn parse_build_info(build_info_path: &Path) -> Vec<(String, String)> {
@@ -258,11 +345,51 @@ pub fn detect_installed_flavours_in_root(wow_root: &Path) -> Vec<InstalledFlavou
                 addons_path,
                 client_build,
                 client_interface,
+                custom_root: None,
             });
         }
     }
 
     result
+}
+
+pub fn detect_all_installed_flavours(
+    conn: &Connection,
+    wow_root: Option<&Path>,
+) -> Vec<InstalledFlavourInfo> {
+    let mut detected = if let Some(root) = wow_root {
+        detect_installed_flavours_in_root(root)
+    } else {
+        Vec::new()
+    };
+
+    // Query custom roots from database
+    let custom_roots: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare("SELECT id, custom_root FROM flavours WHERE custom_root IS NOT NULL") {
+            Ok(s) => s,
+            Err(_) => return detected,
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+
+    for (flavour_id, custom_root_str) in custom_roots {
+        let path = PathBuf::from(&custom_root_str);
+        if let Some(info) = detect_flavour_info_at_path(&flavour_id, &path) {
+            if let Some(pos) = detected.iter().position(|f| f.id == flavour_id) {
+                detected[pos] = info;
+            } else {
+                detected.push(info);
+            }
+        }
+    }
+
+    detected
 }
 
 pub fn sync_installed_flavours_to_db(
@@ -302,10 +429,17 @@ pub fn sync_installed_flavours_to_db(
                 |r| r.get(0),
             ).unwrap_or(0);
             if count == 0 {
-                tx.execute(
-                    "UPDATE flavours SET installed = 0 WHERE id = ?1",
+                let has_custom_root: bool = tx.query_row(
+                    "SELECT custom_root IS NOT NULL FROM flavours WHERE id = ?1",
                     rusqlite::params![db_id],
-                )?;
+                    |r| r.get(0),
+                ).unwrap_or(false);
+                if !has_custom_root {
+                    tx.execute(
+                        "UPDATE flavours SET installed = 0 WHERE id = ?1",
+                        rusqlite::params![db_id],
+                    )?;
+                }
             }
         }
     }
@@ -349,5 +483,60 @@ mod tests {
         assert_eq!(convert_to_interface_number("11.0.2.56456"), Some(110002));
         assert_eq!(convert_to_interface_number("5.5.4.12345"), Some(50504));
         assert_eq!(convert_to_interface_number("4.4.2.55555"), Some(40402));
+    }
+
+    #[test]
+    fn test_resolve_custom_addons_path_variants() {
+        let direct_addons = PathBuf::from(r"C:\Custom\Interface\AddOns");
+        assert_eq!(resolve_custom_addons_path(&direct_addons), direct_addons);
+
+        let game_root = PathBuf::from(r"D:\Games\WoW Forever");
+        assert_eq!(
+            resolve_custom_addons_path(&game_root),
+            game_root.join("Interface").join("AddOns")
+        );
+    }
+
+    #[test]
+    fn test_detect_all_installed_flavours_with_custom_root_decoupled() {
+        use crate::db::schema::INITIAL_SCHEMA;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_root = temp_dir.path().join("WoW (Standard)");
+        let retail_addons = temp_root.join("_retail_").join("Interface").join("AddOns");
+        fs::create_dir_all(&retail_addons).unwrap();
+
+        let temp_forever = temp_dir.path().join("WoW Forever (Standalone)");
+        let forever_addons = temp_forever.join("Interface").join("AddOns");
+        fs::create_dir_all(&forever_addons).unwrap();
+
+        // Register custom root for forever in database
+        crate::db::repo::set_flavour_custom_root(
+            &conn,
+            "forever",
+            temp_forever.to_str().unwrap(),
+        ).unwrap();
+
+        let detected = detect_all_installed_flavours(&conn, Some(&temp_root));
+        assert_eq!(detected.len(), 2);
+
+        let retail = detected.iter().find(|f| f.id == "retail").unwrap();
+        assert_eq!(retail.addons_path, retail_addons);
+        assert!(retail.custom_root.is_none());
+
+        let forever = detected.iter().find(|f| f.id == "forever").unwrap();
+        assert_eq!(forever.addons_path, forever_addons);
+        assert_eq!(forever.custom_root.as_deref(), Some(temp_forever.as_path()));
+        assert_eq!(forever.client_interface, Some(16001));
+
+        // Sync to DB and verify flavours are installed
+        sync_installed_flavours_to_db(&mut conn, &detected).unwrap();
+        let db_flavours = crate::db::repo::get_installed_flavours_db(&conn).unwrap();
+        assert!(db_flavours.iter().any(|f| f.id == "retail" && f.installed));
+        assert!(db_flavours.iter().any(|f| f.id == "forever" && f.installed));
     }
 }

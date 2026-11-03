@@ -222,7 +222,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'get_app_info':
       return {
         name: 'Furphy Addon Manager',
-        version: '2.0.12',
+        version: '2.0.13',
         is_dev: false,
         identifier: 'krenzcreative.furphy.addonmanager',
       } as T;
@@ -254,7 +254,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         is_game_active: false,
         app_info: {
           name: 'Furphy Addon Manager',
-          version: '2.0.12',
+          version: '2.0.13',
           is_dev: false,
           identifier: 'krenzcreative.furphy.addonmanager',
         },
@@ -423,6 +423,46 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
       return undefined as T;
     }
 
+    case 'set_flavour_install_path': {
+      const flvId = args.flavour as string;
+      const targetPath = args.path as string;
+      const flv = MOCK_FLAVOURS.find((f) => f.id === flvId);
+      if (flv) {
+        flv.custom_root = targetPath;
+        flv.addons_path = `${targetPath}/Interface/AddOns`;
+        flv.installed = true;
+        return { ...flv } as T;
+      }
+      return {
+        id: flvId,
+        folder: `_${flvId}_`,
+        label: flvId,
+        product: null,
+        installed: true,
+        custom_root: targetPath,
+        addons_path: `${targetPath}/Interface/AddOns`,
+      } as T;
+    }
+
+    case 'reset_flavour_install_path': {
+      const flvId = args.flavour as string;
+      const flv = MOCK_FLAVOURS.find((f) => f.id === flvId);
+      if (flv) {
+        flv.custom_root = null;
+        flv.addons_path = null;
+        return { ...flv } as T;
+      }
+      return {
+        id: flvId,
+        folder: `_${flvId}_`,
+        label: flvId,
+        product: null,
+        installed: false,
+        custom_root: null,
+        addons_path: null,
+      } as T;
+    }
+
     case 'open_target':
       return undefined as T;
 
@@ -580,12 +620,12 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_check':
       return {
         status: 'available',
-        current_version: '2.0.12',
-        update_version: '2.0.12',
+        current_version: '2.0.13',
+        update_version: '2.0.13',
         release_notes: '• Modernized Svelte 5 frontend with custom Tokyo Rain theme\n• Enhanced WTF SavedVariables snapshot protection\n• Direct CurseForge & Wago updates with rate-limit fallback',
         published_at: '2026-10-23T00:00:00Z',
         has_update: true,
-        download_url: 'https://github.com/krenz444/furphy-addon-manager/releases/download/v2.0.12/FurphyAddonManager-2.0.12-setup.exe',
+        download_url: 'https://github.com/krenz444/furphy-addon-manager/releases/download/v2.0.13/FurphyAddonManager-2.0.13-setup.exe',
       } as T;
 
     case 'app_update_install':
@@ -594,7 +634,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_status':
       return {
         status: 'idle',
-        current_version: '2.0.12',
+        current_version: '2.0.13',
         update_version: null,
         release_notes: null,
         published_at: null,

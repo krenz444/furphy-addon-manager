@@ -10,7 +10,6 @@ pub mod system;
 pub mod update;
 
 use std::path::PathBuf;
-use crate::engine::flavours::detect_installed_flavours_in_root;
 use crate::engine::swap::restore_interrupted_folder_swaps;
 use crate::jobs::runner::JobRunner;
 
@@ -31,13 +30,11 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
     db::migrate::run_migrations(&mut conn)?;
 
     // 3. Crash recovery: recover interrupted folder swaps & sync installed flavours
-    if let Ok(ref root) = wow_root_res {
-        let installed = detect_installed_flavours_in_root(root);
-        for flv in &installed {
-            restore_interrupted_folder_swaps(&flv.addons_path);
-        }
-        let _ = engine::flavours::sync_installed_flavours_to_db(&mut conn, &installed);
+    let installed = engine::flavours::detect_all_installed_flavours(&conn, wow_root_res.as_deref().ok());
+    for flv in &installed {
+        restore_interrupted_folder_swaps(&flv.addons_path);
     }
+    let _ = engine::flavours::sync_installed_flavours_to_db(&mut conn, &installed);
     let _ = JobRunner::recover_unfinished_jobs(&conn);
 
     // 4. Import from v1 if requested or if v1 folder exists
@@ -242,6 +239,8 @@ pub fn run() {
             commands::open::open_target,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::settings::set_flavour_install_path,
+            commands::settings::reset_flavour_install_path,
             commands::settings::export_list,
             commands::settings::import_list,
             commands::settings::run_diagnostics,

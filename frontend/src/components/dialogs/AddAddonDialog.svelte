@@ -1,15 +1,30 @@
 <script lang="ts">
+  import type { Flavour } from '../../lib/types';
+
   interface Props {
     isOpen: boolean;
+    activeFlavour: string;
+    flavours?: Flavour[];
     onClose: () => void;
-    onAdd: (target: string) => Promise<void>;
+    onAdd: (target: string, destinationFlavour?: string) => Promise<void>;
   }
 
-  let { isOpen, onClose, onAdd }: Props = $props();
+  let { isOpen, activeFlavour, flavours = [], onClose, onAdd }: Props = $props();
 
   let inputVal = $state('');
+  let selectedFlavour = $state('');
   let isSubmitting = $state(false);
   let errorMsg = $state<string | null>(null);
+
+  $effect(() => {
+    if (isOpen) {
+      selectedFlavour = activeFlavour;
+    }
+  });
+
+  let selectedFlavourObj = $derived(
+    flavours.find(f => f.id === selectedFlavour)
+  );
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && isOpen) {
@@ -24,7 +39,7 @@
     isSubmitting = true;
     errorMsg = null;
     try {
-      await onAdd(trimmed);
+      await onAdd(trimmed, selectedFlavour);
       inputVal = '';
       onClose();
     } catch (err) {
@@ -54,6 +69,29 @@
       </header>
 
       <form onsubmit={handleSubmit}>
+        <div class="flavour-select-group">
+          <label for="destination-flavour" class="select-label">Target Game Client:</label>
+          <div class="select-wrapper">
+            <select
+              id="destination-flavour"
+              class="dialog-select"
+              bind:value={selectedFlavour}
+              disabled={isSubmitting}
+            >
+              {#each flavours as fl (fl.id)}
+                <option value={fl.id}>
+                  {fl.label} {fl.custom_root ? '(Custom Path)' : `(${fl.folder})`}
+                </option>
+              {/each}
+            </select>
+          </div>
+          {#if selectedFlavourObj?.addons_path || selectedFlavourObj?.custom_root}
+            <div class="dest-preview font-mono" title={selectedFlavourObj.addons_path || selectedFlavourObj.custom_root}>
+              📁 Install path: {selectedFlavourObj.addons_path || selectedFlavourObj.custom_root}
+            </div>
+          {/if}
+        </div>
+
         <p class="dialog-desc">
           Paste a <strong>CurseForge</strong> project URL or ID, a <strong>wago.io</strong> link, or a <strong>GitHub</strong> repository link:
         </p>
@@ -78,7 +116,7 @@
             Cancel
           </button>
           <button type="submit" class="btn btn-accent" disabled={isSubmitting || !inputVal.trim()}>
-            {isSubmitting ? 'Adding…' : 'Add Addon'}
+            {isSubmitting ? 'Adding…' : `Install to ${selectedFlavourObj?.label || selectedFlavour}`}
           </button>
         </footer>
       </form>
@@ -135,6 +173,49 @@
   .close-btn:hover {
     color: var(--text);
     background: var(--bg-2);
+  }
+
+  .flavour-select-group {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .select-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .dialog-select {
+    width: 100%;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .dialog-select:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .dest-preview {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-top: 2px;
   }
 
   .dialog-desc {
@@ -215,5 +296,9 @@
   .btn-ghost:hover {
     color: var(--text);
     background: var(--bg-2);
+  }
+
+  .font-mono {
+    font-family: monospace;
   }
 </style>

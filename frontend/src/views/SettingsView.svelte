@@ -5,12 +5,15 @@
     unignoreUntrackedFolder,
     listIgnoredUntracked,
     deleteUntrackedAddon,
+    setFlavourInstallPath,
+    resetFlavourInstallPath,
   } from '../lib/ipc';
   import ConfirmDialog from '../components/dialogs/ConfirmDialog.svelte';
-  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo } from '../lib/types';
+  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour } from '../lib/types';
 
   interface Props {
     flavour: string;
+    flavours?: Flavour[];
     currentTheme: string;
     density: 'comfortable' | 'compact';
     onThemeChange: (theme: string) => void;
@@ -20,10 +23,12 @@
     onRequestUninstall: () => void;
     onToast?: (type: 'info' | 'success' | 'warning' | 'error', message: string) => void;
     onUntrackedChange?: () => void;
+    onFlavoursChange?: () => void;
   }
 
   let {
     flavour,
+    flavours = [],
     currentTheme,
     density,
     onThemeChange,
@@ -33,7 +38,43 @@
     onRequestUninstall,
     onToast,
     onUntrackedChange,
+    onFlavoursChange,
   }: Props = $props();
+
+  // Custom Flavour Path Management
+  let editingFlavour = $state<string | null>(null);
+  let editPathVal = $state<string>('');
+  let isSavingPath = $state<boolean>(false);
+  let pathError = $state<string | null>(null);
+
+  async function handleSetPath(flvId: string) {
+    const trimmed = editPathVal.trim();
+    if (!trimmed) return;
+    isSavingPath = true;
+    pathError = null;
+    try {
+      await setFlavourInstallPath(flvId, trimmed);
+      onToast?.('success', `Updated install path for ${flvId}.`);
+      editingFlavour = null;
+      editPathVal = '';
+      onFlavoursChange?.();
+    } catch (err) {
+      pathError = String(err);
+      onToast?.('error', `Failed to set path: ${err}`);
+    } finally {
+      isSavingPath = false;
+    }
+  }
+
+  async function handleResetPath(flvId: string) {
+    try {
+      await resetFlavourInstallPath(flvId);
+      onToast?.('info', `Reset install path for ${flvId} to auto-detect.`);
+      onFlavoursChange?.();
+    } catch (err) {
+      onToast?.('error', `Failed to reset path: ${err}`);
+    }
+  }
 
   // Settings State
   let includeBeta = $state(false);
@@ -680,21 +721,139 @@
             </label>
           </div>
 
-          <!-- Open Folders -->
+          <!-- Game Version Install Paths -->
+          <div class="advanced-group">
+            <h3>Game Version Install Paths</h3>
+            <p class="setting-desc">
+              Each World of Warcraft version can have its own decoupled installation directory. If an installation isn't detected automatically, specify its path below.
+            </p>
+
+            <div class="flavour-paths-list">
+              {#each flavours as fl (fl.id)}
+                <div class="flavour-path-card" class:has-custom={Boolean(fl.custom_root)}>
+                  <div class="flavour-path-header">
+                    <div class="flavour-title-row">
+                      <span class="flavour-name">{fl.label}</span>
+                      <span class="flavour-folder-badge font-mono">{fl.folder}</span>
+                      {#if fl.custom_root}
+                        <span class="custom-badge">Custom Path</span>
+                      {:else if fl.installed}
+                        <span class="auto-badge">Auto Detected</span>
+                      {:else}
+                        <span class="not-found-badge">Not Installed</span>
+                      {/if}
+                    </div>
+
+                    <div class="flavour-card-actions">
+                      <button
+                        type="button"
+                        class="btn-secondary btn-sm"
+                        onclick={() => invoke('open_target', { what: 'wowfolder', args: [fl.id] })}
+                        title="Open game directory"
+                      >
+                        Open Game
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-secondary btn-sm"
+                        onclick={() => invoke('open_target', { what: 'addons', args: [fl.id] })}
+                        title="Open AddOns folder"
+                      >
+                        Open AddOns
+                      </button>
+                      {#if editingFlavour === fl.id}
+                        <button
+                          type="button"
+                          class="btn-ghost btn-sm"
+                          onclick={() => {
+                            editingFlavour = null;
+                            editPathVal = '';
+                            pathError = null;
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      {:else}
+                        <button
+                          type="button"
+                          class="btn-secondary btn-sm"
+                          onclick={() => {
+                            editingFlavour = fl.id;
+                            editPathVal = fl.custom_root || fl.addons_path || '';
+                            pathError = null;
+                          }}
+                        >
+                          {fl.custom_root ? 'Change Path…' : 'Set Custom Path…'}
+                        </button>
+                        {#if fl.custom_root}
+                          <button
+                            type="button"
+                            class="btn-ghost btn-sm text-danger"
+                            onclick={() => handleResetPath(fl.id)}
+                            title="Reset to default auto-detection"
+                          >
+                            Reset
+                          </button>
+                        {/if}
+                      {/if}
+                    </div>
+                  </div>
+
+                  {#if fl.addons_path || fl.custom_root}
+                    <div class="resolved-path font-mono" title={fl.addons_path || fl.custom_root}>
+                      📁 {fl.addons_path || fl.custom_root}
+                    </div>
+                  {/if}
+
+                  {#if editingFlavour === fl.id}
+                    <div class="flavour-path-edit-box">
+                      <label for="edit-path-{fl.id}" class="control-label">
+                        Enter installation folder or AddOns directory for {fl.label}:
+                      </label>
+                      <div class="edit-path-input-row">
+                        <input
+                          id="edit-path-{fl.id}"
+                          type="text"
+                          class="form-input"
+                          placeholder="e.g. D:\Games\World of Warcraft or C:\Program Files\..."
+                          bind:value={editPathVal}
+                          disabled={isSavingPath}
+                          onkeydown={(e) => e.key === 'Enter' && handleSetPath(fl.id)}
+                        />
+                        <button
+                          type="button"
+                          class="btn-primary"
+                          disabled={isSavingPath || !editPathVal.trim()}
+                          onclick={() => handleSetPath(fl.id)}
+                        >
+                          {isSavingPath ? 'Saving…' : 'Save'}
+                        </button>
+                      </div>
+                      {#if pathError}
+                        <div class="path-error-text">{pathError}</div>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </div>
+
+          <!-- Common App Folders -->
           <div class="advanced-group">
             <h3>App Folders & Locations</h3>
             <div class="folder-btns">
-              <button type="button" class="btn-secondary" onclick={() => openTarget('wowfolder')}>
-                Open WoW Folder
-              </button>
-              <button type="button" class="btn-secondary" onclick={() => openTarget('addons')}>
-                Open AddOns Folder
-              </button>
               <button type="button" class="btn-secondary" onclick={() => openTarget('datafolder')}>
                 Open Data Folder
               </button>
               <button type="button" class="btn-secondary" onclick={() => openTarget('logs')}>
                 Open Logs Folder
+              </button>
+              <button type="button" class="btn-secondary" onclick={() => openTarget('backups')}>
+                Open Backups Folder
+              </button>
+              <button type="button" class="btn-secondary" onclick={() => openTarget('snapshots')}>
+                Open WTF Snapshots
               </button>
             </div>
           </div>
@@ -1317,4 +1476,137 @@
   .text-success { color: var(--success); }
   .text-muted { color: var(--text-muted); }
   .font-mono { font-family: monospace; }
+
+  .flavour-paths-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    margin-top: 0.5rem;
+  }
+
+  .flavour-path-card {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .flavour-path-card.has-custom {
+    border-color: rgba(59, 130, 246, 0.4);
+    background: rgba(59, 130, 246, 0.03);
+  }
+
+  .flavour-path-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .flavour-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .flavour-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text);
+  }
+
+  .flavour-folder-badge {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-2);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+  }
+
+  .custom-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(59, 130, 246, 0.15);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+  }
+
+  .auto-badge {
+    font-size: 0.7rem;
+    color: var(--success);
+    background: rgba(16, 185, 129, 0.12);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+  }
+
+  .not-found-badge {
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    background: var(--bg-2);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+  }
+
+  .flavour-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .resolved-path {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-1);
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .flavour-path-edit-box {
+    margin-top: 0.35rem;
+    padding: 0.65rem;
+    background: var(--bg-2);
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .edit-path-input-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .edit-path-input-row input {
+    flex: 1;
+  }
+
+  .path-error-text {
+    font-size: 0.75rem;
+    color: var(--danger);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm, 4px);
+    transition: color var(--fast);
+  }
+
+  .btn-ghost:hover {
+    color: var(--text);
+  }
+
+  .text-danger {
+    color: var(--danger) !important;
+  }
 </style>

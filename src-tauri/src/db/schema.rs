@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS flavours (
     installed INTEGER NOT NULL DEFAULT 0,
     client_build TEXT,
     client_interface TEXT,
-    detected_at TEXT
+    detected_at TEXT,
+    custom_root TEXT
 );
 
 CREATE TABLE IF NOT EXISTS addons (

@@ -31,6 +31,10 @@ export interface Flavour {
   label: string;
   product: string | null;
   installed: boolean;
+  client_build?: string | null;
+  client_interface?: number | null;
+  custom_root?: string | null;
+  addons_path?: string | null;
 }
 
 export interface AppInfo {
