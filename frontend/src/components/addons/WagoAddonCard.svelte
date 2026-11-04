@@ -11,6 +11,19 @@
 
   let { addon, destinationLabel, isInstalled, onInstall }: Props = $props();
 
+  let isInstalling = $state(false);
+  let installTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    if (isInstalled && isInstalling) {
+      isInstalling = false;
+      if (installTimeout) {
+        clearTimeout(installTimeout);
+        installTimeout = null;
+      }
+    }
+  });
+
   function formatDownloads(count?: number): string {
     if (!count) return '';
     if (count >= 1_000_000) {
@@ -29,13 +42,32 @@
       console.error('Failed opening Wago page:', err);
     });
   }
+
+  function handleInstallClick() {
+    if (isInstalling || isInstalled) return;
+    isInstalling = true;
+    onInstall(addon.slug);
+
+    if (installTimeout) clearTimeout(installTimeout);
+    installTimeout = setTimeout(() => {
+      isInstalling = false;
+    }, 45000);
+  }
 </script>
 
 <article class="addon-card" class:installed={isInstalled}>
   <div class="card-main">
     <div class="card-header">
       {#if addon.avatar_url}
-        <img src={addon.avatar_url} alt="" class="card-avatar" loading="lazy" />
+        <img
+          src={addon.avatar_url}
+          alt={`${addon.name} icon`}
+          class="card-avatar"
+          loading="lazy"
+          onerror={(e) => {
+            (e.currentTarget as HTMLElement).style.display = 'none';
+          }}
+        />
       {/if}
       <div class="card-title-group">
         <div class="card-title-row">
@@ -51,11 +83,14 @@
               class="version-tag"
               class:forever={addon.game_version === 'forever'}
               class:classic={addon.game_version === 'classic' || addon.game_version === 'classic_era'}
+              class:progression={['cata', 'wotlk', 'wrath', 'bc', 'tbc', 'mop', 'mists'].includes(addon.game_version ?? '')}
             >
               {#if addon.game_version === 'forever'}
                 WoW Forever
               {:else if addon.game_version === 'classic' || addon.game_version === 'classic_era'}
                 Classic
+              {:else if ['cata', 'wotlk', 'wrath', 'bc', 'tbc', 'mop', 'mists'].includes(addon.game_version ?? '')}
+                {addon.game_version.toUpperCase()}
               {:else}
                 Retail
               {/if}
@@ -82,6 +117,7 @@
         type="button"
         class="btn-browser-link"
         onclick={openWagoPage}
+        aria-label={`Open ${addon.name} on addons.wago.io in default web browser`}
         title="Open addon page on addons.wago.io in default web browser"
       >
         <span aria-hidden="true">↗</span>
@@ -99,10 +135,18 @@
         <button
           type="button"
           class="btn-install"
-          onclick={() => onInstall(addon.slug)}
+          class:busy={isInstalling}
+          disabled={isInstalling}
+          onclick={handleInstallClick}
+          aria-label={`Install ${addon.name} to ${destinationLabel}`}
           title={`Install ${addon.name} to ${destinationLabel}`}
         >
-          Install to {destinationLabel}
+          {#if isInstalling}
+            <span class="btn-spinner" aria-hidden="true"></span>
+            <span>Installing…</span>
+          {:else}
+            <span>Install to {destinationLabel}</span>
+          {/if}
         </button>
       {/if}
     </div>
@@ -128,7 +172,7 @@
   }
 
   .addon-card.installed {
-    border-color: rgba(34, 197, 94, 0.35);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
 
   .card-main {
@@ -202,22 +246,30 @@
     font-size: 0.65rem;
     padding: 0.05rem 0.35rem;
     border-radius: 3px;
-    background: rgba(56, 189, 248, 0.15);
-    color: #38bdf8;
+    background: var(--info-tint);
+    color: var(--info);
+    border: 1px solid color-mix(in srgb, var(--info) 25%, transparent);
     text-transform: uppercase;
     font-weight: 600;
     letter-spacing: 0.02em;
   }
 
   .version-tag.classic {
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
+    background: var(--warning-tint);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 25%, transparent);
   }
 
   .version-tag.forever {
-    background: rgba(168, 85, 247, 0.15);
+    background: var(--accent-tint);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+
+  .version-tag.progression {
+    background: color-mix(in srgb, #a855f7 15%, transparent);
     color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-color: color-mix(in srgb, #a855f7 30%, transparent);
   }
 
   .card-desc {
@@ -239,6 +291,7 @@
     padding-top: 0.65rem;
     border-top: 1px solid var(--border);
     gap: 0.5rem;
+    flex-wrap: wrap;
   }
 
   .stats-group {
@@ -289,21 +342,21 @@
   }
 
   .badge-installed {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 0.3rem;
     font-size: 0.75rem;
     font-weight: 600;
-    color: #22c55e;
-    background: rgba(34, 197, 94, 0.12);
-    border: 1px solid rgba(34, 197, 94, 0.25);
+    color: var(--success);
+    background: var(--success-tint);
+    border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
     padding: 0.3rem 0.65rem;
     border-radius: var(--radius-sm, 4px);
   }
 
   .btn-install {
     background: var(--accent);
-    color: #ffffff;
+    color: var(--accent-text);
     border: none;
     padding: 0.35rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
@@ -312,17 +365,40 @@
     cursor: pointer;
     transition: filter var(--fast, 150ms), transform var(--fast, 150ms);
     white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
   }
 
-  .btn-install:hover {
+  .btn-install:hover:not(:disabled) {
     filter: brightness(1.1);
   }
 
-  .btn-install:active {
+  .btn-install:active:not(:disabled) {
     transform: scale(0.98);
+  }
+
+  .btn-install:disabled {
+    opacity: 0.75;
+    cursor: wait;
   }
 
   .btn-install:focus-visible {
     outline: 2px solid var(--focus-ring);
+  }
+
+  .btn-spinner {
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--accent-text);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

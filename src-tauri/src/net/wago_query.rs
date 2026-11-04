@@ -19,10 +19,13 @@ impl WagoQueryParams {
         category: Option<&str>,
         sort: Option<&str>,
     ) -> Self {
-        let game_version = match flavour.unwrap_or("retail") {
+        let normalized_flavour = flavour.unwrap_or("retail").trim().to_lowercase();
+        let game_version = match normalized_flavour.as_str() {
             "classic_era" | "forever" | "classic" => "classic".to_string(),
             "cata" => "cata".to_string(),
-            "wotlk" => "wotlk".to_string(),
+            "wotlk" | "wrath" => "wotlk".to_string(),
+            "tbc" | "bc" => "bc".to_string(),
+            "mists" | "mop" => "mop".to_string(),
             _ => "retail".to_string(),
         };
 
@@ -68,6 +71,7 @@ impl WagoQueryParams {
 
     pub fn apply_to_url(&self, url: &mut Url) {
         let mut qp = url.query_pairs_mut();
+        qp.clear();
         qp.append_pair("game_version", &self.game_version);
         qp.append_pair("page", &self.page.to_string());
 
@@ -104,10 +108,41 @@ mod tests {
         assert_eq!(p_retail.sort.as_deref(), Some("rating"));
         assert_eq!(p_retail.search, None);
 
+        // Case insensitivity and extended classic progression flavours
+        let p_classic_caps = WagoQueryParams::new(Some("CLASSIC_ERA"), None, None, None, None);
+        assert_eq!(p_classic_caps.game_version, "classic");
+
+        let p_tbc = WagoQueryParams::new(Some("tbc"), None, None, None, None);
+        assert_eq!(p_tbc.game_version, "bc");
+
+        let p_bc = WagoQueryParams::new(Some("bc"), None, None, None, None);
+        assert_eq!(p_bc.game_version, "bc");
+
+        let p_wrath = WagoQueryParams::new(Some("wrath"), None, None, None, None);
+        assert_eq!(p_wrath.game_version, "wotlk");
+
+        let p_wotlk = WagoQueryParams::new(Some("wotlk"), None, None, None, None);
+        assert_eq!(p_wotlk.game_version, "wotlk");
+
+        let p_cata = WagoQueryParams::new(Some("cata"), None, None, None, None);
+        assert_eq!(p_cata.game_version, "cata");
+
+        let p_mists = WagoQueryParams::new(Some("mists"), None, None, None, None);
+        assert_eq!(p_mists.game_version, "mop");
+
+        let p_mop = WagoQueryParams::new(Some("mop"), None, None, None, None);
+        assert_eq!(p_mop.game_version, "mop");
+
         // Invalid sort fallback
         let p_invalid_sort = WagoQueryParams::new(None, Some(0), None, None, Some("unsupported_sort"));
         assert_eq!(p_invalid_sort.page, 1);
         assert_eq!(p_invalid_sort.sort, None);
+
+        // Category hygiene: strips '0' and non-digits
+        let p_bad_cat = WagoQueryParams::new(None, None, None, Some("0"), None);
+        assert_eq!(p_bad_cat.category, None);
+        let p_bad_cat2 = WagoQueryParams::new(None, None, None, Some("abc"), None);
+        assert_eq!(p_bad_cat2.category, None);
     }
 
     fn url_for(p: &WagoQueryParams) -> String {
@@ -145,5 +180,16 @@ mod tests {
         assert!(retail.contains("search=Boss+Mods") && retail.contains("category=14"), "{retail}");
         let forever = url_for(&WagoQueryParams::new(Some("forever"), None, None, None, None));
         assert!(forever.contains("game_version=classic"), "{forever}");
+    }
+
+    #[test]
+    fn test_apply_to_url_clears_stale_parameters() {
+        let mut url = Url::parse("https://addons.wago.io/?stale=param&sort=popular").unwrap();
+        let p = WagoQueryParams::new(Some("retail"), Some(1), Some("dbm"), None, Some("name"));
+        p.apply_to_url(&mut url);
+        let s = url.to_string();
+        assert!(!s.contains("stale=param"), "stale parameters must be cleared: {s}");
+        assert!(s.contains("sort=name"), "new sort must be applied: {s}");
+        assert!(s.contains("search=dbm"), "new search must be applied: {s}");
     }
 }

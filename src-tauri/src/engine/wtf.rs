@@ -19,13 +19,78 @@ pub struct WtfFileInfo {
     pub scope: String, // "account" or "character"
 }
 
-pub fn collect_addon_wtf_files(
+pub fn resolve_wtf_root(
+    conn: Option<&Connection>,
     wow_root: &Path,
     flavour_folder: &str,
+) -> PathBuf {
+    // 1. If DB connection is supplied, query flavours.custom_root (ADR-318)
+    if let Some(c) = conn {
+        if let Ok(Some(cr_str)) = crate::db::repo::get_flavour_custom_root(c, flavour_folder) {
+            let cr = PathBuf::from(cr_str);
+            let root_dir = if cr
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("AddOns"))
+                .unwrap_or(false)
+            {
+                cr.parent().and_then(|p| p.parent()).unwrap_or(&cr).to_path_buf()
+            } else {
+                cr
+            };
+
+            if root_dir.join("WTF").is_dir() {
+                return root_dir.join("WTF");
+            }
+            if root_dir.join("Interface").is_dir() {
+                return root_dir.join("WTF");
+            }
+            if root_dir.join(flavour_folder).join("WTF").is_dir() {
+                return root_dir.join(flavour_folder).join("WTF");
+            }
+            let clean_flv = flavour_folder.trim_matches('_');
+            if root_dir.join(format!("_{}_", clean_flv)).join("WTF").is_dir() {
+                return root_dir.join(format!("_{}_", clean_flv)).join("WTF");
+            }
+            return root_dir.join("WTF");
+        }
+    }
+
+    // 2. Direct path inspection on wow_root
+    if wow_root.join("WTF").is_dir() {
+        return wow_root.join("WTF");
+    }
+    if wow_root.join("Interface").is_dir() {
+        return wow_root.join("WTF");
+    }
+
+    let folder_name = wow_root.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let clean_flv = flavour_folder.trim_matches('_');
+    if folder_name.eq_ignore_ascii_case(flavour_folder)
+        || folder_name.eq_ignore_ascii_case(clean_flv)
+        || folder_name.eq_ignore_ascii_case(&format!("_{}_", clean_flv))
+    {
+        return wow_root.join("WTF");
+    }
+
+    let sub = wow_root.join(flavour_folder);
+    if sub.join("WTF").is_dir() || sub.is_dir() {
+        return sub.join("WTF");
+    }
+
+    let clean_sub = wow_root.join(format!("_{}_", clean_flv));
+    if clean_sub.join("WTF").is_dir() || clean_sub.is_dir() {
+        return clean_sub.join("WTF");
+    }
+
+    wow_root.join(flavour_folder).join("WTF")
+}
+
+pub fn collect_addon_wtf_files_at_root(
+    wtf_root: &Path,
     folders: &[String],
 ) -> Vec<WtfFileInfo> {
     let mut files = Vec::new();
-    let wtf_root = wow_root.join(flavour_folder).join("WTF");
     let account_root = wtf_root.join("Account");
 
     if !account_root.is_dir() {
@@ -115,6 +180,25 @@ pub fn collect_addon_wtf_files(
     files
 }
 
+pub fn collect_addon_wtf_files(
+    wow_root: &Path,
+    flavour_folder: &str,
+    folders: &[String],
+) -> Vec<WtfFileInfo> {
+    let wtf_root = resolve_wtf_root(None, wow_root, flavour_folder);
+    collect_addon_wtf_files_at_root(&wtf_root, folders)
+}
+
+pub fn collect_addon_wtf_files_with_conn(
+    conn: Option<&Connection>,
+    wow_root: &Path,
+    flavour_folder: &str,
+    folders: &[String],
+) -> Vec<WtfFileInfo> {
+    let wtf_root = resolve_wtf_root(conn, wow_root, flavour_folder);
+    collect_addon_wtf_files_at_root(&wtf_root, folders)
+}
+
 pub fn take_wtf_snapshot(
     conn: &Connection,
     wow_root: &Path,
@@ -124,7 +208,7 @@ pub fn take_wtf_snapshot(
     data_dir: &Path,
     kind: &str,
 ) -> Result<Option<String>, String> {
-    let files = collect_addon_wtf_files(wow_root, flavour_folder, folders);
+    let files = collect_addon_wtf_files_with_conn(Some(conn), wow_root, flavour_folder, folders);
     if files.is_empty() {
         return Ok(None);
     }
@@ -232,32 +316,8 @@ pub fn take_wtf_snapshot(
     )
     .map_err(|e| e.to_string())?;
 
-    // Retention: keep last 3 pre-update snapshots per addon
-    if kind == "pre-update" {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, path FROM wtf_snapshots WHERE addon_id = ?1 AND kind = 'pre-update' ORDER BY created_at DESC, rowid DESC",
-            )
-            .map_err(|e| e.to_string())?;
-
-        let rows = stmt
-            .query_map(params![addon_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-
-        let mut snapshots = Vec::new();
-        for r in rows {
-            snapshots.push(r.map_err(|e| e.to_string())?);
-        }
-
-        if snapshots.len() > 3 {
-            for (old_id, old_path_str) in &snapshots[3..] {
-                let _ = fs::remove_file(Path::new(old_path_str));
-                let _ = conn.execute("DELETE FROM wtf_snapshots WHERE id = ?1", params![old_id]);
-            }
-        }
-    }
+    // Safe retention pruning: keep last 3 snapshots per addon/kind (ADR-314)
+    let _ = crate::db::repo::prune_stale_wtf_snapshots(conn, addon_id, Some(kind), 3);
 
     Ok(Some(snapshot_id))
 }
@@ -288,7 +348,8 @@ pub fn restore_wtf_snapshot(
         return Err(format!("Snapshot zip file not found on disk: {}", path_str));
     }
 
-    let wtf_root = wow_root.join(flavour_folder).join("WTF");
+    // Resolve WTF root accounting for custom root configurations (ADR-318)
+    let wtf_root = resolve_wtf_root(Some(conn), wow_root, flavour_folder);
 
     // 3. Inspect entries in the snapshot zip to verify safe relative paths
     let zip_file = File::open(&snapshot_zip_path).map_err(|e| e.to_string())?;
@@ -384,7 +445,7 @@ pub fn preview_wtf_restore(
         return Err(format!("Snapshot zip file not found on disk: {}", path_str));
     }
 
-    let wtf_root = wow_root.join(flavour_folder).join("WTF");
+    let wtf_root = resolve_wtf_root(Some(conn), wow_root, flavour_folder);
     let zip_file = File::open(&snapshot_zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(zip_file).map_err(|e| e.to_string())?;
 
@@ -400,6 +461,41 @@ pub fn preview_wtf_restore(
     }
 
     Ok(preview_files)
+}
+
+pub fn cleanup_orphaned_wtf_snapshots(conn: &Connection, data_dir: &Path) -> Result<usize, String> {
+    let snapshots_dir = data_dir.join("wtf_snapshots");
+    if !snapshots_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT path FROM wtf_snapshots")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut known_paths = std::collections::HashSet::new();
+    for r in rows {
+        if let Ok(p) = r {
+            known_paths.insert(PathBuf::from(p));
+        }
+    }
+
+    let mut removed = 0;
+    if let Ok(entries) = fs::read_dir(&snapshots_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("zip") {
+                if !known_paths.contains(&path) {
+                    let _ = fs::remove_file(&path);
+                    removed += 1;
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -499,23 +595,13 @@ mod tests {
         fs::create_dir_all(&data_dir).unwrap();
 
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE wtf_snapshots (
-                id TEXT PRIMARY KEY,
-                addon_id TEXT NOT NULL,
-                account TEXT,
-                scope TEXT,
-                path TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                restored_at TEXT
-            );
-            CREATE TABLE addons (id TEXT PRIMARY KEY, flavour TEXT, name TEXT, adopted INTEGER);
-            CREATE TABLE addon_folders (flavour TEXT, folder TEXT, addon_id TEXT);"
-        ).unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
 
         let complex_id = "retail:gh:bart-dev-wow/TimelineReminders";
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
         conn.execute(
             "INSERT INTO addons (id, flavour, name, adopted) VALUES (?1, 'retail', 'TimelineReminders', 0)",
             rusqlite::params![complex_id],
@@ -546,5 +632,178 @@ mod tests {
 
         assert!(!saved_path.contains(':') || (cfg!(windows) && saved_path.chars().filter(|c| *c == ':').count() <= 1), "No extra colons in path: {}", saved_path);
         assert!(std::path::Path::new(&saved_path).exists(), "Snapshot zip must exist on disk!");
+    }
+
+    #[test]
+    fn test_wtf_snapshot_and_restore_with_custom_root() {
+        let temp = tempfile::tempdir().unwrap();
+        // Custom root decoupled from any standard wow_root directory (ADR-318)
+        let custom_forever_root = temp.path().join("StandaloneWoWForever");
+        let fake_global_wow_root = temp.path().join("GlobalWoW");
+        let data_dir = temp.path().join("Data");
+
+        let wtf_acc = custom_forever_root.join("WTF").join("Account").join("99999#1");
+        let acc_sv = wtf_acc.join("SavedVariables");
+        let char_sv = wtf_acc.join("EmeraldDream").join("Krenz").join("SavedVariables");
+
+        fs::create_dir_all(&acc_sv).unwrap();
+        fs::create_dir_all(&char_sv).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::create_dir_all(&fake_global_wow_root).unwrap();
+
+        fs::write(acc_sv.join("ShaguPlates.lua"), b"shagu_acc_v1").unwrap();
+        fs::write(char_sv.join("ShaguPlates.lua"), b"shagu_char_v1").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        // Flavour configured with custom_root
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed, custom_root) \
+             VALUES ('forever', '_forever_', 'WoW Forever', 1, ?1)",
+            rusqlite::params![custom_forever_root.to_string_lossy()],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, adopted) VALUES ('forever:shagu', 'forever', 'ShaguPlates', 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('forever', 'ShaguPlates', 'forever:shagu')",
+            [],
+        ).unwrap();
+
+        // 1. Take snapshot: even when caller passes fake_global_wow_root, custom_root is resolved from DB
+        let snap_id = take_wtf_snapshot(
+            &conn,
+            &fake_global_wow_root,
+            "_forever_",
+            "forever:shagu",
+            &["ShaguPlates".to_string()],
+            &data_dir,
+            "pre-update",
+        )
+        .unwrap()
+        .expect("Snapshot should be created from custom root");
+
+        // 2. Modify files to v2
+        fs::write(acc_sv.join("ShaguPlates.lua"), b"shagu_acc_v2").unwrap();
+        fs::write(char_sv.join("ShaguPlates.lua"), b"shagu_char_v2").unwrap();
+
+        // 3. Preview restore
+        let previews = preview_wtf_restore(&conn, &fake_global_wow_root, "_forever_", &snap_id).unwrap();
+        assert_eq!(previews.len(), 2);
+        assert!(previews.iter().any(|p| p.contains("will overwrite: true")));
+
+        // 4. Restore snapshot
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FURPHY_TEST_WOW_RUNNING", "0");
+        let res = restore_wtf_snapshot(&conn, &fake_global_wow_root, "_forever_", &snap_id, &data_dir);
+        assert!(res.is_ok(), "Restore should succeed: {:?}", res.err());
+        std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
+
+        // 5. Verify restored to v1 in the custom root directory
+        assert_eq!(fs::read(acc_sv.join("ShaguPlates.lua")).unwrap(), b"shagu_acc_v1");
+        assert_eq!(fs::read(char_sv.join("ShaguPlates.lua")).unwrap(), b"shagu_char_v1");
+    }
+
+    #[test]
+    fn test_wtf_snapshot_retention_pruning_pre_update_and_pre_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow_root = temp.path().join("WoW");
+        let data_dir = temp.path().join("Data");
+        let acc_sv = wow_root.join("_retail_").join("WTF").join("Account").join("12345#1").join("SavedVariables");
+
+        fs::create_dir_all(&acc_sv).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(acc_sv.join("MyAddon.lua"), b"content").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, adopted) VALUES ('addon-1', 'retail', 'MyAddon', 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'MyAddon', 'addon-1')",
+            [],
+        ).unwrap();
+
+        // Create 4 pre-update snapshots
+        for _ in 1..=4 {
+            take_wtf_snapshot(
+                &conn,
+                &wow_root,
+                "_retail_",
+                "addon-1",
+                &["MyAddon".to_string()],
+                &data_dir,
+                "pre-update",
+            ).unwrap();
+        }
+
+        let pre_update_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM wtf_snapshots WHERE addon_id = 'addon-1' AND kind = 'pre-update'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_update_count, 3, "Only last 3 pre-update snapshots should be kept");
+
+        // Create 4 pre-restore snapshots
+        for _ in 1..=4 {
+            take_wtf_snapshot(
+                &conn,
+                &wow_root,
+                "_retail_",
+                "addon-1",
+                &["MyAddon".to_string()],
+                &data_dir,
+                "pre-restore",
+            ).unwrap();
+        }
+
+        let pre_restore_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM wtf_snapshots WHERE addon_id = 'addon-1' AND kind = 'pre-restore'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_restore_count, 3, "Only last 3 pre-restore snapshots should be kept");
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_wtf_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("Data");
+        let snapshots_dir = data_dir.join("wtf_snapshots");
+        fs::create_dir_all(&snapshots_dir).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        // 1. Legitimate snapshot
+        let legit_path = snapshots_dir.join("legit_snapshot.zip");
+        fs::write(&legit_path, b"legit").unwrap();
+        conn.execute(
+            "INSERT INTO wtf_snapshots (id, path) VALUES ('legit-1', ?1)",
+            rusqlite::params![legit_path.to_string_lossy()],
+        ).unwrap();
+
+        // 2. Orphaned snapshot (no DB entry)
+        let orphan_path = snapshots_dir.join("orphan_snapshot.zip");
+        fs::write(&orphan_path, b"orphan").unwrap();
+
+        assert!(orphan_path.exists());
+        let cleaned = cleanup_orphaned_wtf_snapshots(&conn, &data_dir).unwrap();
+        assert_eq!(cleaned, 1);
+        assert!(!orphan_path.exists(), "Orphaned snapshot must be deleted");
+        assert!(legit_path.exists(), "Legitimate snapshot must be kept");
     }
 }

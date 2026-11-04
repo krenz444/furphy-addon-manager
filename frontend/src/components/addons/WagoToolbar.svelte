@@ -37,14 +37,61 @@
     onClearQuery,
   }: Props = $props();
 
+  let isSwitching = $state(false);
+  let pendingFlavour = $state<string | null>(null);
+  let switchTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Derive human-readable target client label for explicit feedback
+  let targetFlavourLabel = $derived.by(() => {
+    if (!pendingFlavour) return '';
+    const match = flavours?.find((f) => f.id === pendingFlavour);
+    return match ? match.label : pendingFlavour;
+  });
+
+  // Synchronize state when selectedFlavour prop updates from parent
+  $effect(() => {
+    if (pendingFlavour && selectedFlavour === pendingFlavour && !loading) {
+      isSwitching = false;
+      pendingFlavour = null;
+      if (switchTimeout) {
+        clearTimeout(switchTimeout);
+        switchTimeout = null;
+      }
+    }
+  });
+
+  function handleFlavourChangeInternal(e: Event) {
+    const select = e.target as HTMLSelectElement;
+    const newFlavour = select.value;
+    if (!newFlavour || newFlavour === selectedFlavour) return;
+
+    // Prevent race conditions: do not allow initiating a client switch during an active browse query
+    if (loading || isSwitching) {
+      select.value = selectedFlavour || '';
+      return;
+    }
+
+    isSwitching = true;
+    pendingFlavour = newFlavour;
+
+    // Safety timeout in case parent fails to acknowledge the switch
+    if (switchTimeout) clearTimeout(switchTimeout);
+    switchTimeout = setTimeout(() => {
+      isSwitching = false;
+      pendingFlavour = null;
+    }, 6000);
+
+    onFlavourChange?.(newFlavour);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !loading) {
       onTriggerSearch();
     }
   }
 </script>
 
-<div class="wago-toolbar">
+<div class="wago-toolbar" role="region" aria-label="Wago browsing controls">
   <div class="search-box">
     <span class="search-icon" aria-hidden="true">🔍</span>
     <input
@@ -55,6 +102,7 @@
       oninput={(e) => onQueryChange((e.target as HTMLInputElement).value)}
       onkeydown={handleKeydown}
       aria-label="Search Wago addons"
+      disabled={loading && isSwitching}
     />
     {#if searchQuery.trim().length > 0}
       <button
@@ -63,6 +111,7 @@
         onclick={onClearQuery}
         title="Clear search query"
         aria-label="Clear search query"
+        disabled={loading && isSwitching}
       >
         ✕
       </button>
@@ -75,6 +124,7 @@
       value={selectedCategory}
       onchange={(e) => onCategoryChange((e.target as HTMLSelectElement).value)}
       aria-label="Filter by category"
+      disabled={loading}
     >
       <option value="">All Categories</option>
       {#each categories as cat (cat.id)}
@@ -88,6 +138,7 @@
     value={selectedSort}
     onchange={(e) => onSortChange((e.target as HTMLSelectElement).value as WagoSortOption)}
     aria-label="Sort by"
+    disabled={loading}
   >
     <option value="popular">Most Popular</option>
     <option value="downloads">Most Downloads</option>
@@ -99,24 +150,36 @@
     type="button"
     class="btn-primary"
     onclick={onTriggerSearch}
-    disabled={loading}
+    disabled={loading || isSwitching}
+    aria-busy={loading}
   >
-    {loading ? 'Searching…' : 'Search'}
+    {loading && !isSwitching ? 'Searching…' : 'Search'}
   </button>
 
   {#if flavours && flavours.length > 0}
-    <div class="flavour-selector-wrap" title="Select which game version to browse and install addons for">
+    <div
+      class="flavour-selector-wrap"
+      title="Select which game version to browse and install addons for"
+    >
       <label for="wago-target-flavour-select" class="flavour-label-badge">
-        <span class="indicator-dot" class:classic={isClassicOrForever}></span>
+        <span
+          class="indicator-dot"
+          class:classic={isClassicOrForever}
+          class:pulsing={loading || isSwitching}
+          aria-hidden="true"
+        ></span>
         <span>Game:</span>
       </label>
+
       <select
         id="wago-target-flavour-select"
         class="toolbar-select flavour-select"
         class:classic={isClassicOrForever}
         value={selectedFlavour}
-        onchange={(e) => onFlavourChange?.((e.target as HTMLSelectElement).value)}
+        disabled={loading || isSwitching}
+        onchange={handleFlavourChangeInternal}
         aria-label="Select game client to browse and install addons for"
+        aria-busy={loading || isSwitching}
       >
         {#each flavours as fl (fl.id)}
           <option value={fl.id}>
@@ -124,86 +187,44 @@
           </option>
         {/each}
       </select>
+
+      {#if isSwitching && targetFlavourLabel}
+        <span class="flavour-feedback" role="status" aria-live="polite">
+          <span class="feedback-spinner" aria-hidden="true"></span>
+          Switching to {targetFlavourLabel}…
+        </span>
+      {/if}
     </div>
   {:else if destinationLabel}
-    <div class="target-indicator" class:classic={isClassicOrForever} title={`Browsing addons compatible with ${destinationLabel}`}>
-      <span class="indicator-dot" class:classic={isClassicOrForever}></span>
+    <div
+      class="target-indicator"
+      class:classic={isClassicOrForever}
+      title={`Browsing addons compatible with ${destinationLabel}`}
+    >
+      <span
+        class="indicator-dot"
+        class:classic={isClassicOrForever}
+        class:pulsing={loading}
+        aria-hidden="true"
+      ></span>
       <span class="indicator-text">{destinationLabel}</span>
     </div>
   {/if}
 </div>
 
 <style>
-  .flavour-selector-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-left: auto;
-  }
-
-  .flavour-label-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .flavour-select {
-    font-weight: 600;
-  }
-
-  .flavour-select.classic {
-    border-color: rgba(245, 158, 11, 0.4);
-    color: #f59e0b;
-  }
-
-  .target-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.75rem;
-    border-radius: var(--radius-sm, 4px);
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    color: var(--accent);
-    font-size: 0.8rem;
-    font-weight: 600;
-    margin-left: auto;
-  }
-
-  .target-indicator.classic {
-    background: rgba(245, 158, 11, 0.12);
-    border-color: rgba(245, 158, 11, 0.35);
-    color: #f59e0b;
-  }
-
-  .indicator-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .indicator-dot.classic {
-    background: #f59e0b;
-  }
-
-  .indicator-text {
-    white-space: nowrap;
-  }
   .wago-toolbar {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
+    width: 100%;
   }
 
   .search-box {
     position: relative;
-    flex: 1;
-    min-width: 200px;
+    flex: 1 1 220px;
+    min-width: 180px;
     display: flex;
     align-items: center;
   }
@@ -246,7 +267,7 @@
     transition: color var(--fast, 150ms), background var(--fast, 150ms);
   }
 
-  .btn-clear:hover {
+  .btn-clear:hover:not(:disabled) {
     color: var(--text);
     background: var(--bg-2);
   }
@@ -263,6 +284,12 @@
     border-radius: var(--radius-sm, 4px);
     font-size: 0.875rem;
     cursor: pointer;
+    transition: opacity var(--fast, 150ms), border-color var(--fast, 150ms);
+  }
+
+  .toolbar-select:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   .toolbar-select:focus-visible {
@@ -271,7 +298,7 @@
 
   .btn-primary {
     background: var(--accent);
-    color: #ffffff;
+    color: var(--accent-text);
     border: none;
     padding: 0.5rem 1rem;
     border-radius: var(--radius-sm, 4px);
@@ -279,6 +306,7 @@
     font-weight: 600;
     cursor: pointer;
     transition: filter var(--fast, 150ms);
+    white-space: nowrap;
   }
 
   .btn-primary:hover:not(:disabled) {
@@ -292,5 +320,162 @@
 
   .btn-primary:focus-visible {
     outline: 2px solid var(--focus-ring);
+  }
+
+  .flavour-selector-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+    flex-wrap: wrap;
+  }
+
+  .flavour-label-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .flavour-select {
+    font-weight: 600;
+  }
+
+  .flavour-select.classic {
+    border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+    color: var(--warning);
+  }
+
+  .flavour-feedback {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-tint);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    white-space: nowrap;
+    animation: fadeIn 150ms ease-out;
+  }
+
+  .feedback-spinner {
+    width: 9px;
+    height: 9px;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+
+  .target-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--accent-tint);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--accent);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-left: auto;
+  }
+
+  .target-indicator.classic {
+    background: var(--warning-tint);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    color: var(--warning);
+  }
+
+  .indicator-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    transition: transform var(--fast, 150ms);
+  }
+
+  .indicator-dot.classic {
+    background: var(--warning);
+  }
+
+  .indicator-dot.pulsing {
+    animation: pulseDot 1s ease-in-out infinite alternate;
+  }
+
+  .indicator-text {
+    white-space: nowrap;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes pulseDot {
+    from {
+      opacity: 0.4;
+      transform: scale(0.85);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1.25);
+    }
+  }
+
+  /* Responsive reflow */
+  @media (max-width: 860px) {
+    .flavour-selector-wrap,
+    .target-indicator {
+      margin-left: 0;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .wago-toolbar {
+      gap: 0.5rem;
+    }
+
+    .search-box {
+      flex: 1 1 100%;
+      min-width: 100%;
+    }
+
+    .toolbar-select {
+      flex: 1 1 calc(50% - 0.25rem);
+      min-width: 120px;
+    }
+
+    .btn-primary {
+      flex: 0 0 auto;
+    }
+
+    .flavour-selector-wrap {
+      flex: 1 1 100%;
+      justify-content: flex-start;
+      margin-left: 0;
+      padding-top: 0.25rem;
+    }
+
+    .flavour-select {
+      flex: 1 1 auto;
+    }
   }
 </style>

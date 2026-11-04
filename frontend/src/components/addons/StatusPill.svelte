@@ -60,43 +60,89 @@
 </script>
 
 {#if statusType === 'failed'}
-  <button
-    type="button"
-    class="status-pill pill-failed"
-    onclick={handleClick}
-    title={addon.error || "Update check failed. Click to retry."}
-  >
-    <span class="pill-dot"></span>
-    Failed · View error
-  </button>
+  {#if onShowError}
+    <button
+      type="button"
+      class="status-pill pill-failed"
+      onclick={handleClick}
+      aria-label={`Failed update for ${addon.name ?? addon.id}: ${addon.error || 'Update check failed. Click to view error.'}`}
+      title={addon.error || "Update check failed. Click to retry."}
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Failed · View error
+    </button>
+  {:else}
+    <span
+      class="status-pill pill-failed"
+      title={addon.error || "Update check failed."}
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Failed
+    </span>
+  {/if}
 {:else if statusType === 'update'}
-  <button
-    type="button"
-    class="status-pill pill-update"
-    onclick={handleClick}
-    title="Update to {addon.update_version}"
-  >
-    <span class="pill-dot"></span>
-    Update {addon.update_version ? `(${addon.update_version})` : ''}
-  </button>
+  {#if onUpdate}
+    <button
+      type="button"
+      class="status-pill pill-update"
+      onclick={handleClick}
+      aria-label={`Update ${addon.name ?? addon.id} to ${addon.update_version}`}
+      title="Update to {addon.update_version}"
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Update {addon.update_version ? `(${addon.update_version})` : ''}
+    </button>
+  {:else}
+    <span
+      class="status-pill pill-update"
+      title="Update to {addon.update_version}"
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Update {addon.update_version ? `(${addon.update_version})` : ''}
+    </span>
+  {/if}
 {:else if statusType === 'pinned'}
-  <button
-    type="button"
-    class="status-pill pill-pinned"
-    onclick={handleClick}
-    title="Pinned to this version. Click to unpin."
-  >
-    Pinned
-  </button>
+  {#if onUnpin}
+    <button
+      type="button"
+      class="status-pill pill-pinned"
+      onclick={handleClick}
+      aria-label={`Pinned version for ${addon.name ?? addon.id}. Click to unpin.`}
+      title="Pinned to this version. Click to unpin."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Pinned
+    </button>
+  {:else}
+    <span
+      class="status-pill pill-pinned"
+      title="Pinned to this version."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Pinned
+    </span>
+  {/if}
 {:else if statusType === 'ignored'}
-  <button
-    type="button"
-    class="status-pill pill-ignored"
-    onclick={handleClick}
-    title="Ignoring updates. Click to resume updates."
-  >
-    Ignored
-  </button>
+  {#if onUnignore}
+    <button
+      type="button"
+      class="status-pill pill-ignored"
+      onclick={handleClick}
+      aria-label={`Updates ignored for ${addon.name ?? addon.id}. Click to resume updates.`}
+      title="Ignoring updates. Click to resume updates."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Ignored
+    </button>
+  {:else}
+    <span
+      class="status-pill pill-ignored"
+      title="Ignoring updates."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Ignored
+    </span>
+  {/if}
 {:else if statusType === 'needs_dep'}
   {#if onInstallDeps}
     <button
@@ -109,30 +155,53 @@
       aria-label="Install missing dependencies for {addon.name ?? addon.id}: {addon.missing_deps?.join(', ') || 'Unknown'}"
       title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to install."
     >
-      <span class="pill-dot"></span>
+      <span class="pill-dot" aria-hidden="true"></span>
       Install deps ({addon.missing_deps?.length ?? 1})
     </button>
-  {:else}
+  {:else if onViewDetails}
     <button
       type="button"
       class="status-pill pill-needs-dep"
       onclick={handleClick}
+      aria-label="Needs dependency for {addon.name ?? addon.id}: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to view details."
       title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}. Click to view details."
     >
+      <span class="pill-dot" aria-hidden="true"></span>
       Needs a dependency
     </button>
+  {:else}
+    <span
+      class="status-pill pill-needs-dep"
+      title="Needs dependency: {addon.missing_deps?.join(', ') || 'Unknown'}."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Needs a dependency
+    </span>
   {/if}
 {:else if statusType === 'old_patch'}
-  <button
-    type="button"
-    class="status-pill pill-old-patch"
-    onclick={handleClick}
-    title="Not built for current game client patch. Click to view compatibility."
-  >
-    Old patch
-  </button>
+  {#if onViewDetails}
+    <button
+      type="button"
+      class="status-pill pill-old-patch"
+      onclick={handleClick}
+      aria-label={`${addon.name ?? addon.id} is not built for current game client patch. Click to view compatibility.`}
+      title="Not built for current game client patch. Click to view compatibility."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Old patch
+    </button>
+  {:else}
+    <span
+      class="status-pill pill-old-patch"
+      title="Not built for current game client patch."
+    >
+      <span class="pill-dot" aria-hidden="true"></span>
+      Old patch
+    </span>
+  {/if}
 {:else}
-  <span class="status-pill pill-up-to-date">
+  <span class="status-pill pill-up-to-date" title="Addon is up to date with latest release.">
+    <span class="pill-dot" aria-hidden="true"></span>
     Up to date
   </span>
 {/if}
@@ -150,7 +219,7 @@
     cursor: default;
     white-space: nowrap;
     user-select: none;
-    transition: background var(--fast), border-color var(--fast), transform var(--fast);
+    transition: background var(--fast, 150ms), border-color var(--fast, 150ms), transform var(--fast, 150ms);
   }
 
   button.status-pill {
@@ -171,11 +240,13 @@
     height: 6px;
     border-radius: 50%;
     background: currentColor;
+    flex-shrink: 0;
   }
 
   .pill-update {
     background: var(--accent);
     color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
   .pill-update:hover {
@@ -185,17 +256,17 @@
   .pill-up-to-date {
     background: var(--success-tint);
     color: var(--success);
-    border-color: rgba(47, 230, 167, 0.25);
+    border-color: color-mix(in srgb, var(--success) 30%, transparent);
   }
 
   .pill-pinned {
     background: var(--warning-tint);
     color: var(--warning);
-    border-color: rgba(255, 179, 71, 0.25);
+    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
   }
 
-  .pill-pinned:hover {
-    background: rgba(255, 179, 71, 0.25);
+  button.pill-pinned:hover {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
   }
 
   .pill-ignored {
@@ -204,19 +275,14 @@
     border-color: var(--border);
   }
 
-  .pill-ignored:hover {
+  button.pill-ignored:hover {
     background: var(--bg-3);
   }
 
   .pill-needs-dep {
     background: var(--warning-tint);
     color: var(--warning);
-    border-color: var(--warning);
-  }
-
-  .pill-needs-dep:hover {
-    background: var(--warning-tint);
-    border-color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   }
 
   .pill-needs-dep.interactive {
@@ -232,20 +298,20 @@
   .pill-old-patch {
     background: var(--warning-tint);
     color: var(--warning);
-    border-color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
   }
 
-  .pill-old-patch:hover {
-    background: var(--warning-tint);
+  button.pill-old-patch:hover {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
   }
 
   .pill-failed {
     background: var(--danger-tint);
     color: var(--danger);
-    border-color: var(--danger-border);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
 
-  .pill-failed:hover {
-    background: rgba(255, 111, 120, 0.25);
+  button.pill-failed:hover {
+    background: color-mix(in srgb, var(--danger) 22%, transparent);
   }
 </style>

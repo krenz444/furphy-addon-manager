@@ -10,6 +10,9 @@
   dot-sourcing, same pattern tests\unit\Server.Handlers.Tests.ps1 already
   uses for Open-InBrowser/Start-Process, so Handle-WagoBrowse's own logic
   runs for real while everything past the HTTP boundary is a fixture.
+
+  Expanded with test suites for pagination edge cases, client switching,
+  game version resolution, filter echo handling, and defensive HTML parsing.
 #>
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
@@ -87,6 +90,51 @@ Describe 'ConvertFrom-WagoSearchCardHtml' {
 }
 
 # ---------------------------------------------------------------------
+# ConvertFrom-WagoSearchCardHtml: Defensive Edge Cases
+# ---------------------------------------------------------------------
+
+Describe 'ConvertFrom-WagoSearchCardHtml: Defensive Edge Cases' {
+
+    It 'handles cards with whitespace, newlines, and tabs inside <p> summary' {
+        $html = "<a href=""https://addons.wago.io/addons/whitespace-test"" class=""plain-link"">`n    <h3>Whitespace Addon</h3>`n    <p class=""summary-text"">`n        This is a multi-line`n        summary with   extra   spaces`n        and tabs.`n    </p>`n    <span><strong>Author:</strong>   Spaced Author   </span>`n    <span><strong>Downloads:</strong> 12,345 </span>`n</a>"
+        $card = ConvertFrom-WagoSearchCardHtml -Html $html
+        $card | Should Not Be $null
+        $card.slug | Should Be 'whitespace-test'
+        $card.name | Should Be 'Whitespace Addon'
+        $card.author | Should Be 'Spaced Author'
+        $card.downloads | Should Be 12345
+        $card.summary | Should Match 'This is a multi-line'
+    }
+
+    It 'handles cards with HTML entities in summary (<p>)' {
+        $html = '<a href="https://addons.wago.io/addons/entities-summary"><h3>Summary Entities</h3><p>Fast &amp; light &lt;combat&gt; meter &quot;pro&quot;</p></a>'
+        $card = ConvertFrom-WagoSearchCardHtml -Html $html
+        $card | Should Not Be $null
+        $card.summary | Should Be 'Fast & light <combat> meter "pro"'
+    }
+
+    It 'parses downloads with spaces as thousand separators ("1 500 000")' {
+        $html = '<a href="https://addons.wago.io/addons/space-downloads"><h3>Space Downloads</h3><span><strong>Downloads:</strong> 1 500 000</span></a>'
+        $card = ConvertFrom-WagoSearchCardHtml -Html $html
+        $card.downloads | Should Be 1500000
+    }
+
+    It 'parses downloads with periods as thousand separators ("2.345.678")' {
+        $html = '<a href="https://addons.wago.io/addons/period-downloads"><h3>Period Downloads</h3><span><strong>Downloads:</strong> 2.345.678</span></a>'
+        $card = ConvertFrom-WagoSearchCardHtml -Html $html
+        $card.downloads | Should Be 2345678
+    }
+
+    It 'card missing <p> tag returns $null summary without throwing' {
+        $html = '<a href="https://addons.wago.io/addons/no-p-tag"><h3>No Description</h3><span><strong>Author:</strong> Dev</span></a>'
+        $card = ConvertFrom-WagoSearchCardHtml -Html $html
+        $card | Should Not Be $null
+        $card.summary | Should Be $null
+        $card.author | Should Be 'Dev'
+    }
+}
+
+# ---------------------------------------------------------------------
 # Sort-WagoItemsByUpdated
 # ---------------------------------------------------------------------
 
@@ -150,6 +198,7 @@ function Get-WagoCached {
     $Script:CapturedWagoUri = $PageUri
     $Script:CapturedAllowLiveFetch = [bool]$AllowLiveFetch
     if ($Script:MockWagoBehavior -eq 'null') { return $null }
+    if ($Script:MockWagoCustomProps) { return $Script:MockWagoCustomProps }
     return $Script:WagoFixtureProps
 }
 
@@ -157,6 +206,7 @@ Describe 'Handle-WagoBrowse (smoke, against tests\fixtures\wago\browse_retail_pr
 
     BeforeEach {
         $Script:MockWagoBehavior = 'fixture'
+        $Script:MockWagoCustomProps = $null
         $Script:CapturedWagoUri = $null
         $Script:CapturedAllowLiveFetch = $null
         $Script:CurrentFlavour = 'retail'
@@ -239,24 +289,6 @@ Describe 'Handle-WagoBrowse (smoke, against tests\fixtures\wago\browse_retail_pr
     }
 
     It 'while the game is running, still allows a live fetch (never gates on game state) - a null upstream response is just an empty result, no gameActive field' {
-        <#
-          GAME-MODE-SPEC.md (2026-09-08), section 8: INVERTED from "while
-          the game is running with no warm cache, returns 200 with an
-          empty result and gameActive:true - never an error, never a live
-          fetch". Handle-WagoBrowse's own game-mode gate is gone - it
-          always calls Get-WagoCached -AllowLiveFetch:$true regardless of
-          Test-GameRunning, and the gameActive field is dropped from the
-          response entirely (never sent, not even as always-false).
-          $Script:WowFakeProcessNameOverride is still set here (game
-          genuinely reads as running) specifically to prove THAT is no
-          longer what produces the empty result below - MockWagoBehavior
-          'null' (a null upstream response, e.g. what a real cold-cache
-          live fetch racing a Wago hiccup could look like) is what does,
-          and Handle-WagoBrowse's own $paginator/$props null-handling
-          (addon-server.ps1's Handle-WagoBrowse) already tolerates that
-          gracefully with a 200 and empty items/total/categories, same as
-          it would with the game not running.
-        #>
         $Script:MockWagoBehavior = 'null'
         $Script:WowFakeProcessNameOverride = (Get-Process -Id $PID).ProcessName
         $Script:GameRunningCache = $false
@@ -271,5 +303,141 @@ Describe 'Handle-WagoBrowse (smoke, against tests\fixtures\wago\browse_retail_pr
         $body.total | Should Be 0
         $body.categories.Count | Should Be 0
         $Script:CapturedAllowLiveFetch | Should Be $true
+    }
+}
+
+# ---------------------------------------------------------------------
+# Handle-WagoBrowse: Pagination Edge Cases
+# ---------------------------------------------------------------------
+
+Describe 'Handle-WagoBrowse: Pagination Edge Cases' {
+
+    BeforeEach {
+        $Script:MockWagoBehavior = 'fixture'
+        $Script:MockWagoCustomProps = $null
+        $Script:CapturedWagoUri = $null
+        $Script:CapturedAllowLiveFetch = $null
+        $Script:CurrentFlavour = 'retail'
+        $Script:ClientBuildInfo = [PSCustomObject]@{ clientInterface = $null }
+    }
+
+    It 'forwards numeric page parameter verbatim when greater than 0 (page=2)' {
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse' -Query '?page=2'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:CapturedWagoUri | Should Match '(\?|&)page=2(&|$)'
+    }
+
+    It 'forwards larger page number (page=42) verbatim' {
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse' -Query '?page=42'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:CapturedWagoUri | Should Match '(\?|&)page=42(&|$)'
+    }
+
+    It 'clamps page=0, negative, and non-numeric page values to page=1' {
+        foreach ($badPage in @('0', '-1', '-99', 'abc', '', 'NaN', '1.5')) {
+            $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse' -Query "?page=$badPage"
+            Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+            $ctx.Response.StatusCode | Should Be 200
+            $Script:CapturedWagoUri | Should Match '(\?|&)page=1(&|$)'
+            $Script:CapturedWagoUri | Should Not Match 'page=0'
+            $Script:CapturedWagoUri | Should Not Match 'page=-'
+        }
+    }
+
+    It 'correctly projects upstream pagination props (current_page, last_page, total) into response body' {
+        $customProps = [PSCustomObject]@{
+            addons = [PSCustomObject]@{
+                current_page = 3
+                last_page    = 7
+                total        = 95
+                data         = @($Script:WagoFixtureFirstCardHtml)
+            }
+            allCategories = $Script:WagoFixtureProps.allCategories
+        }
+        $Script:MockWagoCustomProps = $customProps
+
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse' -Query '?page=3'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $body = Get-FakeResponseBody -Context $ctx
+        $body.page | Should Be 3
+        $body.lastPage | Should Be 7
+        $body.total | Should Be 95
+        $body.items.Count | Should Be 1
+    }
+
+    It 'tolerates an empty data array on a page beyond the end without errors' {
+        $emptyProps = [PSCustomObject]@{
+            addons = [PSCustomObject]@{
+                current_page = 10
+                last_page    = 4
+                total        = 56
+                data         = @()
+            }
+            allCategories = $Script:WagoFixtureProps.allCategories
+        }
+        $Script:MockWagoCustomProps = $emptyProps
+
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse' -Query '?page=10'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $body = Get-FakeResponseBody -Context $ctx
+        $body.page | Should Be 10
+        $body.lastPage | Should Be 4
+        $body.total | Should Be 56
+        $body.items.Count | Should Be 0
+    }
+}
+
+# ---------------------------------------------------------------------
+# Handle-WagoBrowse: Client Switching & Game Version Resolution
+# ---------------------------------------------------------------------
+
+Describe 'Handle-WagoBrowse: Client Switching & Game Version Resolution' {
+
+    BeforeEach {
+        $Script:MockWagoBehavior = 'fixture'
+        $Script:MockWagoCustomProps = $null
+        $Script:CapturedWagoUri = $null
+        $Script:CapturedAllowLiveFetch = $null
+        $Script:ClientBuildInfo = [PSCustomObject]@{ clientInterface = $null }
+    }
+
+    It 'forwards game_version=retail when CurrentFlavour is retail' {
+        $Script:CurrentFlavour = 'retail'
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:CapturedWagoUri | Should Match '(\?|&)game_version=retail(&|$)'
+    }
+
+    It 'forwards game_version=classic when CurrentFlavour is classic_era' {
+        $Script:CurrentFlavour = 'classic_era'
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:CapturedWagoUri | Should Match '(\?|&)game_version=classic(&|$)'
+    }
+
+    It 'forwards game_version=classic when CurrentFlavour is classic with a Classic Era interface (11502)' {
+        $Script:CurrentFlavour = 'classic'
+        $Script:ClientBuildInfo = [PSCustomObject]@{ clientInterface = '11502' }
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 200
+        $Script:CapturedWagoUri | Should Match '(\?|&)game_version=classic(&|$)'
+    }
+
+    It 'returns 422 Unprocessable Entity when Classic version has unknown interface' {
+        $Script:CurrentFlavour = 'classic'
+        # An unrecognized interface version that resolves EraKey='unknown'
+        $Script:ClientBuildInfo = [PSCustomObject]@{ clientInterface = '999999' }
+        $ctx = New-FakeHttpContext -Method 'GET' -Path '/api/wago/browse'
+        Handle-WagoBrowse -Context $ctx -RouteMatch @{}
+        $ctx.Response.StatusCode | Should Be 422
+        $body = Get-FakeResponseBody -Context $ctx
+        $body.error | Should Match "Furphy doesn't recognize this Classic version yet"
     }
 }

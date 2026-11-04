@@ -144,8 +144,126 @@ CREATE TABLE IF NOT EXISTS wtf_snapshots (
 CREATE INDEX IF NOT EXISTS idx_addons_flavour ON addons(flavour);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_addon_id ON addon_folders(addon_id);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_folder ON addon_folders(folder);
+CREATE INDEX IF NOT EXISTS idx_addon_folders_flavour_addon ON addon_folders(flavour, addon_id);
 CREATE INDEX IF NOT EXISTS idx_backups_addon_id ON backups(addon_id);
+CREATE INDEX IF NOT EXISTS idx_backups_addon_kind_created ON backups(addon_id, kind, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_check_results_addon_id ON check_results(addon_id);
 CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_id ON wtf_snapshots(addon_id);
+CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_created ON wtf_snapshots(addon_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_flavour_state ON jobs(flavour, state);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn test_initial_schema_validity_and_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        let expected_tables = [
+            "meta",
+            "flavours",
+            "addons",
+            "ignored_untracked_folders",
+            "addon_folders",
+            "backups",
+            "check_results",
+            "freshness",
+            "jobs",
+            "settings",
+            "ui_prefs",
+            "tray_state",
+            "app_update",
+            "wtf_snapshots",
+        ];
+
+        for table in expected_tables {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(exists, "Table '{}' should exist in INITIAL_SCHEMA", table);
+        }
+
+        let expected_indexes = [
+            "idx_addons_flavour",
+            "idx_addon_folders_addon_id",
+            "idx_addon_folders_folder",
+            "idx_addon_folders_flavour_addon",
+            "idx_backups_addon_id",
+            "idx_backups_addon_kind_created",
+            "idx_check_results_addon_id",
+            "idx_wtf_snapshots_addon_id",
+            "idx_wtf_snapshots_addon_created",
+            "idx_jobs_flavour_state",
+        ];
+
+        for idx in expected_indexes {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(exists, "Index '{}' should exist in INITIAL_SCHEMA", idx);
+        }
+    }
+
+    #[test]
+    fn test_foreign_key_cascades_and_constraints() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label) VALUES ('retail', '_retail_', 'Retail')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name) VALUES ('addon-1', 'retail', 'TestAddon')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO addon_folders (flavour, folder, addon_id) VALUES ('retail', 'TestFolder', 'addon-1')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO wtf_snapshots (id, addon_id, path, created_at) VALUES ('snap-1', 'addon-1', 'path.zip', '2026-11-03T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO backups (id, addon_id, kind, path) VALUES ('bk-1', 'addon-1', 'rollback', 'bk.zip')",
+            [],
+        ).unwrap();
+
+        let folders_cnt: i64 = conn.query_row("SELECT COUNT(*) FROM addon_folders", [], |r| r.get(0)).unwrap();
+        assert_eq!(folders_cnt, 1);
+        let snaps_cnt: i64 = conn.query_row("SELECT COUNT(*) FROM wtf_snapshots", [], |r| r.get(0)).unwrap();
+        assert_eq!(snaps_cnt, 1);
+
+        // Delete addon
+        conn.execute("DELETE FROM addons WHERE id = 'addon-1'", []).unwrap();
+
+        // addon_folders and wtf_snapshots must be CASCADE deleted
+        let folders_after: i64 = conn.query_row("SELECT COUNT(*) FROM addon_folders", [], |r| r.get(0)).unwrap();
+        assert_eq!(folders_after, 0);
+        let snaps_after: i64 = conn.query_row("SELECT COUNT(*) FROM wtf_snapshots", [], |r| r.get(0)).unwrap();
+        assert_eq!(snaps_after, 0);
+
+        // backups addon_id must be SET NULL
+        let bk_addon_id: Option<String> = conn.query_row("SELECT addon_id FROM backups WHERE id = 'bk-1'", [], |r| r.get(0)).unwrap();
+        assert!(bk_addon_id.is_none());
+    }
+}

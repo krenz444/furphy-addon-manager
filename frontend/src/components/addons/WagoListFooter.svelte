@@ -4,14 +4,23 @@
     hasMore: boolean;
     resultsCount: number;
     error: string | null;
+    ceilingReached?: boolean;
     onLoadMore?: () => void;
     onRetry?: () => void;
   }
 
-  let { loadingMore, hasMore, resultsCount, error, onLoadMore, onRetry }: Props = $props();
+  let {
+    loadingMore,
+    hasMore,
+    resultsCount,
+    error,
+    ceilingReached = false,
+    onLoadMore,
+    onRetry,
+  }: Props = $props();
 </script>
 
-<footer class="wago-list-footer">
+<footer class="wago-list-footer" data-testid="wago-list-footer">
   {#if loadingMore}
     <div class="footer-state loading" aria-live="polite">
       <div class="spinner-sm" aria-hidden="true"></div>
@@ -23,8 +32,17 @@
       <button type="button" class="btn-retry" onclick={onRetry || onLoadMore}>Retry</button>
     </div>
   {:else if hasMore}
-    <div class="footer-state load-more-action">
-      <button type="button" class="btn-load-more" onclick={onLoadMore}>
+    <div class="footer-state load-more-action" class:ceiling-notice={ceilingReached}>
+      {#if ceilingReached}
+        <span class="ceiling-pill" data-testid="ceiling-indicator">Auto-scroll paused at {resultsCount} addons</span>
+      {/if}
+      <button
+        type="button"
+        class="btn-load-more"
+        data-testid="manual-load-more"
+        onclick={onLoadMore}
+        aria-label="Load more addons ({resultsCount} loaded)"
+      >
         Load More Addons ({resultsCount} loaded) ↓
       </button>
     </div>
@@ -50,6 +68,21 @@
     gap: 0.65rem;
     font-size: 0.85rem;
     color: var(--text-muted);
+  }
+
+  .load-more-action.ceiling-notice {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .ceiling-pill {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.65rem;
+    border-radius: var(--radius-sm, 4px);
+    letter-spacing: 0.02em;
   }
 
   .btn-load-more {
@@ -105,7 +138,7 @@
   .spinner-sm {
     width: 14px;
     height: 14px;
-    border: 2px solid rgba(255, 255, 255, 0.15);
+    border: 2px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;

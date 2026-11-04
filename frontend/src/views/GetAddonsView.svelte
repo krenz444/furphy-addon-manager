@@ -118,29 +118,34 @@
       totalCount = raw?.total ?? 0;
       hasMore = Boolean(raw?.has_more);
 
-      // Extra client-side filter: if browsing forever / classic, purge any retail-only addons
-      const isClassicOrForever = requestFlavour === 'forever' || requestFlavour === 'classic' || requestFlavour === 'classic_era';
-      const filteredItems = isClassicOrForever
+      // Extra client-side filter: if browsing forever / classic / progression, purge any retail-only addons
+      const isClassicOrProgression = ['forever', 'classic', 'classic_era', 'cata', 'wotlk', 'wrath', 'bc', 'tbc', 'mop', 'mists'].includes(requestFlavour);
+      const filteredItems = isClassicOrProgression
         ? newItems.filter((item) => {
             const s = (item.slug || '').toLowerCase();
-            return !s.startsWith('raiderio') && !s.includes('mythic-plus') && !s.includes('mythic-dungeon-tools');
+            return !s.startsWith('raiderio') &&
+                   !s.includes('mythic-plus') &&
+                   !s.includes('mythic-dungeon-tools') &&
+                   !s.includes('astral-keys') &&
+                   !s.includes('keystone-guru') &&
+                   !s.includes('great-vault');
           })
         : newItems;
 
       if (isFirstPage) {
         wagoResults = filteredItems;
-        if (filteredItems.length === 0) {
-          hasMore = false;
-        }
       } else {
         const existingSlugs = new Set(wagoResults.map((r) => r.slug));
         const uniqueNew = filteredItems.filter((r) => !existingSlugs.has(r.slug));
-        if (uniqueNew.length === 0) {
-          // No new addons found on this page, stop further pagination
-          hasMore = false;
-        } else {
+        if (uniqueNew.length > 0) {
           wagoResults = [...wagoResults, ...uniqueNew];
         }
+      }
+
+      // Runaway pagination loop guard: only terminate if raw page returned from backend is completely empty,
+      // or backend explicitly reported has_more == false, or total count reached.
+      if (newItems.length === 0 || !raw?.has_more || (totalCount > 0 && wagoResults.length >= totalCount)) {
+        hasMore = false;
       }
     } catch (err: unknown) {
       if (seq !== searchSeq) return; // a failure of a superseded search is irrelevant
@@ -218,11 +223,19 @@
 
   // The one way to start a fresh first-page search. It records the filters in force so the
   // reactive effect further down does not start the same search a second time.
+  const AUTOFILL_MAX_RESULTS = 120;
+  let autoCeiling = $state(120);
+
+  let ceilingReached = $derived(
+    hasMore && wagoResults.length >= autoCeiling
+  );
+
   function startSearch() {
     activeSearchKey = currentSearchKey();
     wagoPage = 1;
     wagoResults = [];
     hasMore = true;
+    autoCeiling = AUTOFILL_MAX_RESULTS;
     // A load-more of the list being replaced must not throttle the first load-more of the new one.
     lastLoadMoreTime = 0;
     searchWago(true);
@@ -259,12 +272,19 @@
   function handleRetryLoadMore() {
     if (isFetching || loadingWago || loadingMore || !hasMore) return;
     footerError = null;
+    lastLoadMoreTime = Date.now();
     wagoPage += 1;
     searchWago(false);
   }
 
-  function handleLoadMore() {
+  function handleLoadMore(manual: boolean = false) {
     if (isFetching || loadingWago || loadingMore || !hasMore || footerError) return;
+
+    // Manual load-more advances the ceiling so the user can continue past 120
+    if (manual && wagoResults.length >= autoCeiling) {
+      autoCeiling = wagoResults.length + AUTOFILL_MAX_RESULTS;
+    }
+
     const wait = 600 - (Date.now() - lastLoadMoreTime);
     if (wait > 0) {
       // Declined, not forgotten: look again once the throttle has expired.
@@ -286,25 +306,39 @@
   //  - the list overflows its container and the user is near the bottom (scrolling);
   //  - the list does not even fill the container (a tall or high-resolution window), so there is
   //    nothing to scroll and nothing would ever fire. Pages keep arriving until it overflows.
-  // A container that grows with its content never overflows, so the fill case only runs while the
-  // container sits inside the window, and stops at AUTOFILL_MAX_RESULTS as a last resort.
-  const AUTOFILL_MAX_RESULTS = 120;
-
+  // Automatic level-triggered paging stops at autoCeiling (120 addons) to prevent runaway memory
+  // and network loops; subsequent pages require manual user click on Load More.
   function loadMoreIfNearBottom() {
     const el = scrollContainerEl;
     if (!el || !hasMore || isFetching || loadingWago || loadingMore || footerError) return;
     if (activeTab !== 'wago' || wagoResults.length === 0) return;
 
+    // Enforce 120-addon ceiling: stop automatic paging once ceiling is reached
+    if (wagoResults.length >= autoCeiling) return;
+
     const overflows = el.scrollHeight > el.clientHeight + 40;
     if (overflows) {
-      if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) handleLoadMore();
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) handleLoadMore(false);
       return;
     }
 
     const containerBottom = el.getBoundingClientRect().bottom;
-    if (containerBottom <= window.innerHeight + 1 && wagoResults.length < AUTOFILL_MAX_RESULTS) {
-      handleLoadMore();
+    if (containerBottom <= window.innerHeight + 1) {
+      handleLoadMore(false);
     }
+  }
+
+  // Debounced scroll and resize triggers to prevent layout thrashing
+  const debouncedCheckNearBottom = debounce(() => {
+    loadMoreIfNearBottom();
+  }, 50);
+
+  function handleScroll() {
+    debouncedCheckNearBottom();
+  }
+
+  function handleWindowResize() {
+    debouncedCheckNearBottom();
   }
 
   function isAddonInstalled(slug: string, name: string): boolean {
@@ -401,7 +435,7 @@
 
 </script>
 
-<svelte:window onresize={loadMoreIfNearBottom} />
+<svelte:window onresize={handleWindowResize} />
 
 <div class="get-addons-view">
   <header class="tab-header">
@@ -488,7 +522,7 @@
     </div>
   {/if}
 
-  <div class="tab-content" bind:this={scrollContainerEl} onscroll={loadMoreIfNearBottom}>
+  <div class="tab-content" bind:this={scrollContainerEl} onscroll={handleScroll}>
     {#if activeTab === 'wago'}
       <div class="wago-pane">
         {#if loadingWago && wagoResults.length === 0}
@@ -515,8 +549,8 @@
           </div>
 
           <InfiniteScrollTrigger
-            onTrigger={handleLoadMore}
-            disabled={!hasMore || loadingMore || loadingWago}
+            onTrigger={() => handleLoadMore(false)}
+            disabled={!hasMore || loadingMore || loadingWago || ceilingReached}
             root={scrollContainerEl}
           />
 
@@ -525,7 +559,8 @@
             {hasMore}
             resultsCount={wagoResults.length}
             error={footerError}
-            onLoadMore={handleLoadMore}
+            {ceilingReached}
+            onLoadMore={() => handleLoadMore(true)}
             onRetry={handleRetryLoadMore}
           />
         {/if}

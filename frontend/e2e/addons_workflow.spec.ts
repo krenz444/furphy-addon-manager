@@ -232,4 +232,93 @@ test.describe('Furphy Addon Manager - Addons Workflow E2E', () => {
     await cfInput.fill('deadly boss mods');
     await browserSearchBtn.click();
   });
+
+  test('8. Get Addons - Wago Browse & Client Switching: verifies default Wago catalog and switching between Retail and Classic/Forever', async ({ page }) => {
+    // Navigate to Get Addons view
+    const getAddonsNavItem = page.locator('nav.sidebar-nav button.nav-item').filter({ hasText: 'Get Addons' });
+    await getAddonsNavItem.click();
+
+    // Verify Wago tab is active by default
+    const wagoTab = page.locator('.tab-btn').filter({ hasText: 'Wago.io' });
+    await expect(wagoTab).toBeVisible();
+    await expect(wagoTab).toHaveAttribute('aria-selected', 'true');
+
+    // Verify initial retail addons appear (Plater, Method Raid Tools, Details, Raider.IO)
+    await expect(page.locator('.addon-card').first()).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'Method Raid Tools' })).toBeVisible();
+
+    // Verify client selector exists in toolbar
+    const toolbarClientSelect = page.locator('#wago-target-flavour-select');
+    await expect(toolbarClientSelect).toBeVisible();
+
+    // Switch target client to Forever
+    await toolbarClientSelect.selectOption('forever');
+
+    // Classic / Forever cards appear, Retail-exclusive cards disappear
+    await expect(page.getByRole('heading', { level: 3, name: 'Details! Damage Meter (Classic)' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'TomTom (Classic)' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).not.toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'Method Raid Tools' })).not.toBeVisible();
+
+    // Switch back to Retail
+    await toolbarClientSelect.selectOption('retail');
+    await expect(page.getByRole('heading', { level: 3, name: 'Plater Nameplates' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'TomTom (Classic)' })).not.toBeVisible();
+  });
+
+  test('9. Get Addons - Wago Pagination & Category Filtering: pages through multi-page results and verifies pagination boundary', async ({ page }) => {
+    // Navigate to Get Addons view
+    const getAddonsNavItem = page.locator('nav.sidebar-nav button.nav-item').filter({ hasText: 'Get Addons' });
+    await getAddonsNavItem.click();
+
+    // Category filter dropdown
+    const catSelect = page.getByLabel('Filter by category');
+    await expect(catSelect).toBeVisible();
+
+    // Select "Combat" category (mock provides 45 cards across 3 pages of 15)
+    await catSelect.selectOption('combat');
+
+    // Verify first page of cards loads (15 cards)
+    const cards = page.locator('.addon-card');
+    await expect(cards.first()).toBeVisible();
+    await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 01' })).toBeVisible();
+
+    // If Load More button is present, click it; otherwise scroll container to trigger paging
+    const loadMoreBtn = page.getByRole('button', { name: /Load More Addons/ });
+    if (await loadMoreBtn.isVisible()) {
+      await loadMoreBtn.click();
+      await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 16' })).toBeVisible();
+    } else {
+      const scrollContainer = page.locator('.tab-content');
+      await scrollContainer.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+      await expect(page.getByRole('heading', { level: 3, name: 'Combat Addon 16' })).toBeVisible({ timeout: 10000 });
+    }
+  });
+
+  test('10. Get Addons - Wago Install & Destination Flavour CTA: initiates installation to target client', async ({ page }) => {
+    // Navigate to Get Addons view
+    const getAddonsNavItem = page.locator('nav.sidebar-nav button.nav-item').filter({ hasText: 'Get Addons' });
+    await getAddonsNavItem.click();
+
+    // Ensure Retail is selected
+    const toolbarClientSelect = page.locator('#wago-target-flavour-select');
+    await toolbarClientSelect.selectOption('retail');
+
+    // Locate Plater Nameplates card and verify install button has destination label
+    const platerCard = page.locator('.addon-card').filter({ hasText: 'Plater Nameplates' });
+    await expect(platerCard).toBeVisible();
+
+    const installBtn = platerCard.locator('button.btn-install').filter({ hasText: /Install to/ });
+    await expect(installBtn).toBeVisible();
+    await expect(installBtn).toContainText('Retail');
+
+    // Click install
+    await installBtn.click();
+
+    // Verify toast notification appears confirming installation job started/completed
+    const toast = page.locator('.toast.toast-success');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText('Installed');
+  });
 });

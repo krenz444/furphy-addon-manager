@@ -468,13 +468,27 @@ pub fn extract_avatar_url_from_card(html: &str) -> Option<String> {
     None
 }
 
+pub fn is_classic_flavour(flavour: &str) -> bool {
+    let f = flavour.trim().to_lowercase();
+    matches!(
+        f.as_str(),
+        "classic" | "classic_era" | "forever" | "cata" | "wotlk" | "wrath" | "bc" | "tbc" | "mop" | "mists"
+    )
+}
+
 pub fn is_retail_only_wago_addon(slug: &str) -> bool {
-    let s = slug.to_lowercase();
+    let s = slug.trim().to_lowercase();
     s.starts_with("raiderio")
+        || s.starts_with("raider-io")
+        || s.contains("raiderio")
+        || s.contains("raider-io")
         || s.contains("mythic-plus")
         || s.contains("mythic-dungeon-tools")
+        || s == "mdt"
+        || s.starts_with("mdt-")
         || s == "astral-keys"
         || s == "keystone-guru"
+        || s.contains("great-vault")
 }
 
 pub fn parse_wago_card_html(html: &str, game_version: Option<&str>) -> Option<WagoSearchItem> {
@@ -517,6 +531,19 @@ pub fn verify_wago_filter_echo(props: &Value, params: &WagoQueryParams) -> Resul
             Value::Null => None,
             Value::String(s) => Some(s.trim().to_string()),
             Value::Number(n) => Some(n.to_string()),
+            Value::Object(map) => {
+                if let Some(id) = map.get("id") {
+                    match id {
+                        Value::Number(n) => Some(n.to_string()),
+                        Value::String(s) => Some(s.trim().to_string()),
+                        _ => Some(id.to_string()),
+                    }
+                } else if let Some(slug) = map.get("slug") {
+                    slug.as_str().map(|s| s.trim().to_string())
+                } else {
+                    Some(Value::Object(map.clone()).to_string())
+                }
+            }
             other => Some(other.to_string()),
         })
     }
@@ -524,7 +551,11 @@ pub fn verify_wago_filter_echo(props: &Value, params: &WagoQueryParams) -> Resul
         match echo {
             None => false,
             Some(None) => true,
-            Some(Some(got)) => got.to_lowercase() != expected.trim().to_lowercase(),
+            Some(Some(got)) => {
+                let norm_got = got.trim().to_lowercase();
+                let norm_exp = expected.trim().to_lowercase();
+                norm_got != norm_exp && norm_got.replace('+', " ") != norm_exp
+            }
         }
     }
 
@@ -571,16 +602,36 @@ pub fn sort_by_updated_desc(items: &mut [WagoSearchItem]) {
 /// (null on the final page). Without either (test doubles) it compares the reported total
 /// with what has been returned so far. It does not depend on how many cards survived
 /// client-side filtering, so an emptied page cannot end paging early.
-fn compute_has_more(addons_obj: &Value, current_page: u64, total: u64, returned: usize) -> bool {
-    if let Some(last_page) = addons_obj.get("last_page").and_then(|v| v.as_u64()) {
-        return current_page < last_page;
-    }
+pub fn compute_has_more(addons_obj: &Value, current_page: u64, total: u64, raw_returned: usize) -> bool {
     if let Some(next) = addons_obj.get("next_page_url") {
-        return next.as_str().map_or(false, |s| !s.is_empty());
+        if next.is_null() {
+            return false;
+        }
+        if let Some(s) = next.as_str() {
+            return !s.trim().is_empty();
+        }
     }
-    let per_page = addons_obj.get("per_page").and_then(|v| v.as_u64()).unwrap_or(15);
-    let seen = current_page.saturating_sub(1).saturating_mul(per_page) + returned as u64;
-    returned > 0 && total > seen
+
+    let last_page = addons_obj.get("last_page").and_then(|v| match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    });
+    if let Some(last) = last_page {
+        return current_page < last;
+    }
+
+    let per_page = addons_obj
+        .get("per_page")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(15);
+
+    let seen = current_page.saturating_sub(1).saturating_mul(per_page) + raw_returned as u64;
+    raw_returned > 0 && total > seen
 }
 
 pub async fn search_wago_addons(
@@ -679,16 +730,23 @@ pub async fn search_wago_addons(
                     None => return Ok((Vec::new(), 0, false)),
                 };
 
-                let total = addons_obj.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+                let total = addons_obj
+                    .get("total")
+                    .and_then(|t| match t {
+                        Value::Number(n) => n.as_u64(),
+                        Value::String(s) => s.trim().parse::<u64>().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
                 let mut results = Vec::new();
+                let mut raw_cards_count = 0;
 
                 if let Some(cards_array) = addons_obj.get("data").and_then(|d| d.as_array()) {
+                    raw_cards_count = cards_array.len();
                     for card_val in cards_array {
                         if let Some(card_html) = card_val.as_str() {
                             if let Some(item) = parse_wago_card_html(card_html, Some(flavour)) {
-                                if (flavour == "forever" || flavour == "classic" || flavour == "classic_era")
-                                    && is_retail_only_wago_addon(&item.slug)
-                                {
+                                if is_classic_flavour(flavour) && is_retail_only_wago_addon(&item.slug) {
                                     continue;
                                 }
                                 results.push(item);
@@ -705,9 +763,13 @@ pub async fn search_wago_addons(
 
                 let current_page = addons_obj
                     .get("current_page")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|v| match v {
+                        Value::Number(n) => n.as_u64(),
+                        Value::String(s) => s.trim().parse::<u64>().ok(),
+                        _ => None,
+                    })
                     .unwrap_or(page as u64);
-                let has_more = compute_has_more(addons_obj, current_page, total, results.len());
+                let has_more = compute_has_more(addons_obj, current_page, total, raw_cards_count);
 
                 return Ok((results, total, has_more));
             }
@@ -851,6 +913,16 @@ mod tests {
         let props = serde_json::json!({ "game_version": "classic", "search": "details", "category": 16, "sort": "name" });
         let p = echo_params("forever", Some("details"), Some("16"), Some("name"));
         assert!(verify_wago_filter_echo(&props, &p).is_ok());
+
+        // Supports category echoed as an object with id
+        let props_obj = serde_json::json!({ "game_version": "retail", "category": { "id": 18 } });
+        let p_obj = echo_params("retail", None, Some("18"), None);
+        assert!(verify_wago_filter_echo(&props_obj, &p_obj).is_ok());
+
+        // Supports space URL-encoded as '+' in search echo
+        let props_plus = serde_json::json!({ "game_version": "retail", "search": "Boss+Mods" });
+        let p_plus = echo_params("retail", Some("Boss Mods"), None, None);
+        assert!(verify_wago_filter_echo(&props_plus, &p_plus).is_ok());
     }
 
     #[test]
@@ -909,6 +981,45 @@ mod tests {
     }
 
     #[test]
+    fn test_is_classic_flavour() {
+        for flv in ["classic", "classic_era", "forever", "cata", "wotlk", "wrath", "bc", "tbc", "mop", "mists"] {
+            assert!(is_classic_flavour(flv), "{flv} should be recognized as classic");
+            assert!(is_classic_flavour(&flv.to_uppercase()), "uppercase {flv} should match");
+        }
+        for flv in ["retail", "ptr", "xptr", "beta"] {
+            assert!(!is_classic_flavour(flv), "{flv} must not be classic");
+        }
+    }
+
+    #[test]
+    fn test_is_retail_only_wago_addon() {
+        for slug in [
+            "raiderio",
+            "raider-io",
+            "raiderio-mythic-plus-raid-progress-and-recruitment",
+            "raider-io-addon",
+            "mythic-plus",
+            "mythic-dungeon-tools",
+            "mdt",
+            "mdt-dungeon-guide",
+            "astral-keys",
+            "keystone-guru",
+            "great-vault-tracker",
+        ] {
+            assert!(is_retail_only_wago_addon(slug), "{slug} must be detected as retail-only");
+        }
+        for slug in [
+            "details-damage-meter-standalone",
+            "plater-nameplates",
+            "dbm-deadly-boss-mods",
+            "bagnon",
+            "questie",
+        ] {
+            assert!(!is_retail_only_wago_addon(slug), "{slug} is compatible with classic");
+        }
+    }
+
+    #[test]
     fn test_compute_has_more_prefers_wago_pagination_meta() {
         let meta = serde_json::json!({ "current_page": 2, "last_page": 3 });
         assert!(compute_has_more(&meta, 2, 1000, 14));
@@ -916,16 +1027,21 @@ mod tests {
         // 30 results are 2 pages: the final page must not claim there is more.
         let last = serde_json::json!({ "current_page": 2, "last_page": 2 });
         assert!(!compute_has_more(&last, 2, 30, 15));
-        // next_page_url alone (null on the final page) is honoured when last_page is absent.
+        // next_page_url is authoritative: non-empty string means more, null means none.
         let next_only = serde_json::json!({ "next_page_url": "https://addons.wago.io?page=3" });
         assert!(compute_has_more(&next_only, 2, 0, 0));
         let final_page = serde_json::json!({ "next_page_url": null });
         assert!(!compute_has_more(&final_page, 3, 1000, 14));
+        // When next_page_url is explicitly null, it overrides current_page < last_page.
+        let final_page_with_last = serde_json::json!({ "current_page": 2, "last_page": 3, "next_page_url": null });
+        assert!(!compute_has_more(&final_page_with_last, 2, 1000, 14));
         // Without metadata (test doubles) fall back to total versus what was returned.
         let none = serde_json::json!({});
         assert!(compute_has_more(&none, 1, 40, 14));
         assert!(!compute_has_more(&none, 1, 14, 14));
         assert!(!compute_has_more(&none, 1, 0, 0));
+        // Emptied page by client-side filters does not terminate paging when raw cards were returned:
+        assert!(compute_has_more(&none, 1, 40, 14));
         // A short final page: 20 results at 15 per page, page 2 returned only 5.
         let paged = serde_json::json!({ "per_page": 15 });
         assert!(compute_has_more(&paged, 1, 20, 15));
