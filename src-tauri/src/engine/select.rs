@@ -101,6 +101,17 @@ pub fn select_wago_release(
         }
     }
 
+    // 1b. For "forever", if no dedicated forever release exists across the addon, fall back to "classic"
+    if wago_field == "forever" {
+        for r in releases {
+            let rank = get_wago_stability_rank(r.stability.as_deref());
+            let has_classic = r.supported_classic_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
+            if rank <= max_release_type && has_classic {
+                return Some(r.clone());
+            }
+        }
+    }
+
     // 2. Fallback to newest allowed stability ONLY if release is flavour-agnostic
     for r in releases {
         let rank = get_wago_stability_rank(r.stability.as_deref());
@@ -375,5 +386,50 @@ mod tests {
 
         let selected_retail = select_wago_release(&releases, 1, "retail").unwrap();
         assert_eq!(selected_retail.id, "kwXVoAjQ");
+    }
+    #[test]
+    fn test_select_wago_release_forever_classic_fallback() {
+        // When an addon has NO forever releases (like BigWigs Classic KdMk8ER6),
+        // it must fall back to the Classic Era release, but never to Retail-only releases.
+        let releases = vec![
+            WagoRelease {
+                id: "rel_retail_only".to_string(),
+                name: Some("Retail Only Addon".to_string()),
+                version: Some("1.0".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(100),
+                url: None,
+                supported_retail_patches: Some(vec!["12.1.5".to_string()]),
+                supported_classic_patches: None,
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+            WagoRelease {
+                id: "rel_classic_fallback".to_string(),
+                name: Some("BigWigs Classic".to_string()),
+                version: Some("12.1.3".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(100),
+                url: None,
+                supported_retail_patches: Some(vec!["12.1.5".to_string()]),
+                supported_classic_patches: Some(vec!["1.15.9".to_string()]),
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+        ];
+
+        // For forever, rel_classic_fallback is selected because it supports classic patches
+        let sel = select_wago_release(&releases, 1, "forever").unwrap();
+        assert_eq!(sel.id, "rel_classic_fallback");
+
+        // Retail only release list for forever must return None (no cross-contamination from Retail)
+        let retail_only = vec![releases[0].clone()];
+        assert!(select_wago_release(&retail_only, 1, "forever").is_none());
     }
 }
