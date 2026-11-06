@@ -73,6 +73,7 @@ pub fn select_wago_release(
         match wago_field {
             "retail" | "mainline" => r.supported_retail_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
             "classic" | "vanilla" | "classic_era" => r.supported_classic_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
+            "forever" => r.supported_forever_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
             "bc" | "tbc" => r.supported_bc_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
             "wotlk" | "wrath" => r.supported_wotlk_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
             "cata" | "cataclysm" => r.supported_cata_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
@@ -84,11 +85,12 @@ pub fn select_wago_release(
     let has_any_patch_specification = |r: &WagoRelease| -> bool {
         let has_retail = r.supported_retail_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_classic = r.supported_classic_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
+        let has_forever = r.supported_forever_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_bc = r.supported_bc_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_wotlk = r.supported_wotlk_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_cata = r.supported_cata_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_mop = r.supported_mop_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
-        has_retail || has_classic || has_bc || has_wotlk || has_cata || has_mop
+        has_retail || has_classic || has_forever || has_bc || has_wotlk || has_cata || has_mop
     };
 
     // 1. Stability <= max_release_type AND supported patches non-empty for requested flavour
@@ -261,6 +263,7 @@ mod tests {
                 url: None,
                 supported_retail_patches: Some(vec!["11.0.2".to_string()]),
                 supported_classic_patches: None,
+                supported_forever_patches: None,
                 supported_bc_patches: None,
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
@@ -275,6 +278,22 @@ mod tests {
                 url: None,
                 supported_retail_patches: None,
                 supported_classic_patches: Some(vec!["1.15.2".to_string()]),
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+            WagoRelease {
+                id: "rel3".to_string(),
+                name: Some("Forever release".to_string()),
+                version: Some("1.0".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(100),
+                url: None,
+                supported_retail_patches: None,
+                supported_classic_patches: None,
+                supported_forever_patches: Some(vec!["1.60.1".to_string()]),
                 supported_bc_patches: None,
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
@@ -287,5 +306,74 @@ mod tests {
 
         let sel_classic = select_wago_release(&releases, 1, "classic").unwrap();
         assert_eq!(sel_classic.id, "rel2");
+
+        let sel_forever = select_wago_release(&releases, 1, "forever").unwrap();
+        assert_eq!(sel_forever.id, "rel3");
+     }
+    #[test]
+    fn test_select_wago_release_pawn_forever() {
+        // Simulates Pawn's Wago release list:
+        // 1. Retail release (kwXVoAjQ) with supported_retail_patches ["12.1.5", "12.1.7"]
+        // 2. Classic Era release (odGeLVO6) with supported_classic_patches ["1.15.9"]
+        // 3. Forever release (5wq3moZQ) with supported_forever_patches ["1.60.1"]
+        let releases = vec![
+            WagoRelease {
+                id: "kwXVoAjQ".to_string(),
+                name: Some("Pawn 2.14.2".to_string()),
+                version: Some("2.14.2".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(500000),
+                url: None,
+                supported_retail_patches: Some(vec!["12.1.5".to_string(), "12.1.7".to_string()]),
+                supported_classic_patches: None,
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+            WagoRelease {
+                id: "odGeLVO6".to_string(),
+                name: Some("Pawn 2.14.1 (Classic)".to_string()),
+                version: Some("2.14.1".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(400000),
+                url: None,
+                supported_retail_patches: None,
+                supported_classic_patches: Some(vec!["1.15.9".to_string()]),
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+            WagoRelease {
+                id: "5wq3moZQ".to_string(),
+                name: Some("Pawn 2.14.1 (Forever)".to_string()),
+                version: Some("2.14.1".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(400000),
+                url: None,
+                supported_retail_patches: None,
+                supported_classic_patches: None,
+                supported_forever_patches: Some(vec!["1.60.1".to_string()]),
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+        ];
+
+        let selected = select_wago_release(&releases, 1, "forever");
+        assert!(selected.is_some());
+        let release = selected.unwrap();
+        assert_eq!(release.id, "5wq3moZQ");
+        assert_eq!(release.name.as_deref(), Some("Pawn 2.14.1 (Forever)"));
+
+        let selected_classic = select_wago_release(&releases, 1, "classic").unwrap();
+        assert_eq!(selected_classic.id, "odGeLVO6");
+
+        let selected_retail = select_wago_release(&releases, 1, "retail").unwrap();
+        assert_eq!(selected_retail.id, "kwXVoAjQ");
     }
 }

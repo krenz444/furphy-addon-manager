@@ -47,7 +47,7 @@ pub fn resolve_classic_progression(interface: Option<i32>) -> ClassicProgression
                     era_key: "forever".to_string(),
                     era_label: "WoW Forever".to_string(),
                     type_id: Some(88568),
-                    wago_value: Some("classic".to_string()),
+                    wago_value: Some("forever".to_string()),
                     version_prefix: Some("1.60.".to_string()),
                 };
             }
@@ -146,7 +146,7 @@ pub fn get_flavour_mapping(flavour: &str, client_interface: Option<i32>) -> Flav
         "forever" => FlavourMapping {
             type_id: Some(88568),
             version_prefix: Some("1.60.".to_string()),
-            wago_field: Some("classic".to_string()),
+            wago_field: Some("forever".to_string()),
             era_label: "WoW Forever".to_string(),
             era_key: "forever".to_string(),
         },
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(forever.era_key, "forever");
         assert_eq!(forever.era_label, "WoW Forever");
         assert_eq!(forever.type_id, Some(88568));
-        assert_eq!(forever.wago_value.as_deref(), Some("classic"));
+        assert_eq!(forever.wago_value.as_deref(), Some("forever"));
         assert_eq!(forever.version_prefix.as_deref(), Some("1.60."));
 
         let unknown = resolve_classic_progression(Some(99999));

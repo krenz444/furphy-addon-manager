@@ -29,6 +29,8 @@ pub struct WagoRelease {
     #[serde(default)]
     pub supported_classic_patches: Option<Vec<String>>,
     #[serde(default)]
+    pub supported_forever_patches: Option<Vec<String>>,
+    #[serde(default)]
     pub supported_bc_patches: Option<Vec<String>>,
     #[serde(default)]
     pub supported_wotlk_patches: Option<Vec<String>>,
