@@ -10,14 +10,26 @@ pub fn select_cf_file(
 ) -> Option<CfFile> {
     let clean_prefix = version_prefix.trim();
 
-    // 1. Primary match: Flavour TypeId AND releaseType <= max_release_type
+    // 1. Dual match: TypeId AND version prefix match AND release_type <= max_release_type
+    if !clean_prefix.is_empty() {
+        for f in files {
+            if f.game_version_type_ids.contains(&type_id)
+                && f.release_type <= max_release_type
+                && f.game_versions.iter().any(|v| v.starts_with(clean_prefix))
+            {
+                return Some(f.clone());
+            }
+        }
+    }
+
+    // 2. Primary match: Flavour TypeId AND releaseType <= max_release_type
     for f in files {
         if f.game_version_type_ids.contains(&type_id) && f.release_type <= max_release_type {
             return Some(f.clone());
         }
     }
 
-    // 2. Secondary match: Version prefix string match AND releaseType <= max_release_type
+    // 3. Secondary match: Version prefix string match AND releaseType <= max_release_type
     if !clean_prefix.is_empty() {
         for f in files {
             if f.release_type <= max_release_type {
@@ -30,7 +42,7 @@ pub fn select_cf_file(
         }
     }
 
-    // 3. Fallback: If no strict channel match exists, only allow relaxing to Beta if Beta channel is permitted
+    // 4. Fallback: If no strict channel match exists, only allow relaxing to Beta if Beta channel is permitted
     if max_release_type > 1 {
         for f in files {
             if f.game_version_type_ids.contains(&type_id) && f.release_type <= 2 {
@@ -179,6 +191,62 @@ mod tests {
         // Channel 3: picks newest file id 1
         let sel3 = select_cf_file(&files, 3, 517, "12.").unwrap();
         assert_eq!(sel3.id, 1);
+    }
+
+    #[test]
+    fn test_select_cf_file_forever_leatrix_plus() {
+        let files = vec![
+            CfFile {
+                id: 9471872,
+                display_name: Some("1.60.29-forever".to_string()),
+                file_name: Some("Leatrix_Plus-1.60.29-forever.zip".to_string()),
+                file_length: Some(100),
+                release_type: 1, // Release
+                project_id: Some(94855),
+                game_versions: vec!["1.60.1".to_string()],
+                game_version_type_ids: vec![88568],
+                date_created: None,
+            },
+            CfFile {
+                id: 9428873,
+                display_name: Some("1.15.164-classic".to_string()),
+                file_name: Some("Leatrix_Plus-1.15.164-classic.zip".to_string()),
+                file_length: Some(100),
+                release_type: 1, // Release
+                project_id: Some(94855),
+                game_versions: vec!["1.15.9".to_string()],
+                game_version_type_ids: vec![67408],
+                date_created: None,
+            },
+            CfFile {
+                id: 9428751,
+                display_name: Some("12.1.16".to_string()),
+                file_name: Some("Leatrix_Plus-12.1.16.zip".to_string()),
+                file_length: Some(100),
+                release_type: 1, // Release
+                project_id: Some(94855),
+                game_versions: vec!["12.1.5".to_string()],
+                game_version_type_ids: vec![517],
+                date_created: None,
+            },
+        ];
+
+        // Forever (88568, "1.60.") MUST select file 9471872
+        let sel_forever = select_cf_file(&files, 1, 88568, "1.60.").unwrap();
+        assert_eq!(sel_forever.id, 9471872);
+
+        // Classic Era (67408, "1.15.") MUST select file 9428873
+        let sel_classic = select_cf_file(&files, 1, 67408, "1.15.").unwrap();
+        assert_eq!(sel_classic.id, 9428873);
+
+        // Retail (517, "12.") MUST select file 9428751
+        let sel_retail = select_cf_file(&files, 1, 517, "12.").unwrap();
+        assert_eq!(sel_retail.id, 9428751);
+
+        // Forever on a classic-only addon MUST return None (strict compatibility, DEC-FURPHY-013)
+        let classic_only = vec![files[1].clone()];
+        let sel_fallback = select_cf_file(&classic_only, 1, 88568, "1.60.");
+        assert!(sel_fallback.is_none());
     }
 
     #[test]
