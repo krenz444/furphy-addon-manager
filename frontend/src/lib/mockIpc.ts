@@ -200,6 +200,163 @@ function generateMockAddons(count: number = 200): Addon[] {
 
 const mockAddons = generateMockAddons(200);
 
+// Check-for-updates behaviour for browser mock mode, steerable from Playwright through window.__furphyMock.
+interface MockCheckOutcome {
+  addon_id: string;
+  name: string;
+  status: 'Up-to-date' | 'Would-update' | 'Pinned' | 'Ignored' | 'Failed';
+  current_version: string | null;
+  update_version: string | null;
+  error: string | null;
+}
+
+interface FurphyMockHook {
+  failNextCheck(message?: string): void;
+  busyNextCheck(): void;
+  partialFailureNextCheck(): void;
+  setCheckedAt(iso: string | null, flavour?: string): void;
+  setCheckDelay(ms: number): void;
+  noUpdates(on: boolean): void;
+  staleRunningJobOnce(kind: string): void;
+  readonly checkCalls: number;
+}
+
+// Per game version, like the backend's freshness rows.
+const mockCheckedAt: Record<string, string | null> = {
+  retail: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+};
+let mockCheckDelayMs = 400;
+let mockCheckCalls = 0;
+let mockNextCheck: 'ok' | 'fail' | 'busy' | 'partial' = 'ok';
+let mockNextCheckError = 'Provider unreachable';
+let mockNoUpdates = false;
+let mockStaleJobKind: string | null = null;
+let mockHookInstalled = false;
+
+// Installed on the first mock call, so it only exists in mock mode.
+function installMockHook(): void {
+  if (mockHookInstalled || typeof window === 'undefined') return;
+  mockHookInstalled = true;
+  const hook: FurphyMockHook = {
+    failNextCheck(message = 'Provider unreachable') {
+      mockNextCheck = 'fail';
+      mockNextCheckError = message;
+    },
+    busyNextCheck() {
+      mockNextCheck = 'busy';
+    },
+    partialFailureNextCheck() {
+      mockNextCheck = 'partial';
+    },
+    setCheckedAt(iso, flavour = 'retail') {
+      mockCheckedAt[flavour] = iso;
+    },
+    setCheckDelay(ms) {
+      mockCheckDelayMs = ms;
+    },
+    noUpdates(on) {
+      mockNoUpdates = on;
+    },
+    staleRunningJobOnce(kind) {
+      mockStaleJobKind = kind;
+    },
+    get checkCalls() {
+      return mockCheckCalls;
+    },
+  };
+  (window as unknown as { __furphyMock: FurphyMockHook }).__furphyMock = hook;
+}
+
+// A background job the next get_state reports as running and then forgets, like one that finished unseen.
+function takeStaleJob(flavour: string): JobRecord | null {
+  if (!mockStaleJobKind) return null;
+  const kind = mockStaleJobKind;
+  mockStaleJobKind = null;
+  return {
+    id: 'mock-bg-1',
+    kind,
+    flavour,
+    params: null,
+    state: 'running',
+    started_at: new Date().toISOString(),
+    finished_at: null,
+    error: null,
+    results: null,
+    reload_needed: false,
+    log_path: null,
+  };
+}
+
+function mockAddonsFor(flavour: string): Addon[] {
+  const rows = mockAddons.filter((a) => a.flavour === flavour);
+  if (!mockNoUpdates) return rows;
+  return rows.map((a) => ({ ...a, update_version: null, update_file_id: null, check_status: 'up_to_date' }));
+}
+
+async function runMockCheck(flavour: string): Promise<JobRecord> {
+  mockCheckCalls += 1;
+  const behaviour = mockNextCheck;
+  mockNextCheck = 'ok';
+  // Long enough for a test to observe the busy state.
+  await new Promise((r) => setTimeout(r, mockCheckDelayMs));
+  // Tauri rejects with a plain string, so the mock does too. The real runner is busy because a job is
+  // running, and the refresh that follows reports that job.
+  if (behaviour === 'busy') {
+    mockStaleJobKind = 'update-all-flavours';
+    throw 'Another job (mock-bg-1) is currently running';
+  }
+  if (behaviour === 'fail') throw mockNextCheckError;
+
+  let toFail = behaviour === 'partial' ? 2 : 0;
+  const outcomes: MockCheckOutcome[] = mockAddonsFor(flavour).map((a) => {
+    let status: MockCheckOutcome['status'] = 'Up-to-date';
+    if (a.ignore_updates) status = 'Ignored';
+    else if (a.pinned_file_id) status = 'Pinned';
+    else if (toFail > 0) {
+      status = 'Failed';
+      toFail -= 1;
+    } else if (a.update_version) status = 'Would-update';
+    return {
+      addon_id: a.id,
+      name: a.name ?? a.id,
+      status,
+      current_version: a.version,
+      update_version: status === 'Would-update' ? a.update_version ?? null : null,
+      error: status === 'Failed' ? 'Provider timed out' : null,
+    };
+  });
+  const tally = (s: MockCheckOutcome['status']) => outcomes.filter((o) => o.status === s).length;
+  const failed = outcomes.filter((o) => o.status === 'Failed');
+  const now = new Date().toISOString();
+  mockCheckedAt[flavour] = now;
+
+  return {
+    id: `mock-check-${Date.now()}`,
+    kind: 'check',
+    flavour,
+    params: '{}',
+    state: 'completed',
+    started_at: now,
+    finished_at: now,
+    error: failed.length
+      ? `${failed.length} addon(s) failed: ${failed.map((o) => `${o.name}: ${o.error}`).join('; ')}`
+      : null,
+    results: JSON.stringify({
+      flavour,
+      checked_at: now,
+      total: outcomes.length,
+      would_update_count: tally('Would-update'),
+      up_to_date_count: tally('Up-to-date'),
+      ignored_count: tally('Ignored'),
+      pinned_count: tally('Pinned'),
+      failed_count: failed.length,
+      outcomes,
+    }),
+    reload_needed: false,
+    log_path: 'mock/sync.log',
+  };
+}
+
 let mockSettings: Record<string, unknown> = {
   hostTheme: 'tokyo-rain',
   density: 'comfortable',
@@ -215,6 +372,7 @@ let mockSettings: Record<string, unknown> = {
 };
 
 export async function handleMockInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  installMockHook();
   // Artificial micro-delay for realistic UI feedback
   await new Promise((r) => setTimeout(r, 10));
 
@@ -222,7 +380,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'get_app_info':
       return {
         name: 'Furphy Addon Manager',
-        version: '2.0.13',
+        version: '2.0.25',
         is_dev: false,
         identifier: 'krenzcreative.furphy.addonmanager',
       } as T;
@@ -232,29 +390,29 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
 
     case 'get_addons': {
       const flv = (args.flavour as string) || 'retail';
-      return mockAddons.filter((a) => a.flavour === flv) as T;
+      return mockAddonsFor(flv) as T;
     }
 
     case 'get_state': {
       const flv = (args.flavour as string) || 'retail';
-      const filtered = mockAddons.filter((a) => a.flavour === flv);
+      const filtered = mockAddonsFor(flv);
       const updatesCount = filtered.filter((a) => a.update_version && !a.ignore_updates && !a.pinned_file_id).length;
       const state: AppState = {
         addons: filtered,
         flavours: MOCK_FLAVOURS,
         active_flavour: flv,
         freshness: {
-          state: updatesCount > 0 ? 'updates_ready' : 'clean',
-          checked_at: new Date().toISOString(),
+          state: filtered.length === 0 ? 'not_checked' : updatesCount > 0 ? 'updates_ready' : 'clean',
+          checked_at: filtered.length === 0 ? null : (mockCheckedAt[flv] ?? null),
           updates_count: updatesCount,
           last_error: null,
         },
-        running_job: null,
+        running_job: takeStaleJob(flv),
         untracked_count: 2,
         is_game_active: false,
         app_info: {
           name: 'Furphy Addon Manager',
-          version: '2.0.13',
+          version: '2.0.25',
           is_dev: false,
           identifier: 'krenzcreative.furphy.addonmanager',
         },
@@ -341,6 +499,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
 
     case 'start_job': {
       const kind = args.kind as string;
+      if (kind === 'check') return (await runMockCheck((args.flavour as string) || 'retail')) as T;
       const job: JobRecord = {
         id: `mock-job-${Date.now()}`,
         kind,
@@ -653,12 +812,12 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_check':
       return {
         status: 'available',
-        current_version: '2.0.13',
-        update_version: '2.0.13',
+        current_version: '2.0.25',
+        update_version: '2.0.25',
         release_notes: '• Modernized Svelte 5 frontend with custom Tokyo Rain theme\n• Enhanced WTF SavedVariables snapshot protection\n• Direct CurseForge & Wago updates with rate-limit fallback',
         published_at: '2026-10-23T00:00:00Z',
         has_update: true,
-        download_url: 'https://github.com/krenz444/furphy-addon-manager/releases/download/v2.0.13/FurphyAddonManager-2.0.13-setup.exe',
+        download_url: 'https://github.com/krenz444/furphy-addon-manager/releases/download/v2.0.25/FurphyAddonManager-2.0.25-setup.exe',
       } as T;
 
     case 'app_update_install':
@@ -667,7 +826,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'app_update_status':
       return {
         status: 'idle',
-        current_version: '2.0.13',
+        current_version: '2.0.25',
         update_version: null,
         release_notes: null,
         published_at: null,

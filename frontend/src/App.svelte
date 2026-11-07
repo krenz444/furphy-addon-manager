@@ -14,6 +14,15 @@
   import Toasts, { type ToastItem } from './components/jobs/Toasts.svelte';
   import AppUpdateBanner from './components/banners/AppUpdateBanner.svelte';
   import type { Addon, Flavour, AppInfo, Freshness, JobRecord, PatchCompatStatus, AppUpdateInfo } from './lib/types';
+  import {
+    summarizeCheck,
+    checkSuccessMessage,
+    checkFailureMessage,
+    isRunnerBusyError,
+    errorText,
+    BUSY_MESSAGE,
+    NOTHING_TO_CHECK_MESSAGE,
+  } from './lib/checkReport';
 
   // Navigation State
   let activeView = $state<'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings'>('my_addons');
@@ -73,6 +82,10 @@
   // Computed Tallies
   let updatesCount = $derived(freshness?.updates_count ?? addons.filter(a => !!a.update_version).length);
   let notBuiltCount = $derived(compatList.length > 0 ? compatList.length : addons.filter(a => a.is_old_patch).length);
+  // Owned by handleCheckNow alone: a stale "running check" learned from the backend cannot lock out a new click.
+  let checkInFlight = $state(false);
+  let isJobBusy = $derived(runningJob?.state === 'running');
+  let isChecking = $derived(checkInFlight || (runningJob?.state === 'running' && runningJob.kind === 'check'));
 
   // Listen to Window Focus/Blur for Animation Pausing (§2.F, §4.7)
   $effect(() => {
@@ -307,47 +320,97 @@
 
   // Job Triggers
   async function handleCheckNow() {
-    try {
-      runningJob = {
-        id: 'job-check-' + Date.now(),
-        kind: 'check',
-        flavour: activeFlavour,
-        params: null,
-        state: 'running',
-        started_at: new Date().toISOString(),
-        finished_at: null,
-        error: null,
-        results: null,
-        reload_needed: false,
-        log_path: null,
-      };
-      activeJobPhase = 'Checking';
-      currentJobAddon = 'Contacting repositories…';
-      jobLogs = ['[Check] Starting check for ' + activeFlavour];
-
-      const job = await invoke<JobRecord>('start_job', { kind: 'check', flavour: activeFlavour });
-      const finishedJob: JobRecord = job || {
-        ...runningJob,
-        state: 'completed',
-        finished_at: new Date().toISOString(),
-      };
-      runningJob = finishedJob;
-      const hasError = handleJobResultToast(finishedJob);
-      if (!hasError) {
-        addToast('info', 'Check complete.');
-        setTimeout(() => {
-          if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
-            runningJob = null;
-          }
-        }, 2000);
-      }
-      await refreshFlavourData(activeFlavour);
-    } catch (err: unknown) {
-      if (runningJob) {
-        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
-      }
-      addToast('error', 'Check failed: ' + err);
+    if (checkInFlight) return;
+    if (addons.length === 0) {
+      addToast('info', NOTHING_TO_CHECK_MESSAGE);
+      return;
     }
+    checkInFlight = true;
+    try {
+      if (isJobBusy) {
+        // A job started in the background can finish unseen, so re-read the state before refusing.
+        await refreshFlavourData(activeFlavour);
+        if (isJobBusy) {
+          describeBackgroundJob();
+          addToast('info', BUSY_MESSAGE);
+          return;
+        }
+      }
+      await runCheck();
+    } finally {
+      checkInFlight = false;
+    }
+  }
+
+  // A job learned from the backend has no progress text of its own; label it by kind, not as our check.
+  function describeBackgroundJob() {
+    const job = runningJob;
+    if (job?.state !== 'running') return;
+    activeJobPhase = job.kind === 'check' ? 'Checking' : 'Updating';
+    currentJobAddon = 'Running in the background…';
+  }
+
+  async function runCheck() {
+    const flv = activeFlavour;
+    const flvLabel = flavours.find((f) => f.id === flv)?.label ?? flv;
+    const optimistic: JobRecord = {
+      id: 'job-check-' + Date.now(),
+      kind: 'check',
+      flavour: flv,
+      params: null,
+      state: 'running',
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      error: null,
+      results: null,
+      reload_needed: false,
+      log_path: null,
+    };
+    runningJob = optimistic;
+    activeJobPhase = 'Checking';
+    currentJobAddon = `Contacting repositories for ${flvLabel}…`;
+    jobLogs = ['[Check] Starting check for ' + flv];
+
+    let finishedJob: JobRecord;
+    try {
+      const job = await invoke<JobRecord>('start_job', { kind: 'check', flavour: flv });
+      finishedJob = job || { ...optimistic, state: 'completed', finished_at: new Date().toISOString() };
+    } catch (err: unknown) {
+      const message = errorText(err);
+      if (isRunnerBusyError(message)) {
+        // Not a failure of this check: the runner is occupied, so show the real job instead of a failed panel.
+        runningJob = null;
+        addToast('info', BUSY_MESSAGE);
+        await refreshFlavourData(activeFlavour);
+        describeBackgroundJob();
+      } else {
+        runningJob = { ...optimistic, state: 'failed', error: message, finished_at: new Date().toISOString() };
+        addToast('error', `Check failed: ${message}`);
+      }
+      return;
+    }
+
+    runningJob = finishedJob;
+    const summary = summarizeCheck(finishedJob);
+    const failed = finishedJob.state === 'failed' || !!finishedJob.error || (summary?.failed ?? 0) > 0;
+    // A check can finish while the user is already on another game version.
+    const prefix = flv === activeFlavour ? '' : `${flvLabel}: `;
+    if (failed) {
+      const text =
+        summary && summary.failed > 0 ? checkFailureMessage(summary) : `Check failed: ${finishedJob.error ?? 'unknown error'}`;
+      addToast('error', prefix + text, 6000);
+    } else {
+      addToast('success', prefix + (summary ? checkSuccessMessage(summary) : 'Check complete.'));
+      setTimeout(() => {
+        if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+          runningJob = null;
+        }
+      }, 2000);
+    }
+    await refreshFlavourData(activeFlavour);
+    // The refresh swaps in the backend's view (no running job), which would drop the failure details.
+    // Another game version's details do not belong on this one; its toast already named the version.
+    if (failed && flv === activeFlavour) runningJob = finishedJob;
   }
 
   async function handleUpdateAll() {
@@ -896,6 +959,7 @@
     {isGameActive}
     {appInfo}
     {showTestRealms}
+    {isChecking}
     onSelectView={(v) => (activeView = v)}
     onSelectFlavour={handleFlavourChange}
     onCheckNow={handleCheckNow}
@@ -947,8 +1011,13 @@
         <MyAddonsView
           {addons}
           flavour={activeFlavour}
+          flavourLabel={flavours.find((f) => f.id === activeFlavour)?.label ?? activeFlavour}
           {density}
           {untrackedCount}
+          checkedAt={freshness?.checked_at ?? null}
+          {isChecking}
+          {isJobBusy}
+          onCheckNow={handleCheckNow}
           onUpdateAddon={handleUpdateAddon}
           onUpdateAll={handleUpdateAll}
           onUpdateSelected={handleUpdateSelected}

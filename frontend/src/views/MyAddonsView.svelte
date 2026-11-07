@@ -4,12 +4,19 @@
   import RowMenu from '../components/addons/RowMenu.svelte';
   import UntrackedAddonsBanner from '../components/banners/UntrackedAddonsBanner.svelte';
   import type { Addon } from '../lib/types';
+  import { formatCheckedAgo } from '../lib/timeAgo';
+  import { BUSY_MESSAGE, NOTHING_TO_CHECK_MESSAGE } from '../lib/checkReport';
 
   interface Props {
     addons: Addon[];
     flavour: string;
+    flavourLabel?: string;
     density: 'comfortable' | 'compact';
     untrackedCount: number;
+    checkedAt?: string | null;
+    isChecking?: boolean;
+    isJobBusy?: boolean;
+    onCheckNow: () => void;
     onUpdateAddon: (addon: Addon) => void;
     onUpdateAll: () => void;
     onUpdateSelected: (addons: Addon[]) => void;
@@ -32,8 +39,13 @@
   let {
     addons,
     flavour,
+    flavourLabel,
     density,
     untrackedCount,
+    checkedAt = null,
+    isChecking = false,
+    isJobBusy = false,
+    onCheckNow,
     onUpdateAddon,
     onUpdateAll,
     onUpdateSelected,
@@ -177,6 +189,24 @@
     isDepsDismissed = false;
     isUntrackedDismissed = false;
   });
+
+  let now = $state(Date.now());
+  $effect(() => {
+    const timer = setInterval(() => (now = Date.now()), 30_000);
+    return () => clearInterval(timer);
+  });
+
+  // The button is aria-disabled, not disabled: a native disabled button drops keyboard focus mid-check.
+  // A click on it still reaches the app, which re-reads a stale busy state or explains the refusal in a toast.
+  let checkBlockedReason = $derived.by(() => {
+    if (isChecking) return 'A check is already running.';
+    if (isJobBusy) return BUSY_MESSAGE;
+    if (addons.length === 0) return NOTHING_TO_CHECK_MESSAGE;
+    return null;
+  });
+  let checkTitle = $derived(
+    checkBlockedReason ?? `Check every ${flavourLabel || flavour} addon for updates. This does not install anything.`
+  );
 </script>
 
 <div class="my-addons-view">
@@ -414,6 +444,20 @@
     </div>
 
     <div class="filter-bar-actions">
+      <span class="checked-ago">{formatCheckedAgo(checkedAt, now)}</span>
+      <button
+        type="button"
+        class="btn-check"
+        aria-busy={isChecking}
+        aria-disabled={checkBlockedReason !== null}
+        title={checkTitle}
+        onclick={onCheckNow}
+      >
+        {#if isChecking}
+          <span class="check-spinner" aria-hidden="true"></span>
+        {/if}
+        {isChecking ? 'Checking…' : 'Check for updates'}
+      </button>
       {#if updatesCount > 0}
         <button
           type="button"
@@ -806,6 +850,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
     padding: 0.5rem 1.25rem;
     background: var(--bg-2);
     border-bottom: 1px solid var(--border-soft);
@@ -814,6 +860,7 @@
   .filter-chips {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.4rem;
   }
 
@@ -853,7 +900,73 @@
   .filter-bar-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 8px;
+    margin-left: auto;
+  }
+
+  .checked-ago {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* A --text-muted border reaches 3:1 against the bar in every theme; the usual --border does not. */
+  .btn-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--text-muted);
+    border-radius: var(--radius-sm, 4px);
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: calc(0.3rem - 1px) calc(0.75rem - 1px);
+    cursor: pointer;
+    transition: background var(--fast);
+  }
+
+  .btn-check:hover {
+    background: var(--bg-3);
+  }
+
+  .btn-check:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .btn-check[aria-disabled='true'] {
+    color: var(--text-muted);
+    border-color: var(--border-hover);
+    cursor: default;
+  }
+
+  .btn-check[aria-disabled='true']:hover {
+    background: transparent;
+  }
+
+  .check-spinner {
+    width: 0.7rem;
+    height: 0.7rem;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: check-spin 0.8s linear infinite;
+  }
+
+  @keyframes check-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .check-spinner {
+      animation: none;
+      border-top-color: currentColor;
+    }
   }
 
   .btn-update-all {

@@ -117,6 +117,18 @@
           }
         }
       }
+      // A check job reports per-addon outcomes instead of results/failed.
+      if (Array.isArray(parsedResults.outcomes)) {
+        for (const o of parsedResults.outcomes) {
+          if (o && (o.status === 'Failed' || o.status === 'failed')) {
+            list.push({
+              id: o.addon_id || o.name || 'failed-addon',
+              name: o.name || o.addon_id || 'Unknown Addon',
+              error: o.error || 'Operation failed',
+            });
+          }
+        }
+      }
     }
 
     if (list.length === 0 && job?.error) {

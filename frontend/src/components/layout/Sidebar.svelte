@@ -12,6 +12,7 @@
     isGameActive: boolean;
     appInfo: AppInfo | null;
     showTestRealms?: boolean;
+    isChecking?: boolean;
     onSelectView: (view: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings') => void;
     onSelectFlavour: (flavour: string) => void;
     onCheckNow: () => void;
@@ -28,6 +29,7 @@
     isGameActive,
     appInfo,
     showTestRealms = false,
+    isChecking = false,
     onSelectView,
     onSelectFlavour,
     onCheckNow,
@@ -97,6 +99,7 @@
   <div class="freshness-box">
     <FreshnessHeadline
       {freshness}
+      checking={isChecking}
       {onCheckNow}
       {onUpdateAll}
     />
