@@ -90,6 +90,7 @@ pub async fn cf_browse(
     sort: Option<String>,
     page: Option<u32>,
     search: Option<String>,
+    flavour: Option<String>,
 ) -> Result<Value, String> {
     let client = crate::net::curseforge::create_cf_client().map_err(|e| e.to_string())?;
     let base = crate::net::curseforge::get_cf_base_url();
@@ -121,6 +122,12 @@ pub async fn cf_browse(
             let trimmed = s.trim();
             if !trimmed.is_empty() {
                 pairs.append_pair("sortField", trimmed);
+            }
+        }
+        if let Some(ref flv) = flavour {
+            let mapping = crate::engine::flavours::get_flavour_mapping(flv, None);
+            if let Some(tid) = mapping.type_id {
+                pairs.append_pair("gameVersionTypeId", &tid.to_string());
             }
         }
     }

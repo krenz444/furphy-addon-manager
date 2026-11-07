@@ -64,7 +64,7 @@ pub fn get_wago_stability_rank(stability: Option<&str>) -> i64 {
     }
 }
 
-pub fn select_wago_release(
+pub fn select_wago_release_strict(
     releases: &[WagoRelease],
     max_release_type: i64,
     wago_field: &str,
@@ -82,6 +82,21 @@ pub fn select_wago_release(
         }
     };
 
+    for r in releases {
+        let rank = get_wago_stability_rank(r.stability.as_deref());
+        if rank <= max_release_type && check_supported_patches(r) {
+            return Some(r.clone());
+        }
+    }
+
+    None
+}
+
+pub fn select_wago_release(
+    releases: &[WagoRelease],
+    max_release_type: i64,
+    wago_field: &str,
+) -> Option<WagoRelease> {
     let has_any_patch_specification = |r: &WagoRelease| -> bool {
         let has_retail = r.supported_retail_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
         let has_classic = r.supported_classic_patches.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
@@ -94,11 +109,8 @@ pub fn select_wago_release(
     };
 
     // 1. Stability <= max_release_type AND supported patches non-empty for requested flavour
-    for r in releases {
-        let rank = get_wago_stability_rank(r.stability.as_deref());
-        if rank <= max_release_type && check_supported_patches(r) {
-            return Some(r.clone());
-        }
+    if let Some(strict) = select_wago_release_strict(releases, max_release_type, wago_field) {
+        return Some(strict);
     }
 
     // 1b. For "forever", if no dedicated forever release exists across the addon, fall back to "classic"
@@ -123,24 +135,119 @@ pub fn select_wago_release(
     None
 }
 
+pub fn matches_flavour_asset_name(name: &str, flavour: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    match flavour {
+        "forever" => {
+            lower.contains("forever") || lower.contains("wowf") || lower.contains("1.60")
+        }
+        "classic" | "classic_era" => {
+            (lower.contains("classic") || lower.contains("vanilla") || lower.contains("era") || lower.contains("1.15"))
+                && !lower.contains("classic-tbc")
+                && !lower.contains("classic-wotlk")
+                && !lower.contains("classic-cata")
+        }
+        "retail" => {
+            lower.contains("retail") || lower.contains("mainline") || lower.contains("12.") || lower.contains("11.")
+        }
+        "tbc" | "bc" => lower.contains("tbc") || lower.contains("bcc") || lower.contains("2.5"),
+        "wotlk" | "wrath" => lower.contains("wotlk") || lower.contains("wrath") || lower.contains("3.4"),
+        "cata" => lower.contains("cata") || lower.contains("cataclysm") || lower.contains("4.4"),
+        "mop" | "mists" => lower.contains("mop") || lower.contains("mists") || lower.contains("5.5"),
+        _ => false,
+    }
+}
+
+pub fn is_conflicting_flavour_asset(name: &str, flavour: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    match flavour {
+        "forever" => {
+            lower.contains("retail")
+                || lower.contains("mainline")
+                || lower.contains("cata")
+                || lower.contains("wotlk")
+                || lower.contains("tbc")
+                || lower.contains("mop")
+        }
+        "classic" | "classic_era" => {
+            lower.contains("retail")
+                || lower.contains("mainline")
+                || lower.contains("cata")
+                || lower.contains("wotlk")
+                || lower.contains("tbc")
+                || lower.contains("mop")
+        }
+        "retail" => {
+            lower.contains("classic")
+                || lower.contains("vanilla")
+                || lower.contains("forever")
+                || lower.contains("cata")
+                || lower.contains("wotlk")
+                || lower.contains("tbc")
+        }
+        _ => false,
+    }
+}
+
 pub fn select_github_release(
     releases: &[GithubRelease],
     max_release_type: i64,
     pinned_tag: Option<&str>,
+    flavour: Option<&str>,
 ) -> Option<GithubRelease> {
     if let Some(tag) = pinned_tag {
         return releases.iter().find(|r| r.tag_name == tag).cloned();
     }
 
-    if max_release_type == 1 {
+    let eligible: Vec<&GithubRelease> = if max_release_type == 1 {
         // Release only, skip prerelease
-        releases.iter().find(|r| !r.prerelease).cloned()
+        releases.iter().filter(|r| !r.prerelease).collect()
     } else {
-        releases.first().cloned()
+        releases.iter().collect()
+    };
+
+    if let Some(flv) = flavour {
+        // 1. Exact flavour match in tag or title
+        for r in &eligible {
+            let tag = &r.tag_name;
+            let name = r.name.as_deref().unwrap_or("");
+            if matches_flavour_asset_name(tag, flv) || matches_flavour_asset_name(name, flv) {
+                return Some((*r).clone());
+            }
+        }
+
+        // 1b. For "forever", fall back to classic
+        if flv == "forever" {
+            for r in &eligible {
+                let tag = &r.tag_name;
+                let name = r.name.as_deref().unwrap_or("");
+                if matches_flavour_asset_name(tag, "classic") || matches_flavour_asset_name(name, "classic") {
+                    return Some((*r).clone());
+                }
+            }
+        }
+
+        // 2. Flavour-neutral releases (no conflicting flavour in tag or title)
+        for r in &eligible {
+            let tag = &r.tag_name;
+            let name = r.name.as_deref().unwrap_or("");
+            if !is_conflicting_flavour_asset(tag, flv) && !is_conflicting_flavour_asset(name, flv) {
+                return Some((*r).clone());
+            }
+        }
+
+        // If all releases are for conflicting flavours, do NOT install cross-flavour
+        return None;
     }
+
+    eligible.first().copied().cloned()
 }
 
-pub fn select_github_asset<'a>(release: &'a GithubRelease, repo: &str) -> Option<&'a GithubAsset> {
+pub fn select_github_asset<'a>(
+    release: &'a GithubRelease,
+    repo: &str,
+    flavour: Option<&str>,
+) -> Option<&'a GithubAsset> {
     let repo_name = repo.rsplit('/').next().unwrap_or(repo);
     let repo_clean = repo_name.strip_suffix(".git").unwrap_or(repo_name);
     let repo_lower = repo_clean.to_ascii_lowercase();
@@ -153,6 +260,40 @@ pub fn select_github_asset<'a>(release: &'a GithubRelease, repo: &str) -> Option
 
     if zip_assets.is_empty() {
         return None;
+    }
+
+    if let Some(flv) = flavour {
+        // 1. Direct flavour match
+        if let Some(matched) = zip_assets.iter().find(|ast| matches_flavour_asset_name(&ast.name, flv)) {
+            return Some(*matched);
+        }
+
+        // 1b. For "forever", fall back to classic/vanilla
+        if flv == "forever" {
+            if let Some(matched) = zip_assets.iter().find(|ast| matches_flavour_asset_name(&ast.name, "classic")) {
+                return Some(*matched);
+            }
+        }
+
+        // Filter out assets that are explicitly for a conflicting flavour
+        let non_conflicting: Vec<&GithubAsset> = zip_assets
+            .iter()
+            .copied()
+            .filter(|ast| !is_conflicting_flavour_asset(&ast.name, flv))
+            .collect();
+
+        if let Some(matched) = non_conflicting.iter().find(|ast| ast.name.to_ascii_lowercase().contains(&repo_lower)) {
+            return Some(*matched);
+        }
+
+        if let Some(first) = non_conflicting.first() {
+            return Some(*first);
+        }
+
+        // If all assets are conflicting flavours, reject rather than installing wrong flavour
+        if zip_assets.iter().any(|ast| is_conflicting_flavour_asset(&ast.name, flv)) {
+            return None;
+        }
     }
 
     // Prefer asset containing repo_name
@@ -431,5 +572,150 @@ mod tests {
         // Retail only release list for forever must return None (no cross-contamination from Retail)
         let retail_only = vec![releases[0].clone()];
         assert!(select_wago_release(&retail_only, 1, "forever").is_none());
+    }
+
+    #[test]
+    fn test_select_wago_release_multipage_forever_priority() {
+        // Page 1: Has a Classic release
+        let page_1 = vec![
+            WagoRelease {
+                id: "classic_p1".to_string(),
+                name: Some("Pawn Classic".to_string()),
+                version: Some("2.14.0".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(100),
+                url: None,
+                supported_retail_patches: None,
+                supported_classic_patches: Some(vec!["1.15.5".to_string()]),
+                supported_forever_patches: None,
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+        ];
+
+        // Page 2: Has a dedicated Forever release
+        let page_2 = vec![
+            WagoRelease {
+                id: "forever_p2".to_string(),
+                name: Some("Pawn Forever".to_string()),
+                version: Some("2.14.1".to_string()),
+                stability: Some("stable".to_string()),
+                size: Some(100),
+                url: None,
+                supported_retail_patches: None,
+                supported_classic_patches: None,
+                supported_forever_patches: Some(vec!["1.60.1".to_string()]),
+                supported_bc_patches: None,
+                supported_wotlk_patches: None,
+                supported_cata_patches: None,
+                supported_mop_patches: None,
+            },
+        ];
+
+        // Strict search on page 1 yields None
+        assert!(select_wago_release_strict(&page_1, 1, "forever").is_none());
+
+        // Strict search on page 2 finds the dedicated release
+        let strict_p2 = select_wago_release_strict(&page_2, 1, "forever");
+        assert!(strict_p2.is_some());
+        assert_eq!(strict_p2.unwrap().id, "forever_p2");
+    }
+
+    #[test]
+    fn test_select_github_flavour_filtering() {
+        use crate::net::github::GithubAsset;
+
+        let release = GithubRelease {
+            id: 101,
+            tag_name: "v1.0.0".to_string(),
+            name: Some("v1.0.0".to_string()),
+            prerelease: false,
+            published_at: None,
+            assets: vec![
+                GithubAsset {
+                    id: 1,
+                    name: "WeakAuras-Retail.zip".to_string(),
+                    size: Some(100),
+                    url: "https://example.com/retail.zip".to_string(),
+                    browser_download_url: None,
+                    digest: None,
+                },
+                GithubAsset {
+                    id: 2,
+                    name: "WeakAuras-Classic.zip".to_string(),
+                    size: Some(100),
+                    url: "https://example.com/classic.zip".to_string(),
+                    browser_download_url: None,
+                    digest: None,
+                },
+                GithubAsset {
+                    id: 3,
+                    name: "WeakAuras-Forever.zip".to_string(),
+                    size: Some(100),
+                    url: "https://example.com/forever.zip".to_string(),
+                    browser_download_url: None,
+                    digest: None,
+                },
+            ],
+            zipball_url: None,
+        };
+
+        // Forever selects Forever asset
+        let ast_forever = select_github_asset(&release, "WeakAuras/WeakAuras2", Some("forever")).unwrap();
+        assert_eq!(ast_forever.name, "WeakAuras-Forever.zip");
+
+        // Classic selects Classic asset
+        let ast_classic = select_github_asset(&release, "WeakAuras/WeakAuras2", Some("classic")).unwrap();
+        assert_eq!(ast_classic.name, "WeakAuras-Classic.zip");
+
+        // Retail selects Retail asset
+        let ast_retail = select_github_asset(&release, "WeakAuras/WeakAuras2", Some("retail")).unwrap();
+        assert_eq!(ast_retail.name, "WeakAuras-Retail.zip");
+
+        // Release tag matching
+        let releases = vec![
+            GithubRelease {
+                id: 201,
+                tag_name: "v12.1.0-retail".to_string(),
+                name: Some("12.1.0 Retail".to_string()),
+                prerelease: false,
+                published_at: None,
+                assets: vec![],
+                zipball_url: None,
+            },
+            GithubRelease {
+                id: 202,
+                tag_name: "v1.60.1-forever".to_string(),
+                name: Some("1.60.1 Forever".to_string()),
+                prerelease: false,
+                published_at: None,
+                assets: vec![],
+                zipball_url: None,
+            },
+            GithubRelease {
+                id: 203,
+                tag_name: "v1.15.5-classic".to_string(),
+                name: Some("1.15.5 Classic".to_string()),
+                prerelease: false,
+                published_at: None,
+                assets: vec![],
+                zipball_url: None,
+            },
+        ];
+
+        let sel_forever = select_github_release(&releases, 1, None, Some("forever")).unwrap();
+        assert_eq!(sel_forever.tag_name, "v1.60.1-forever");
+
+        let sel_retail = select_github_release(&releases, 1, None, Some("retail")).unwrap();
+        assert_eq!(sel_retail.tag_name, "v12.1.0-retail");
+
+        let sel_classic = select_github_release(&releases, 1, None, Some("classic")).unwrap();
+        assert_eq!(sel_classic.tag_name, "v1.15.5-classic");
+
+        // Retail-only releases rejected for Forever
+        let retail_only_releases = vec![releases[0].clone()];
+        assert!(select_github_release(&retail_only_releases, 1, None, Some("forever")).is_none());
     }
 }

@@ -52,7 +52,7 @@ pub async fn search_cf_addons(
     }
 
     let pid = if query.to_lowercase().contains("details") { 61284 } else { 2382 };
-    let files = furphy_lib::net::curseforge::get_cf_files(policy, client, pid, 1).await?;
+    let files = furphy_lib::net::curseforge::get_cf_files(policy, client, pid, 1, None).await?;
     Ok(serde_json::json!({
         "data": [
             {

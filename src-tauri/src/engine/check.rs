@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use crate::engine::flavours::get_flavour_mapping;
-use crate::engine::select::{select_cf_file, select_github_release, select_wago_release};
+use crate::engine::select::{select_cf_file, select_github_release, select_wago_release, select_wago_release_strict};
 use crate::logging::append_sync_log;
 use crate::net::curseforge::{create_cf_client, get_cf_files};
 use crate::net::github::{create_github_client, get_github_releases};
@@ -184,7 +184,7 @@ pub async fn run_check_for_flavour(
                 if let Some(pid) = a.project_id {
                     let type_id = mapping.type_id.unwrap_or(517);
                     let prefix = mapping.version_prefix.as_deref().unwrap_or("12.");
-                    match get_cf_files(&policy, &cf_client, pid, a.release_type).await {
+                    match get_cf_files(&policy, &cf_client, pid, a.release_type, mapping.type_id).await {
                         Ok(files) => {
                             if let Some(chosen) = select_cf_file(&files, a.release_type, type_id, prefix) {
                                 let chosen_id_str = chosen.id.to_string();
@@ -217,15 +217,17 @@ pub async fn run_check_for_flavour(
             "wago" => {
                 if let Some(ref slug) = a.wago_slug {
                     let wago_field = mapping.wago_field.as_deref().unwrap_or("retail");
-                    // Paging with early exit at the first page that yields a selection (Section 3.3)
+                    // Multi-page search: prioritize strict flavour match across all pages first
+                    let mut all_releases = Vec::new();
                     let mut found_selection = None;
                     for page in 1..=10 {
                         match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
                             Ok((releases, has_next)) => {
-                                if let Some(chosen) = select_wago_release(&releases, a.release_type, wago_field) {
+                                if let Some(chosen) = select_wago_release_strict(&releases, a.release_type, wago_field) {
                                     found_selection = Some(chosen);
                                     break;
                                 }
+                                all_releases.extend(releases);
                                 if !has_next {
                                     break;
                                 }
@@ -236,6 +238,9 @@ pub async fn run_check_for_flavour(
                                 break;
                             }
                         }
+                    }
+                    if found_selection.is_none() && err_msg.is_none() && !all_releases.is_empty() {
+                        found_selection = select_wago_release(&all_releases, a.release_type, wago_field);
                     }
 
                     if let Some(chosen) = found_selection {
@@ -273,7 +278,7 @@ pub async fn run_check_for_flavour(
                         if parts.len() == 2 {
                             match get_github_releases(&policy, &github_client, parts[0], parts[1], github_token.as_deref()).await {
                                 Ok(releases) => {
-                                    if let Some(chosen) = select_github_release(&releases, a.release_type, None) {
+                                    if let Some(chosen) = select_github_release(&releases, a.release_type, None, Some(flavour)) {
                                         let is_same_tag = a.installed_tag.as_deref() == Some(&chosen.tag_name);
                                         let is_same_ver = a.version.as_deref() == Some(&chosen.tag_name);
                                         let is_same_file = a.file_id.as_deref() == Some(&chosen.tag_name);

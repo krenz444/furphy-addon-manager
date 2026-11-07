@@ -100,6 +100,7 @@ async fn resolve_dependency_target_direct(
     dep_name: &str,
     policy: &Arc<NetworkPolicy>,
     data_dir: &Path,
+    flavour: Option<&str>,
 ) -> Option<AddonTarget> {
     let dep_trimmed = dep_name.trim();
     if dep_trimmed.is_empty() {
@@ -164,11 +165,12 @@ async fn resolve_dependency_target_direct(
     // 3. Fallback: Search Wago via WagoSession + search_wago_addons (addons.wago.io Inertia protocol)
     if let Ok(wago_client) = crate::net::wago::create_wago_client() {
         let wago_session = crate::net::wago::WagoSession::new();
+        let search_flv = flavour.unwrap_or("retail");
         if let Ok((items, _total, _has_more)) = crate::net::wago::search_wago_addons(
             policy,
             &wago_client,
             &wago_session,
-            "retail",
+            search_flv,
             Some(dep_trimmed),
             None,
             Some("name"),
@@ -210,6 +212,7 @@ pub async fn resolve_dependency_target(
     dep_name: &str,
     policy: &Arc<NetworkPolicy>,
     data_dir: &Path,
+    flavour: Option<&str>,
 ) -> Option<AddonTarget> {
     let dep_trimmed = dep_name.trim();
     if dep_trimmed.is_empty() {
@@ -217,12 +220,12 @@ pub async fn resolve_dependency_target(
     }
 
     if let Some(alias) = get_dependency_alias(dep_trimmed) {
-        if let Some(target) = resolve_dependency_target_direct(alias, policy, data_dir).await {
+        if let Some(target) = resolve_dependency_target_direct(alias, policy, data_dir, flavour).await {
             return Some(target);
         }
     }
 
-    if let Some(target) = resolve_dependency_target_direct(dep_trimmed, policy, data_dir).await {
+    if let Some(target) = resolve_dependency_target_direct(dep_trimmed, policy, data_dir, flavour).await {
         return Some(target);
     }
 
@@ -377,7 +380,7 @@ pub async fn install_missing_dependencies_for_addon(
                 continue;
             }
 
-            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir).await {
+            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir, Some(flavour)).await {
                 if is_target_already_present(conn, flavour, &target) {
                     continue;
                 }
@@ -525,7 +528,7 @@ pub async fn install_all_missing_dependencies_for_flavour(
                 continue;
             }
 
-            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir).await {
+            if let Some(target) = resolve_dependency_target(&dep, &policy, data_dir, Some(flavour)).await {
                 if is_target_already_present(conn, flavour, &target) {
                     continue;
                 }
@@ -666,35 +669,35 @@ mod tests {
         let policy = Arc::new(NetworkPolicy::new());
 
         // Exact match
-        let res_details = resolve_dependency_target("details", &policy, temp_dir.path()).await;
+        let res_details = resolve_dependency_target("details", &policy, temp_dir.path(), None).await;
         match res_details {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 61288),
             other => panic!("Expected CurseForge(61288), got {:?}", other),
         }
 
         // Normalized match: LibSharedMedia-3.0 -> libsharedmedia-3-0
-        let res_lsm = resolve_dependency_target("LibSharedMedia-3.0", &policy, temp_dir.path()).await;
+        let res_lsm = resolve_dependency_target("LibSharedMedia-3.0", &policy, temp_dir.path(), None).await;
         match res_lsm {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 13346),
             other => panic!("Expected CurseForge(13346), got {:?}", other),
         }
 
         // Normalized match: CallbackHandler-1.0 -> callbackhandler-1-0
-        let res_cbh = resolve_dependency_target("CallbackHandler-1.0", &policy, temp_dir.path()).await;
+        let res_cbh = resolve_dependency_target("CallbackHandler-1.0", &policy, temp_dir.path(), None).await;
         match res_cbh {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 13347),
             other => panic!("Expected CurseForge(13347), got {:?}", other),
         }
 
         // Alias match: exwindcore -> excore (99999)
-        let res_alias = resolve_dependency_target("exwindcore", &policy, temp_dir.path()).await;
+        let res_alias = resolve_dependency_target("exwindcore", &policy, temp_dir.path(), None).await;
         match res_alias {
             Some(AddonTarget::CurseForge(id)) => assert_eq!(id, 99999),
             other => panic!("Expected CurseForge(99999) for exwindcore via alias excore, got {:?}", other),
         }
 
         // Whitespace/empty
-        assert!(resolve_dependency_target("   ", &policy, temp_dir.path()).await.is_none());
+        assert!(resolve_dependency_target("   ", &policy, temp_dir.path(), None).await.is_none());
     }
 
     #[test]

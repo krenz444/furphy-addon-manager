@@ -9,7 +9,7 @@ use crate::engine::archive::extract_addon_archive;
 use crate::engine::backups::{cleanup_orphaned_backups, create_backup_zip, record_and_prune_backup};
 use crate::engine::flavours::get_flavour_mapping;
 use crate::engine::ownership::{check_folder_ownership_conflicts, get_protected_folders};
-use crate::engine::select::{select_cf_file, select_github_asset, select_github_release, select_wago_release};
+use crate::engine::select::{select_cf_file, select_github_asset, select_github_release, select_wago_release, select_wago_release_strict};
 use crate::engine::staging::prepare_flavour_staging_dir;
 use crate::engine::swap::execute_atomic_swap;
 use crate::engine::toc::{find_primary_toc, parse_toc_file, strip_wow_formatting};
@@ -203,7 +203,7 @@ pub async fn run_sync_for_flavour(
                             None
                         }
                     } else {
-                        match get_cf_files(&policy, &cf_client, pid, a.release_type).await {
+                        match get_cf_files(&policy, &cf_client, pid, a.release_type, mapping.type_id).await {
                             Ok(files) => select_cf_file(&files, a.release_type, type_id, prefix),
                             Err(e) => {
                                 sync_error = Some(e);
@@ -281,15 +281,17 @@ pub async fn run_sync_for_flavour(
                         }
                         found
                     } else {
-                        // Paging with early exit at the first page that yields a selection (Section 3.3)
+                        // Multi-page search: prioritize strict flavour match across all pages first
+                        let mut all_releases = Vec::new();
                         let mut chosen = None;
                         for page in 1..=10 {
                             match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
                                 Ok((rel_page, has_next)) => {
-                                    if let Some(sel) = select_wago_release(&rel_page, a.release_type, wago_field) {
+                                    if let Some(sel) = select_wago_release_strict(&rel_page, a.release_type, wago_field) {
                                         chosen = Some(sel);
                                         break;
                                     }
+                                    all_releases.extend(rel_page);
                                     if !has_next {
                                         break;
                                     }
@@ -299,6 +301,9 @@ pub async fn run_sync_for_flavour(
                                     break;
                                 }
                             }
+                        }
+                        if chosen.is_none() && sync_error.is_none() && !all_releases.is_empty() {
+                            chosen = select_wago_release(&all_releases, a.release_type, wago_field);
                         }
                         chosen
                     };
@@ -349,7 +354,7 @@ pub async fn run_sync_for_flavour(
                         match get_github_releases(&policy, &github_client, parts[0], parts[1], github_token.as_deref()).await {
                             Ok(releases) => {
                                 let pin_ref = a.pinned_file_id.as_deref();
-                                if let Some(chosen) = select_github_release(&releases, a.release_type, pin_ref) {
+                                if let Some(chosen) = select_github_release(&releases, a.release_type, pin_ref, Some(flavour)) {
                                     if !force && (a.file_id.as_deref() == Some(&chosen.tag_name) || a.version.as_deref() == Some(&chosen.tag_name)) {
                                         up_to_date_count += 1;
                                         let now_str = Utc::now().to_rfc3339();
@@ -374,7 +379,7 @@ pub async fn run_sync_for_flavour(
                                     chosen_version = Some(chosen.tag_name.clone());
 
                                     // Pick best asset with .zip, else zipball
-                                    let asset_opt = select_github_asset(&chosen, &repo);
+                                    let asset_opt = select_github_asset(&chosen, &repo, Some(flavour));
                                     let is_zipball = asset_opt.is_none();
                                     let dl_url = asset_opt
                                         .map(|ast| ast.url.clone())

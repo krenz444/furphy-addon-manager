@@ -253,7 +253,7 @@ async fn test_e2e_dependency_resolution_and_lifecycle() {
     );
 
     let policy = Arc::new(NetworkPolicy::new());
-    let resolved_alias = resolve_dependency_target("exwindcore", &policy, &data_dir).await;
+    let resolved_alias = resolve_dependency_target("exwindcore", &policy, &data_dir, None).await;
     assert_eq!(resolved_alias, Some(AddonTarget::CurseForge(99999)));
 
     // 4. Trigger install_missing_dependencies: verify dependency download and installation into AddOns/Ace3

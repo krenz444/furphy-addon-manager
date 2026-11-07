@@ -167,6 +167,7 @@ pub async fn get_cf_files(
     client: &Client,
     project_id: i64,
     max_release_type: i64,
+    game_version_type_id: Option<i64>,
 ) -> Result<Vec<CfFile>, String> {
     let base_url = get_cf_base_url();
     let remove_alphas = if max_release_type >= 3 {
@@ -175,8 +176,35 @@ pub async fn get_cf_files(
         "&removeAlphas=true"
     };
 
+    // If game_version_type_id is provided, try filtering by typeId with pageSize=50
+    if let Some(type_id) = game_version_type_id {
+        let typed_url = format!(
+            "{}/api/v1/mods/{}/files?pageIndex=0&pageSize=50&sort=dateCreated&sortDescending=true&gameVersionTypeId={}{}",
+            base_url, project_id, type_id, remove_alphas
+        );
+
+        if let Ok(resp) = execute_cf_request(policy, client, &typed_url).await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(root) = serde_json::from_str::<Value>(&text) {
+                        if let Some(data) = root.get("data").and_then(|v| v.as_array()) {
+                            if !data.is_empty() {
+                                if let Ok(files) = serde_json::from_value::<Vec<CfFile>>(Value::Array(data.clone())) {
+                                    if !files.is_empty() {
+                                        return Ok(files);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Default or fallback: query without gameVersionTypeId with pageSize=50
     let url = format!(
-        "{}/api/v1/mods/{}/files?pageIndex=0&pageSize=20&sort=dateCreated&sortDescending=true{}",
+        "{}/api/v1/mods/{}/files?pageIndex=0&pageSize=50&sort=dateCreated&sortDescending=true{}",
         base_url, project_id, remove_alphas
     );
 
