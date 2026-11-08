@@ -1,6 +1,6 @@
 # Furphy Addon Manager - changelog
 
-## 2.0.26: Setup.exe starts on every PC
+## 2.0.26: Setup.exe no longer needs libunwind.dll
 
 **`FurphyAddonManager-Setup.exe` no longer stops with "libunwind.dll was not found".**
 Every v2 installer up to 2.0.25 needed `libunwind.dll`, a file from the build
