@@ -1,90 +1,76 @@
 # Furphy Addon Manager
 
-A self-contained World of Warcraft addon manager for Windows: silent background addon updates, plus a CurseForge-style desktop app to browse, install, pin, roll back and manage addons - from CurseForge, Wago Addons, and GitHub. No Electron, **no accounts, no API keys, no sign-up of any kind**, no ads, no local HTTP port. Powered by a single native Rust core (Tauri 2) and a reactive Svelte 5 frontend with SQLite WAL storage.
-
-## Data location & compatibility
-
-Furphy v2 stores its database, backups, WTF snapshots, and logs in `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\`. Existing v1 installations are automatically detected, imported, and retired on first launch. To ensure safe rollback, a dual-write mirror synchronizes addon lists and settings back to `<WoW>\_retail_\AddonSync\` until v2.1.0.
-
-## No accounts, no API keys
-
-Everything works out of the box, with nothing to sign up for and nothing to configure: installing and updating addons from CurseForge and Wago Addons, searching Wago and browsing the real CurseForge.com from inside the app, versions, pin/ignore/rollback, dependency and compatibility checks, descriptions/changelogs/screenshots. There used to be an optional CurseForge API key that added a little extra official metadata - it was removed entirely (2026-09-04), since every one of those flows already worked just as well without it.
-
-## Multiple WoW versions
-
-Furphy also manages Classic and Classic Era addons, not just Retail - it detects whichever of Retail/Classic/Classic Era/PTR is actually installed on your machine and, once more than one is, shows a small switcher pill row so you can flip between them (each keeps its own addon list, freshness check, and an "Update All" button to sync everything at once); on a Retail-only machine like the one this app is usually installed on, none of that appears at all - every screen, file, and API response stays exactly as it is today. Classic's CurseForge/Wago version match is resolved live from your installed client's own build number, not hardcoded, so it keeps working correctly as Classic itself progresses through future expansions. See `FLAVORS-SPEC.md` for the full design if you're curious how it works.
+Furphy Addon Manager is a Windows desktop app that keeps World of Warcraft addons up to date from CurseForge, Wago Addons and GitHub releases without accounts or API keys. Version 2 is a single native program built with Rust and Tauri 2, a Svelte interface, and SQLite storage. It opens no local web server or port. Each installed WoW version (Retail, Classic Era, WoW Forever) has its own addon list and its own install folder, which can be changed in Settings.
 
 ## Requirements
 
-- Windows 10 or 11
-- Windows PowerShell 5.1 (built into Windows - nothing to install)
-- Microsoft Edge (used for the app window and required for it to open - WoW-adjacent machines almost always have it, but there is currently no fallback to another browser if it's missing)
-- World of Warcraft retail, installed anywhere the installer can find or you can point it at
+- Windows 10 or 11, 64-bit.
+- Microsoft Edge WebView2 Runtime. Setup checks for it and offers Microsoft's download page if it is missing.
 
 ## Install
 
-1. Download FurphyAddonManager-Setup.exe from the project's [Releases
-   page](https://github.com/krenz444/furphy-addon-manager/releases/latest)
-   (or the download button on the [landing
-   page](https://krenzcreative.org/furphy/), if it's live).
-2. Your browser may show a mild download-safety notice first (wording
-   varies by browser) - choose Keep/Keep anyway, then open the file.
-3. Windows may show a blue "Windows protected your PC" screen the first
-   time you run it, since it isn't signed with a paid certificate - click
-   More info, then Run anyway. Furphy only writes inside your WoW folder
-   and never asks for admin access, and Setup never shows a Windows admin
-   (UAC) prompt either.
-4. A small window opens: "Furphy found World of Warcraft in `<path>`"
-   with a single **Install** button (or a folder picker if it can't find
-   WoW - point it at your WoW folder and click Install). A progress bar
-   shows while it copies files and builds the native host, then a success
-   screen offers **Open Furphy Addon Manager**.
+Download `FurphyAddonManager-Setup.exe` from https://github.com/krenz444/furphy-addon-manager/releases/latest or the Download button on https://krenzcreative.org/furphy/ .
 
-Either way, the installer:
-   - finds your WoW retail folder (registry, then common install paths - or pass `-WowPath "<your WoW folder>"` if it can't)
-   - copies the app into `<WoW>\_retail_\AddonSync\`
-   - creates a desktop shortcut: **Furphy Addon Manager**
-   - registers `curseforge://` install links (from CurseForge.com's own Install buttons) to open here instead of the CurseForge desktop app, unless you pass `-NoProtocol`
-   - registers Furphy in Windows' own **Settings > Apps** list, with a working Uninstall entry
-   - finds addons you already have in your `AddOns` folder and starts keeping track of them, exactly as they are - nothing is downloaded or changed; skip with `-SkipAdopt`
+Setup installs for the current user into `%LOCALAPPDATA%\Programs\Furphy Addon Manager`, creates Desktop and Start Menu shortcuts, adds Furphy to Windows Settings > Apps, and opens Furphy. Setup writes only to the user profile and the per-user registry. Furphy itself writes addon files inside the WoW folder when it installs or updates addons.
 
-Re-running the installer is safe: it upgrades the app in place and adopts anything new, without touching your addon list, settings, or an addon it already manages.
+The installer is not code-signed, so Windows may warn or block it. See Troubleshooting below.
 
-Command-line options: `-WowPath <path>`, `-NoShortcuts`, `-NoProtocol`, `-SkipAdopt`, `-Uninstall`.
+### Silent install
 
-Prefer the old zip (Install Furphy.cmd / install.ps1 by hand)? It's still published on every release, for power users and for the auto-updater - see the [Releases page](https://github.com/krenz444/furphy-addon-manager/releases/latest).
+- `FurphyAddonManager-Setup.exe /S` installs without opening the window.
+- `FurphyAddonManager-Setup.exe /S --relaunch-tray` also restarts Furphy in the tray afterwards.
 
-Scripted/silent install: `FurphyAddonManager-Setup.exe /S` (optionally followed by any install.ps1 flag, e.g. `-WowPath "<path>"`).
+### Upgrading from Furphy 1.x
 
-**Advanced users:** `irm <releases-zip-or-raw-script-url>/install.ps1 | iex` also works if you'd rather install from a PowerShell one-liner than a downloaded file - it bypasses the execution-policy prompt entirely, since `iex` runs the script in-session rather than as a file. Not the recommended path for most people: it skips the one clear signal a normal install gives you, the readable console log, and it assumes you already know how to open PowerShell.
+On first start Furphy 2 imports the 1.x addon list, settings and backups from `<WoW>\_retail_\AddonSync` and retires 1.x. The 1.x folder is left in place.
 
 ## Uninstall
 
-Three equivalent ways to remove Furphy, all doing the same thing under the hood:
+Uninstall through Windows Settings > Apps > Furphy Addon Manager, or run:
 
-- **Right-click the tray icon** and choose **Uninstall Furphy Addon Manager...**.
-- **Inside the app:** Settings > Backup & troubleshooting > **Uninstall Furphy Addon Manager**.
-- **Windows' own Settings > Apps > Furphy Addon Manager > Uninstall.**
+`"%LOCALAPPDATA%\Programs\Furphy Addon Manager\Furphy Addon Manager.exe" --uninstall`
 
-Any of the three removes the app files, the Start with Windows setting, the `curseforge://` registration, and the Windows Settings > Apps entry itself. Your `AddOns` folder and this tool's own addon list/settings/logs (`addons.json`, `settings.json`, `state.json`, `sync.log`, `server.log`) are left in place, in case you reinstall later - a short text file is left in the app's own folder pointing at exactly where.
+It removes the program, shortcuts and the Settings > Apps entry, and keeps the data folder and all installed addons.
 
-You can also run `install.ps1 -Uninstall` (or `Install Furphy.cmd -Uninstall` from a console) directly from an unzipped copy of the app - the same mechanism the three paths above use.
+The data folder is `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager`. It holds the database and `app.log`. Uninstalling keeps it.
 
-## Updates itself
+## Updates
 
-Starting with version 1.22.0, Furphy checks for a newer version of itself (never your addons - that's the separate "Update addons in the background" feature above) and installs it automatically, the next time doing so is safe: never in the middle of an addon update, and - for the fully automatic path - never while a Furphy window is open. If a window happens to be open when an update is ready, you'll see a small banner instead, with an **Install now** button; either way, the update itself takes only a few seconds and your addon list, settings and logs are never touched. A tray balloon lets you know once, after a silent update finishes.
+Closing the window hides it to the tray. In the tray Furphy checks for addon updates on a schedule (every 2 hours by default; Settings offers every hour up to once a day).
 
-Settings has its own **App updates** section (separate from the addon-update section above it) with a toggle - **Install app updates automatically** (on by default) - plus **Check now** and **Install now** buttons and a status line telling you what's going on. Turning the toggle off does not stop Furphy from *checking*; it only stops it from installing on its own - you'll still see "Install now" whenever a new version is ready, and can install it with one click whenever you're ready. Every downloaded update is verified (a cryptographic checksum, over a secure connection) before anything touches your installed copy, and a failed update automatically restores the version you had, so you're never left with a broken app.
+For self-updates, the running app checks https://github.com/krenz444/furphy-addon-manager/releases/latest/download/latest.json every hour, verifies a SHA-256 checksum, and installs a new version automatically when the Furphy window is closed and no addon job is running. With the window open the update waits and can be installed from Settings. If the new installer cannot start, Furphy keeps running and shows the error. After a silent update the tray icon comes back.
 
-If you're coming from a version older than 1.22.0, this feature doesn't run for you yet - update to 1.22.0 the same way you always have (download the zip, run `Install Furphy.cmd` once). Every version from 1.22.0 onward updates itself automatically after that.
+## Command line
 
-## Performance
+Run `"%LOCALAPPDATA%\Programs\Furphy Addon Manager\Furphy Addon Manager.exe"` with:
 
-Furphy takes a light touch while you play: it doesn't pretend WoW isn't running, it just keeps the overhead down. While a supported WoW client is running, decorative theme animations pause, the app (and the background updater) run at a lower OS scheduling priority, and the CurseForge browsing pane suspends itself whenever the window isn't in the foreground. Everything else - checking for updates, updating or installing addons, browsing Wago and CurseForge - keeps working exactly like it does when WoW is closed. `tests\perf\Perf.Tests.ps1` (part of a full `tests\run-all.ps1` run) asserts the CPU/priority side of this automatically against a real game-running simulation on every test pass, not just by hand.
+- `--check`
+  Look for addon updates, install nothing.
+- `--sync`
+  Update addons.
+- `--status`
+  Show status.
+- `--json`
+  Machine-readable output for the three before (`--check`, `--sync`, `--status`).
+- `--flavour <id>`
+  Limit to one WoW version.
+- `--add <link>`
+  Add an addon from a CurseForge, Wago or GitHub link.
+- `--export-v1 <folder>`
+  Write a Furphy 1.x style copy of the data.
+- `--tray`
+  Start hidden in the tray.
 
 ## Privacy
 
-The app only listens on `http://localhost:<port>/` (default 47831) - nothing outside this PC can reach it. It talks to the internet only to do what you asked: `curseforge.com`'s public file-list/download/browsing endpoints, `addons.wago.io` and its `cdn.wago.io` downloads, `addon-radar.com` (a community CurseForge metadata mirror), and `raw.githubusercontent.com` (the offline CurseForge id catalogue, refreshed at most once a day). Nothing else - never `api.curseforge.com`, since the app never had, and no longer even has a way to hold, a CurseForge API key. No accounts, no telemetry, no ads.
+Furphy contacts only:
+
+- `curseforge.com`
+- `addons.wago.io` and `cdn.wago.io`
+- `github.com`, `api.github.com`, `objects.githubusercontent.com` and `raw.githubusercontent.com` (app updates, GitHub addons, the addon catalogue)
+- `addon-radar.com` (addon details)
+
+It sends no analytics.
 
 ## Troubleshooting
 
@@ -95,68 +81,19 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 - **"Smart App Control blocked an app that may be unsafe"** (Windows 11). Smart App Control blocks unsigned apps and has no Run anyway button. You can turn it off in Windows Security > App & browser control > Smart App Control settings; read what that page says about turning it back on before you decide.
 - **Nothing happens for up to a minute.** Microsoft Defender scans a new download before its first run. Wait rather than opening the file again.
 - **"Furphy needs the Microsoft Edge WebView2 Runtime."** Setup offers Microsoft's download page. Install the runtime, then start Furphy from its desktop shortcut.
-- **Any other error.** The message names the log file, `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\app.log`. Attach it when you report the problem.
+- **Any other problem.** An error message names the log file, `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\app.log`. Attach it when you report the problem at https://github.com/krenz444/furphy-addon-manager/issues .
 
-- `server.log` (in the app folder) - every request the local server handled, and any errors.
-- `sync.log` (in the app folder) - everything the updater did on each run.
-- `last-run.txt` - a quick table of the most recent update.
-- The app shows a banner if it can't reach the server; restart it from the **Furphy Addon Manager** desktop shortcut.
+## Building from source
 
-## What it does
+- `tools\test-v2.ps1`
+  Runs the Rust tests (cargo test, target x86_64-pc-windows-gnullvm, llvm-mingw toolchain).
+- `npm --prefix frontend run build`
+  Builds the interface.
+- `tools\package-v2.ps1`
+  Builds the nine release assets and runs `tools\check-release-binary.ps1`, which fails the build if the exe needs any DLL that Windows does not ship and then starts it alone from an empty folder.
 
-- **Background updates** - turn on "Update addons in the background" (Settings, or the tray icon's own right-click menu; optional, off by default) and Furphy checks and updates on its own timer with no window to open.
-- **The app** ("Furphy Addon Manager" shortcut) - one headline tells you if anything needs updating; each addon shows a single status pill (Update, Pinned, Ignoring updates, Needs a dependency, Old patch, or Up to date) that doubles as its own one-click fix; any update shows a live progress bar with the raw log one click away, and a plain-language reason plus Retry if one fails; **Get new addons** switches between an in-app Wago search and the real CurseForge.com, browsed right inside the app window (installing from a CurseForge page there just works, no key required), trimmed by default to just its search results - no CurseForge header, filter sidebar, cookie banner, or footer clutter (toggle it off in Settings > Advanced if you want the page as-is) - with ads and trackers on that page also filtered by default (same Settings > Advanced toggle to turn off); per addon: install any specific version, pin/unpin, ignore updates, **roll back** to the previous version, uninstall, open on CurseForge/Wago; automatic update checks; **update addons in the background** on a timer, plus **start with Windows**, both optional and off by default and both toggleable from the tray icon's own right-click menu as well as from Settings; **uninstall** from the tray menu, from Settings, or from Windows' own Settings > Apps, all three doing the same clean removal (addons and your addon list stay in WoW either way); 16 themes, picked from a swatch grid (Tokyo Rain default - a rain-lit neon street at night, dark by default - plus Arcane Library, Vaporwave, Lofi Night, Dark, Light, and ten more - Terminal Green, Arctic Ice, Art Deco, Alpine Dawn, Matcha, Desert Night, Brushed Steel, Aurora Sky, Strawberry Cream, Snow Day); Settings also lists any addons already sitting in your `AddOns` folder that Furphy isn't managing yet, with a one-click **Manage** (or **Manage all**) to start keeping them updated exactly as they are - no download, nothing changes until a real update is actually found; a first-run dialog offers the same one-click choice the moment the app notices addons like that. Settings keeps the everyday toggles up front and tucks everything else (release channel extras, folders, logs, diagnostics) one click away.
-- **Three sources** - CurseForge, Wago Addons, and GitHub, side by side: install, pin, ignore, roll back and check dependencies/compatibility on any of them, no key needed for CurseForge or Wago. Wago is searched in-app; CurseForge is the real website, embedded in the app window itself (or a side window on an older install); GitHub addons are added by pasting a link - see "Addons from GitHub" below.
-- **Safety** - a failed download never touches the installed copy; only folders that came from a package are ever deleted; every update keeps the previous zip for rollback.
+See CHANGELOG.md for the changes in each version.
 
-## Addons from GitHub (guild addons)
+## Documentation
 
-Some guilds ship their own addons as GitHub releases instead of CurseForge or Wago - sometimes as *private* releases, gated behind a token the guild hands out (often a Patreon perk). Furphy can manage those too, exactly like any CurseForge or Wago addon: checked, updated, pinned, rolled back.
-
-- **If your guild's addon is public**, just paste its `github.com/owner/repo` link (Settings > GitHub addons, or the "From a GitHub link" option under Get new addons) - no token needed.
-- **If it's private**, your guild will hand you a token. Paste it once into Settings > GitHub addons and hit Save. The token stays on your own PC (it's written to your local `settings.json`, the same file every other setting already lives in) and is only ever sent to GitHub itself when Furphy checks that addon - never to CurseForge, Wago, or anywhere else, and Furphy never shows it back to you or writes it to any log file. If the token stops working (guilds rotate these sometimes), Furphy just tells you to paste a fresh one.
-- **Already have the addon installed** from an old script or a manual download? Paste its GitHub link anyway - Furphy recognizes the folder that's already there and starts managing it in place, no re-download, no lost settings.
-- **Once your GitHub addons show up in Furphy's own list**, any separate updater script or scheduled task you were using before is no longer needed - you can delete it.
-
-## How it works
-
-| File | Role |
-|---|---|
-| `install.ps1` / `Install Furphy.cmd` | The installer described above. |
-| `package.ps1` | Builds `dist\FurphyAddonManager-<version>.zip` for a Release, from the `VERSION` file. |
-| `addon-sync.ps1` | The updater/CLI. Talks to CurseForge's and Wago's public website endpoints directly - no key, no account, ever - plus GitHub's releases API for GitHub-sourced addons (a token, only when the addon needs one, read from `settings.json`). State in `addons.json`, settings in `settings.json`. |
-| `addon-server.ps1` | Local HTTP server (`System.Net.HttpListener`, localhost only). Serves `ui/`, exposes a JSON API, runs the CLI as hidden child processes for jobs, proxies Wago and CurseForge's keyless metadata sources, persists check results and job history in `state.json`. Exits after idle. |
-| `ui/` | Vanilla HTML/CSS/JS single-page app. No frameworks, no CDN, works offline except the addon sources themselves. |
-| `Addon Manager.vbs` | Starts the server hidden if it is not running and opens the UI as an Edge `--app` window. |
-| `curseforge-handler.vbs` / `register-protocol.ps1` | The `curseforge://` install-link handler and its (per-user, reversible) registration. |
-| `deploy.ps1` | Dev tool: copies a build into a live `_retail_\AddonSync` folder with a backup and end-to-end verification; never overwrites state files. Not needed for a normal install - use `install.ps1`. |
-| `SPEC.md` / `ROADMAP.md` / `OVERNIGHT-REPORT.md` | Authoritative spec and API contract, backlog, and build log - developer-facing, not needed to use the app. |
-
-## CLI
-
-```
-.\addon-sync.ps1                    update everything
-.\addon-sync.ps1 -Status            what is installed (no network)      -Json for machine output
-.\addon-sync.ps1 -DryRun            what would update
-.\addon-sync.ps1 -Add <id> [-FileId <fileId>]      install (CurseForge project id, or wago:<slug>) - optionally a specific file = pinned
-.\addon-sync.ps1 -Remove <name|id>  uninstall
-.\addon-sync.ps1 -Only <id> [-Force]               update/reinstall specific addons
-.\addon-sync.ps1 -Ignore/-Unignore/-Unpin/-Rollback <id>
-.\addon-sync.ps1 -Files <id>        list available versions
-.\addon-sync.ps1 -Scan              folders not managed by the tool
-```
-
-## PowerShell 5.1 lessons learned (see CHANGELOG)
-
-- `Get-Content` returns strings decorated with provider note properties; feeding one to `ConvertTo-Json` walks the whole provider graph and hangs. Use `[IO.File]::ReadAllText`.
-- `Start-Process -ArgumentList` does not quote array elements; quote paths with spaces (`C:\Program Files (x86)\...`) yourself.
-- `@()` around a `List[object]` throws on some builds; use `.ToArray()` / `foreach` / `Write-Output -NoEnumerate`.
-- A single comma-joined token (`-Add 111,222`) survives `powershell.exe -File` argument binding intact; separate space-separated tokens do not collect into an array parameter the way an in-process call does.
-
-## Tests
-
-`tests\run-all.ps1` is the one entry point for the whole automated test suite (static checks, PS 5.1 unit tests, real server/CLI integration tests, the native host's `--selftest`/`--tray-selftest` markers, a headless-browser SPA harness plus a 16-theme contrast/screenshot audit, a FLAVORS-SPEC section 8 acceptance pass, and a "light touch while you play" perf pass against a simulated running game) - run `tests\run-all.ps1 -Quick` for a sub-4-minute pass covering everything except real network installs and the full theme/fixture/perf sweep, or plain `tests\run-all.ps1` for the complete run; both print a summary table and write `tests\last-report.json`/`tests\last-report.md`. `deploy.ps1` runs the Quick gate itself before touching a live install and refuses to proceed on a failure (`-SkipTests` overrides, loudly). See `tests\TESTING.md` for the full layer breakdown, the small set of testability hooks added to production files to make this possible, and how to add a new test.
-
-## Status
-
-Actively iterated; see `CHANGELOG.md`, `SPEC.md` and `ROADMAP.md`.
+The docs folder holds design documents from the 1.x PowerShell version. Version 2 replaced that architecture, so they describe 1.x, not 2.

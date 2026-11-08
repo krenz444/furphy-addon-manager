@@ -684,6 +684,384 @@ pub fn import_from_v1(
     Ok(summary)
 }
 
+#[derive(Debug)]
+pub enum ReimportOutcome {
+    NotNeeded,
+    NoV1Data,
+    Imported(ImportSummary),
+}
+
+fn v1_has_addon_records(v1_dir: &Path) -> bool {
+    let check_file = |path: &Path| -> bool {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let trimmed = content.trim_start_matches('\u{feff}');
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Array(arr)) => !arr.is_empty(),
+            _ => false,
+        }
+    };
+
+    if check_file(&v1_dir.join("addons.json")) {
+        return true;
+    }
+
+    let flavours_dir = v1_dir.join("flavours");
+    if let Ok(entries) = std::fs::read_dir(flavours_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name() {
+                    if name.to_string_lossy().starts_with("_migration-backup-") {
+                        continue;
+                    }
+                }
+                if check_file(&path.join("addons.json")) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+pub fn reimport_if_first_import_was_empty(
+    conn: &mut Connection,
+    v1_dir: &Path,
+    v2_data_dir: &Path,
+) -> Result<ReimportOutcome, ImportError> {
+    let imported_from_v1_at_present: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM meta WHERE key = 'imported_from_v1_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !imported_from_v1_at_present {
+        return Ok(ReimportOutcome::NotNeeded);
+    }
+
+    let reimport_done_present: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM meta WHERE key = 'v1_reimport_done'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if reimport_done_present {
+        return Ok(ReimportOutcome::NotNeeded);
+    }
+
+    let addon_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM addons", [], |row| row.get(0))
+        .unwrap_or(0);
+    if addon_count > 0 {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('v1_reimport_done', ?1)",
+            params![now],
+        )?;
+        return Ok(ReimportOutcome::NotNeeded);
+    }
+
+    if !v1_has_addon_records(v1_dir) {
+        return Ok(ReimportOutcome::NoV1Data);
+    }
+
+    let snap_settings: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        list
+    };
+
+    let snap_ui_prefs: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT key, value FROM ui_prefs")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        list
+    };
+
+    let snap_tray_state: Option<String> = match conn.query_row(
+        "SELECT data FROM tray_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(data) => Some(data),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    let snap_app_update: Option<String> = match conn.query_row(
+        "SELECT data FROM app_update WHERE id = 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(data) => Some(data),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    let summary = import_from_v1(conn, v1_dir, v2_data_dir, true)?;
+
+    let tx = conn.transaction()?;
+
+    for (k, v) in &snap_settings {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![k, v],
+        )?;
+    }
+
+    for (k, v) in &snap_ui_prefs {
+        tx.execute(
+            "INSERT OR REPLACE INTO ui_prefs (key, value) VALUES (?1, ?2)",
+            params![k, v],
+        )?;
+    }
+
+    match &snap_tray_state {
+        Some(data) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO tray_state (id, data) VALUES (1, ?1)",
+                params![data],
+            )?;
+        }
+        None => {
+            tx.execute("DELETE FROM tray_state WHERE id = 1", [])?;
+        }
+    }
+
+    match &snap_app_update {
+        Some(data) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO app_update (id, data) VALUES (1, ?1)",
+                params![data],
+            )?;
+        }
+        None => {
+            tx.execute("DELETE FROM app_update WHERE id = 1", [])?;
+        }
+    }
+
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('v1_reimport_done', ?1)",
+        params![now],
+    )?;
+
+    tx.commit()?;
+
+    Ok(ReimportOutcome::Imported(summary))
+}
+
+#[cfg(test)]
+mod reimport_tests {
+    use super::*;
+
+    #[test]
+    fn reimports_when_first_import_was_empty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("furphy reimport (test) {}", uuid::Uuid::new_v4()));
+        let v1_dir = temp_dir.join("v1");
+        let v2_data_dir = temp_dir.join("v2_data");
+        let retail_dir = v1_dir.join("flavours").join("retail");
+        std::fs::create_dir_all(&retail_dir).unwrap();
+        std::fs::create_dir_all(&v2_data_dir).unwrap();
+
+        let addons_json = serde_json::json!([
+            {"name": "Details", "projectId": 61284, "folders": ["Details"], "source": "curseforge"}
+        ]);
+        std::fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('imported_from_v1_at', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        let outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        match outcome {
+            ReimportOutcome::Imported(summary) => {
+                assert_eq!(summary.addons_imported, 1);
+            }
+            other => panic!("expected ReimportOutcome::Imported, got {:?}", other),
+        }
+
+        let addon_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM addons", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(addon_count, 1);
+
+        let reimport_done: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM meta WHERE key = 'v1_reimport_done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(reimport_done);
+
+        let second_outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        assert!(matches!(second_outcome, ReimportOutcome::NotNeeded));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn leaves_a_non_empty_v2_list_alone() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("furphy reimport (test) {}", uuid::Uuid::new_v4()));
+        let v1_dir = temp_dir.join("v1");
+        let v2_data_dir = temp_dir.join("v2_data");
+        let retail_dir = v1_dir.join("flavours").join("retail");
+        std::fs::create_dir_all(&retail_dir).unwrap();
+        std::fs::create_dir_all(&v2_data_dir).unwrap();
+
+        let addons_json = serde_json::json!([
+            {"name": "Details", "projectId": 61284, "folders": ["Details"], "source": "curseforge"}
+        ]);
+        std::fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        let initial_import = import_from_v1(&mut conn, &v1_dir, &v2_data_dir, false).unwrap();
+        assert_eq!(initial_import.addons_imported, 1);
+
+        let outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        assert!(matches!(outcome, ReimportOutcome::NotNeeded));
+
+        let addon_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM addons", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(addon_count, 1);
+
+        let reimport_done: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM meta WHERE key = 'v1_reimport_done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(reimport_done);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn v2_settings_win_over_v1_settings() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("furphy reimport (test) {}", uuid::Uuid::new_v4()));
+        let v1_dir = temp_dir.join("v1");
+        let v2_data_dir = temp_dir.join("v2_data");
+        let retail_dir = v1_dir.join("flavours").join("retail");
+        std::fs::create_dir_all(&retail_dir).unwrap();
+        std::fs::create_dir_all(&v2_data_dir).unwrap();
+
+        let addons_json = serde_json::json!([
+            {"name": "Details", "projectId": 61284, "folders": ["Details"], "source": "curseforge"}
+        ]);
+        std::fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        let settings_json = serde_json::json!({
+            "backgroundIntervalMinutes": 120
+        });
+        std::fs::write(v1_dir.join("settings.json"), settings_json.to_string()).unwrap();
+
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('backgroundIntervalMinutes', '600')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('imported_from_v1_at', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        let outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        assert!(matches!(outcome, ReimportOutcome::Imported(_)));
+
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'backgroundIntervalMinutes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "600");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn no_v1_records_is_reported() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("furphy reimport (test) {}", uuid::Uuid::new_v4()));
+        let v1_dir = temp_dir.join("v1");
+        let v2_data_dir = temp_dir.join("v2_data");
+        std::fs::create_dir_all(&v1_dir).unwrap();
+        std::fs::create_dir_all(&v2_data_dir).unwrap();
+
+        let empty_addons = serde_json::json!([]);
+        std::fs::write(v1_dir.join("addons.json"), empty_addons.to_string()).unwrap();
+
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('imported_from_v1_at', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        let outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        assert!(matches!(outcome, ReimportOutcome::NoV1Data));
+
+        let reimport_done: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM meta WHERE key = 'v1_reimport_done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!reimport_done);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn not_needed_without_a_recorded_import() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("furphy reimport (test) {}", uuid::Uuid::new_v4()));
+        let v1_dir = temp_dir.join("v1");
+        let v2_data_dir = temp_dir.join("v2_data");
+        let retail_dir = v1_dir.join("flavours").join("retail");
+        std::fs::create_dir_all(&retail_dir).unwrap();
+        std::fs::create_dir_all(&v2_data_dir).unwrap();
+
+        let addons_json = serde_json::json!([
+            {"name": "Details", "projectId": 61284, "folders": ["Details"], "source": "curseforge"}
+        ]);
+        std::fs::write(retail_dir.join("addons.json"), addons_json.to_string()).unwrap();
+
+        let outcome = reimport_if_first_import_was_empty(&mut conn, &v1_dir, &v2_data_dir).unwrap();
+        assert!(matches!(outcome, ReimportOutcome::NotNeeded));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {

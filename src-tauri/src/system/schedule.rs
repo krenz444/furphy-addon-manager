@@ -24,12 +24,111 @@ pub const MAX_INTERVAL_MINUTES: i64 = 1440;
 pub const RETRY_MINUTES_ON_BUSY: i64 = 5;
 pub const FIRST_CYCLE_DELAY_SECS: i64 = 90;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum AutoInstallDecision {
+    NoUpdate,
+    SkipInstallerFailedBefore,
+    SkipWindowOpen,
+    SkipRunnerBusy,
+    Install,
+}
+
+pub fn auto_install_decision(
+    auto_install: bool,
+    has_update: bool,
+    installer_failed_before: bool,
+    window_open: bool,
+    runner_busy: bool,
+) -> AutoInstallDecision {
+    if !auto_install || !has_update {
+        AutoInstallDecision::NoUpdate
+    } else if installer_failed_before {
+        AutoInstallDecision::SkipInstallerFailedBefore
+    } else if window_open {
+        AutoInstallDecision::SkipWindowOpen
+    } else if runner_busy {
+        AutoInstallDecision::SkipRunnerBusy
+    } else {
+        AutoInstallDecision::Install
+    }
+}
+
+#[cfg(test)]
+mod install_decision_tests {
+    use super::*;
+
+    #[test]
+    fn test_no_update() {
+        assert_eq!(
+            auto_install_decision(false, true, false, false, false),
+            AutoInstallDecision::NoUpdate
+        );
+        assert_eq!(
+            auto_install_decision(true, false, false, false, false),
+            AutoInstallDecision::NoUpdate
+        );
+        assert_eq!(
+            auto_install_decision(false, false, false, false, false),
+            AutoInstallDecision::NoUpdate
+        );
+    }
+
+    #[test]
+    fn test_skip_installer_failed_before() {
+        assert_eq!(
+            auto_install_decision(true, true, true, false, false),
+            AutoInstallDecision::SkipInstallerFailedBefore
+        );
+    }
+
+    #[test]
+    fn test_skip_window_open() {
+        assert_eq!(
+            auto_install_decision(true, true, false, true, false),
+            AutoInstallDecision::SkipWindowOpen
+        );
+    }
+
+    #[test]
+    fn test_skip_runner_busy() {
+        assert_eq!(
+            auto_install_decision(true, true, false, false, true),
+            AutoInstallDecision::SkipRunnerBusy
+        );
+    }
+
+    #[test]
+    fn test_install() {
+        assert_eq!(
+            auto_install_decision(true, true, false, false, false),
+            AutoInstallDecision::Install
+        );
+    }
+
+    #[test]
+    fn test_window_open_wins_over_runner_busy() {
+        assert_eq!(
+            auto_install_decision(true, true, false, true, true),
+            AutoInstallDecision::SkipWindowOpen
+        );
+    }
+
+    #[test]
+    fn test_installer_failed_before_wins_over_window_open() {
+        assert_eq!(
+            auto_install_decision(true, true, true, true, false),
+            AutoInstallDecision::SkipInstallerFailedBefore
+        );
+    }
+}
+
 pub struct Scheduler {
     runner: Arc<JobRunner>,
     snapshot: Arc<Mutex<TrayStateSnapshot>>,
     is_running_cycle: Mutex<bool>,
     trigger_tx: tokio::sync::mpsc::UnboundedSender<bool>,
     trigger_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<bool>>>,
+    window_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Scheduler {
@@ -41,6 +140,19 @@ impl Scheduler {
             is_running_cycle: Mutex::new(false),
             trigger_tx: tx,
             trigger_rx: Mutex::new(Some(rx)),
+            window_probe: None,
+        }
+    }
+
+    pub fn with_window_probe(mut self, probe: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.window_probe = Some(Arc::new(probe));
+        self
+    }
+
+    pub fn is_window_open(&self) -> bool {
+        match self.window_probe.as_deref() {
+            Some(probe) => probe(),
+            None => false,
         }
     }
 
@@ -430,27 +542,43 @@ impl Scheduler {
                                             let settings = get_settings_map(&conn).unwrap_or_default();
                                             settings.get("appUpdateAutoInstall").and_then(|v| v.as_bool()).unwrap_or(true)
                                         };
-                                        if auto_install && status.has_update && failed_before {
-                                            crate::logging::append_app_log(
-                                                "INFO",
-                                                &format!(
-                                                    "Skipping automatic install of v{}: its installer failed before",
-                                                    status.update_version.as_deref().unwrap_or("?")
-                                                ),
-                                            );
-                                        } else if auto_install && status.has_update {
-                                            let is_busy = sched.runner.is_busy().await;
-                                            if is_busy {
-                                                // Retried next hour; not an installer failure.
-                                            } else if let Err(e) = crate::update::app_update::install_update(&status, is_busy, false).await {
-                                                crate::logging::append_app_log("ERROR", &format!("Automatic app update failed: {}", e));
-                                                let mut err_status = status.clone();
-                                                err_status.status = "error".into();
-                                                err_status.error = Some(e);
-                                                if let Err(se) = crate::update::app_update::save_app_update_state(&conn, &err_status) {
-                                                    crate::logging::append_app_log("WARN", &format!("Could not save app update state: {}", se));
+                                        match auto_install_decision(
+                                            auto_install,
+                                            status.has_update,
+                                            failed_before,
+                                            sched.is_window_open(),
+                                            sched.runner.is_busy().await,
+                                        ) {
+                                            AutoInstallDecision::Install => {
+                                                if let Err(e) = crate::update::app_update::install_update(&status, false, false).await {
+                                                    crate::logging::append_app_log("ERROR", &format!("Automatic app update failed: {}", e));
+                                                    let mut err_status = status.clone();
+                                                    err_status.status = "error".into();
+                                                    err_status.error = Some(e);
+                                                    if let Err(se) = crate::update::app_update::save_app_update_state(&conn, &err_status) {
+                                                        crate::logging::append_app_log("WARN", &format!("Could not save app update state: {}", se));
+                                                    }
                                                 }
                                             }
+                                            AutoInstallDecision::SkipInstallerFailedBefore => {
+                                                crate::logging::append_app_log(
+                                                    "INFO",
+                                                    &format!(
+                                                        "Skipping automatic install of v{}: its installer failed before",
+                                                        status.update_version.as_deref().unwrap_or("?")
+                                                    ),
+                                                );
+                                            }
+                                            AutoInstallDecision::SkipWindowOpen => {
+                                                crate::logging::append_app_log(
+                                                    "INFO",
+                                                    &format!(
+                                                        "Not installing v{} automatically: the Furphy window is open. The update stays available.",
+                                                        status.update_version.as_deref().unwrap_or("?")
+                                                    ),
+                                                );
+                                            }
+                                            AutoInstallDecision::NoUpdate | AutoInstallDecision::SkipRunnerBusy => {}
                                         }
                                     }
                                 }

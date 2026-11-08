@@ -1,5 +1,11 @@
 # Furphy Addon Manager - changelog
 
+## 2.0.27: your 1.x addon list comes back, and updates leave an open window alone
+
+- **Upgraded from Furphy 1.x and found an empty list? It is restored.** Versions 2.0.0 to 2.0.25 imported from a temporary folder when 1.x updated itself, found nothing and never looked again. On start, if that first import brought in nothing and your 1.x folder still has addons, Furphy imports them once. Settings you changed in 2.x are kept, and a list that already has addons is never replaced.
+- **Automatic updates no longer close an open window.** The hourly check installs a new version only while Furphy runs in the tray. With the window open, the update waits and Settings offers Install now.
+- **README rewritten for version 2.** It still described the 1.x PowerShell version and its local web server.
+
 ## 2.0.26: Setup.exe no longer needs libunwind.dll
 
 **`FurphyAddonManager-Setup.exe` no longer stops with "libunwind.dll was not found".**

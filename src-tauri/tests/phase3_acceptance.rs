@@ -19,6 +19,17 @@ use furphy_lib::system::tray_status::{
 
 use chrono::TimeZone;
 
+/// `set_background_updates` and `tray_status` read the app database, which only exists
+/// after the app has started once. A test run on a fresh profile has no tables yet.
+fn ensure_app_database() {
+    let path = furphy_lib::paths::get_db_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut conn = furphy_lib::db::open_connection(&path).unwrap();
+    furphy_lib::db::migrate::run_migrations(&mut conn).unwrap();
+}
+
 #[test]
 fn test_acceptance_exact_v1_status_sentences() {
     let now = Local.with_ymd_and_hms(2026, 10, 23, 20, 51, 0).unwrap();
@@ -282,6 +293,7 @@ async fn test_acceptance_game_mode_and_reload_notice() {
 #[tokio::test]
 async fn test_acceptance_sleep_resume_wall_clock_trigger() {
     let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_app_database();
     furphy_lib::commands::system::set_background_updates(true).unwrap();
 
     let temp = std::env::temp_dir().join("wow test root (acceptance test)");
@@ -352,6 +364,7 @@ fn test_acceptance_v1_imported_window_bounds() {
 #[tokio::test]
 async fn test_acceptance_background_updates_off_prevents_tight_loop() {
     let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_app_database();
     let policy = Arc::new(NetworkPolicy::default());
     let runner = Arc::new(JobRunner::new(policy));
     let scheduler = Scheduler::new(runner, TrayStateSnapshot::default());

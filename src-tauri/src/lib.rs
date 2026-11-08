@@ -71,6 +71,22 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
                 logging::append_app_log("ERROR", &format!("Import from v1 failed: {}", e));
             }
         }
+        match db::import_v1::reimport_if_first_import_was_empty(&mut conn, &v1_path, &v2_data_dir) {
+            Ok(db::import_v1::ReimportOutcome::Imported(summary)) => {
+                logging::append_app_log("INFO", &format!(
+                    "Re-imported v1 data after an empty first import: {} addons, {} flavours",
+                    summary.addons_imported, summary.flavours_imported
+                ));
+                system::retire_v1::retire_v1_blocking(system::retire_v1::RetireOptions {
+                    custom_v1_path: Some(v1_path.clone()),
+                    ..Default::default()
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                logging::append_app_log("ERROR", &format!("Re-import from v1 failed: {}", e));
+            }
+        }
     }
 
     Ok(())
@@ -211,7 +227,12 @@ pub fn run() {
                     system::tray_status::TrayStateSnapshot::default()
                 }
             };
-            let scheduler = std::sync::Arc::new(system::schedule::Scheduler::new(runner.clone(), initial_state));
+            let scheduler = std::sync::Arc::new(
+                system::schedule::Scheduler::new(runner.clone(), initial_state).with_window_probe({
+                    let handle = app.handle().clone();
+                    move || handle.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(false)
+                }),
+            );
             system::single_instance::start_single_instance_listener(app.handle().clone());
             if let Err(e) = system::tray::setup_tray(app.handle(), scheduler.clone()) {
                 logging::append_app_log("ERROR", &format!("setup_tray failed: {}", e));
