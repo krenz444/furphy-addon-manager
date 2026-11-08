@@ -327,12 +327,32 @@ fn test_acceptance_setup_silent_install_and_uninstall_lifecycle() {
     let scratch_install_dir = temp.path().join("Programs").join("Furphy Addon Manager");
 
     // 1. Silent Install creates install dir and copies binary
-    let install_res = furphy_lib::system::setup::run_install(true, Some(scratch_install_dir.clone()));
+    let install_res = furphy_lib::system::setup::run_install(true, false, Some(scratch_install_dir.clone()));
     assert!(install_res.is_ok(), "Silent install should succeed: {:?}", install_res);
     assert!(scratch_install_dir.exists(), "Install directory was not created");
     assert!(
         scratch_install_dir.join("Furphy Addon Manager.exe").exists(),
         "Installed binary was not copied"
+    );
+    assert!(
+        scratch_install_dir.join("WebView2Loader.dll").exists(),
+        "WebView2Loader.dll was not unpacked"
+    );
+    assert!(
+        !scratch_install_dir.join("libunwind.dll").exists(),
+        "libunwind.dll is static-linked and must not be shipped"
+    );
+
+    // With an install-dir override the shortcuts go into the sandbox, never the real profile.
+    let shortcuts = temp.path().join("Programs").join("test-shortcuts");
+    let desktop_lnk = shortcuts.join("Desktop").join("Furphy Addon Manager.lnk");
+    let start_lnk = shortcuts.join("Start Menu").join("Furphy Addon Manager.lnk");
+    assert!(desktop_lnk.exists(), "Desktop shortcut was not created in the sandbox");
+    assert!(start_lnk.exists(), "Start Menu shortcut was not created in the sandbox");
+    let lnk_bytes = fs::read(&desktop_lnk).unwrap();
+    assert!(
+        lnk_bytes.len() > 76 && lnk_bytes[0] == 0x4C && lnk_bytes[1] == 0,
+        "Desktop shortcut is not a shell link file"
     );
 
     // 2. Uninstall removes binaries and keeps user data intact (§5.1)
@@ -342,6 +362,7 @@ fn test_acceptance_setup_silent_install_and_uninstall_lifecycle() {
         !scratch_install_dir.exists(),
         "Install directory should be removed after uninstall"
     );
+    assert!(!desktop_lnk.exists() && !start_lnk.exists(), "Sandbox shortcuts were not removed");
 }
 
 #[test]

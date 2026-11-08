@@ -79,6 +79,12 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
 
+    // Release gate: reaching this point proves every non-delay-loaded DLL import resolved.
+    if args.iter().any(|a| a == "--loader-check") {
+        println!("furphy-addon-manager {} loader-ok", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     let current_exe = std::env::current_exe().unwrap_or_default();
     let exe_name = current_exe
         .file_name()
@@ -93,8 +99,20 @@ pub fn run() {
     let is_install = !is_uninstall && (is_setup_exe || args.iter().any(|a| a == "--install") || is_silent);
 
     if is_install {
-        if let Err(e) = system::setup::run_install(is_silent, None) {
+        let relaunch_tray = args.iter().any(|a| a == "--relaunch-tray");
+        if let Err(e) = system::setup::run_install(is_silent, relaunch_tray, None) {
+            logging::append_app_log("ERROR", &format!("Installation failed: {}", e));
             eprintln!("[FATAL] Installation failed: {}", e);
+            if !is_silent {
+                system::setup::show_setup_message(
+                    &format!(
+                        "Furphy could not be installed.\n\n{}\n\nDetails are in the log file:\n{}",
+                        e,
+                        logging::get_app_log_path().display()
+                    ),
+                    system::setup::SetupMessageKind::Error,
+                );
+            }
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -102,7 +120,18 @@ pub fn run() {
 
     if is_uninstall {
         if let Err(e) = system::setup::run_uninstall(is_silent, None) {
+            logging::append_app_log("ERROR", &format!("Uninstallation failed: {}", e));
             eprintln!("[FATAL] Uninstallation failed: {}", e);
+            if !is_silent {
+                system::setup::show_setup_message(
+                    &format!(
+                        "Furphy could not be uninstalled.\n\n{}\n\nDetails are in the log file:\n{}",
+                        e,
+                        logging::get_app_log_path().display()
+                    ),
+                    system::setup::SetupMessageKind::Error,
+                );
+            }
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -151,7 +180,7 @@ pub fn run() {
 
     use tauri::Manager;
 
-    tauri::Builder::default()
+    let run_result = tauri::Builder::default()
         .setup(|app| {
             let window = app.get_webview_window("main")
                 .or_else(|| app.webview_windows().values().next().cloned());
@@ -267,6 +296,18 @@ pub fn run() {
             commands::system::set_background_updates,
             commands::system::is_game_active,
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .run(context);
+
+    if let Err(e) = run_result {
+        logging::append_app_log("ERROR", &format!("Tauri failed to run: {}", e));
+        let mut text = format!("Furphy could not start.\n\n{}", e);
+        if system::setup::webview2_runtime_version().is_none() {
+            text.push_str(
+                "\n\nThe Microsoft Edge WebView2 Runtime does not appear to be installed. Install it from https://go.microsoft.com/fwlink/p/?LinkId=2124703 and start Furphy again.",
+            );
+        }
+        text.push_str(&format!("\n\nDetails are in the log file:\n{}", logging::get_app_log_path().display()));
+        system::setup::show_setup_message(&text, system::setup::SetupMessageKind::Error);
+        std::process::exit(3);
+    }
 }

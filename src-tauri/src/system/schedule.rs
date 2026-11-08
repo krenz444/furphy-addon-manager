@@ -422,14 +422,47 @@ impl Scheduler {
                                 crate::logging::append_app_log("INFO", "Running hourly maintenance crawl");
                                 if let Ok(status) = crate::update::app_update::check_for_updates(None).await {
                                     if let Ok(conn) = open_connection(get_db_path()) {
-                                        let _ = crate::update::app_update::save_app_update_state(&conn, &status);
+                                        // A version whose installer already failed is not retried every
+                                        // hour: the error stays visible and Settings can still install it.
+                                        let previous_failure = crate::update::app_update::load_app_update_state(&conn)
+                                            .filter(|prev| {
+                                                prev.status == "error"
+                                                    && prev.update_version.is_some()
+                                                    && prev.update_version == status.update_version
+                                                    && prev.error.as_deref().map_or(false, |e| {
+                                                        e.starts_with(crate::update::app_update::INSTALLER_START_FAILED)
+                                                    })
+                                            })
+                                            .and_then(|prev| prev.error);
+                                        let mut saved = status.clone();
+                                        if let Some(ref err) = previous_failure {
+                                            saved.status = "error".into();
+                                            saved.error = Some(err.clone());
+                                        }
+                                        let _ = crate::update::app_update::save_app_update_state(&conn, &saved);
                                         let auto_install = {
                                             let settings = get_settings_map(&conn).unwrap_or_default();
                                             settings.get("appUpdateAutoInstall").and_then(|v| v.as_bool()).unwrap_or(true)
                                         };
-                                        if auto_install && status.has_update {
+                                        if auto_install && status.has_update && previous_failure.is_some() {
+                                            crate::logging::append_app_log(
+                                                "INFO",
+                                                &format!(
+                                                    "Skipping automatic install of v{}: its installer failed before",
+                                                    status.update_version.as_deref().unwrap_or("?")
+                                                ),
+                                            );
+                                        } else if auto_install && status.has_update {
                                             let is_busy = sched.runner.is_busy().await;
-                                            let _ = crate::update::app_update::install_update(&status, is_busy, false).await;
+                                            if is_busy {
+                                                // Retried next hour; not an installer failure.
+                                            } else if let Err(e) = crate::update::app_update::install_update(&status, is_busy, false).await {
+                                                crate::logging::append_app_log("ERROR", &format!("Automatic app update failed: {}", e));
+                                                let mut err_status = status.clone();
+                                                err_status.status = "error".into();
+                                                err_status.error = Some(e);
+                                                let _ = crate::update::app_update::save_app_update_state(&conn, &err_status);
+                                            }
                                         }
                                     }
                                 }

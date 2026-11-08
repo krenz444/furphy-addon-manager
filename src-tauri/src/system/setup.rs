@@ -14,7 +14,6 @@ pub const APP_TITLE: &str = "Furphy Addon Manager";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const EMBEDDED_WEBVIEW2: &[u8] = include_bytes!("../../resources/WebView2Loader.dll");
-const EMBEDDED_LIBUNWIND: &[u8] = include_bytes!("../../resources/libunwind.dll");
 
 pub fn get_default_install_dir() -> PathBuf {
     if let Some(local_app_data) = dirs::data_local_dir() {
@@ -24,12 +23,170 @@ pub fn get_default_install_dir() -> PathBuf {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupMessageKind {
+    Error,
+    Warning,
+    Question,
+}
+
+pub const IDYES: i32 = 6;
+
+#[cfg(windows)]
+fn to_wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Shows a modal message box and returns the id of the button pressed (IDYES = 6).
+/// The release exe is a GUI-subsystem binary, so this is the only way an installer failure reaches the user.
+pub fn show_setup_message(text: &str, kind: SetupMessageKind) -> i32 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
+        };
+        let flags = match kind {
+            SetupMessageKind::Error => MB_ICONERROR | MB_OK,
+            SetupMessageKind::Warning => MB_ICONWARNING | MB_OK,
+            SetupMessageKind::Question => MB_ICONQUESTION | MB_YESNO,
+        };
+        let wtext = to_wide(text);
+        let wtitle = to_wide("Furphy Addon Manager Setup");
+        unsafe { MessageBoxW(0, wtext.as_ptr(), wtitle.as_ptr(), flags) }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (text, kind);
+        0
+    }
+}
+
+/// Reads the Evergreen WebView2 runtime version using Microsoft's documented registry check.
+pub fn webview2_runtime_version() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        const GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+        let candidates = [
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\EdgeUpdate\Clients"),
+            (HKEY_CURRENT_USER, r"Software\Microsoft\EdgeUpdate\Clients"),
+        ];
+        for (hive, base) in candidates {
+            let root = RegKey::predef(hive);
+            if let Ok(key) = root.open_subkey(format!(r"{}\{}", base, GUID)) {
+                if let Ok(pv) = key.get_value::<String, _>("pv") {
+                    let pv = pv.trim().to_string();
+                    if !pv.is_empty() && pv != "0.0.0.0" {
+                        return Some(pv);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+pub const WEBVIEW2_DOWNLOAD_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let verb = to_wide("open");
+        let wurl = to_wide(url);
+        unsafe {
+            ShellExecuteW(
+                0,
+                verb.as_ptr(),
+                wurl.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+    }
+}
+
+#[cfg(windows)]
+fn create_shortcut_com(target_exe: &Path, shortcut_path: &Path, description: &str) -> Result<(), String> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    // S_OK and S_FALSE both add a reference we must release; RPC_E_CHANGED_MODE means
+    // the thread already runs in another apartment model and we must not uninitialize.
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let we_initialized = if hr.is_ok() || hr == S_FALSE {
+        true
+    } else if hr == RPC_E_CHANGED_MODE {
+        false
+    } else {
+        return Err(format!("CoInitializeEx failed: {}", hr.message()));
+    };
+
+    let result = (|| -> windows::core::Result<()> {
+        unsafe {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            link.SetPath(&HSTRING::from(target_exe.as_os_str()))?;
+            link.SetDescription(&HSTRING::from(description))?;
+            if let Some(dir) = target_exe.parent() {
+                link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
+            }
+            link.SetIconLocation(&HSTRING::from(target_exe.as_os_str()), 0)?;
+            let file: IPersistFile = link.cast()?;
+            file.Save(&HSTRING::from(shortcut_path.as_os_str()), true)?;
+        }
+        Ok(())
+    })();
+
+    if we_initialized {
+        unsafe { CoUninitialize() };
+    }
+    result.map_err(|e| format!("COM shortcut creation failed: {}", e))
+}
+
 pub fn create_shortcut(target_exe: &Path, shortcut_path: &Path, description: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Some(parent) = shortcut_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        match create_shortcut_com(target_exe, shortcut_path, description) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                append_app_log("WARN", &format!("{}; falling back to PowerShell", e));
+            }
+        }
+        create_shortcut_powershell(target_exe, shortcut_path, description)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (target_exe, shortcut_path, description);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn create_shortcut_powershell(target_exe: &Path, shortcut_path: &Path, description: &str) -> Result<(), String> {
+    {
         let working_dir = target_exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let p_esc = shortcut_path.to_string_lossy().replace("'", "''");
         let t_esc = target_exe.to_string_lossy().replace("'", "''");
@@ -52,18 +209,31 @@ pub fn create_shortcut(target_exe: &Path, shortcut_path: &Path, description: &st
         }
         Ok(())
     }
+}
 
-    #[cfg(not(windows))]
-    {
-        let _ = (target_exe, shortcut_path, description);
-        Ok(())
+/// Desktop and Start Menu shortcut paths. With an install-dir override (tests) they live in
+/// a folder beside that install dir and the registry is left alone, so a test run never
+/// replaces or deletes the shortcuts and Installed Apps entry of the copy on this PC.
+fn shortcut_paths(sandbox_root: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let name = format!("{}.lnk", APP_TITLE);
+    if let Some(root) = sandbox_root {
+        let base = root.join("test-shortcuts");
+        return (
+            Some(base.join("Desktop").join(&name)),
+            Some(base.join("Start Menu").join(&name)),
+        );
     }
+    (
+        dirs::desktop_dir().map(|d| d.join(&name)),
+        dirs::data_dir().map(|d| d.join(r"Microsoft\Windows\Start Menu\Programs").join(&name)),
+    )
 }
 
 /// Executes the installer lifecycle (§5.1): copies files, creates shortcuts, registers Apps uninstall entry
-pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result<(), String> {
+pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Option<PathBuf>) -> Result<(), String> {
     let dev = is_dev();
-    let is_test = target_dir_override.is_some() || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
+    let sandboxed = target_dir_override.is_some();
+    let is_test = sandboxed || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
     if dev && !is_test {
         append_app_log("INFO", "Dev mode: skipped production installation (live-PC safety)");
         return Ok(());
@@ -88,41 +258,66 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
 
-        fs::copy(&current_exe, &dest_exe)
-            .map_err(|e| format!("Failed copying binary to '{}': {}", dest_exe.display(), e))?;
+        // taskkill only requests termination; the old process can keep the file locked for a moment.
+        const COPY_ATTEMPTS: u32 = 20;
+        let mut last_err = None;
+        for attempt in 1..=COPY_ATTEMPTS {
+            match fs::copy(&current_exe, &dest_exe) {
+                Ok(_) => {
+                    if attempt > 1 {
+                        append_app_log("INFO", &format!("Copied binary after {} attempts", attempt));
+                    }
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < COPY_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            if silent && relaunch_tray && !is_test && dest_exe.exists() {
+                match std::process::Command::new(&dest_exe).arg("--tray").spawn() {
+                    Ok(_) => append_app_log("WARN", "Copy failed; restarted the previously installed version in the tray"),
+                    Err(se) => append_app_log("WARN", &format!("Copy failed and restarting the old version also failed: {}", se)),
+                }
+            }
+            return Err(format!(
+                "Failed copying binary to '{}' after {} attempts: {}",
+                dest_exe.display(), COPY_ATTEMPTS, e
+            ));
+        }
     }
 
     // Unpack embedded runtime dependencies alongside the executable
+    // The app delay-loads this DLL; without it the window cannot be created, so a failed write is fatal.
     let dest_wv2 = install_dir.join("WebView2Loader.dll");
-    let _ = fs::write(&dest_wv2, EMBEDDED_WEBVIEW2);
-    let dest_unwind = install_dir.join("libunwind.dll");
-    let _ = fs::write(&dest_unwind, EMBEDDED_LIBUNWIND);
+    let already_current = fs::read(&dest_wv2).map(|b| b == EMBEDDED_WEBVIEW2).unwrap_or(false);
+    if !already_current {
+        fs::write(&dest_wv2, EMBEDDED_WEBVIEW2)
+            .map_err(|e| format!("Failed writing '{}': {}", dest_wv2.display(), e))?;
+    }
+    // Older versions shipped libunwind.dll next to the exe; it is no longer needed.
+    let _ = fs::remove_file(install_dir.join("libunwind.dll"));
 
-    // 1. Create Desktop Shortcut
-    if let Some(desktop) = dirs::desktop_dir() {
-        let sc_path = desktop.join(format!("{}.lnk", APP_TITLE));
-        if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
-            append_app_log("WARN", &format!("Failed creating desktop shortcut: {}", e));
-        } else {
-            append_app_log("INFO", &format!("Created desktop shortcut: {}", sc_path.display()));
+    // 1. Desktop and Start Menu shortcuts
+    let (desktop_lnk, start_menu_lnk) = shortcut_paths(if sandboxed { install_dir.parent() } else { None });
+    for (label, sc_path) in [("desktop", desktop_lnk), ("start menu", start_menu_lnk)] {
+        if let Some(sc_path) = sc_path {
+            if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
+                append_app_log("WARN", &format!("Failed creating {} shortcut: {}", label, e));
+            } else {
+                append_app_log("INFO", &format!("Created {} shortcut: {}", label, sc_path.display()));
+            }
         }
     }
 
-    // 2. Create Start Menu Shortcut
-    if let Some(data_dir) = dirs::data_dir() {
-        // %APPDATA%\Microsoft\Windows\Start Menu\Programs\
-        let start_menu = data_dir.join(r"Microsoft\Windows\Start Menu\Programs");
-        let sc_path = start_menu.join(format!("{}.lnk", APP_TITLE));
-        if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
-            append_app_log("WARN", &format!("Failed creating start menu shortcut: {}", e));
-        } else {
-            append_app_log("INFO", &format!("Created start menu shortcut: {}", sc_path.display()));
-        }
-    }
-
-    // 3. Register Installed-Apps entry in HKCU Uninstall
+    // 2. Register Installed-Apps entry in HKCU Uninstall
     #[cfg(windows)]
-    {
+    if !sandboxed {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if let Ok((key, _)) = hkcu.create_subkey(UNINSTALL_REG_KEY_NAME) {
             let _ = key.set_value("DisplayName", &APP_TITLE);
@@ -144,11 +339,38 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
 
     append_app_log("INFO", &format!("Installed Furphy v2 into '{}'", install_dir.display()));
 
+    let webview2_missing = !is_test && webview2_runtime_version().is_none();
+    if webview2_missing {
+        append_app_log("WARN", "Microsoft Edge WebView2 Runtime not found; Furphy cannot open until it is installed");
+    }
+
     if !silent {
         // Interactive install: launch installed binary
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new(&dest_exe).spawn();
+            let mut launch = true;
+            if webview2_missing {
+                let answer = show_setup_message(
+                    "Furphy needs the Microsoft Edge WebView2 Runtime, which isn't installed on this PC. Furphy is installed, but it can't open until the runtime is installed.\n\nOpen Microsoft's download page now?",
+                    SetupMessageKind::Question,
+                );
+                if answer == IDYES {
+                    open_url(WEBVIEW2_DOWNLOAD_URL);
+                    launch = false;
+                }
+            }
+            if launch {
+                let _ = std::process::Command::new(&dest_exe).spawn();
+            }
+        }
+    } else if relaunch_tray && !is_test && !webview2_missing {
+        // The in-app updater runs this installer silently while only the tray is open;
+        // without a restart the user would have no tray until the next login.
+        #[cfg(windows)]
+        {
+            if let Err(e) = std::process::Command::new(&dest_exe).arg("--tray").spawn() {
+                append_app_log("WARN", &format!("Failed relaunching tray after update: {}", e));
+            }
         }
     }
 
@@ -158,35 +380,29 @@ pub fn run_install(silent: bool, target_dir_override: Option<PathBuf>) -> Result
 /// Executes the keep-your-data uninstaller (§5.1): removes shortcuts, binaries, and registry, but leaves data folder intact
 pub fn run_uninstall(silent: bool, target_dir_override: Option<PathBuf>) -> Result<(), String> {
     let dev = is_dev();
-    let is_test = target_dir_override.is_some() || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
+    let sandboxed = target_dir_override.is_some();
+    let is_test = sandboxed || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
     if dev && !is_test {
         append_app_log("INFO", "Dev mode: skipped production uninstallation (live-PC safety)");
         return Ok(());
     }
+    let install_dir = target_dir_override.unwrap_or_else(get_default_install_dir);
 
-    // 1. Remove Desktop Shortcut
-    if let Some(desktop) = dirs::desktop_dir() {
-        let sc_path = desktop.join(format!("{}.lnk", APP_TITLE));
+    // 1. Remove Desktop and Start Menu shortcuts
+    let (desktop_lnk, start_menu_lnk) = shortcut_paths(if sandboxed { install_dir.parent() } else { None });
+    for sc_path in [desktop_lnk, start_menu_lnk].into_iter().flatten() {
         let _ = fs::remove_file(sc_path);
     }
 
-    // 2. Remove Start Menu Shortcut
-    if let Some(data_dir) = dirs::data_dir() {
-        let start_menu = data_dir.join(r"Microsoft\Windows\Start Menu\Programs");
-        let sc_path = start_menu.join(format!("{}.lnk", APP_TITLE));
-        let _ = fs::remove_file(sc_path);
-    }
-
-    // 3. Remove HKCU Uninstall registration
+    // 2. Remove HKCU Uninstall registration
     #[cfg(windows)]
-    {
+    if !sandboxed {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let _ = hkcu.delete_subkey(UNINSTALL_REG_KEY_NAME);
         let _ = hkcu.delete_subkey(LEGACY_SPACED_REG_KEY);
     }
 
-    // 4. Remove binaries in install directory
-    let install_dir = target_dir_override.unwrap_or_else(get_default_install_dir);
+    // 3. Remove binaries in install directory
     if install_dir.exists() {
         let _ = fs::remove_dir_all(&install_dir);
     }

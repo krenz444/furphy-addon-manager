@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fs;
+use std::time::{Duration, Instant};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -225,6 +226,43 @@ mod tests {
         assert!(bad_sig_res.is_err());
         std::env::remove_var("FURPHY_UPDATER_PUBKEY");
     }
+
+    #[cfg(windows)]
+    fn hidden_cmd(script: &str) -> std::process::Child {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd.exe")
+            .args(["/c", script])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .expect("spawn cmd.exe")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installer_start_reports_early_nonzero_exit() {
+        let mut child = hidden_cmd("exit 3");
+        let res = wait_for_installer_start(
+            &mut child,
+            Duration::from_secs(5),
+            std::path::Path::new("C:\\fake\\Setup.exe"),
+        );
+        let err = res.expect_err("early non-zero exit must be an error");
+        assert!(err.contains("0x00000003"), "unexpected message: {}", err);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installer_start_ok_when_child_outlives_window() {
+        let mut child = hidden_cmd("ping -n 6 127.0.0.1 >nul");
+        let res = wait_for_installer_start(
+            &mut child,
+            Duration::from_millis(500),
+            std::path::Path::new("C:\\fake\\Setup.exe"),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(res.is_ok(), "{:?}", res);
+    }
 }
 
 /// Loads persisted updater state from database
@@ -323,6 +361,53 @@ pub async fn check_for_updates(feed_url_override: Option<&str>) -> Result<AppUpd
     Ok(status)
 }
 
+/// Prefix of the error recorded when the installer dies at start. The hourly check
+/// matches on it so that version is not auto-installed again every hour.
+pub const INSTALLER_START_FAILED: &str = "The update installer failed to start";
+
+/// How long to watch a freshly spawned installer for an immediate crash.
+#[cfg(windows)]
+const INSTALLER_START_WINDOW: Duration = Duration::from_secs(4);
+
+/// Polls the installer for `window`. A non-zero exit inside the window means it
+/// never got going (for example the loader could not find a DLL), so the caller
+/// must keep the app alive. Exit 0 or still running both count as started.
+#[cfg(windows)]
+fn wait_for_installer_start(
+    child: &mut std::process::Child,
+    window: Duration,
+    installer_path: &std::path::Path,
+) -> Result<(), String> {
+    let deadline = Instant::now() + window;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let code = status.code().unwrap_or(-1) as u32;
+                let msg = format!(
+                    "{} (exit code 0x{:08X}). Furphy is still running; the installer was saved at {}",
+                    INSTALLER_START_FAILED,
+                    code,
+                    installer_path.display()
+                );
+                append_app_log("ERROR", &msg);
+                return Err(msg);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                append_app_log("WARN", &format!("Could not poll update installer: {}", e));
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Installs the update if ready and safe to do so
 pub async fn install_update(
     status: &AppUpdateStatus,
@@ -400,11 +485,17 @@ pub async fn install_update(
     {
         let mut cmd = std::process::Command::new(&installer_path);
         if !is_window_open {
-            // Tray-only silent install (§2.K, §5.4)
-            cmd.arg("/S");
-            append_app_log("INFO", "Running silent background installer (/S)");
+            // Tray-only silent install (§2.K, §5.4); the installer restarts the tray itself
+            cmd.arg("/S").arg("--relaunch-tray");
+            append_app_log("INFO", "Running silent background installer (/S --relaunch-tray)");
         }
-        cmd.spawn().map_err(|e| format!("Failed spawning update installer: {}", e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed spawning update installer: {}", e))?;
+
+        // spawn() succeeds even if the loader kills the child at once (missing DLL),
+        // so give it a moment and stay alive if it died.
+        wait_for_installer_start(&mut child, INSTALLER_START_WINDOW, &installer_path)?;
 
         if !is_window_open {
             let names = vec![format!("Furphy v{}", status.update_version.as_deref().unwrap_or(""))];

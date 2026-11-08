@@ -1,9 +1,16 @@
 param(
-    [string]$Version = "2.0.25",
-    [string]$OutputDir
+    [string]$Version,
+    [string]$OutputDir,
+    # Defaults to target\cargo in this checkout so a release never reuses a binary another
+    # worktree left in a shared CARGO_TARGET_DIR.
+    [string]$TargetDir
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($env:RUSTFLAGS) {
+    throw "RUSTFLAGS is set ('$env:RUSTFLAGS'). It replaces the rustflags in src-tauri\.cargo\config.toml, including +crt-static, and the exe would need libunwind.dll again. Clear it and re-run."
+}
 
 # Toolchain paths on Gizmo
 $rustBin = "E:\rust\.rustup\toolchains\stable-x86_64-pc-windows-gnullvm\bin"
@@ -30,6 +37,20 @@ $SrcTauriDir = Join-Path $RootDir 'src-tauri'
 if (-not $OutputDir) {
     $OutputDir = Join-Path $RootDir 'target\release-assets'
 }
+if (-not $TargetDir) {
+    $TargetDir = Join-Path $RootDir 'target\cargo'
+}
+$GateScript = Join-Path $ScriptDir 'check-release-binary.ps1'
+
+# The three version strings must agree, or the assets, the exe's own version and the
+# updater feed disagree about what was released.
+$fileVersion = ([IO.File]::ReadAllText((Join-Path $RootDir 'VERSION'))).Trim()
+$cargoVersion = ([regex]::Match([IO.File]::ReadAllText((Join-Path $SrcTauriDir 'Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+$tauriVersion = ([regex]::Match([IO.File]::ReadAllText((Join-Path $SrcTauriDir 'tauri.conf.json')), '"version"\s*:\s*"([^"]+)"')).Groups[1].Value
+if (-not $Version) { $Version = $fileVersion }
+if ($Version -ne $fileVersion -or $Version -ne $cargoVersion -or $Version -ne $tauriVersion) {
+    throw "Version mismatch: -Version '$Version', VERSION '$fileVersion', Cargo.toml '$cargoVersion', tauri.conf.json '$tauriVersion'"
+}
 
 Write-Host "=== Building Furphy v2 Release Artifacts (v$Version) ==="
 if (Test-Path $OutputDir) {
@@ -39,24 +60,40 @@ New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 # 1. Build Frontend
 Write-Host "1. Building frontend..."
+# npm and cargo report progress on stderr. When this script's own stderr is redirected,
+# PowerShell 5.1 turns those lines into errors, so native calls run under 'Continue'
+# and are judged by their exit codes.
+$ErrorActionPreference = 'Continue'
 npm --prefix "$FrontendDir" run build
+$npmExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($npmExit -ne 0) { throw "Frontend build failed (npm exit $npmExit)" }
 
 # 2. Build Backend Release Binary
-Write-Host "2. Building backend release binary..."
+# The exe path comes from cargo's own artifact report for THIS build, not a guessed path.
+Write-Host "2. Building backend release binary into $TargetDir..."
+$targetExe = $null
 Push-Location "$SrcTauriDir"
+$ErrorActionPreference = 'Continue'
 try {
-    cargo build --release
+    $cargoOutput = & cargo build --release --target-dir "$TargetDir" --message-format=json-render-diagnostics
+    $cargoExit = $LASTEXITCODE
 } finally {
+    $ErrorActionPreference = 'Stop'
     Pop-Location
 }
-
-$targetExe = "E:\rust\target\x86_64-pc-windows-gnullvm\release\furphy-addon-manager.exe"
-if (-not (Test-Path $targetExe)) {
-    $targetExe = Join-Path $SrcTauriDir "target\release\furphy-addon-manager.exe"
+if ($cargoExit -ne 0) { throw "cargo build failed (exit $cargoExit)" }
+foreach ($line in $cargoOutput) {
+    if (-not $line.StartsWith('{') -or -not $line.Contains('"compiler-artifact"') -or -not $line.Contains('furphy-addon-manager')) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.reason -eq 'compiler-artifact' -and $msg.target.name -eq 'furphy-addon-manager' -and $msg.executable) {
+        $targetExe = $msg.executable
+    }
 }
-if (-not (Test-Path $targetExe)) {
-    throw "Built binary not found at $targetExe"
+if (-not $targetExe -or -not (Test-Path -LiteralPath $targetExe)) {
+    throw "cargo did not report a furphy-addon-manager executable"
 }
+Write-Host "Built $targetExe"
 
 # 3. Create Versioned Setup Executable
 $versionedSetupName = "FurphyAddonManager-Setup-$Version.exe"
@@ -68,11 +105,10 @@ $stableSetupPath = Join-Path $OutputDir $stableSetupName
 Copy-Item -Path $targetExe -Destination $versionedSetupPath -Force
 Copy-Item -Path $targetExe -Destination $stableSetupPath -Force
 
+# Gate: the file users download must start on a PC with nothing but Windows.
+& $GateScript -ExePath $stableSetupPath -ExpectedVersion $Version
+
 # Copy runtime DLLs to output directory
-$llvmBin = "E:\mingw\llvm-mingw-20260908-ucrt-x86_64\bin"
-if (Test-Path "$llvmBin\libunwind.dll") {
-    Copy-Item -Path "$llvmBin\libunwind.dll" -Destination (Join-Path $OutputDir "libunwind.dll") -Force
-}
 $targetReleaseDir = Split-Path -Parent $targetExe
 if (Test-Path (Join-Path $targetReleaseDir "WebView2Loader.dll")) {
     Copy-Item -Path (Join-Path $targetReleaseDir "WebView2Loader.dll") -Destination (Join-Path $OutputDir "WebView2Loader.dll") -Force
@@ -94,9 +130,6 @@ Set-Content -Path (Join-Path $bridgeDir "VERSION") -Value $Version -NoNewline
 # Copy Setup and .sha256 into bridge package
 Copy-Item -Path $versionedSetupPath -Destination (Join-Path $bridgeDir $versionedSetupName) -Force
 Copy-Item -Path "$versionedSetupPath.sha256" -Destination (Join-Path $bridgeDir "$versionedSetupName.sha256") -Force
-if (Test-Path "$llvmBin\libunwind.dll") {
-    Copy-Item -Path "$llvmBin\libunwind.dll" -Destination (Join-Path $bridgeDir "libunwind.dll") -Force
-}
 if (Test-Path (Join-Path $targetReleaseDir "WebView2Loader.dll")) {
     Copy-Item -Path (Join-Path $targetReleaseDir "WebView2Loader.dll") -Destination (Join-Path $bridgeDir "WebView2Loader.dll") -Force
 }

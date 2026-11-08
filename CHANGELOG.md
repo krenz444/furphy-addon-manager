@@ -1,5 +1,33 @@
 # Furphy Addon Manager - changelog
 
+## 2.0.26: Setup.exe starts on every PC
+
+**`FurphyAddonManager-Setup.exe` no longer stops with "libunwind.dll was not found".**
+Every v2 installer up to 2.0.25 needed `libunwind.dll`, a file from the build
+toolchain, before it could start. The installer carried a copy but could only unpack
+it after starting, so on a PC without the toolchain Windows refused to run it. The
+build now links that code into the exe, which imports only DLLs that ship with
+Windows. A release check fails the build if any other DLL appears, then runs the
+installer alone from an empty folder with a Windows-only PATH.
+
+- **Self-update no longer closes Furphy when the new installer cannot start.** The
+  app waits a few seconds, and if the installer exits with an error it keeps running
+  and shows the error. A version whose installer failed is not retried every hour.
+- **Background updates bring the tray icon back.** A silent update used to leave no
+  tray until the next sign-in; the installer now restarts Furphy in the tray.
+- **The installer survives a slow-closing old copy.** It retries replacing the exe for
+  about five seconds, and in a background update restarts the old copy if it still
+  cannot.
+- **Installer and start-up errors appear on screen.** Failures used to end silently;
+  they now show a message with the error and the log file location.
+- **WebView2 check.** If the Microsoft Edge WebView2 Runtime is missing, Setup says so
+  and offers Microsoft's download page instead of opening a Furphy that cannot start.
+- **Shortcuts no longer need PowerShell.** Desktop and Start Menu shortcuts are created
+  through the Windows shell directly, so PCs that restrict PowerShell still get them.
+- **Tests stay out of the real profile.** The install/uninstall test used to replace,
+  then delete, the real Desktop and Start Menu shortcuts and the Installed Apps entry;
+  it now works in its own temporary folder.
+
 ## 2.0.0: The Tauri 2 + Svelte 5 Transition (v2 Architecture)
 
 Furphy Addon Manager transitions from PowerShell/C#/.NET to a single native binary powered by Tauri 2, Rust, and Svelte 5.

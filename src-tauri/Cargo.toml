@@ -1,6 +1,6 @@
 [package]
 name = "furphy-addon-manager"
-version = "2.0.25"
+version = "2.0.26"
 description = "Furphy Addon Manager v2"
 authors = ["Eric Krenz"]
 edition = "2021"
@@ -29,5 +29,6 @@ tempfile = "3.10"
 sha2 = "0.10"
 ring = "0.17"
 base64 = "0.22"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { version = "0.52", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Security"] }
 
