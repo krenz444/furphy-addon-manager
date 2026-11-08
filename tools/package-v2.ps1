@@ -8,8 +8,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ($env:RUSTFLAGS) {
-    throw "RUSTFLAGS is set ('$env:RUSTFLAGS'). It replaces the rustflags in src-tauri\.cargo\config.toml, including +crt-static, and the exe would need libunwind.dll again. Clear it and re-run."
+# Each of these replaces the rustflags in src-tauri\.cargo\config.toml, including
+# +crt-static, and the exe would need libunwind.dll again.
+foreach ($name in 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS') {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) { throw "$name is set ('$value'). Clear it and re-run." }
 }
 
 # Toolchain paths on Gizmo
@@ -40,6 +43,11 @@ if (-not $OutputDir) {
 if (-not $TargetDir) {
     $TargetDir = Join-Path $RootDir 'target\cargo'
 }
+# cargo runs from src-tauri, so a relative path would land there.
+if (-not [IO.Path]::IsPathRooted($TargetDir)) {
+    $TargetDir = Join-Path (Get-Location).Path $TargetDir
+}
+$TargetDir = [IO.Path]::GetFullPath($TargetDir)
 $GateScript = Join-Path $ScriptDir 'check-release-binary.ps1'
 
 # The three version strings must agree, or the assets, the exe's own version and the
@@ -170,8 +178,26 @@ function Record-BridgeError($errorMsg) {
     } catch {}
 }
 
+# The v1 updater runs this script from a staging copy in %TEMP%, not from the v1
+# folder, so $ScriptDir holds no v1 data. v1 lives in <WowPath>\_retail_\AddonSync.
+# Importing from the staging copy imported nothing and still marked the import done,
+# so v2 never looked at the real v1 folder again.
+function Test-V1Root([string]$Path) {
+    if (-not $Path) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $Path 'settings.json')) -or
+        (Test-Path -LiteralPath (Join-Path $Path 'flavours')) -or
+        (Test-Path -LiteralPath (Join-Path $Path 'addons.json'))
+}
+$v1Root = $null
+if ($WowPath -and (Test-V1Root (Join-Path $WowPath '_retail_\AddonSync'))) {
+    $v1Root = Join-Path $WowPath '_retail_\AddonSync'
+} elseif (Test-V1Root $ScriptDir) {
+    $v1Root = $ScriptDir
+}
+
 try {
     Log-BridgeMessage "Starting v1-to-v2 bridge upgrade..."
+    if ($v1Root) { Log-BridgeMessage "v1 data folder: $v1Root" } else { Log-BridgeMessage "No v1 data folder found; v2 will look for one itself." }
 
     $setupExe = Get-ChildItem -Path $ScriptDir -Filter "FurphyAddonManager-Setup*.exe" | Select-Object -First 1
     if (-not $setupExe) {
@@ -199,9 +225,10 @@ try {
         $stopEvent.Dispose()
     } catch {}
 
-    $settingsFile = Join-Path $ScriptDir "settings.json"
     $port = 47831
-    if (Test-Path $settingsFile) {
+    $settingsFile = $null
+    if ($v1Root) { $settingsFile = Join-Path $v1Root "settings.json" }
+    if ($settingsFile -and (Test-Path -LiteralPath $settingsFile)) {
         try {
             $settingsJson = Get-Content $settingsFile -Raw | ConvertFrom-Json
             if ($settingsJson.port) { $port = $settingsJson.port }
@@ -229,18 +256,32 @@ try {
         }
     }
 
-    $launchArgs = @("--import-v1", "`"$ScriptDir`"")
+    $launchArgs = @()
+    if ($v1Root) { $launchArgs += @("--import-v1", "`"$v1Root`"") }
     if ($Relaunch -eq 'tray') { $launchArgs += "--tray" }
 
-    Start-Process -FilePath $v2Exe -ArgumentList $launchArgs
+    if ($launchArgs.Count -gt 0) {
+        Start-Process -FilePath $v2Exe -ArgumentList $launchArgs
+    } else {
+        Start-Process -FilePath $v2Exe
+    }
     Log-BridgeMessage "Bridge upgrade complete."
     exit 0
 } catch {
     Record-BridgeError $_.Exception.Message
+    # Bring v1 back the way it was running: its host lives in host\bin of the v1 folder.
     try {
-        $v1Exe = Join-Path $ScriptDir "FurphyAddonManager.exe"
-        if (Test-Path $v1Exe) {
-            Start-Process -FilePath $v1Exe
+        if ($v1Root) {
+            $v1Host = Join-Path $v1Root "host\bin\FurphyHost.exe"
+            if (Test-Path -LiteralPath $v1Host) {
+                $hostArgs = @()
+                if ($Relaunch -eq 'tray') { $hostArgs = @('--tray') }
+                if ($hostArgs.Count -gt 0) {
+                    Start-Process -FilePath $v1Host -ArgumentList $hostArgs -WorkingDirectory (Split-Path -Parent $v1Host)
+                } else {
+                    Start-Process -FilePath $v1Host -WorkingDirectory (Split-Path -Parent $v1Host)
+                }
+            }
         }
     } catch {}
     exit 1
@@ -273,8 +314,11 @@ $signature = ""
 if ($env:TAURI_SIGNING_PRIVATE_KEY) {
     Write-Host "TAURI_SIGNING_PRIVATE_KEY present in environment per ADR-313."
     try {
-        $signOutput = & $targetExe --sign-file "$versionedSetupPath" 2>&1
-        if ($LASTEXITCODE -eq 0 -and $signOutput) {
+        $ErrorActionPreference = 'Continue'
+        $signOutput = & $targetExe --sign-file "$versionedSetupPath" 2>$null
+        $signExit = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($signExit -eq 0 -and $signOutput) {
             $signature = $signOutput.ToString().Trim()
             Write-Host "Generated Ed25519 signature for $versionedSetupName"
         } else {

@@ -38,9 +38,16 @@ fn to_wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Shows a modal message box and returns the id of the button pressed (IDYES = 6).
-/// The release exe is a GUI-subsystem binary, so this is the only way an installer failure reaches the user.
+/// Shows a modal message box titled "Furphy Addon Manager Setup" and returns the id of
+/// the button pressed (IDYES = 6). The release exe is a GUI-subsystem binary, so this is
+/// the only way an installer failure reaches the user.
 pub fn show_setup_message(text: &str, kind: SetupMessageKind) -> i32 {
+    show_message("Furphy Addon Manager Setup", text, kind)
+}
+
+/// Like `show_setup_message` with a caller-chosen title. No MB_SETFOREGROUND or
+/// MB_TOPMOST: a box raised by the tray must not take focus from a running game.
+pub fn show_message(title: &str, text: &str, kind: SetupMessageKind) -> i32 {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -52,15 +59,24 @@ pub fn show_setup_message(text: &str, kind: SetupMessageKind) -> i32 {
             SetupMessageKind::Question => MB_ICONQUESTION | MB_YESNO,
         };
         let wtext = to_wide(text);
-        let wtitle = to_wide("Furphy Addon Manager Setup");
+        let wtitle = to_wide(title);
         unsafe { MessageBoxW(0, wtext.as_ptr(), wtitle.as_ptr(), flags) }
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (text, kind);
+        let _ = (title, text, kind);
         0
     }
+}
+
+/// A console tool started from this GUI-subsystem exe would otherwise flash a console window.
+#[cfg(windows)]
+fn hidden_command(program: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
 }
 
 /// Reads the Evergreen WebView2 runtime version using Microsoft's documented registry check.
@@ -198,7 +214,7 @@ fn create_shortcut_powershell(target_exe: &Path, shortcut_path: &Path, descripti
             p_esc, t_esc, d_esc, w_esc
         );
 
-        let output = std::process::Command::new("powershell")
+        let output = hidden_command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
             .output()
             .map_err(|e| format!("Failed executing shortcut script: {}", e))?;
@@ -229,8 +245,45 @@ fn shortcut_paths(sandbox_root: Option<&Path>) -> (Option<PathBuf>, Option<PathB
     )
 }
 
+/// Shortcut root for a sandboxed run: the install dir's parent, or the install dir itself
+/// when it has none, so a sandboxed run can never fall through to the real profile.
+fn sandbox_root(sandboxed: bool, install_dir: &Path) -> Option<&Path> {
+    if sandboxed {
+        Some(install_dir.parent().unwrap_or(install_dir))
+    } else {
+        None
+    }
+}
+
 /// Executes the installer lifecycle (§5.1): copies files, creates shortcuts, registers Apps uninstall entry
 pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Option<PathBuf>) -> Result<(), String> {
+    let is_test = target_dir_override.is_some() || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
+    let install_dir = target_dir_override.clone().unwrap_or_else(get_default_install_dir);
+
+    let result = run_install_steps(silent, target_dir_override);
+
+    // A background update (/S --relaunch-tray) has already closed the running app, so
+    // whatever happened, start the version now in place again in the tray: the new one
+    // after a success, the old one if the copy failed. If WebView2 is really missing,
+    // the app itself explains that on start.
+    #[cfg(windows)]
+    if silent && relaunch_tray && !is_test && !is_dev() {
+        let dest_exe = install_dir.join(format!("{}.exe", APP_TITLE));
+        if dest_exe.exists() {
+            match std::process::Command::new(&dest_exe).arg("--tray").spawn() {
+                Ok(_) if result.is_ok() => append_app_log("INFO", "Restarted Furphy in the tray after the update"),
+                Ok(_) => append_app_log("WARN", "Update failed; restarted the installed version in the tray"),
+                Err(e) => append_app_log("WARN", &format!("Could not restart Furphy in the tray: {}", e)),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (relaunch_tray, &install_dir, is_test);
+
+    result
+}
+
+fn run_install_steps(silent: bool, target_dir_override: Option<PathBuf>) -> Result<(), String> {
     let dev = is_dev();
     let sandboxed = target_dir_override.is_some();
     let is_test = sandboxed || std::env::var("FURPHY_TEST_SETUP_OVERRIDE").is_ok();
@@ -252,8 +305,16 @@ pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Optio
     if current_exe != dest_exe {
         #[cfg(windows)]
         if !is_test {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", &format!("{}.exe", APP_TITLE)])
+            // Exclude this process: an installer started as "Furphy Addon Manager.exe"
+            // from another folder would otherwise kill itself.
+            let _ = hidden_command("taskkill")
+                .args([
+                    "/F",
+                    "/IM",
+                    &format!("{}.exe", APP_TITLE),
+                    "/FI",
+                    &format!("PID ne {}", std::process::id()),
+                ])
                 .output();
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
@@ -279,12 +340,6 @@ pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Optio
             }
         }
         if let Some(e) = last_err {
-            if silent && relaunch_tray && !is_test && dest_exe.exists() {
-                match std::process::Command::new(&dest_exe).arg("--tray").spawn() {
-                    Ok(_) => append_app_log("WARN", "Copy failed; restarted the previously installed version in the tray"),
-                    Err(se) => append_app_log("WARN", &format!("Copy failed and restarting the old version also failed: {}", se)),
-                }
-            }
             return Err(format!(
                 "Failed copying binary to '{}' after {} attempts: {}",
                 dest_exe.display(), COPY_ATTEMPTS, e
@@ -304,7 +359,7 @@ pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Optio
     let _ = fs::remove_file(install_dir.join("libunwind.dll"));
 
     // 1. Desktop and Start Menu shortcuts
-    let (desktop_lnk, start_menu_lnk) = shortcut_paths(if sandboxed { install_dir.parent() } else { None });
+    let (desktop_lnk, start_menu_lnk) = shortcut_paths(sandbox_root(sandboxed, &install_dir));
     for (label, sc_path) in [("desktop", desktop_lnk), ("start menu", start_menu_lnk)] {
         if let Some(sc_path) = sc_path {
             if let Err(e) = create_shortcut(&dest_exe, &sc_path, "Furphy Addon Manager v2") {
@@ -363,15 +418,6 @@ pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Optio
                 let _ = std::process::Command::new(&dest_exe).spawn();
             }
         }
-    } else if relaunch_tray && !is_test && !webview2_missing {
-        // The in-app updater runs this installer silently while only the tray is open;
-        // without a restart the user would have no tray until the next login.
-        #[cfg(windows)]
-        {
-            if let Err(e) = std::process::Command::new(&dest_exe).arg("--tray").spawn() {
-                append_app_log("WARN", &format!("Failed relaunching tray after update: {}", e));
-            }
-        }
     }
 
     Ok(())
@@ -389,7 +435,7 @@ pub fn run_uninstall(silent: bool, target_dir_override: Option<PathBuf>) -> Resu
     let install_dir = target_dir_override.unwrap_or_else(get_default_install_dir);
 
     // 1. Remove Desktop and Start Menu shortcuts
-    let (desktop_lnk, start_menu_lnk) = shortcut_paths(if sandboxed { install_dir.parent() } else { None });
+    let (desktop_lnk, start_menu_lnk) = shortcut_paths(sandbox_root(sandboxed, &install_dir));
     for sc_path in [desktop_lnk, start_menu_lnk].into_iter().flatten() {
         let _ = fs::remove_file(sc_path);
     }

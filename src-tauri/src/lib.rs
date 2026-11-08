@@ -307,7 +307,7 @@ pub fn run() {
             );
         }
         text.push_str(&format!("\n\nDetails are in the log file:\n{}", logging::get_app_log_path().display()));
-        system::setup::show_setup_message(&text, system::setup::SetupMessageKind::Error);
+        system::setup::show_message("Furphy Addon Manager", &text, system::setup::SetupMessageKind::Error);
         std::process::exit(3);
     }
 }

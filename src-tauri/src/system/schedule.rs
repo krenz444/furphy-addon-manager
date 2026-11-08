@@ -424,27 +424,13 @@ impl Scheduler {
                                     if let Ok(conn) = open_connection(get_db_path()) {
                                         // A version whose installer already failed is not retried every
                                         // hour: the error stays visible and Settings can still install it.
-                                        let previous_failure = crate::update::app_update::load_app_update_state(&conn)
-                                            .filter(|prev| {
-                                                prev.status == "error"
-                                                    && prev.update_version.is_some()
-                                                    && prev.update_version == status.update_version
-                                                    && prev.error.as_deref().map_or(false, |e| {
-                                                        e.starts_with(crate::update::app_update::INSTALLER_START_FAILED)
-                                                    })
-                                            })
-                                            .and_then(|prev| prev.error);
-                                        let mut saved = status.clone();
-                                        if let Some(ref err) = previous_failure {
-                                            saved.status = "error".into();
-                                            saved.error = Some(err.clone());
-                                        }
-                                        let _ = crate::update::app_update::save_app_update_state(&conn, &saved);
+                                        let failed_before =
+                                            crate::update::app_update::save_check_result_keeping_install_failure(&conn, &status);
                                         let auto_install = {
                                             let settings = get_settings_map(&conn).unwrap_or_default();
                                             settings.get("appUpdateAutoInstall").and_then(|v| v.as_bool()).unwrap_or(true)
                                         };
-                                        if auto_install && status.has_update && previous_failure.is_some() {
+                                        if auto_install && status.has_update && failed_before {
                                             crate::logging::append_app_log(
                                                 "INFO",
                                                 &format!(
@@ -461,7 +447,9 @@ impl Scheduler {
                                                 let mut err_status = status.clone();
                                                 err_status.status = "error".into();
                                                 err_status.error = Some(e);
-                                                let _ = crate::update::app_update::save_app_update_state(&conn, &err_status);
+                                                if let Err(se) = crate::update::app_update::save_app_update_state(&conn, &err_status) {
+                                                    crate::logging::append_app_log("WARN", &format!("Could not save app update state: {}", se));
+                                                }
                                             }
                                         }
                                     }

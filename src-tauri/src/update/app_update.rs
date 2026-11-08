@@ -227,6 +227,44 @@ mod tests {
         std::env::remove_var("FURPHY_UPDATER_PUBKEY");
     }
 
+    #[test]
+    fn check_result_keeps_installer_failure_only_for_same_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE app_update (id INTEGER PRIMARY KEY, data TEXT)", []).unwrap();
+        let failed = AppUpdateStatus {
+            status: "error".into(),
+            update_version: Some("9.9.1".into()),
+            has_update: true,
+            error: Some(format!("{} (exit code 0xC0000135)", INSTALLER_START_FAILED)),
+            ..Default::default()
+        };
+        save_app_update_state(&conn, &failed).unwrap();
+
+        let same = AppUpdateStatus {
+            status: "available".into(),
+            update_version: Some("9.9.1".into()),
+            has_update: true,
+            ..Default::default()
+        };
+        assert!(save_check_result_keeping_install_failure(&conn, &same));
+        let kept = load_app_update_state(&conn).unwrap();
+        assert_eq!(kept.status, "error");
+        assert!(kept.error.unwrap().starts_with(INSTALLER_START_FAILED));
+
+        let newer = AppUpdateStatus { update_version: Some("9.9.2".into()), ..same.clone() };
+        assert!(!save_check_result_keeping_install_failure(&conn, &newer));
+        assert_eq!(load_app_update_state(&conn).unwrap().status, "available");
+
+        // A download error is retried, not remembered.
+        let download_failed = AppUpdateStatus {
+            status: "error".into(),
+            error: Some("Download failed with HTTP 503".into()),
+            ..newer.clone()
+        };
+        save_app_update_state(&conn, &download_failed).unwrap();
+        assert!(!save_check_result_keeping_install_failure(&conn, &newer));
+    }
+
     #[cfg(windows)]
     fn hidden_cmd(script: &str) -> std::process::Child {
         use std::os::windows::process::CommandExt;
@@ -238,27 +276,30 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn installer_start_reports_early_nonzero_exit() {
+    #[tokio::test]
+    async fn installer_start_reports_early_nonzero_exit() {
         let mut child = hidden_cmd("exit 3");
         let res = wait_for_installer_start(
             &mut child,
             Duration::from_secs(5),
             std::path::Path::new("C:\\fake\\Setup.exe"),
-        );
+        )
+        .await;
         let err = res.expect_err("early non-zero exit must be an error");
         assert!(err.contains("0x00000003"), "unexpected message: {}", err);
+        assert!(err.starts_with(INSTALLER_START_FAILED), "unexpected message: {}", err);
     }
 
     #[cfg(windows)]
-    #[test]
-    fn installer_start_ok_when_child_outlives_window() {
+    #[tokio::test]
+    async fn installer_start_ok_when_child_outlives_window() {
         let mut child = hidden_cmd("ping -n 6 127.0.0.1 >nul");
         let res = wait_for_installer_start(
             &mut child,
             Duration::from_millis(500),
             std::path::Path::new("C:\\fake\\Setup.exe"),
-        );
+        )
+        .await;
         let _ = child.kill();
         let _ = child.wait();
         assert!(res.is_ok(), "{:?}", res);
@@ -277,6 +318,30 @@ pub fn load_app_update_state(conn: &Connection) -> Option<AppUpdateStatus> {
     } else {
         None
     }
+}
+
+/// Saves a fresh check result without losing an earlier "installer failed to start"
+/// for the same version. Returns true when that version's installer already failed,
+/// in which case it must not be installed automatically again; Settings can still
+/// install it by hand.
+pub fn save_check_result_keeping_install_failure(conn: &Connection, fresh: &AppUpdateStatus) -> bool {
+    let previous_failure = load_app_update_state(conn)
+        .filter(|prev| {
+            prev.status == "error"
+                && prev.update_version.is_some()
+                && prev.update_version == fresh.update_version
+                && prev.error.as_deref().map_or(false, |e| e.starts_with(INSTALLER_START_FAILED))
+        })
+        .and_then(|prev| prev.error);
+    let mut saved = fresh.clone();
+    if let Some(ref err) = previous_failure {
+        saved.status = "error".into();
+        saved.error = Some(err.clone());
+    }
+    if let Err(e) = save_app_update_state(conn, &saved) {
+        append_app_log("WARN", &format!("Could not save app update state: {}", e));
+    }
+    previous_failure.is_some()
 }
 
 /// Saves persisted updater state to database
@@ -372,8 +437,10 @@ const INSTALLER_START_WINDOW: Duration = Duration::from_secs(4);
 /// Polls the installer for `window`. A non-zero exit inside the window means it
 /// never got going (for example the loader could not find a DLL), so the caller
 /// must keep the app alive. Exit 0 or still running both count as started.
+/// When the state cannot be read, staying alive is the safe answer: a working
+/// installer closes this process itself.
 #[cfg(windows)]
-fn wait_for_installer_start(
+async fn wait_for_installer_start(
     child: &mut std::process::Child,
     window: Duration,
     installer_path: &std::path::Path,
@@ -397,14 +464,15 @@ fn wait_for_installer_start(
             }
             Ok(None) => {}
             Err(e) => {
-                append_app_log("WARN", &format!("Could not poll update installer: {}", e));
-                return Ok(());
+                let msg = format!("Could not check whether the update installer started: {}", e);
+                append_app_log("WARN", &msg);
+                return Err(msg);
             }
         }
         if Instant::now() >= deadline {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -495,7 +563,7 @@ pub async fn install_update(
 
         // spawn() succeeds even if the loader kills the child at once (missing DLL),
         // so give it a moment and stay alive if it died.
-        wait_for_installer_start(&mut child, INSTALLER_START_WINDOW, &installer_path)?;
+        wait_for_installer_start(&mut child, INSTALLER_START_WINDOW, &installer_path).await?;
 
         if !is_window_open {
             let names = vec![format!("Furphy v{}", status.update_version.as_deref().unwrap_or(""))];

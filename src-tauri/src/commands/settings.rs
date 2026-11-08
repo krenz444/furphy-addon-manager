@@ -345,10 +345,15 @@ pub fn set_window_theme(theme: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn app_update_check() -> Result<Value, String> {
-    let status = crate::update::app_update::check_for_updates(None).await?;
+    let mut status = crate::update::app_update::check_for_updates(None).await?;
     let db_path = get_db_path();
     if let Ok(conn) = open_connection(&db_path) {
-        let _ = crate::update::app_update::save_app_update_state(&conn, &status);
+        // Keeps an earlier "installer failed to start" for this version, so a manual
+        // check does not re-arm the hourly automatic install of a broken installer.
+        crate::update::app_update::save_check_result_keeping_install_failure(&conn, &status);
+        if let Some(saved) = crate::update::app_update::load_app_update_state(&conn) {
+            status = saved;
+        }
     }
     serde_json::to_value(&status).map_err(|e| e.to_string())
 }

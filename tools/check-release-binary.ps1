@@ -52,9 +52,19 @@ $SystemDlls = @(
     'winspool.drv', 'ws2_32.dll', 'wtsapi32.dll'
 )
 
+# API sets are listed one by one, not by wildcard: a set added in a later Windows 11
+# build would pass on this PC and fail on Windows 10. The UCRT sets (api-ms-win-crt-*)
+# are part of every Windows 10 and 11. Before adding a set here, check that Windows 10
+# 1809 has it.
+$ApiSets = @(
+    'api-ms-win-core-synch-l1-2-0.dll',      # Windows 8 and later (WaitOnAddress)
+    'api-ms-win-core-winrt-error-l1-1-0.dll' # Windows 8.1 and later
+)
+
 function Test-SystemDll([string]$Name) {
     $n = $Name.ToLowerInvariant()
-    if ($n -like 'api-ms-win-*.dll') { return $true }
+    if ($n -like 'api-ms-win-crt-*.dll') { return $true }
+    if ($ApiSets -contains $n) { return $true }
     return ($SystemDlls -contains $n)
 }
 
@@ -96,14 +106,15 @@ namespace FurphyGate {
                     uint va = BitConverter.ToUInt32(b, s + 12);
                     uint rawSize = BitConverter.ToUInt32(b, s + 16);
                     uint rawPtr = BitConverter.ToUInt32(b, s + 20);
-                    uint span = Math.Max(vsize, rawSize);
-                    if (rva >= va && rva < va + span) return (int)(rva - va + rawPtr);
+                    // Only the part of a section that is stored in the file can be read.
+                    if (rva >= va && rva - va < rawSize) return (int)(rva - va + rawPtr);
                 }
-                throw new InvalidDataException("RVA 0x" + rva.ToString("X") + " is outside every section");
+                throw new InvalidDataException("RVA 0x" + rva.ToString("X") + " is outside the file data of every section");
             };
             Func<int, string> cstr = delegate (int o) {
                 int e = o;
-                while (b[e] != 0) e++;
+                while (e < b.Length && b[e] != 0) e++;
+                if (e >= b.Length) throw new InvalidDataException("unterminated name at file offset 0x" + o.ToString("X"));
                 return Encoding.ASCII.GetString(b, o, e - o);
             };
 
@@ -115,6 +126,7 @@ namespace FurphyGate {
                         uint name = BitConverter.ToUInt32(b, o + 12);
                         uint iat = BitConverter.ToUInt32(b, o + 16);
                         if (lookup == 0 && name == 0 && iat == 0) break;
+                        if (name == 0) break;
                         r.Imports.Add(cstr(offset(name)));
                     }
                 }
@@ -126,13 +138,29 @@ namespace FurphyGate {
                         uint attributes = BitConverter.ToUInt32(b, o);
                         uint name = BitConverter.ToUInt32(b, o + 4);
                         if (name == 0) break;
-                        // Attribute bit 0 clear means the old VA-based layout.
-                        uint nameRva = (attributes & 1) != 0 ? name : (uint)(name - imageBase);
+                        // Attribute bit 0 clear means the old VA-based layout, which a
+                        // 64-bit image cannot use (a 32-bit field cannot hold its VAs).
+                        uint nameRva;
+                        if ((attributes & 1) != 0) nameRva = name;
+                        else if (plus) throw new InvalidDataException("VA-based delay-load descriptor in a 64-bit image");
+                        else nameRva = (uint)(name - (uint)imageBase);
                         r.DelayImports.Add(cstr(offset(nameRva)));
                     }
                 }
             }
             return r;
+        }
+
+        public static bool ContainsAscii(string path, string text) {
+            byte[] b = File.ReadAllBytes(path);
+            byte[] t = Encoding.ASCII.GetBytes(text);
+            for (int i = 0; i <= b.Length - t.Length; i++) {
+                if (b[i] != t[0]) continue;
+                int j = 1;
+                while (j < t.Length && b[i + j] == t[j]) j++;
+                if (j == t.Length) return true;
+            }
+            return false;
         }
     }
 
@@ -169,25 +197,23 @@ foreach ($d in $badHard) { $failures.Add("direct import of a DLL that Windows do
 foreach ($d in $badDelay) { $failures.Add("delay-loaded DLL that the installer does not provide: $d") }
 
 # 2. Clean start
-$bytes = [IO.File]::ReadAllBytes($ExePath)
-$marker = [Text.Encoding]::ASCII.GetBytes('loader-ok')
-$hasHandler = $false
-for ($i = 0; $i -le $bytes.Length - $marker.Length; $i++) {
-    if ($bytes[$i] -ne $marker[0]) { continue }
-    $match = $true
-    for ($j = 1; $j -lt $marker.Length; $j++) { if ($bytes[$i + $j] -ne $marker[$j]) { $match = $false; break } }
-    if ($match) { $hasHandler = $true; break }
-}
-$bytes = $null
+# Only the output text is searched: the compiler turns the short "--loader-check"
+# comparison into integer compares, so that literal does not appear in the binary.
+$hasHandler = [FurphyGate.PeImports]::ContainsAscii($ExePath, ' loader-ok')
 
 if (-not $hasHandler) {
     $failures.Add('the exe has no --loader-check handler, so the clean start was not run (running it would install over this PC)')
 } else {
-    $folderName = 'furphy loader check (' + [char]0x00E9 + ') ' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $tag = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $folderName = 'furphy loader check (' + [char]0x00E9 + ') ' + $tag
     $iso = Join-Path ([IO.Path]::GetTempPath()) $folderName
     New-Item -ItemType Directory -Path $iso -Force | Out-Null
     $isoExe = Join-Path $iso ([IO.Path]::GetFileName($ExePath))
     Copy-Item -LiteralPath $ExePath -Destination $isoExe -Force
+    # Per-user folders for the child, so anything it writes lands here and is reported
+    # below instead of touching this PC's Furphy data.
+    $envRoot = Join-Path ([IO.Path]::GetTempPath()) "furphy loader check env $tag"
+    foreach ($sub in 'Local', 'Roaming', 'Temp') { New-Item -ItemType Directory -Path (Join-Path $envRoot $sub) -Force | Out-Null }
 
     $win = $env:SystemRoot
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -199,6 +225,10 @@ if (-not $hasHandler) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.EnvironmentVariables['PATH'] = "$win\System32;$win;$win\System32\Wbem;$win\System32\WindowsPowerShell\v1.0"
+    $psi.EnvironmentVariables['LOCALAPPDATA'] = Join-Path $envRoot 'Local'
+    $psi.EnvironmentVariables['APPDATA'] = Join-Path $envRoot 'Roaming'
+    $psi.EnvironmentVariables['TEMP'] = Join-Path $envRoot 'Temp'
+    $psi.EnvironmentVariables['TMP'] = Join-Path $envRoot 'Temp'
 
     # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX: the child inherits it, so a missing
     # DLL ends the process with an NTSTATUS instead of opening a dialog.
@@ -212,6 +242,7 @@ if (-not $hasHandler) {
     $stderrTask = $proc.StandardError.ReadToEndAsync()
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
         try { $proc.Kill() } catch {}
+        [void]$proc.WaitForExit(5000)
         $failures.Add("clean start did not exit within $TimeoutSec s")
     } else {
         $proc.WaitForExit()
@@ -224,13 +255,15 @@ if (-not $hasHandler) {
             $failures.Add(('clean start failed with 0x{0:X8} ({1}); stderr: {2}' -f $code, $why, $stderrTask.Result.Trim()))
         } elseif ($stdout -notmatch 'loader-ok') {
             $failures.Add("clean start exited 0 but did not print loader-ok: '$stdout'")
-        } elseif ($ExpectedVersion -and $stdout -notmatch [regex]::Escape(" $ExpectedVersion ")) {
+        } elseif ($ExpectedVersion -and $stdout -notmatch ('(^|\s)' + [regex]::Escape($ExpectedVersion) + '(\s|$)')) {
             $failures.Add("clean start reported '$stdout', expected version $ExpectedVersion")
         }
     }
     $leftovers = @(Get-ChildItem -LiteralPath $iso -Force | Where-Object { $_.Name -ne [IO.Path]::GetFileName($ExePath) })
-    if ($leftovers.Count -gt 0) { $failures.Add('--loader-check wrote files next to the exe: ' + (($leftovers | ForEach-Object { $_.Name }) -join ', ')) }
+    $leftovers += @(Get-ChildItem -LiteralPath $envRoot -Recurse -Force -File)
+    if ($leftovers.Count -gt 0) { $failures.Add('--loader-check wrote files: ' + (($leftovers | ForEach-Object { $_.FullName }) -join ', ')) }
     Remove-Item -LiteralPath $iso -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $envRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 if ($failures.Count -gt 0) {

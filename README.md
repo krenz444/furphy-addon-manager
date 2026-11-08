@@ -88,6 +88,15 @@ The app only listens on `http://localhost:<port>/` (default 47831) - nothing out
 
 ## Troubleshooting
 
+### If the installer does not start
+
+- **"The code execution cannot proceed because libunwind.dll was not found."** Installers from 2.0.0 to 2.0.25 needed a file that only existed on the developer's PC. Download the current installer from the [Releases page](https://github.com/krenz444/furphy-addon-manager/releases/latest); 2.0.26 and later start on any Windows 10 or 11 PC.
+- **"Windows protected your PC"** (SmartScreen). Furphy isn't signed with a paid certificate. Select **More info**, then **Run anyway**.
+- **"Smart App Control blocked an app that may be unsafe"** (Windows 11). Smart App Control blocks unsigned apps and has no Run anyway button. You can turn it off in Windows Security > App & browser control > Smart App Control settings; read what that page says about turning it back on before you decide.
+- **Nothing happens for up to a minute.** Microsoft Defender scans a new download before its first run. Wait rather than opening the file again.
+- **"Furphy needs the Microsoft Edge WebView2 Runtime."** Setup offers Microsoft's download page. Install the runtime, then start Furphy from its desktop shortcut.
+- **Any other error.** The message names the log file, `%LOCALAPPDATA%\krenzcreative.furphy.addonmanager\app.log`. Attach it when you report the problem.
+
 - `server.log` (in the app folder) - every request the local server handled, and any errors.
 - `sync.log` (in the app folder) - everything the updater did on each run.
 - `last-run.txt` - a quick table of the most recent update.
