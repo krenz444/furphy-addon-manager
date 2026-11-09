@@ -11,6 +11,7 @@ export interface CheckSummary {
   updates: number;
   failed: number;
   failures: CheckFailure[];
+  held: number;
 }
 
 export const BUSY_MESSAGE = 'Another task is running. Try again when it finishes.';
@@ -61,12 +62,22 @@ export function summarizeCheck(job: Pick<JobRecord, 'results'> | null | undefine
     updates: count(report.would_update_count),
     failed: Math.max(count(report.failed_count), failures.length),
     failures,
+    held: count(report.held_count),
   };
 }
 
 export function checkSuccessMessage(summary: CheckSummary): string {
   const skipped = summary.skipped > 0 ? `, ${summary.skipped} ignored or pinned skipped` : '';
-  const tail = summary.updates > 0 ? `${plural(summary.updates, 'update')} ready.` : 'Everything is up to date.';
+  const updatesPart = summary.updates > 0 ? `${plural(summary.updates, 'update')} ready` : '';
+  const heldPart = summary.held > 0 ? `${summary.held} on hold` : '';
+  let tail = 'Everything is up to date.';
+  if (updatesPart && heldPart) {
+    tail = `${updatesPart}, ${heldPart}.`;
+  } else if (updatesPart) {
+    tail = `${updatesPart}.`;
+  } else if (heldPart) {
+    tail = `${heldPart}.`;
+  }
   return `Checked ${plural(summary.checked, 'addon')}${skipped}. ${tail}`;
 }
 

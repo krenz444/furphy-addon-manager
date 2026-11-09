@@ -300,7 +300,15 @@ impl JobRunner {
                 }
 
                 let flv_root = resolve_flavour_root(target_flv)?;
-                let report = run_sync_for_flavour(
+                let origin = match params.get("origin").and_then(|v| v.as_str()) {
+                    Some(s) if s.eq_ignore_ascii_case("background") => crate::engine::update_policy::SyncOrigin::Background,
+                    _ => crate::engine::update_policy::SyncOrigin::Manual,
+                };
+                let override_hold = params.get("override_hold").and_then(|v| v.as_bool()).unwrap_or(false);
+                let override_modified = params.get("override_modified").and_then(|v| v.as_bool()).unwrap_or(false);
+                let backup_modified = params.get("backup_modified").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                let report = crate::engine::sync::run_sync_for_flavour_with_options(
                     conn,
                     &flv_root,
                     flv,
@@ -312,6 +320,10 @@ impl JobRunner {
                     github_token.clone(),
                     only_ids.as_deref(),
                     force,
+                    origin,
+                    override_hold,
+                    override_modified,
+                    backup_modified,
                 )
                 .await?;
 
@@ -352,6 +364,11 @@ impl JobRunner {
                 let mut all_reports = Vec::new();
                 let mut any_reload = false;
 
+                let origin = match params.get("origin").and_then(|v| v.as_str()) {
+                    Some(s) if s.eq_ignore_ascii_case("background") => crate::engine::update_policy::SyncOrigin::Background,
+                    _ => crate::engine::update_policy::SyncOrigin::Manual,
+                };
+
                 let show_test_realms: bool = conn
                     .query_row(
                         "SELECT value FROM settings WHERE key = 'showTestRealms'",
@@ -372,7 +389,24 @@ impl JobRunner {
                         Err(_) => continue,
                     };
 
-                    let report = run_sync_for_flavour(
+                    let update_mode = conn.query_row(
+                        "SELECT update_mode FROM flavours WHERE id = ?1",
+                        rusqlite::params![flv_info.id],
+                        |r| r.get::<_, Option<String>>(0),
+                    ).ok().flatten().unwrap_or_else(|| "auto".to_string());
+
+                    if update_mode.eq_ignore_ascii_case("notify") {
+                        let _ = run_check_for_flavour(
+                            conn,
+                            &flv_info.id,
+                            flv_info.client_interface,
+                            self.policy.clone(),
+                            github_token.clone(),
+                        ).await;
+                        continue;
+                    }
+
+                    let report = crate::engine::sync::run_sync_for_flavour_with_options(
                         conn,
                         &flv_root,
                         &flv_info.id,
@@ -383,6 +417,10 @@ impl JobRunner {
                         self.policy.clone(),
                         github_token.clone(),
                         None,
+                        false,
+                        origin,
+                        false,
+                        false,
                         false,
                     )
                     .await?;
@@ -437,6 +475,29 @@ impl JobRunner {
                 .map_err(|e| format!("Invalid adopt payload: {}", e))?;
 
                 let addon_id = adopt_candidate_group(conn, flv, &candidate).map_err(|e| e.to_string())?;
+
+                let target_flv = installed_flavours.iter().find(|f| f.id == flv);
+                if let Some(t_flv) = target_flv {
+                    if let Ok(manifest) = crate::engine::integrity::generate_manifest_for_folders(&t_flv.addons_path, &candidate.folders) {
+                        let _ = crate::engine::integrity::record_manifest(conn, &addon_id, &manifest);
+                    }
+                }
+
+                let act = crate::engine::activity::ActivityEntry {
+                    id: Uuid::new_v4().to_string(),
+                    ts: Utc::now().to_rfc3339(),
+                    flavour: flv.to_string(),
+                    addon_id: addon_id.clone(),
+                    name: candidate.name.clone(),
+                    kind: "installed".to_string(),
+                    from_version: None,
+                    to_version: candidate.version.clone(),
+                    source: candidate.source.clone(),
+                    job_id: None,
+                    error: None,
+                };
+                let _ = crate::engine::activity::record_activity(conn, &act);
+
                 Ok((serde_json::json!({ "addon_id": addon_id }).to_string(), false, None))
             }
             "rollback" => {
@@ -452,6 +513,12 @@ impl JobRunner {
                     .and_then(|v| v.as_str())
                     .ok_or("Missing addon_id parameter")?;
 
+                let addon_meta: Option<(String, Option<String>, Option<String>)> = conn.query_row(
+                    "SELECT name, version, source FROM addons WHERE id = ?1",
+                    rusqlite::params![addon_id],
+                    |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?, r.get(2)?)),
+                ).ok();
+
                 rollback_addon(
                     conn,
                     &flv_root,
@@ -461,6 +528,24 @@ impl JobRunner {
                     &target_flv.addons_path,
                     &data_dir,
                 )?;
+
+                if let Some((name, ver, src)) = addon_meta {
+                    let act = crate::engine::activity::ActivityEntry {
+                        id: Uuid::new_v4().to_string(),
+                        ts: Utc::now().to_rfc3339(),
+                        flavour: flv.to_string(),
+                        addon_id: addon_id.to_string(),
+                        name,
+                        kind: "rolled_back".to_string(),
+                        from_version: ver,
+                        to_version: None,
+                        source: src,
+                        job_id: None,
+                        error: None,
+                    };
+                    let _ = crate::engine::activity::record_activity(conn, &act);
+                }
+
                 Ok((serde_json::json!({ "rolled_back": addon_id }).to_string(), false, None))
             }
             "restore-wtf" => {
@@ -497,7 +582,31 @@ impl JobRunner {
                     .and_then(|v| v.as_str())
                     .ok_or("Missing addon_id parameter")?;
 
+                let addon_meta: Option<(String, Option<String>, Option<String>)> = conn.query_row(
+                    "SELECT name, version, source FROM addons WHERE id = ?1",
+                    rusqlite::params![addon_id],
+                    |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?, r.get(2)?)),
+                ).ok();
+
                 remove_addon(conn, addon_id, flv, &target_flv.addons_path)?;
+
+                if let Some((name, ver, src)) = addon_meta {
+                    let act = crate::engine::activity::ActivityEntry {
+                        id: Uuid::new_v4().to_string(),
+                        ts: Utc::now().to_rfc3339(),
+                        flavour: flv.to_string(),
+                        addon_id: addon_id.to_string(),
+                        name,
+                        kind: "removed".to_string(),
+                        from_version: ver,
+                        to_version: None,
+                        source: src,
+                        job_id: None,
+                        error: None,
+                    };
+                    let _ = crate::engine::activity::record_activity(conn, &act);
+                }
+
                 Ok((serde_json::json!({ "removed": addon_id }).to_string(), false, None))
             }
             "switch-source" => {
@@ -675,7 +784,147 @@ impl JobRunner {
                     None
                 };
 
+                let act = crate::engine::activity::ActivityEntry {
+                    id: Uuid::new_v4().to_string(),
+                    ts: Utc::now().to_rfc3339(),
+                    flavour: flv.to_string(),
+                    addon_id: addon_id.clone().unwrap_or_default(),
+                    name: "Dependencies".to_string(),
+                    kind: "installed".to_string(),
+                    from_version: None,
+                    to_version: None,
+                    source: None,
+                    job_id: None,
+                    error: job_error.clone(),
+                };
+                let _ = crate::engine::activity::record_activity(conn, &act);
+
                 Ok((json, reload_needed, job_error))
+            }
+            "reinstall" => {
+                let flv = flavour.ok_or("Flavour is required for reinstall job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
+
+                let addon_id = params
+                    .get("addon_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing addon_id parameter for reinstall")?;
+
+                let report = crate::engine::sync::run_sync_for_flavour_with_options(
+                    conn,
+                    &flv_root,
+                    flv,
+                    &target_flv.folder,
+                    &target_flv.addons_path,
+                    &data_dir,
+                    target_flv.client_interface,
+                    self.policy.clone(),
+                    github_token.clone(),
+                    Some(&[addon_id.to_string()]),
+                    true,
+                    crate::engine::update_policy::SyncOrigin::Manual,
+                    true,
+                    true,
+                    false,
+                )
+                .await?;
+
+                let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
+                Ok((json, report.reload_needed, None))
+            }
+            "verify-integrity" => {
+                let flv = flavour.ok_or("Flavour is required for verify-integrity job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+
+                let addon_id = params.get("addon_id").and_then(|v| v.as_str());
+                if let Some(aid) = addon_id {
+                    let report = crate::engine::integrity::verify_addon_integrity(conn, &target_flv.addons_path, aid)?;
+                    let status_str = match report.status {
+                        crate::engine::integrity::IntegrityStatus::Clean => "clean",
+                        crate::engine::integrity::IntegrityStatus::Modified => "modified",
+                        crate::engine::integrity::IntegrityStatus::Missing => "missing",
+                        crate::engine::integrity::IntegrityStatus::Unknown => "unknown",
+                    };
+                    let _ = conn.execute("UPDATE addons SET integrity_status = ?1 WHERE id = ?2", rusqlite::params![status_str, aid]);
+                    let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
+                    Ok((json, false, None))
+                } else {
+                    let mut reports = Vec::new();
+                    let mut stmt = conn.prepare("SELECT id FROM addons WHERE flavour = ?1")
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt.query_map(rusqlite::params![flv], |r| r.get::<_, String>(0))
+                        .map_err(|e| e.to_string())?;
+                    let aids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+                    for aid in aids {
+                        if let Ok(rep) = crate::engine::integrity::verify_addon_integrity(conn, &target_flv.addons_path, &aid) {
+                            let status_str = match rep.status {
+                                crate::engine::integrity::IntegrityStatus::Clean => "clean",
+                                crate::engine::integrity::IntegrityStatus::Modified => "modified",
+                                crate::engine::integrity::IntegrityStatus::Missing => "missing",
+                                crate::engine::integrity::IntegrityStatus::Unknown => "unknown",
+                            };
+                            let _ = conn.execute("UPDATE addons SET integrity_status = ?1 WHERE id = ?2", rusqlite::params![status_str, aid]);
+                            reports.push(rep);
+                        }
+                    }
+                    let json = serde_json::to_string(&reports).map_err(|e| e.to_string())?;
+                    Ok((json, false, None))
+                }
+            }
+            "backup-wtf" => {
+                let flv = flavour.ok_or("Flavour is required for backup-wtf job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
+
+                let note = params.get("note").and_then(|v| v.as_str());
+                let retention = params.get("retention").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+                let record = crate::engine::wtf_full::backup_whole_wtf(
+                    conn,
+                    &flv_root,
+                    &target_flv.folder,
+                    flv,
+                    &data_dir,
+                    note,
+                    retention,
+                )?;
+
+                let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+                Ok((json, false, None))
+            }
+            "restore-wtf-all" => {
+                let flv = flavour.ok_or("Flavour is required for restore-wtf-all job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let flv_root = resolve_flavour_root(target_flv)?;
+
+                let backup_id = params
+                    .get("backup_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing backup_id parameter")?;
+
+                crate::engine::wtf_full::restore_whole_wtf(
+                    conn,
+                    &flv_root,
+                    &target_flv.folder,
+                    flv,
+                    backup_id,
+                    &data_dir,
+                )?;
+
+                Ok((serde_json::json!({ "restored": backup_id }).to_string(), true, None))
             }
             "import" => {
                 let flv = flavour.ok_or("Flavour is required for import job")?;

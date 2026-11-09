@@ -10,6 +10,9 @@
   import ExportDialog from './components/dialogs/ExportDialog.svelte';
   import ProtocolConsentDialog from './components/dialogs/ProtocolConsentDialog.svelte';
   import ConfirmDialog from './components/dialogs/ConfirmDialog.svelte';
+  import HoldDialog from './components/dialogs/HoldDialog.svelte';
+  import ModifiedDialog from './components/dialogs/ModifiedDialog.svelte';
+  import ActivityView from './views/ActivityView.svelte';
   import JobPanel from './components/jobs/JobPanel.svelte';
   import Toasts, { type ToastItem } from './components/jobs/Toasts.svelte';
   import AppUpdateBanner from './components/banners/AppUpdateBanner.svelte';
@@ -25,7 +28,7 @@
   } from './lib/checkReport';
 
   // Navigation State
-  let activeView = $state<'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings'>('my_addons');
+  let activeView = $state<'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings' | 'activity'>('my_addons');
 
   // Application Data
   let appInfo = $state<AppInfo | null>(null);
@@ -68,6 +71,12 @@
   let confirmDetail = $state<string | null>(null);
   let confirmDanger = $state<boolean>(false);
   let confirmAction = $state<(() => void) | null>(null);
+
+  // Hold & Modified Dialog State
+  let holdDialogOpen = $state<boolean>(false);
+  let holdDialogAddon = $state<Addon | null>(null);
+  let modifiedDialogOpen = $state<boolean>(false);
+  let modifiedDialogAddon = $state<Addon | null>(null);
 
   // Protocol Consent Dialog State
   let protocolOpen = $state<boolean>(false);
@@ -608,6 +617,105 @@
     }
   }
 
+  async function handleHoldUpdateAnyway(addon: Addon) {
+    holdDialogOpen = false;
+    try {
+      await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { only: [addon.id], override_hold: true } });
+      addToast('info', `Updating ${addon.name ?? addon.id}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Update failed: ${errorText(err)}`);
+    }
+  }
+
+  async function handleHoldIgnoreForBuild(addon: Addon, build: string) {
+    holdDialogOpen = false;
+    try {
+      await invoke('hold_ignore_for_build', { addon_id: addon.id, build });
+      addToast('info', `Ignored updates for ${addon.name ?? addon.id} on build ${build}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to ignore build: ${errorText(err)}`);
+    }
+  }
+
+  async function handleModifiedUpdateAndZip(addon: Addon) {
+    modifiedDialogOpen = false;
+    try {
+      await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { only: [addon.id], backup_modified: true, override_modified: true } });
+      addToast('info', `Updating and backing up local copy for ${addon.name ?? addon.id}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Update failed: ${errorText(err)}`);
+    }
+  }
+
+  async function handleModifiedUpdateAnyway(addon: Addon) {
+    modifiedDialogOpen = false;
+    try {
+      await invoke('start_job', { kind: 'sync', flavour: activeFlavour, params: { only: [addon.id], override_modified: true } });
+      addToast('info', `Updating ${addon.name ?? addon.id}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Update failed: ${errorText(err)}`);
+    }
+  }
+
+  async function handleSetChannel(addon: Addon, channel: number) {
+    try {
+      await invoke('set_release_channel', { addon_id: addon.id, release_type: channel });
+      addToast('info', `Set ${addon.name ?? addon.id} channel to ${channel === 1 ? 'Stable' : channel === 2 ? 'Beta' : 'Alpha'}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to set release channel: ${errorText(err)}`);
+    }
+  }
+
+  async function handleToggleAutoUpdate(addon: Addon) {
+    const nextVal = !(addon.auto_update ?? true);
+    try {
+      await invoke('set_auto_update', { addon_id: addon.id, auto_update: nextVal });
+      addToast('info', `${nextVal ? 'Enabled' : 'Disabled'} auto-update for ${addon.name ?? addon.id}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to toggle auto-update: ${errorText(err)}`);
+    }
+  }
+
+  async function handleShowFolder(addon: Addon) {
+    try {
+      await invoke('show_addon_folder', { flavour: activeFlavour, addon_id: addon.id });
+    } catch (err) {
+      addToast('error', `Failed to show folder: ${errorText(err)}`);
+    }
+  }
+
+  async function handleReinstall(addon: Addon) {
+    try {
+      await invoke('start_job', { kind: 'reinstall', flavour: activeFlavour, params: { addon_id: addon.id } });
+      addToast('info', `Reinstalling ${addon.name ?? addon.id}`);
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Reinstall failed: ${errorText(err)}`);
+    }
+  }
+
+  async function handleBulkSetChannel(targetAddons: Addon[], channel: number) {
+    for (const a of targetAddons) {
+      await invoke('set_release_channel', { addon_id: a.id, release_type: channel }).catch(() => {});
+    }
+    addToast('info', `Updated release channel for ${targetAddons.length} addons`);
+    await refreshFlavourData(activeFlavour);
+  }
+
+  async function handleBulkSetAutoUpdate(targetAddons: Addon[], autoUpdate: boolean) {
+    for (const a of targetAddons) {
+      await invoke('set_auto_update', { addon_id: a.id, auto_update: autoUpdate }).catch(() => {});
+    }
+    addToast('info', `Updated auto-update for ${targetAddons.length} addons`);
+    await refreshFlavourData(activeFlavour);
+  }
+
   async function handleUpdateAddon(addon: Addon) {
     try {
       runningJob = {
@@ -1035,6 +1143,20 @@
           onInstallDeps={handleInstallDeps}
           onIgnoreDeps={handleIgnoreAllDeps}
           onIgnoreAllMissing={handleIgnoreAllMissing}
+          onShowHoldDialog={(addon) => {
+            holdDialogAddon = addon;
+            holdDialogOpen = true;
+          }}
+          onShowModifiedDialog={(addon) => {
+            modifiedDialogAddon = addon;
+            modifiedDialogOpen = true;
+          }}
+          onSetChannel={handleSetChannel}
+          onToggleAutoUpdate={handleToggleAutoUpdate}
+          onShowFolder={handleShowFolder}
+          onReinstall={handleReinstall}
+          onBulkSetChannel={handleBulkSetChannel}
+          onBulkSetAutoUpdate={handleBulkSetAutoUpdate}
         />
       {:else if activeView === 'get_addons'}
         <GetAddonsView
@@ -1067,6 +1189,7 @@
           {flavours}
           {currentTheme}
           {density}
+          {isGameActive}
           onThemeChange={handleThemeChange}
           onDensityChange={handleDensityChange}
           onExportList={() => (exportDialogOpen = true)}
@@ -1088,6 +1211,17 @@
               confirmOpen = false;
             };
             confirmOpen = true;
+          }}
+        />
+      {:else if activeView === 'activity'}
+        <ActivityView
+          {activeFlavour}
+          onOpenDrawer={(addonId, tab) => {
+            const addon = addons.find((a) => a.id === addonId) ?? null;
+            if (addon) {
+              activeDrawerAddon = addon;
+              activeDrawerTab = tab || 'overview';
+            }
           }}
         />
       {/if}
@@ -1144,6 +1278,23 @@
     selectedFlavour={activeFlavour}
     onConfirm={handleProtocolConsent}
     onCancel={() => (protocolOpen = false)}
+  />
+
+  <HoldDialog
+    open={holdDialogOpen}
+    addon={holdDialogAddon}
+    clientBuild={flavours.find((f) => f.id === activeFlavour)?.client_build ?? ''}
+    onUpdateAnyway={handleHoldUpdateAnyway}
+    onIgnoreForBuild={handleHoldIgnoreForBuild}
+    onCancel={() => (holdDialogOpen = false)}
+  />
+
+  <ModifiedDialog
+    open={modifiedDialogOpen}
+    addon={modifiedDialogAddon}
+    onUpdateAndZip={handleModifiedUpdateAndZip}
+    onUpdateAnyway={handleModifiedUpdateAnyway}
+    onSkip={() => (modifiedDialogOpen = false)}
   />
 
   <ConfirmDialog

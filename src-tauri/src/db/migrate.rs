@@ -185,6 +185,112 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
 
+    if current_version < 7 {
+        let tx = conn.transaction()?;
+
+        let has_ignored_until_build: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'ignored_until_build'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_ignored_until_build {
+            tx.execute("ALTER TABLE addons ADD COLUMN ignored_until_build TEXT", [])?;
+        }
+
+        let has_auto_update: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'auto_update'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_auto_update {
+            tx.execute("ALTER TABLE addons ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 1", [])?;
+        }
+
+        let has_integrity_status: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'integrity_status'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_integrity_status {
+            tx.execute("ALTER TABLE addons ADD COLUMN integrity_status TEXT", [])?;
+        }
+
+        let has_update_mode: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('flavours') WHERE name = 'update_mode'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_update_mode {
+            tx.execute("ALTER TABLE flavours ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'auto'", [])?;
+        }
+
+        let has_held: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('check_results') WHERE name = 'held'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_held {
+            tx.execute("ALTER TABLE check_results ADD COLUMN held INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
+        let has_held_reason: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('check_results') WHERE name = 'held_reason'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_held_reason {
+            tx.execute("ALTER TABLE check_results ADD COLUMN held_reason TEXT", [])?;
+        }
+
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS addon_manifests (
+                addon_id TEXT NOT NULL,
+                rel_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                PRIMARY KEY (addon_id, rel_path),
+                FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_addon_manifests_addon_id ON addon_manifests(addon_id);
+
+            CREATE TABLE IF NOT EXISTS activity (
+                id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                flavour TEXT NOT NULL,
+                addon_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                from_version TEXT,
+                to_version TEXT,
+                source TEXT,
+                job_id TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_flavour_ts ON activity(flavour, ts DESC);
+
+            CREATE TABLE IF NOT EXISTS whole_wtf_backups (
+                id TEXT PRIMARY KEY,
+                flavour TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                path TEXT NOT NULL,
+                file_count INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                note TEXT,
+                FOREIGN KEY(flavour) REFERENCES flavours(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_whole_wtf_backups_flavour ON whole_wtf_backups(flavour, created_at DESC);
+            "#,
+        )?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '7')",
+            [],
+        )?;
+
+        tx.commit()?;
+    }
+
     // Ensure all predefined flavours exist in flavours table
     for def in FLAVOUR_DEFS {
         conn.execute(
@@ -206,7 +312,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
@@ -226,6 +332,49 @@ mod tests {
             .map(|c| c > 0)
             .unwrap();
         assert!(has_col);
+
+        // Verify migration 7 columns exist
+        let has_auto_update: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'auto_update'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_auto_update);
+
+        let has_update_mode: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('flavours') WHERE name = 'update_mode'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_update_mode);
+
+        let has_held: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('check_results') WHERE name = 'held'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_held);
+
+        // Verify migration 7 tables exist
+        for table in ["addon_manifests", "activity", "whole_wtf_backups"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(exists, "Expected table {} to exist", table);
+        }
 
         // Verify ignored_untracked_folders table exists
         let table_exists: bool = conn

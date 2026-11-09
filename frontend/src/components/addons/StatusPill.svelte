@@ -10,14 +10,30 @@
     onViewDetails?: (addon: Addon) => void;
     onInstallDeps?: (addon?: Addon) => void;
     onShowError?: (addon: Addon) => void;
+    onShowHoldDialog?: (addon: Addon) => void;
+    onShowModifiedDialog?: (addon: Addon) => void;
   }
 
-  let { addon, onUpdate, onUnpin, onUnignore, onRetry, onViewDetails, onInstallDeps, onShowError }: Props = $props();
+  let {
+    addon,
+    onUpdate,
+    onUnpin,
+    onUnignore,
+    onRetry,
+    onViewDetails,
+    onInstallDeps,
+    onShowError,
+    onShowHoldDialog,
+    onShowModifiedDialog,
+  }: Props = $props();
 
   let hasMissingDeps = $derived((addon.missing_deps && addon.missing_deps.length > 0) ?? false);
 
   let statusType = $derived.by(() => {
     if (addon.error || addon.check_status === 'failed') return 'failed';
+    if (addon.integrity_status === 'modified') return 'modified';
+    if (addon.integrity_status === 'missing') return 'missing';
+    if (addon.held) return 'held';
     if (addon.pinned_file_id) return 'pinned';
     if (addon.ignore_updates) return 'ignored';
     let hasActualUpdate = addon.update_version &&
@@ -40,6 +56,22 @@
         onRetry(addon);
       } else if (onUpdate) {
         onUpdate(addon);
+      }
+    } else if (statusType === 'modified') {
+      if (onShowModifiedDialog) {
+        onShowModifiedDialog(addon);
+      } else if (onUpdate) {
+        onUpdate(addon);
+      }
+    } else if (statusType === 'held') {
+      if (onShowHoldDialog) {
+        onShowHoldDialog(addon);
+      } else if (onUpdate) {
+        onUpdate(addon);
+      }
+    } else if (statusType === 'missing') {
+      if (onViewDetails) {
+        onViewDetails(addon);
       }
     } else if (statusType === 'update' && onUpdate) {
       onUpdate(addon);
@@ -80,6 +112,36 @@
       Failed
     </span>
   {/if}
+{:else if statusType === 'modified'}
+  <button
+    type="button"
+    class="status-pill pill-modified"
+    onclick={handleClick}
+    aria-label={`Modified files in ${addon.name ?? addon.id}`}
+    title="Local files modified"
+  >
+    <span class="pill-dot" aria-hidden="true"></span>
+    Modified
+  </button>
+{:else if statusType === 'held'}
+  <button
+    type="button"
+    class="status-pill pill-held"
+    onclick={handleClick}
+    aria-label={`Update held back for ${addon.name ?? addon.id}`}
+    title={addon.held_reason || "Update held back"}
+  >
+    <span class="pill-dot" aria-hidden="true"></span>
+    On hold
+  </button>
+{:else if statusType === 'missing'}
+  <span
+    class="status-pill pill-missing"
+    title="Missing files on disk"
+  >
+    <span class="pill-dot" aria-hidden="true"></span>
+    Missing files
+  </span>
 {:else if statusType === 'update'}
   {#if onUpdate}
     <button
@@ -251,6 +313,22 @@
 
   .pill-update:hover {
     background: var(--accent-hover);
+  }
+
+  .pill-held, .pill-modified {
+    background: var(--warning-tint);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  }
+
+  button.pill-held:hover, button.pill-modified:hover {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+  }
+
+  .pill-missing {
+    background: var(--danger-tint);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
 
   .pill-up-to-date {

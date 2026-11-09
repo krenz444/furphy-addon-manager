@@ -458,6 +458,38 @@
                   </span>
                 </div>
               </div>
+
+              <div class="drawer-update-controls">
+                <div class="control-row">
+                  <label for="drawer-release-channel" class="info-label">Release Channel</label>
+                  <select
+                    id="drawer-release-channel"
+                    class="form-select drawer-select"
+                    value={addon.release_type ?? 1}
+                    onchange={(e) => {
+                      const channel = Number((e.currentTarget as HTMLSelectElement).value);
+                      invoke('set_release_channel', { addon_id: addon.id, release_type: channel }).catch(() => {});
+                    }}
+                  >
+                    <option value="1">Stable</option>
+                    <option value="2">Beta</option>
+                    <option value="3">Alpha</option>
+                  </select>
+                </div>
+                <div class="control-row">
+                  <label class="toggle-control">
+                    <input
+                      type="checkbox"
+                      checked={addon.auto_update ?? true}
+                      onchange={(e) => {
+                        const val = (e.currentTarget as HTMLInputElement).checked;
+                        invoke('set_auto_update', { addon_id: addon.id, auto_update: val }).catch(() => {});
+                      }}
+                    />
+                    <span class="toggle-text">Install updates automatically</span>
+                  </label>
+                </div>
+              </div>
             </div>
 
             <div class="description-section">
@@ -830,6 +862,35 @@
     gap: 12px;
     border-top: 1px solid var(--border-soft);
     padding-top: 12px;
+  }
+
+  .drawer-update-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    border-top: 1px solid var(--border-soft);
+    padding-top: 12px;
+  }
+
+  .control-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .drawer-select {
+    background: var(--bg-1);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .drawer-select:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 
   .section-title {

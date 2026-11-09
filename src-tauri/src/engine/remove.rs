@@ -43,6 +43,7 @@ pub fn remove_addon(
 
     // 4. Remove from DB in transaction
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM addon_manifests WHERE addon_id = ?1", params![addon_id]).map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM addon_folders WHERE addon_id = ?1", params![addon_id]).map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM check_results WHERE addon_id = ?1", params![addon_id]).map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM addons WHERE id = ?1", params![addon_id]).map_err(|e| e.to_string())?;

@@ -316,6 +316,18 @@ pub fn run() {
             commands::system::tray_status,
             commands::system::set_background_updates,
             commands::system::is_game_active,
+            commands::update_control::hold_ignore_for_build,
+            commands::update_control::set_release_channel,
+            commands::update_control::set_auto_update,
+            commands::update_control::set_update_mode,
+            commands::update_control::get_update_modes,
+            commands::integrity::show_addon_folder,
+            commands::integrity::integrity_report,
+            commands::activity::list_activity,
+            commands::activity::clear_activity,
+            commands::wtf_full::wtf_backups_list,
+            commands::wtf_full::wtf_restore_preview,
+            commands::wtf_full::wtf_backup_delete,
         ])
         .run(context);
 

@@ -34,6 +34,14 @@
     onInstallDeps?: (addonId?: string) => void;
     onIgnoreDeps?: (addon: Addon) => void;
     onIgnoreAllMissing?: () => void;
+    onShowHoldDialog?: (addon: Addon) => void;
+    onShowModifiedDialog?: (addon: Addon) => void;
+    onSetChannel?: (addon: Addon, channel: number) => void;
+    onToggleAutoUpdate?: (addon: Addon) => void;
+    onShowFolder?: (addon: Addon) => void;
+    onReinstall?: (addon: Addon) => void;
+    onBulkSetChannel?: (addons: Addon[], channel: number) => void;
+    onBulkSetAutoUpdate?: (addons: Addon[], autoUpdate: boolean) => void;
   }
 
   let {
@@ -63,10 +71,18 @@
     onInstallDeps,
     onIgnoreDeps,
     onIgnoreAllMissing,
+    onShowHoldDialog,
+    onShowModifiedDialog,
+    onSetChannel,
+    onToggleAutoUpdate,
+    onShowFolder,
+    onReinstall,
+    onBulkSetChannel,
+    onBulkSetAutoUpdate,
   }: Props = $props();
 
   let searchQuery = $state('');
-  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch' | 'failed'>('all');
+  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch' | 'failed' | 'held' | 'modified'>('all');
   let sortBy = $state<'name' | 'status' | 'updated'>('name');
   let selectedIds = $state<Set<string>>(new Set());
   let errorDialogAddon = $state<Addon | null>(null);
@@ -96,6 +112,10 @@
       list = list.filter(a => a.is_old_patch);
     } else if (activeFilter === 'failed') {
       list = list.filter(a => !!a.error || a.check_status === 'failed');
+    } else if (activeFilter === 'held') {
+      list = list.filter(a => a.held);
+    } else if (activeFilter === 'modified') {
+      list = list.filter(a => a.integrity_status === 'modified');
     }
 
     // Search query
@@ -143,6 +163,8 @@
   let ignoredCount = $derived(addons.filter(a => a.ignore_updates).length);
   let oldPatchCount = $derived(addons.filter(a => a.is_old_patch).length);
   let failedCount = $derived(addons.filter(a => !!a.error || a.check_status === 'failed').length);
+  let heldCount = $derived(addons.filter(a => a.held).length);
+  let modifiedCount = $derived(addons.filter(a => a.integrity_status === 'modified').length);
 
   // Selection helpers
   let isAllSelected = $derived(
@@ -441,6 +463,32 @@
           Failed ({failedCount})
         </button>
       {/if}
+
+      {#if heldCount > 0}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeFilter === 'held'}
+          class="filter-chip chip-warning chip-held"
+          class:active={activeFilter === 'held'}
+          onclick={() => (activeFilter = 'held')}
+        >
+          On hold ({heldCount})
+        </button>
+      {/if}
+
+      {#if modifiedCount > 0}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeFilter === 'modified'}
+          class="filter-chip chip-warning chip-modified"
+          class:active={activeFilter === 'modified'}
+          onclick={() => (activeFilter = 'modified')}
+        >
+          Modified ({modifiedCount})
+        </button>
+      {/if}
     </div>
 
     <div class="filter-bar-actions">
@@ -489,6 +537,32 @@
           onclick={handleBulkUninstall}
         >
           Uninstall Selected
+        </button>
+        <select
+          class="btn-sm btn-secondary bulk-channel-select"
+          aria-label="Set release channel for selected addons"
+          onchange={(e) => {
+            const val = Number((e.currentTarget as HTMLSelectElement).value);
+            if (val > 0) {
+              const selected = addons.filter(a => selectedIds.has(a.id));
+              onBulkSetChannel?.(selected, val);
+            }
+          }}
+        >
+          <option value="0">Release channel...</option>
+          <option value="1">Stable</option>
+          <option value="2">Beta</option>
+          <option value="3">Alpha</option>
+        </select>
+        <button
+          type="button"
+          class="btn-sm btn-secondary"
+          onclick={() => {
+            const selected = addons.filter(a => selectedIds.has(a.id));
+            onBulkSetAutoUpdate?.(selected, true);
+          }}
+        >
+          Auto-update On
         </button>
         <button
           type="button"
@@ -621,6 +695,8 @@
                   onViewDetails={onOpenAddonDrawer}
                   onInstallDeps={() => onInstallDeps?.(addon.id)}
                   onShowError={(a) => (errorDialogAddon = a)}
+                  {onShowHoldDialog}
+                  {onShowModifiedDialog}
                 />
               </div>
 
@@ -641,6 +717,10 @@
                   onRollback={onRollbackAddon}
                   onOpenSource={onOpenSource}
                   onUninstall={onUninstallAddon}
+                  {onSetChannel}
+                  {onToggleAutoUpdate}
+                  {onShowFolder}
+                  {onReinstall}
                 />
               </div>
             </div>

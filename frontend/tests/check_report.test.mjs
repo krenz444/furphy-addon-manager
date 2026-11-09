@@ -54,13 +54,14 @@ function report(overrides = {}) {
     ignored_count: 2,
     pinned_count: 2,
     failed_count: 0,
+    held_count: 0,
     outcomes: [],
     ...overrides,
   };
 }
 
 test('summarizeCheck: reads a CheckRunReport given as a JSON string or an object', () => {
-  const expected = { checked: 31, skipped: 4, updates: 3, failed: 0, failures: [] };
+  const expected = { checked: 31, skipped: 4, updates: 3, failed: 0, failures: [], held: 0 };
   assert.deepEqual(summarizeCheck({ results: JSON.stringify(report()) }), expected);
   assert.deepEqual(summarizeCheck({ results: report() }), expected);
 });
@@ -123,20 +124,24 @@ test('errorText: strings, Errors, objects with a message, and everything else', 
 
 test('checkSuccessMessage: counts, singular forms and the skipped note', () => {
   assert.equal(
-    checkSuccessMessage({ checked: 31, skipped: 4, updates: 3, failed: 0, failures: [] }),
+    checkSuccessMessage({ checked: 31, skipped: 4, updates: 3, failed: 0, failures: [], held: 0 }),
     'Checked 31 addons, 4 ignored or pinned skipped. 3 updates ready.',
   );
   assert.equal(
-    checkSuccessMessage({ checked: 1, skipped: 0, updates: 1, failed: 0, failures: [] }),
+    checkSuccessMessage({ checked: 1, skipped: 0, updates: 1, failed: 0, failures: [], held: 0 }),
     'Checked 1 addon. 1 update ready.',
   );
   assert.equal(
-    checkSuccessMessage({ checked: 12, skipped: 0, updates: 0, failed: 0, failures: [] }),
+    checkSuccessMessage({ checked: 12, skipped: 0, updates: 0, failed: 0, failures: [], held: 0 }),
     'Checked 12 addons. Everything is up to date.',
   );
   assert.equal(
-    checkSuccessMessage({ checked: 0, skipped: 5, updates: 0, failed: 0, failures: [] }),
+    checkSuccessMessage({ checked: 0, skipped: 5, updates: 0, failed: 0, failures: [], held: 0 }),
     'Checked 0 addons, 5 ignored or pinned skipped. Everything is up to date.',
+  );
+  assert.equal(
+    checkSuccessMessage({ checked: 12, skipped: 0, updates: 3, failed: 0, failures: [], held: 1 }),
+    'Checked 12 addons. 3 updates ready, 1 on hold.',
   );
 });
 

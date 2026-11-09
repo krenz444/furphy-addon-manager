@@ -151,6 +151,38 @@ pub fn show_cycle_notification(status: &str, names: &[String]) {
     }
 }
 
+pub fn show_notification(title: &str, text: &str, is_warning: bool) {
+    let suppressed = is_fullscreen_or_game_foreground();
+
+    let record = NotificationRecord {
+        title: title.to_string(),
+        text: text.to_string(),
+        is_warning,
+        suppressed_game_foreground: suppressed,
+    };
+
+    {
+        let mut guard = NOTIFICATION_STATE.lock().unwrap();
+        guard.last_record = Some(record.clone());
+        guard.balloon_shown = !suppressed;
+        guard.balloon_text = if !suppressed { text.to_string() } else { String::new() };
+        guard.history.push(record);
+    }
+
+    if suppressed {
+        crate::logging::append_app_log(
+            "INFO",
+            "Suppressed notification: game is running in the foreground (ADR-309)",
+        );
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        // Handled via tray or Win32 API if tray icon is active
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

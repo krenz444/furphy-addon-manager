@@ -9,13 +9,16 @@
     resetFlavourInstallPath,
   } from '../lib/ipc';
   import ConfirmDialog from '../components/dialogs/ConfirmDialog.svelte';
-  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour } from '../lib/types';
+  import UpdateModeSettings from '../components/settings/UpdateModeSettings.svelte';
+  import WtfBackupPanel from '../components/settings/WtfBackupPanel.svelte';
+  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour, WholeWtfBackup } from '../lib/types';
 
   interface Props {
     flavour: string;
     flavours?: Flavour[];
     currentTheme: string;
     density: 'comfortable' | 'compact';
+    isGameActive?: boolean;
     onThemeChange: (theme: string) => void;
     onDensityChange: (density: 'comfortable' | 'compact') => void;
     onExportList: () => void;
@@ -31,6 +34,7 @@
     flavours = [],
     currentTheme,
     density,
+    isGameActive = false,
     onThemeChange,
     onDensityChange,
     onExportList,
@@ -40,6 +44,32 @@
     onUntrackedChange,
     onFlavoursChange,
   }: Props = $props();
+
+  let updateModes = $state<Record<string, 'auto' | 'notify'>>({});
+  let wtfBackups = $state<WholeWtfBackup[]>([]);
+
+  async function loadUpdateModes() {
+    try {
+      const modes = await invoke<Record<string, 'auto' | 'notify'>>('get_update_modes');
+      if (modes) updateModes = modes;
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadWtfBackups() {
+    try {
+      const list = await invoke<WholeWtfBackup[]>('wtf_backups_list', { flavour });
+      if (list) wtfBackups = list;
+    } catch {
+      // ignore
+    }
+  }
+
+  $effect(() => {
+    loadUpdateModes();
+    loadWtfBackups();
+  });
 
   // Custom Flavour Path Management
   let editingFlavour = $state<string | null>(null);
@@ -420,6 +450,20 @@
           <span class="toggle-text">Start Furphy with Windows (in system tray)</span>
         </label>
       </div>
+
+      <UpdateModeSettings
+        {flavours}
+        {updateModes}
+        onChangeMode={async (flvId, mode) => {
+          updateModes[flvId] = mode;
+          try {
+            await invoke('set_update_mode', { flavour: flvId, update_mode: mode });
+            onToast?.('info', `Update mode for ${flvId} set to ${mode}`);
+          } catch (err) {
+            onToast?.('error', `Failed to set update mode: ${err}`);
+          }
+        }}
+      />
     </section>
 
     <!-- 2. App Updates Section -->
@@ -861,6 +905,37 @@
           <!-- Export & Import -->
           <div class="advanced-group">
             <h3>Backup & Transfer</h3>
+            <WtfBackupPanel
+              activeFlavour={flavour}
+              {isGameActive}
+              backups={wtfBackups}
+              onBackupNow={async () => {
+                try {
+                  await invoke('start_job', { kind: 'backup-wtf', flavour, params: {} });
+                  onToast?.('success', 'WTF backup initiated');
+                  await loadWtfBackups();
+                } catch (err) {
+                  onToast?.('error', `WTF backup failed: ${err}`);
+                }
+              }}
+              onRestorePreview={async (backupId) => {
+                try {
+                  await invoke('wtf_restore_preview', { backup_id: backupId });
+                  onToast?.('info', `Previewed restore for ${backupId}`);
+                } catch (err) {
+                  onToast?.('error', `Failed to preview restore: ${err}`);
+                }
+              }}
+              onDeleteBackup={async (backupId) => {
+                try {
+                  await invoke('wtf_backup_delete', { backup_id: backupId });
+                  onToast?.('info', 'WTF backup deleted');
+                  await loadWtfBackups();
+                } catch (err) {
+                  onToast?.('error', `Failed to delete backup: ${err}`);
+                }
+              }}
+            />
             <div class="folder-btns">
               <button type="button" class="btn-primary" onclick={onExportList}>
                 Export Addon List (/2 format)

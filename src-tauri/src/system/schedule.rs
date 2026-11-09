@@ -129,6 +129,7 @@ pub struct Scheduler {
     trigger_tx: tokio::sync::mpsc::UnboundedSender<bool>,
     trigger_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<bool>>>,
     window_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    last_notified_held_ids: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Scheduler {
@@ -141,6 +142,7 @@ impl Scheduler {
             trigger_tx: tx,
             trigger_rx: Mutex::new(Some(rx)),
             window_probe: None,
+            last_notified_held_ids: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -263,7 +265,7 @@ impl Scheduler {
         // 3. Execute update-all-flavours job
         let job_res = self
             .runner
-            .run_job(&mut conn, "update-all-flavours", None, json!({}))
+            .run_job(&mut conn, "update-all-flavours", None, json!({"origin": "background"}))
             .await;
 
         let now = Utc::now();
@@ -356,6 +358,34 @@ impl Scheduler {
                     &updated_names
                 };
                 show_cycle_notification(status, notify_names);
+
+                // Held addons notification: notify only when set of held addon IDs changes
+                let held_addon_ids: std::collections::HashSet<String> = {
+                    let mut stmt = conn.prepare("SELECT addon_id FROM check_results WHERE held = 1").ok();
+                    if let Some(ref mut st) = stmt {
+                        st.query_map([], |r| r.get::<_, String>(0))
+                            .ok()
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                            .unwrap_or_default()
+                    } else {
+                        std::collections::HashSet::new()
+                    }
+                };
+
+                if !held_addon_ids.is_empty() {
+                    let mut cache = self.last_notified_held_ids.lock().await;
+                    if *cache != held_addon_ids {
+                        *cache = held_addon_ids.clone();
+                        crate::system::notify::show_notification(
+                            "Furphy",
+                            &format!("{} addon update(s) held back for newer WoW version", held_addon_ids.len()),
+                            false,
+                        );
+                    }
+                } else {
+                    let mut cache = self.last_notified_held_ids.lock().await;
+                    cache.clear();
+                }
 
                 s.clone()
             }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Addon } from '../../lib/types';
+  import ChannelSubmenu from './ChannelSubmenu.svelte';
 
   interface Props {
     addon: Addon;
@@ -13,6 +14,10 @@
     onSwitchSource?: (addon: Addon) => void;
     onOpenSource?: (addon: Addon) => void;
     onUninstall?: (addon: Addon) => void;
+    onSetChannel?: (addon: Addon, channel: number) => void;
+    onToggleAutoUpdate?: (addon: Addon) => void;
+    onShowFolder?: (addon: Addon) => void;
+    onReinstall?: (addon: Addon) => void;
   }
 
   let {
@@ -27,10 +32,16 @@
     onSwitchSource,
     onOpenSource,
     onUninstall,
+    onSetChannel,
+    onToggleAutoUpdate,
+    onShowFolder,
+    onReinstall,
   }: Props = $props();
 
   let isOpen = $state(false);
+  let showChannelSubmenu = $state(false);
   let menuRef = $state<HTMLDivElement | null>(null);
+  let channelBtnRef = $state<HTMLButtonElement | null>(null);
 
   function toggleMenu(e: MouseEvent) {
     e.stopPropagation();
@@ -124,6 +135,53 @@
         View versions
       </button>
 
+      <div class="submenu-container">
+        <button
+          type="button"
+          class="menu-item has-submenu"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded={showChannelSubmenu}
+          bind:this={channelBtnRef}
+          onclick={(e) => {
+            e.stopPropagation();
+            showChannelSubmenu = !showChannelSubmenu;
+          }}
+        >
+          <span>Release channel</span>
+          <span class="submenu-arrow">▶</span>
+        </button>
+        {#if showChannelSubmenu}
+          <div class="submenu-popover">
+            <ChannelSubmenu
+              selectedChannel={addon.release_type ?? 1}
+              onSelectChannel={(ch) => {
+                showChannelSubmenu = false;
+                onSetChannel?.(addon, ch);
+                closeMenu();
+              }}
+              onClose={() => {
+                showChannelSubmenu = false;
+                channelBtnRef?.focus();
+              }}
+            />
+          </div>
+        {/if}
+      </div>
+
+      <button
+        type="button"
+        class="menu-item"
+        role="menuitem"
+        onclick={(e) => {
+          e.stopPropagation();
+          closeMenu();
+          onToggleAutoUpdate?.(addon);
+        }}
+      >
+        {addon.auto_update ?? true ? '✓ Install automatically' : 'Install automatically'}
+      </button>
+
       <button
         type="button"
         class="menu-item"
@@ -180,6 +238,24 @@
         onclick={(e) => { e.stopPropagation(); closeMenu(); onOpenSource?.(addon); }}
       >
         Open on {addon.source === 'wago' ? 'Wago' : addon.source === 'github' ? 'GitHub' : 'CurseForge'}
+      </button>
+
+      <button
+        type="button"
+        class="menu-item"
+        role="menuitem"
+        onclick={(e) => { e.stopPropagation(); closeMenu(); onShowFolder?.(addon); }}
+      >
+        Show folder
+      </button>
+
+      <button
+        type="button"
+        class="menu-item"
+        role="menuitem"
+        onclick={(e) => { e.stopPropagation(); closeMenu(); onReinstall?.(addon); }}
+      >
+        Reinstall
       </button>
 
       <div class="menu-divider" role="separator"></div>
@@ -241,6 +317,30 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
+  }
+
+  .submenu-container {
+    position: relative;
+    width: 100%;
+  }
+
+  .has-submenu {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .submenu-arrow {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+  }
+
+  .submenu-popover {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    margin-left: 4px;
+    z-index: 1001;
   }
 
   .menu-item {

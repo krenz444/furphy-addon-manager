@@ -3,7 +3,7 @@
   import FreshnessHeadline from './FreshnessHeadline.svelte';
 
   interface Props {
-    activeView: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings';
+    activeView: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings' | 'activity';
     activeFlavour: string;
     flavours: Flavour[];
     freshness: Freshness | null;
@@ -13,7 +13,7 @@
     appInfo: AppInfo | null;
     showTestRealms?: boolean;
     isChecking?: boolean;
-    onSelectView: (view: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings') => void;
+    onSelectView: (view: 'my_addons' | 'get_addons' | 'not_built_for_patch' | 'settings' | 'activity') => void;
     onSelectFlavour: (flavour: string) => void;
     onCheckNow: () => void;
     onUpdateAll: () => void;
@@ -140,6 +140,21 @@
       {#if notBuiltCount > 0}
         <span class="nav-badge badge-warning">{notBuiltCount}</span>
       {/if}
+    </button>
+
+    <button
+      type="button"
+      class="nav-item"
+      class:active={activeView === 'activity'}
+      onclick={() => onSelectView('activity')}
+    >
+      <span class="nav-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+          <circle cx="12" cy="12" r="9" />
+          <polyline points="12 7 12 12 15 15" />
+        </svg>
+      </span>
+      <span class="nav-text">Activity</span>
     </button>
 
     <button

@@ -332,6 +332,85 @@ pub fn delete_wtf_snapshot(conn: &Connection, snapshot_id: &str) -> Result<bool>
     }
 }
 
+pub fn set_addon_auto_update(conn: &Connection, addon_id: &str, auto_update: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE addons SET auto_update = ?1 WHERE id = ?2",
+        params![if auto_update { 1 } else { 0 }, addon_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_addon_auto_update(conn: &Connection, addon_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT auto_update FROM addons WHERE id = ?1",
+        params![addon_id],
+        |r| Ok(r.get::<_, i32>(0)? != 0),
+    )
+}
+
+pub fn set_addon_ignored_until_build(conn: &Connection, addon_id: &str, build: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE addons SET ignored_until_build = ?1 WHERE id = ?2",
+        params![build, addon_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_addon_ignored_until_build(conn: &Connection, addon_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT ignored_until_build FROM addons WHERE id = ?1",
+        params![addon_id],
+        |r| r.get(0),
+    )
+}
+
+pub fn set_addon_integrity_status(conn: &Connection, addon_id: &str, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE addons SET integrity_status = ?1 WHERE id = ?2",
+        params![status, addon_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_addon_integrity_status(conn: &Connection, addon_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT integrity_status FROM addons WHERE id = ?1",
+        params![addon_id],
+        |r| r.get(0),
+    )
+}
+
+pub fn set_flavour_update_mode(conn: &Connection, flavour: &str, mode: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE flavours SET update_mode = ?1 WHERE id = ?2",
+        params![mode, flavour],
+    )?;
+    Ok(())
+}
+
+pub fn get_flavour_update_mode(conn: &Connection, flavour: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT update_mode FROM flavours WHERE id = ?1",
+        params![flavour],
+        |r| r.get(0),
+    )
+}
+
+pub fn get_flavour_update_modes(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT id, update_mode FROM flavours")?;
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let mode: String = row.get::<_, Option<String>>(1)?.unwrap_or_else(|| "auto".to_string());
+        Ok((id, mode))
+    })?;
+    let mut map = HashMap::new();
+    for r in rows {
+        let (id, mode) = r?;
+        map.insert(id, mode);
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

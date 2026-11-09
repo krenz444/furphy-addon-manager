@@ -5,3 +5,7 @@ pub mod open;
 pub mod settings;
 pub mod system;
 pub mod wtf;
+pub mod update_control;
+pub mod integrity;
+pub mod activity;
+pub mod wtf_full;

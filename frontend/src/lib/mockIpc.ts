@@ -11,6 +11,25 @@ import type {
   DiagnosticItem,
   MigrationBackup,
 } from './types';
+import { initHoldbackMock } from './mocks/holdback';
+import { initUpdateControlMock } from './mocks/updateControl';
+import { initIntegrityMock } from './mocks/integrity';
+import { initActivityMock } from './mocks/activity';
+import { initWtfFullMock } from './mocks/wtfFull';
+
+export type MockCommandHandler = (cmd: string, args: Record<string, unknown>) => Promise<unknown> | unknown;
+export type MockJobHandler = (jobKind: string, flavour: string | null, params: Record<string, unknown>) => Promise<unknown> | unknown;
+
+const mockRegistry = new Map<string, MockCommandHandler>();
+const mockJobRegistry = new Map<string, MockJobHandler>();
+
+export function registerMockCommand(cmd: string, handler: MockCommandHandler) {
+  mockRegistry.set(cmd, handler);
+}
+
+export function registerMockJob(jobKind: string, handler: MockJobHandler) {
+  mockJobRegistry.set(jobKind, handler);
+}
 
 const MOCK_FLAVOURS: Flavour[] = [
   { id: 'retail', folder: '_retail_', label: 'Retail', product: 'wow', installed: true },
@@ -20,7 +39,7 @@ const MOCK_FLAVOURS: Flavour[] = [
 ];
 
 function generateMockAddons(count: number = 200): Addon[] {
-  const addons: Addon[] = [
+  const addons: Array<Omit<Addon, 'held' | 'held_reason' | 'auto_update' | 'integrity_status'>> = [
     {
       id: 'details',
       flavour: 'retail',
@@ -195,7 +214,13 @@ function generateMockAddons(count: number = 200): Addon[] {
     });
   }
 
-  return addons;
+  return addons.map((a) => ({
+    held: false,
+    held_reason: null,
+    auto_update: true,
+    integrity_status: 'clean' as const,
+    ...a,
+  }));
 }
 
 const mockAddons = generateMockAddons(200);
@@ -237,6 +262,11 @@ let mockHookInstalled = false;
 function installMockHook(): void {
   if (mockHookInstalled || typeof window === 'undefined') return;
   mockHookInstalled = true;
+  initHoldbackMock();
+  initUpdateControlMock();
+  initIntegrityMock();
+  initActivityMock();
+  initWtfFullMock();
   const hook: FurphyMockHook = {
     failNextCheck(message = 'Provider unreachable') {
       mockNextCheck = 'fail';
@@ -371,10 +401,67 @@ let mockSettings: Record<string, unknown> = {
   cfFocus: true,
 };
 
+export function getMockAddons(): Addon[] {
+  return mockAddons;
+}
+
+export function setMockAddons(addons: Addon[]): void {
+  mockAddons.length = 0;
+  mockAddons.push(...addons);
+}
+
+export function getMockFlavours(): Flavour[] {
+  return MOCK_FLAVOURS;
+}
+
+export function getMockSettings(): Record<string, unknown> {
+  return mockSettings;
+}
+
+export function getMockState(flavour: string = 'retail'): AppState {
+  const filtered = mockAddonsFor(flavour);
+  const updatesCount = filtered.filter((a) => a.update_version && !a.ignore_updates && !a.pinned_file_id).length;
+  return {
+    addons: filtered,
+    flavours: MOCK_FLAVOURS,
+    active_flavour: flavour,
+    freshness: {
+      state: filtered.length === 0 ? 'not_checked' : updatesCount > 0 ? 'updates_ready' : 'clean',
+      checked_at: filtered.length === 0 ? null : (mockCheckedAt[flavour] ?? null),
+      updates_count: updatesCount,
+      last_error: null,
+    },
+    running_job: takeStaleJob(flavour),
+    untracked_count: 2,
+    is_game_active: false,
+    app_info: {
+      name: 'Furphy Addon Manager',
+      version: '2.0.25',
+      is_dev: false,
+      identifier: 'krenzcreative.furphy.addonmanager',
+    },
+  };
+}
+
 export async function handleMockInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   installMockHook();
   // Artificial micro-delay for realistic UI feedback
   await new Promise((r) => setTimeout(r, 10));
+
+  if (cmd === 'start_job') {
+    const kind = args?.kind as string;
+    if (mockJobRegistry.has(kind)) {
+      return (await mockJobRegistry.get(kind)!(
+        kind,
+        (args?.flavour as string) || null,
+        (args?.params as Record<string, unknown>) || {}
+      )) as T;
+    }
+  }
+
+  if (mockRegistry.has(cmd)) {
+    return (await mockRegistry.get(cmd)!(cmd, args || {})) as T;
+  }
 
   switch (cmd) {
     case 'get_app_info':

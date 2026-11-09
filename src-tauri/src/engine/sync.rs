@@ -58,6 +58,43 @@ pub async fn run_sync_for_flavour(
     only_addon_ids: Option<&[String]>,
     force: bool,
 ) -> Result<SyncRunReport, String> {
+    run_sync_for_flavour_with_options(
+        conn,
+        wow_root,
+        flavour,
+        flavour_folder,
+        addons_path,
+        data_dir,
+        client_interface,
+        policy,
+        github_token,
+        only_addon_ids,
+        force,
+        crate::engine::update_policy::SyncOrigin::Manual,
+        false,
+        false,
+        false,
+    )
+    .await
+}
+
+pub async fn run_sync_for_flavour_with_options(
+    conn: &mut Connection,
+    wow_root: &Path,
+    flavour: &str,
+    flavour_folder: &str,
+    addons_path: &Path,
+    data_dir: &Path,
+    client_interface: Option<i32>,
+    policy: Arc<NetworkPolicy>,
+    github_token: Option<String>,
+    only_addon_ids: Option<&[String]>,
+    force: bool,
+    origin: crate::engine::update_policy::SyncOrigin,
+    override_hold: bool,
+    override_modified: bool,
+    backup_modified: bool,
+) -> Result<SyncRunReport, String> {
     let started_at = Utc::now().to_rfc3339();
     append_sync_log(Some(flavour), "INFO", "Starting addon sync...");
 
@@ -67,6 +104,14 @@ pub async fn run_sync_for_flavour(
     let wago_session = WagoSession::new();
 
     let mapping = get_flavour_mapping(flavour, client_interface);
+
+    let (client_build, update_mode): (Option<String>, String) = conn
+        .query_row(
+            "SELECT client_build, update_mode FROM flavours WHERE id = ?1",
+            params![flavour],
+            |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "auto".to_string()))),
+        )
+        .unwrap_or((None, "auto".to_string()));
 
     // 1. Fetch addons for this flavour
     struct SyncRow {
@@ -83,11 +128,15 @@ pub async fn run_sync_for_flavour(
         ignore_updates: bool,
         release_type: i64,
         adopted: bool,
+        ignored_until_build: Option<String>,
+        auto_update: bool,
+        integrity_status: Option<String>,
+        latest_game_versions: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted, ignored_until_build, auto_update, integrity_status, latest_game_versions \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -108,6 +157,10 @@ pub async fn run_sync_for_flavour(
                 ignore_updates: r.get::<_, i32>(10)? != 0,
                 release_type: r.get::<_, Option<i64>>(11)?.unwrap_or(1),
                 adopted: r.get::<_, i32>(12)? != 0,
+                ignored_until_build: r.get(13)?,
+                auto_update: r.get::<_, Option<i32>>(14)?.unwrap_or(1) != 0,
+                integrity_status: r.get(15)?,
+                latest_game_versions: r.get(16)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -130,6 +183,112 @@ pub async fn run_sync_for_flavour(
             if !only_ids.contains(&a.id) {
                 continue;
             }
+        }
+
+        let gv: Vec<String> = a.latest_game_versions.as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let p_ctx = crate::engine::update_policy::PolicyContext {
+            addon_id: &a.id,
+            name: &a.name,
+            flavour,
+            client_build: client_build.as_deref(),
+            target_game_versions: &gv,
+            ignored_until_build: a.ignored_until_build.as_deref(),
+            ignore_updates: a.ignore_updates,
+            is_pinned: a.pinned_file_id.is_some(),
+            auto_update: a.auto_update,
+            update_mode: &update_mode,
+            origin,
+            override_hold,
+            override_modified,
+            integrity_status: a.integrity_status.as_deref(),
+            is_newer: true,
+            force,
+        };
+        let policy_action = crate::engine::update_policy::decide(&p_ctx);
+        match policy_action {
+            crate::engine::update_policy::PolicyAction::SkipHeld { reason } => {
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error, held, held_reason) \
+                     VALUES (?1, ?2, NULL, NULL, 'held', NULL, 1, ?3)",
+                    params![a.id, now_str, reason],
+                );
+                let act_entry = crate::engine::activity::ActivityEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: now_str,
+                    flavour: flavour.to_string(),
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    kind: "held".to_string(),
+                    from_version: a.version.clone(),
+                    to_version: None,
+                    source: a.source.clone(),
+                    job_id: None,
+                    error: Some(reason.clone()),
+                };
+                let _ = crate::engine::activity::record_activity(conn, &act_entry);
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Skipped".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: Some(format!("Held back: {}", reason)),
+                });
+                continue;
+            }
+            crate::engine::update_policy::PolicyAction::SkipDisabledAutoUpdate
+            | crate::engine::update_policy::PolicyAction::SkipNotifyOnly
+            | crate::engine::update_policy::PolicyAction::SkipModified { .. }
+            | crate::engine::update_policy::PolicyAction::PromptModified { .. } => {
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Skipped".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: None,
+                });
+                continue;
+            }
+            crate::engine::update_policy::PolicyAction::Pinned => {
+                up_to_date_count += 1;
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Up-to-date".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: None,
+                });
+                continue;
+            }
+            crate::engine::update_policy::PolicyAction::Ignored => {
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Ignored".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: None,
+                });
+                continue;
+            }
+            crate::engine::update_policy::PolicyAction::UpToDate => {
+                up_to_date_count += 1;
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Up-to-date".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: None,
+                });
+                continue;
+            }
+            crate::engine::update_policy::PolicyAction::Install => {}
         }
 
         if a.ignore_updates && !force && only_addon_ids.is_none() {
@@ -647,6 +806,13 @@ pub async fn run_sync_for_flavour(
         }
 
         // Step 6: Atomic swap
+        if backup_modified {
+            let backup_dir = data_dir.join("backups").join(flavour).join(&target_addon_id);
+            let _ = std::fs::create_dir_all(&backup_dir);
+            let backup_zip = backup_dir.join(format!("{}_modified.zip", Utc::now().format("%Y%m%d_%H%M%S")));
+            let _ = crate::engine::integrity::zip_modified_files_backup(addons_path, &target_addon_id, &[], &backup_zip);
+        }
+
         let protected = match get_protected_folders(conn, flavour, Some(&target_addon_id)) {
             Ok(p) => p,
             Err(_) => HashSet::new(),
@@ -777,6 +943,26 @@ pub async fn run_sync_for_flavour(
              VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
             params![target_addon_id, now_str],
         );
+
+        let _ = conn.execute("UPDATE addons SET integrity_status = 'clean' WHERE id = ?1", params![target_addon_id]);
+        if let Ok(manifest) = crate::engine::integrity::generate_manifest_for_folders(addons_path, &installed_folders) {
+            let _ = crate::engine::integrity::record_manifest(conn, &target_addon_id, &manifest);
+        }
+
+        let act_entry = crate::engine::activity::ActivityEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: now.clone(),
+            flavour: flavour.to_string(),
+            addon_id: target_addon_id.clone(),
+            name: target_addon_name.clone(),
+            kind: (if a.file_id.is_none() { "installed" } else { "updated" }).to_string(),
+            from_version: a.version.clone(),
+            to_version: chosen_version.clone(),
+            source: a.source.clone(),
+            job_id: None,
+            error: None,
+        };
+        let _ = crate::engine::activity::record_activity(conn, &act_entry);
 
         updated_count += 1;
         if is_wow_running() {

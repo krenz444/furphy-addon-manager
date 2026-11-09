@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS flavours (
     client_build TEXT,
     client_interface TEXT,
     detected_at TEXT,
-    custom_root TEXT
+    custom_root TEXT,
+    update_mode TEXT NOT NULL DEFAULT 'auto'
 );
 
 CREATE TABLE IF NOT EXISTS addons (
@@ -44,6 +45,9 @@ CREATE TABLE IF NOT EXISTS addons (
     github_rate_limited_until TEXT,
     extra TEXT,
     ignored_deps TEXT,
+    ignored_until_build TEXT,
+    auto_update INTEGER NOT NULL DEFAULT 1,
+    integrity_status TEXT,
     FOREIGN KEY(flavour) REFERENCES flavours(id)
 );
 
@@ -82,6 +86,8 @@ CREATE TABLE IF NOT EXISTS check_results (
     update_version TEXT,
     status TEXT,
     error TEXT,
+    held INTEGER NOT NULL DEFAULT 0,
+    held_reason TEXT,
     FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
 );
 
@@ -141,6 +147,40 @@ CREATE TABLE IF NOT EXISTS wtf_snapshots (
     FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS addon_manifests (
+    addon_id TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    PRIMARY KEY (addon_id, rel_path),
+    FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS activity (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    flavour TEXT NOT NULL,
+    addon_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    from_version TEXT,
+    to_version TEXT,
+    source TEXT,
+    job_id TEXT,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS whole_wtf_backups (
+    id TEXT PRIMARY KEY,
+    flavour TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    path TEXT NOT NULL,
+    file_count INTEGER NOT NULL,
+    total_bytes INTEGER NOT NULL,
+    note TEXT,
+    FOREIGN KEY(flavour) REFERENCES flavours(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_addons_flavour ON addons(flavour);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_addon_id ON addon_folders(addon_id);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_folder ON addon_folders(folder);
@@ -151,6 +191,9 @@ CREATE INDEX IF NOT EXISTS idx_check_results_addon_id ON check_results(addon_id)
 CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_id ON wtf_snapshots(addon_id);
 CREATE INDEX IF NOT EXISTS idx_wtf_snapshots_addon_created ON wtf_snapshots(addon_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_flavour_state ON jobs(flavour, state);
+CREATE INDEX IF NOT EXISTS idx_addon_manifests_addon_id ON addon_manifests(addon_id);
+CREATE INDEX IF NOT EXISTS idx_activity_flavour_ts ON activity(flavour, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_whole_wtf_backups_flavour ON whole_wtf_backups(flavour, created_at DESC);
 "#;
 
 #[cfg(test)]
@@ -179,6 +222,9 @@ mod tests {
             "tray_state",
             "app_update",
             "wtf_snapshots",
+            "addon_manifests",
+            "activity",
+            "whole_wtf_backups",
         ];
 
         for table in expected_tables {
@@ -203,6 +249,9 @@ mod tests {
             "idx_wtf_snapshots_addon_id",
             "idx_wtf_snapshots_addon_created",
             "idx_jobs_flavour_state",
+            "idx_addon_manifests_addon_id",
+            "idx_activity_flavour_ts",
+            "idx_whole_wtf_backups_flavour",
         ];
 
         for idx in expected_indexes {

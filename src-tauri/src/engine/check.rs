@@ -33,6 +33,10 @@ pub struct CheckRunReport {
     pub ignored_count: usize,
     pub pinned_count: usize,
     pub failed_count: usize,
+    #[serde(default)]
+    pub held_count: usize,
+    #[serde(default)]
+    pub modified_count: usize,
     pub outcomes: Vec<AddonCheckOutcome>,
 }
 
@@ -80,6 +84,14 @@ pub async fn run_check_for_flavour(
 
     let mapping = get_flavour_mapping(flavour, client_interface);
 
+    let (client_build, update_mode): (Option<String>, String) = conn
+        .query_row(
+            "SELECT client_build, update_mode FROM flavours WHERE id = ?1",
+            params![flavour],
+            |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "auto".to_string()))),
+        )
+        .unwrap_or((None, "auto".to_string()));
+
     // 1. Fetch addons for this flavour
     struct RowData {
         id: String,
@@ -96,11 +108,15 @@ pub async fn run_check_for_flavour(
         ignore_updates: bool,
         release_type: i64,
         github_rate_limited_until: Option<String>,
+        ignored_until_build: Option<String>,
+        auto_update: bool,
+        integrity_status: Option<String>,
+        latest_game_versions: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until, ignored_until_build, auto_update, integrity_status, latest_game_versions \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -122,6 +138,10 @@ pub async fn run_check_for_flavour(
                 ignore_updates: r.get::<_, i32>(11)? != 0,
                 release_type: r.get::<_, Option<i64>>(12)?.unwrap_or(1),
                 github_rate_limited_until: r.get(13)?,
+                ignored_until_build: r.get(14)?,
+                auto_update: r.get::<_, Option<i32>>(15)?.unwrap_or(1) != 0,
+                integrity_status: r.get(16)?,
+                latest_game_versions: r.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -139,6 +159,10 @@ pub async fn run_check_for_flavour(
     let mut ignored_count = 0;
     let mut pinned_count = 0;
     let mut failed_count = 0;
+    let mut held_count = 0;
+    let mut modified_count = 0;
+
+    let mut check_details: std::collections::HashMap<String, (i32, Option<String>)> = std::collections::HashMap::new();
 
     for a in &addons {
         if a.ignore_updates {
@@ -315,6 +339,9 @@ pub async fn run_check_for_flavour(
             _ => {}
         }
 
+        let mut held_val = 0;
+        let mut held_reason_val = None;
+
         match outcome_status.as_str() {
             "Would-update" => {
                 would_update_count += 1;
@@ -323,6 +350,34 @@ pub async fn run_check_for_flavour(
                     "INFO",
                     &format!("{}: Would update to {:?}", a.name, upd_ver),
                 );
+
+                let gv: Vec<String> = a.latest_game_versions.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let p_ctx = crate::engine::update_policy::PolicyContext {
+                    addon_id: &a.id,
+                    name: &a.name,
+                    flavour,
+                    client_build: client_build.as_deref(),
+                    target_game_versions: &gv,
+                    ignored_until_build: a.ignored_until_build.as_deref(),
+                    ignore_updates: a.ignore_updates,
+                    is_pinned: a.pinned_file_id.is_some(),
+                    auto_update: a.auto_update,
+                    update_mode: &update_mode,
+                    origin: crate::engine::update_policy::SyncOrigin::Manual,
+                    override_hold: false,
+                    override_modified: false,
+                    integrity_status: a.integrity_status.as_deref(),
+                    is_newer: true,
+                    force: false,
+                };
+                let action = crate::engine::update_policy::decide(&p_ctx);
+                if let crate::engine::update_policy::PolicyAction::SkipHeld { reason } = action {
+                    held_count += 1;
+                    held_val = 1;
+                    held_reason_val = Some(reason);
+                }
             }
             "Up-to-date" => {
                 up_to_date_count += 1;
@@ -338,6 +393,12 @@ pub async fn run_check_for_flavour(
             }
             _ => {}
         }
+
+        if a.integrity_status.as_deref() == Some("modified") {
+            modified_count += 1;
+        }
+
+        check_details.insert(a.id.clone(), (held_val, held_reason_val));
 
         outcomes.push(AddonCheckOutcome {
             addon_id: a.id.clone(),
@@ -356,10 +417,11 @@ pub async fn run_check_for_flavour(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
     for o in &outcomes {
+        let (held, held_reason) = check_details.get(&o.addon_id).cloned().unwrap_or((0, None));
         tx.execute(
-            "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![o.addon_id, now, o.update_file_id, o.update_version, o.status, o.error],
+            "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error, held, held_reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![o.addon_id, now, o.update_file_id, o.update_version, o.status, o.error, held, held_reason],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -405,6 +467,8 @@ pub async fn run_check_for_flavour(
         ignored_count,
         pinned_count,
         failed_count,
+        held_count,
+        modified_count,
         outcomes,
     })
 }

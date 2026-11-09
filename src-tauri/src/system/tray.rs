@@ -394,7 +394,7 @@ pub fn setup_tray<R: tauri::Runtime>(
                     }
                 }
                 "check" => {
-                    sched_clone.trigger_cycle(true);
+                    sched_clone.trigger_cycle(false);
                 }
                 "startup" => {
                     let current = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);

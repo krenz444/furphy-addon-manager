@@ -38,6 +38,15 @@ pub fn adopt_candidate_group(
 
     tx.commit()?;
 
+    // Baseline manifest generation for adopted folders
+    let wow_root = crate::paths::detect_wow_root(None).ok();
+    let installed = crate::engine::flavours::detect_all_installed_flavours(conn, wow_root.as_deref());
+    if let Some(flv_info) = installed.iter().find(|f| f.id == flavour) {
+        if let Ok(manifest) = crate::engine::integrity::generate_manifest_for_folders(&flv_info.addons_path, &candidate.folders) {
+            let _ = crate::engine::integrity::record_manifest(conn, &addon_id, &manifest);
+        }
+    }
+
     append_app_log(
         "INFO",
         &format!(

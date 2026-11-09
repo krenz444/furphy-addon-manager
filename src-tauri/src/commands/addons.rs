@@ -49,6 +49,10 @@ pub struct AddonDto {
     pub ignored_deps: Vec<String>,
     pub wago_slug: Option<String>,
     pub repo: Option<String>,
+    pub held: bool,
+    pub held_reason: Option<String>,
+    pub auto_update: bool,
+    pub integrity_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +119,8 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             "SELECT a.id, a.flavour, a.name, a.author, a.source, a.version, a.project_id, \
              a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
              a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
-             c.update_version, c.update_file_id, c.status, c.error, a.latest_game_versions, a.ignored_deps \
+             c.update_version, c.update_file_id, c.status, c.error, a.latest_game_versions, a.ignored_deps, \
+             a.auto_update, a.integrity_status, c.held, c.held_reason \
              FROM addons a \
              LEFT JOIN check_results c ON a.id = c.addon_id \
              WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
@@ -146,12 +151,17 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             let error: Option<String> = row.get(19)?;
             let latest_gv_json: Option<String> = row.get(20)?;
             let ignored_deps_json: Option<String> = row.get(21)?;
+            let auto_update: bool = row.get::<_, Option<i32>>(22).ok().flatten().unwrap_or(1) != 0;
+            let integrity_status: String = row.get::<_, Option<String>>(23).ok().flatten().unwrap_or_else(|| "clean".to_string());
+            let held: bool = row.get::<_, Option<i32>>(24).ok().flatten().unwrap_or(0) != 0;
+            let held_reason: Option<String> = row.get(25).ok().flatten();
 
             Ok((
                 addon_id, flavour_id, name, author, source, version,
                 project_id, file_id, file_name, installed_at, adopted,
                 ignore_updates, pinned_file_id, release_type, wago_slug,
                 repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
+                auto_update, integrity_status, held, held_reason,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -163,6 +173,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             project_id, file_id, file_name, installed_at, adopted,
             ignore_updates, pinned_file_id, release_type, wago_slug,
             repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
+            auto_update, integrity_status, held, held_reason,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut folder_stmt = conn
@@ -240,6 +251,10 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             ignored_deps,
             wago_slug,
             repo,
+            held,
+            held_reason,
+            auto_update,
+            integrity_status,
         });
     }
 

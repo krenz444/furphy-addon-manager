@@ -65,7 +65,7 @@ pub fn open_folder_path(path: &Path) -> Result<(), String> {
 #[tauri::command]
 pub fn open_target(what: String, args: Option<serde_json::Value>) -> Result<(), String> {
     let arg_str = match args {
-        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::String(ref s)) => Some(s.clone()),
         Some(serde_json::Value::Array(ref arr)) => {
             arr.first().and_then(|v| v.as_str().map(|s| s.to_string()))
         }
@@ -164,6 +164,22 @@ pub fn open_target(what: String, args: Option<serde_json::Value>) -> Result<(), 
         "migration-backup" => {
             let mig = get_data_dir().join("migration_backups");
             open_folder_path(&mig)
+        }
+        "addon_folder" => {
+            let (flavour, addon_id) = match args {
+                Some(serde_json::Value::Object(ref map)) => {
+                    let f = map.get("flavour").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let a = map.get("addon_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    (f, a)
+                }
+                Some(serde_json::Value::Array(ref arr)) => {
+                    let f = arr.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let a = arr.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    (f, a)
+                }
+                _ => return Err("Arguments flavour and addon_id required for addon_folder".into()),
+            };
+            crate::commands::integrity::show_addon_folder(flavour, addon_id)
         }
         _ => Err(format!("Unknown open target: {}", what)),
     }

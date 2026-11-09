@@ -23,6 +23,10 @@ export interface Addon {
   ignored_deps?: string[];
   wago_slug?: string | null;
   repo?: string | null;
+  held?: boolean;
+  held_reason?: string | null;
+  auto_update?: boolean;
+  integrity_status?: 'clean' | 'modified' | 'missing' | 'unknown';
 }
 
 export interface Flavour {
@@ -173,3 +177,58 @@ export interface WagoSearchResponse {
   page: number;
   has_more: boolean;
 }
+
+export interface ActivityRecord {
+  id: string;
+  ts: string;
+  flavour: string;
+  addon_id: string;
+  name: string;
+  kind: 'installed' | 'updated' | 'removed' | 'rolled_back' | 'failed' | 'held' | 'switched_source';
+  from_version: string | null;
+  to_version: string | null;
+  source: string | null;
+  job_id: string | null;
+  error: string | null;
+}
+
+export type ActivityEntry = ActivityRecord;
+
+export interface WholeWtfBackup {
+  id: string;
+  flavour: string;
+  created_at: string;
+  path: string;
+  file_count: number;
+  total_bytes: number;
+  note: string | null;
+}
+
+export type WholeWtfBackupRecord = WholeWtfBackup;
+
+export interface WtfRestorePreview {
+  backup_id: string;
+  flavour: string;
+  created_at: string;
+  file_count: number;
+  total_bytes: number;
+  live_file_count: number;
+  live_total_bytes: number;
+  warning: string | null;
+}
+
+export interface FileIntegrityDiff {
+  rel_path: string;
+  expected_hash: string | null;
+  actual_hash: string | null;
+  reason: 'hash_mismatch' | 'file_missing' | 'extra_file';
+}
+
+export interface IntegrityReport {
+  addon_id: string;
+  status: 'clean' | 'modified' | 'missing' | 'unknown';
+  diffs: FileIntegrityDiff[];
+}
+
+export type UpdateMode = 'auto' | 'notify';
+
