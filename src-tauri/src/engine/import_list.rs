@@ -18,6 +18,8 @@ pub struct AddonExportItemV2 {
     pub release_type: Option<i64>,
     pub pinned_file_id: Option<String>,
     pub ignore_updates: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
     pub folders: Vec<String>,
 }
 
@@ -48,7 +50,7 @@ pub fn export_addon_list_v2_with_options(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, release_type, pinned_file_id, ignore_updates \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, release_type, pinned_file_id, ignore_updates, auto_update \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -65,6 +67,7 @@ pub fn export_addon_list_v2_with_options(
             let release_type: Option<i64> = row.get(7)?;
             let pinned_file_id: Option<String> = row.get(8)?;
             let ignore_updates: bool = row.get::<_, i32>(9)? != 0;
+            let auto_update: bool = row.get::<_, Option<i32>>(10)?.map(|v| v != 0).unwrap_or(true);
 
             Ok((
                 id,
@@ -77,6 +80,7 @@ pub fn export_addon_list_v2_with_options(
                 release_type,
                 pinned_file_id,
                 ignore_updates,
+                auto_update,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -94,6 +98,7 @@ pub fn export_addon_list_v2_with_options(
             release_type,
             pinned_file_id,
             ignore_updates,
+            auto_update,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut fstmt = conn
@@ -114,6 +119,7 @@ pub fn export_addon_list_v2_with_options(
             release_type,
             pinned_file_id,
             ignore_updates,
+            auto_update: Some(auto_update),
             folders,
         });
     }
@@ -219,11 +225,12 @@ pub fn import_addon_list(
                 let release_type = a.get("release_type").or_else(|| a.get("releaseType")).and_then(|v| v.as_i64()).unwrap_or(1);
                 let pinned = a.get("pinned_file_id").or_else(|| a.get("pinnedFileId")).and_then(|v| v.as_str());
                 let ignore = a.get("ignore_updates").or_else(|| a.get("ignoreUpdates")).and_then(|v| v.as_bool()).unwrap_or(false);
+                let auto_update = a.get("auto_update").or_else(|| a.get("autoUpdate")).and_then(|v| v.as_bool()).unwrap_or(true);
 
                 let id = Uuid::new_v4().to_string();
                 tx.execute(
-                    "INSERT INTO addons (id, flavour, name, source, project_id, wago_slug, wago_id, repo, release_type, pinned_file_id, ignore_updates, installed_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO addons (id, flavour, name, source, project_id, wago_slug, wago_id, repo, release_type, pinned_file_id, ignore_updates, auto_update, installed_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         id,
                         flavour,
@@ -236,6 +243,7 @@ pub fn import_addon_list(
                         release_type,
                         pinned,
                         if ignore { 1 } else { 0 },
+                        if auto_update { 1 } else { 0 },
                         now
                     ],
                 )
@@ -314,8 +322,8 @@ mod tests {
         ).unwrap();
 
         conn.execute(
-            "INSERT INTO addons (id, flavour, name, source, project_id, release_type, ignore_updates) \
-             VALUES ('a1', 'retail', 'Deadly Boss Mods', 'curseforge', 3358, 2, 0)",
+            "INSERT INTO addons (id, flavour, name, source, project_id, release_type, ignore_updates, auto_update) \
+             VALUES ('a1', 'retail', 'Deadly Boss Mods', 'curseforge', 3358, 2, 0, 0)",
             [],
         ).unwrap();
         conn.execute(
@@ -339,10 +347,13 @@ mod tests {
         let imported = import_addon_list(&mut dest_conn, "retail", &export_path).unwrap();
         assert_eq!(imported, 1);
 
-        let imported_name: String = dest_conn
-            .query_row("SELECT name FROM addons WHERE flavour = 'retail'", [], |r| r.get(0))
+        let (imported_name, imported_auto): (String, i32) = dest_conn
+            .query_row("SELECT name, auto_update FROM addons WHERE flavour = 'retail'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(imported_name, "Deadly Boss Mods");
+        assert_eq!(imported_auto, 0);
     }
 
     #[test]
@@ -396,5 +407,78 @@ mod tests {
             .query_row("SELECT name FROM addons WHERE flavour = 'retail'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "Details! Damage Meter");
+    }
+
+    #[test]
+    fn test_import_v2_with_optional_auto_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let import_path = temp.path().join("import_v2.json");
+
+        let doc = serde_json::json!({
+            "format": "wow-addon-manager/2",
+            "version": 2,
+            "exported_at": "2026-11-08T00:00:00Z",
+            "flavour": "retail",
+            "addons": [
+                {
+                    "name": "Addon With Auto False",
+                    "source": "curseforge",
+                    "project_id": 123,
+                    "auto_update": false,
+                    "folders": ["AddonA"]
+                },
+                {
+                    "name": "Addon With Auto True",
+                    "source": "curseforge",
+                    "project_id": 456,
+                    "auto_update": true,
+                    "folders": ["AddonB"]
+                },
+                {
+                    "name": "Addon Without Auto Field",
+                    "source": "curseforge",
+                    "project_id": 789,
+                    "folders": ["AddonC"]
+                }
+            ]
+        });
+        fs::write(&import_path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        ).unwrap();
+
+        let count = import_addon_list(&mut conn, "retail", &import_path).unwrap();
+        assert_eq!(count, 3);
+
+        let auto_false: i32 = conn
+            .query_row(
+                "SELECT auto_update FROM addons WHERE project_id = 123",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(auto_false, 0);
+
+        let auto_true: i32 = conn
+            .query_row(
+                "SELECT auto_update FROM addons WHERE project_id = 456",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(auto_true, 1);
+
+        let auto_default: i32 = conn
+            .query_row(
+                "SELECT auto_update FROM addons WHERE project_id = 789",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(auto_default, 1);
     }
 }
