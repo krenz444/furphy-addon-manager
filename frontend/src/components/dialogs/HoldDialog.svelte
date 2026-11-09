@@ -19,6 +19,7 @@
     onCancel,
   }: Props = $props();
 
+  let dialogCardEl = $state<HTMLDivElement | null>(null);
   let cancelButtonEl = $state<HTMLButtonElement | null>(null);
 
   $effect(() => {
@@ -34,6 +35,23 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       onCancel();
+    } else if (e.key === 'Tab' && dialogCardEl) {
+      const focusable = Array.from(
+        dialogCardEl.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      );
+      if (focusable.length > 0) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
   }
 </script>
@@ -46,6 +64,7 @@
     <div
       class="dialog-card"
       data-testid="hold-dialog"
+      bind:this={dialogCardEl}
       onclick={(e) => e.stopPropagation()}
       role="dialog"
       aria-modal="true"
