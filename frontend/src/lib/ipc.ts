@@ -1,5 +1,6 @@
 import { isTauri, invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { handleMockInvoke } from './mockIpc';
+import { withCamelAliases } from './ipcArgs';
 import type { Flavour, JobRecord } from './types';
 
 export type JobDto = JobRecord;
@@ -136,7 +137,7 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     }
   } else {
     try {
-      res = await tauriInvoke<T>(cmd, args);
+      res = await tauriInvoke<T>(cmd, withCamelAliases(args));
     } catch (err) {
       console.error(`[IPC Error] ${cmd}:`, err);
       throw err;
