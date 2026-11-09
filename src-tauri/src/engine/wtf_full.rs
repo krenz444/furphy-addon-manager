@@ -91,6 +91,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Restore safety copies kept after a successful restore: the way back from the last restores, without filling the disk.
+const SAFETY_SNAPSHOTS_KEPT: usize = 2;
+
+/// Removes the oldest `wtf_safety_*` folders in `backups_dir` until `keep` remain. The folder names carry a sortable timestamp.
+fn prune_safety_snapshots(backups_dir: &Path, keep: usize) {
+    let mut dirs: Vec<PathBuf> = match fs::read_dir(backups_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("wtf_safety_")).unwrap_or(false))
+            .collect(),
+        Err(_) => return,
+    };
+    dirs.sort();
+    while dirs.len() > keep {
+        let oldest = dirs.remove(0);
+        let _ = fs::remove_dir_all(&oldest);
+    }
+}
+
 fn rollback_from_safety(safety_dir: &Path, wtf_root: &Path) -> std::io::Result<()> {
     if wtf_root.exists() {
         fs::remove_dir_all(wtf_root)?;
@@ -436,6 +456,7 @@ pub fn restore_whole_wtf(
         "INFO",
         &format!("Successfully restored whole WTF backup '{}' for flavour '{}'", backup_id, flavour),
     );
+    prune_safety_snapshots(&data_dir.join("backups"), SAFETY_SNAPSHOTS_KEPT);
 
     Ok(())
 }
@@ -484,6 +505,35 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use crate::db::schema::INITIAL_SCHEMA;
+
+    #[test]
+    fn test_prune_safety_snapshots_keeps_the_newest_and_leaves_other_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let backups = temp.path().join("backups");
+        for name in [
+            "wtf_safety_20261101_100000_000",
+            "wtf_safety_20261102_100000_000",
+            "wtf_safety_20261103_100000_000",
+            "wtf_safety_20261104_100000_000",
+            "retail",
+        ] {
+            let dir = backups.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file.txt"), "x").unwrap();
+        }
+        fs::write(backups.join("wtf_retail_abc.zip"), "zip").unwrap();
+
+        prune_safety_snapshots(&backups, 2);
+
+        assert!(!backups.join("wtf_safety_20261101_100000_000").exists());
+        assert!(!backups.join("wtf_safety_20261102_100000_000").exists());
+        assert!(backups.join("wtf_safety_20261103_100000_000").exists());
+        assert!(backups.join("wtf_safety_20261104_100000_000").exists());
+        assert!(backups.join("retail").exists(), "a folder that is not a safety copy must stay");
+        assert!(backups.join("wtf_retail_abc.zip").exists(), "archives must stay");
+
+        prune_safety_snapshots(&temp.path().join("does-not-exist"), 2);
+    }
 
     #[test]
     fn test_backup_whole_wtf_creates_valid_zip() {
