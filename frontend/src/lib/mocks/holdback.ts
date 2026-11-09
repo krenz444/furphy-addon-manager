@@ -37,6 +37,31 @@ function restoreHeldStorage(): void {
   } catch {}
 }
 
+function getFurphyMock(): Record<string, unknown> {
+  if (typeof window === 'undefined') return {};
+  const w = window as unknown as Record<string, unknown>;
+  const desc = Object.getOwnPropertyDescriptor(w, '__furphyMock');
+  if (!desc) {
+    let currentMock = (w.__furphyMock as Record<string, unknown>) || {};
+    Object.defineProperty(w, '__furphyMock', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return currentMock;
+      },
+      set(val: Record<string, unknown>) {
+        if (val && typeof val === 'object') {
+          Object.assign(val, currentMock);
+          currentMock = val;
+        } else {
+          currentMock = val || {};
+        }
+      },
+    });
+  }
+  return w.__furphyMock as Record<string, unknown>;
+}
+
 function attachFurphyMockHooks(wMock: Record<string, unknown>): void {
   wMock.setHeldAddon = (addonId: string, held: boolean, reason?: string) => {
     const addons = getMockAddons();
@@ -58,15 +83,8 @@ function attachFurphyMockHooks(wMock: Record<string, unknown>): void {
     }
   };
 
-  wMock.getLastSyncParams = () => lastSyncParams;
-
-  Object.defineProperty(wMock, 'lastSyncParams', {
-    get() {
-      return lastSyncParams;
-    },
-    configurable: true,
-    enumerable: true,
-  });
+  wMock.getLastSyncParams = () => (wMock.lastSyncParams as Record<string, unknown> | null) ?? lastSyncParams;
+  wMock.lastSyncParams = lastSyncParams;
 }
 
 export function initHoldbackMock(): void {
@@ -86,6 +104,8 @@ export function initHoldbackMock(): void {
 
   registerMockJob('sync', (_jobKind, flavour, params) => {
     lastSyncParams = params;
+    const mock = getFurphyMock();
+    mock.lastSyncParams = params;
     if (params?.override_hold && Array.isArray(params.only)) {
       const addons = getMockAddons();
       for (const id of params.only) {
@@ -114,23 +134,7 @@ export function initHoldbackMock(): void {
   });
 
   if (typeof window !== 'undefined') {
-    const w = window as unknown as Record<string, unknown>;
-    let currentMock = w.__furphyMock as Record<string, unknown> | undefined;
-    if (currentMock) {
-      attachFurphyMockHooks(currentMock);
-    }
-    Object.defineProperty(window, '__furphyMock', {
-      configurable: true,
-      enumerable: true,
-      get() {
-        return currentMock;
-      },
-      set(val: Record<string, unknown>) {
-        currentMock = val;
-        if (currentMock) {
-          attachFurphyMockHooks(currentMock);
-        }
-      },
-    });
+    const wMock = getFurphyMock();
+    attachFurphyMockHooks(wMock);
   }
 }

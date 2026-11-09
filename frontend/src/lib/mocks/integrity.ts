@@ -14,6 +14,31 @@ let lastSyncParams: Record<string, unknown> | null = null;
 let mockShowFolderCalls: Array<{ flavour: string; addon_id: string }> = [];
 let mockReinstallCalls: Array<{ flavour: string | null; params: Record<string, unknown> }> = [];
 
+function getFurphyMock(): Record<string, unknown> {
+  if (typeof window === 'undefined') return {};
+  const w = window as unknown as Record<string, unknown>;
+  const desc = Object.getOwnPropertyDescriptor(w, '__furphyMock');
+  if (!desc) {
+    let currentMock = (w.__furphyMock as Record<string, unknown>) || {};
+    Object.defineProperty(w, '__furphyMock', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return currentMock;
+      },
+      set(val: Record<string, unknown>) {
+        if (val && typeof val === 'object') {
+          Object.assign(val, currentMock);
+          currentMock = val;
+        } else {
+          currentMock = val || {};
+        }
+      },
+    });
+  }
+  return w.__furphyMock as Record<string, unknown>;
+}
+
 function attachIntegrityHooks(target: Record<string, unknown>): void {
   target.setAddonIntegrityStatus = (
     addonId: string,
@@ -29,7 +54,8 @@ function attachIntegrityHooks(target: Record<string, unknown>): void {
   target.clearMockZipBackups = () => {
     mockZipBackups = [];
   };
-  target.getLastSyncParams = () => lastSyncParams;
+  target.getLastSyncParams = () => (target.lastSyncParams as Record<string, unknown> | null) ?? lastSyncParams;
+  target.lastSyncParams = lastSyncParams;
   target.getShowFolderCalls = () => [...mockShowFolderCalls];
   target.getReinstallCalls = () => [...mockReinstallCalls];
 }
@@ -112,6 +138,20 @@ export function initIntegrityMock(): void {
 
   registerMockJob('sync', (_jobKind, flavour, params) => {
     lastSyncParams = params;
+    const mock = getFurphyMock();
+    mock.lastSyncParams = params;
+
+    if (params?.override_hold && Array.isArray(params.only)) {
+      const addons = getMockAddons();
+      for (const id of params.only) {
+        const target = addons.find((a) => a.id === id);
+        if (target) {
+          target.held = false;
+          target.held_reason = null;
+        }
+      }
+    }
+
     if (params?.backup_modified === true) {
       mockZipBackups.push({
         id: `mock-zip-${Date.now()}`,
@@ -152,23 +192,7 @@ export function initIntegrityMock(): void {
   });
 
   if (typeof window !== 'undefined') {
-    const w = window as unknown as Record<string, unknown>;
-    let currentMock = (w.__furphyMock as Record<string, unknown>) || {};
-    try {
-      Object.defineProperty(w, '__furphyMock', {
-        configurable: true,
-        enumerable: true,
-        get() {
-          return currentMock;
-        },
-        set(val: Record<string, unknown>) {
-          currentMock = val || {};
-          attachIntegrityHooks(currentMock);
-        },
-      });
-    } catch {
-      // If defineProperty fails, attach directly to currentMock
-    }
+    const currentMock = getFurphyMock();
     attachIntegrityHooks(currentMock);
   }
 }
