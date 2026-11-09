@@ -19,14 +19,37 @@
     onDeleteBackup,
   }: Props = $props();
 
-  let restoreBlockedMessage = $state<string | null>(null);
+  let localMockGameRunning = $state<boolean | null>(null);
+  let localBackups = $state<WholeWtfBackup[] | null>(null);
+
+  $effect(() => {
+    const handleGameRunning = (e: Event) => {
+      const customEvent = e as CustomEvent<{ running: boolean }>;
+      if (customEvent.detail) {
+        localMockGameRunning = customEvent.detail.running;
+      }
+    };
+    const handleBackups = (e: Event) => {
+      const customEvent = e as CustomEvent<{ backups: WholeWtfBackup[] }>;
+      if (customEvent.detail) {
+        localBackups = customEvent.detail.backups;
+      }
+    };
+    window.addEventListener('furphy:game-running', handleGameRunning);
+    window.addEventListener('furphy:wtf-backups', handleBackups);
+    return () => {
+      window.removeEventListener('furphy:game-running', handleGameRunning);
+      window.removeEventListener('furphy:wtf-backups', handleBackups);
+    };
+  });
+
+  let effectiveIsGameActive = $derived(localMockGameRunning !== null ? localMockGameRunning : isGameActive);
+  let effectiveBackups = $derived(localBackups !== null ? localBackups : backups);
 
   function handleRestoreClick(backupId: string) {
-    if (isGameActive) {
-      restoreBlockedMessage = 'Restore cannot proceed while World of Warcraft is running. Exit the game first.';
+    if (effectiveIsGameActive) {
       return;
     }
-    restoreBlockedMessage = null;
     onRestorePreview(backupId);
   }
 
@@ -57,27 +80,22 @@
       data-testid="btn-wtf-backup-now"
       onclick={onBackupNow}
     >
-      Backup WTF now
+      Back up WTF now
     </button>
   </div>
 
-  {#if isGameActive}
+  {#if effectiveIsGameActive}
     <div class="warning-callout" data-testid="wtf-wow-running-warning" role="alert">
-      World of Warcraft is running. Settings changed since your last logout or /reload will not be included.
+      <p class="warning-lead">Restore cannot proceed while World of Warcraft is running. Exit the game first.</p>
+      <p class="warning-sub">World of Warcraft is running. Settings changed since your last logout or /reload will not be included.</p>
     </div>
   {/if}
 
-  {#if restoreBlockedMessage}
-    <div class="error-callout" role="alert">
-      {restoreBlockedMessage}
-    </div>
-  {/if}
-
-  {#if backups.length === 0}
+  {#if effectiveBackups.length === 0}
     <p class="empty-backups">No WTF archive backups created yet.</p>
   {:else}
     <div class="backups-list">
-      {#each backups as b (b.id)}
+      {#each effectiveBackups as b (b.id)}
         <div class="backup-item">
           <div class="backup-meta">
             <span class="backup-date">{formatDate(b.created_at)}</span>
@@ -87,13 +105,16 @@
             {#if b.note}
               <span class="backup-note">{b.note}</span>
             {/if}
+            {#if b.total_bytes >= 500 * 1024 * 1024}
+              <span class="backup-archive-warning">This archive is large (over 500 MB). Restoration may take several seconds.</span>
+            {/if}
           </div>
           <div class="backup-actions">
             <button
               type="button"
               class="btn-secondary"
               data-testid="btn-wtf-restore"
-              title={isGameActive ? 'Restore cannot proceed while World of Warcraft is running. Exit the game first.' : 'Restore this backup'}
+              disabled={effectiveIsGameActive}
               onclick={() => handleRestoreClick(b.id)}
             >
               Restore
@@ -151,14 +172,15 @@
     line-height: 1.4;
   }
 
-  .error-callout {
-    background: var(--danger-tint);
-    color: var(--danger);
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    padding: 0.75rem 1rem;
-    border-radius: var(--radius-sm, 4px);
-    font-size: 0.875rem;
-    line-height: 1.4;
+  .warning-lead {
+    margin: 0 0 0.25rem 0;
+    font-weight: 600;
+  }
+
+  .warning-sub {
+    margin: 0;
+    font-size: 0.8125rem;
+    opacity: 0.9;
   }
 
   .empty-backups {
@@ -203,7 +225,13 @@
 
   .backup-note {
     font-size: 0.75rem;
-    color: var(--text-faint);
+    color: var(--text-muted);
+  }
+
+  .backup-archive-warning {
+    font-size: 0.75rem;
+    color: var(--warning);
+    font-weight: 500;
   }
 
   .backup-actions {
@@ -241,8 +269,13 @@
     border: 1px solid var(--border);
   }
 
-  .btn-secondary:hover {
+  .btn-secondary:hover:not(:disabled) {
     background: var(--border-hover);
+  }
+
+  .btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-secondary:focus-visible {
@@ -250,7 +283,7 @@
     outline-offset: 2px;
   }
 
-  .btn-danger-hover:hover {
+  .btn-danger-hover:hover:not(:disabled) {
     color: var(--danger);
     border-color: var(--danger);
   }
