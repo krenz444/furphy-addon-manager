@@ -284,7 +284,11 @@ pub fn parse_build_info(build_info_path: &Path) -> Vec<(String, String)> {
     if let Ok(content) = fs::read_to_string(build_info_path) {
         let mut lines = content.lines();
         if let Some(header_line) = lines.next() {
-            let headers: Vec<&str> = header_line.split('|').map(|s| s.trim()).collect();
+            // Battle.net writes each column name with a type suffix ("Product!STRING:0").
+            let headers: Vec<&str> = header_line
+                .split('|')
+                .map(|s| s.split('!').next().unwrap_or("").trim())
+                .collect();
             let product_idx = headers.iter().position(|&h| h.eq_ignore_ascii_case("Product"));
             let version_idx = headers.iter().position(|&h| h.eq_ignore_ascii_case("Version"));
 
@@ -538,5 +542,58 @@ mod tests {
         let db_flavours = crate::db::repo::get_installed_flavours_db(&conn).unwrap();
         assert!(db_flavours.iter().any(|f| f.id == "retail" && f.installed));
         assert!(db_flavours.iter().any(|f| f.id == "forever" && f.installed));
+    }
+
+    // Header line of a real Battle.net .build.info: every column name carries a "!TYPE:size" suffix.
+    const REAL_BUILD_INFO_HEADER: &str = "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Install Key!HEX:16|IM Size!DEC:4|CDN Path!STRING:0|CDN Hosts!STRING:0|CDN Servers!STRING:0|Tags!STRING:0|Armadillo!STRING:0|Last Activated!STRING:0|Version!STRING:0|KeyRing!HEX:16|Product!STRING:0";
+
+    fn write_real_format_build_info(root: &Path) {
+        let row = |product: &str, version: &str| {
+            format!(
+                "us|1|aa|bb|cc||tpr/wow|a.example|b.example|Windows x86_64 enUS speech?:Windows x86_64 enUS text?||2026-11-08T00:00:00Z|{}||{}",
+                version, product
+            )
+        };
+        let content = format!(
+            "{}\n{}\n{}\n",
+            REAL_BUILD_INFO_HEADER,
+            row("wow", "12.1.5.70783"),
+            row("wowf", "1.60.1.70862")
+        );
+        fs::write(root.join(".build.info"), content).unwrap();
+    }
+
+    #[test]
+    fn test_parse_build_info_reads_typed_battlenet_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_real_format_build_info(dir.path());
+
+        let rows = parse_build_info(&dir.path().join(".build.info"));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&("wow".to_string(), "12.1.5.70783".to_string())));
+        assert!(rows.contains(&("wowf".to_string(), "1.60.1.70862".to_string())));
+    }
+
+    #[test]
+    fn test_detected_client_build_feeds_the_holdback_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        write_real_format_build_info(dir.path());
+        fs::create_dir_all(dir.path().join("_retail_").join("Interface").join("AddOns")).unwrap();
+        fs::create_dir_all(dir.path().join("_forever_").join("Interface").join("AddOns")).unwrap();
+
+        let detected = detect_installed_flavours_in_root(dir.path());
+        let retail = detected.iter().find(|f| f.id == "retail").unwrap();
+        assert_eq!(retail.client_build.as_deref(), Some("12.1.5.70783"));
+        assert_eq!(retail.client_interface, Some(120105));
+        let forever = detected.iter().find(|f| f.id == "forever").unwrap();
+        assert_eq!(forever.client_build.as_deref(), Some("1.60.1.70862"));
+        assert_eq!(forever.client_interface, Some(16001));
+
+        let newer = vec!["12.2.0".to_string()];
+        let same_patch = vec!["12.1.5".to_string()];
+        assert!(crate::engine::holdback::is_update_held_back("retail", retail.client_build.as_deref(), &newer, None).is_some());
+        assert_eq!(crate::engine::holdback::is_update_held_back("retail", retail.client_build.as_deref(), &same_patch, None), None);
+        let forever_newer = vec!["1.60.2".to_string()];
+        assert!(crate::engine::holdback::is_update_held_back("forever", forever.client_build.as_deref(), &forever_newer, None).is_some());
     }
 }
