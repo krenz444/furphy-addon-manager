@@ -8,8 +8,8 @@
   }
 
   let {
-    flavours,
-    updateModes,
+    flavours = [],
+    updateModes = {},
     onChangeMode,
   }: Props = $props();
 </script>
@@ -25,7 +25,7 @@
         id="mode-select-{flv.id}"
         class="form-select mode-select"
         data-testid="mode-select-{flv.id}"
-        value={updateModes[flv.id] || 'auto'}
+        value={updateModes?.[flv.id] || 'auto'}
         onchange={(e) => {
           const mode = (e.currentTarget as HTMLSelectElement).value as 'auto' | 'notify';
           onChangeMode(flv.id, mode);

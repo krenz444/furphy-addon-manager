@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+
   interface Props {
     selectedChannel: number;
     onSelectChannel: (channel: number) => void;
@@ -21,9 +23,51 @@
     Math.max(0, channels.findIndex((c) => c.id === selectedChannel))
   );
   let buttonEls = $state<(HTMLButtonElement | null)[]>([]);
+  let openerRef: HTMLElement | null = null;
+  let menuTriggerRef: HTMLElement | null = null;
+
+  onMount(() => {
+    openerRef = (document.activeElement as HTMLElement) || null;
+    if (openerRef) {
+      menuTriggerRef = openerRef.closest('.menu-container')?.querySelector<HTMLElement>('.menu-trigger-btn') || null;
+    }
+  });
 
   $effect(() => {
     buttonEls[focusedIndex]?.focus();
+  });
+
+  function returnFocus() {
+    if (openerRef && openerRef.isConnected) {
+      openerRef.focus();
+    } else if (menuTriggerRef && menuTriggerRef.isConnected) {
+      menuTriggerRef.focus();
+    }
+  }
+
+  function selectChannel(channel: number) {
+    onSelectChannel(channel);
+    returnFocus();
+    setTimeout(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        returnFocus();
+      }
+    }, 0);
+  }
+
+  function closeSubmenu() {
+    onClose();
+    returnFocus();
+  }
+
+  onDestroy(() => {
+    setTimeout(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        returnFocus();
+      }
+    }, 0);
   });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -35,9 +79,22 @@
       e.preventDefault();
       focusedIndex = (focusedIndex - 1 + channels.length) % channels.length;
       buttonEls[focusedIndex]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      focusedIndex = 0;
+      buttonEls[focusedIndex]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      focusedIndex = channels.length - 1;
+      buttonEls[focusedIndex]?.focus();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      onClose();
+      e.stopPropagation();
+      closeSubmenu();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      selectChannel(channels[focusedIndex].id);
     }
   }
 </script>
@@ -60,7 +117,7 @@
       bind:this={buttonEls[idx]}
       onclick={(e) => {
         e.stopPropagation();
-        onSelectChannel(ch.id);
+        selectChannel(ch.id);
       }}
     >
       <span class="channel-check" aria-hidden="true">
