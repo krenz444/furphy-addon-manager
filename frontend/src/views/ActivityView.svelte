@@ -16,22 +16,11 @@
   let activities = $state<ActivityRecord[]>([]);
   let loading = $state<boolean>(false);
 
-  $effect(() => {
-    // When activeFlavour prop changes, initialize filter if empty
-    if (!selectedFlavour && activeFlavour) {
-      selectedFlavour = activeFlavour;
-    }
-  });
-
-  $effect(() => {
-    loadActivities();
-  });
-
-  async function loadActivities() {
+  async function loadActivities(flavour?: string) {
     loading = true;
     try {
       const records = await invoke<ActivityRecord[]>('list_activity', {
-        flavour: selectedFlavour || undefined,
+        flavour: flavour || undefined,
       });
       activities = records || [];
     } catch {
@@ -41,12 +30,21 @@
     }
   }
 
+  $effect(() => {
+    const f = selectedFlavour;
+    loadActivities(f);
+  });
+
   async function handleClear() {
+    if (typeof window !== 'undefined' && window.confirm) {
+      const confirmed = window.confirm('Clear all activity history?');
+      if (!confirmed) return;
+    }
     try {
       await invoke('clear_activity', {
         flavour: selectedFlavour || undefined,
       });
-      await loadActivities();
+      await loadActivities(selectedFlavour);
     } catch {
       // ignore
     }
@@ -55,6 +53,7 @@
   function getDayHeading(iso: string): string {
     try {
       const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const itemDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -62,7 +61,7 @@
       const diffDays = Math.round(diffTime / (1000 * 3600 * 24));
       if (diffDays === 0) return 'Today';
       if (diffDays === 1) return 'Yesterday';
-      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
     } catch {
       return iso;
     }
@@ -116,16 +115,18 @@
         data-testid="btn-clear-activity"
         onclick={handleClear}
       >
-        Clear Activity
+        Clear history
       </button>
     {/if}
   </header>
 
   <div class="activity-content">
     {#if loading}
-      <p class="loading-state">Loading activity history…</p>
+      <p class="loading-state">Loading activity history...</p>
     {:else if activities.length === 0}
-      <p class="empty-state" data-testid="activity-empty-state">Nothing has changed yet.</p>
+      <div class="empty-state-container" data-testid="activity-empty-state">
+        <p>Nothing has changed yet.</p>
+      </div>
     {:else}
       <div class="activity-timeline">
         {#each dayGroups as group (group.heading)}
@@ -133,13 +134,28 @@
             <h2 class="day-heading">{group.heading}</h2>
             <div class="day-items">
               {#each group.items as item (item.id)}
-                <div class="activity-row" data-testid="activity-item">
+                <div
+                  class="activity-row"
+                  data-testid="activity-item"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => onOpenDrawer(item.addon_id, 'changelog')}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onOpenDrawer(item.addon_id, 'changelog');
+                    }
+                  }}
+                >
                   <span class="activity-time">{formatTime(item.ts)}</span>
                   <span class="activity-kind-badge kind-{item.kind}">{item.kind}</span>
                   <button
                     type="button"
                     class="activity-name-btn"
-                    onclick={() => onOpenDrawer(item.addon_id, 'overview')}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      onOpenDrawer(item.addon_id, 'changelog');
+                    }}
                   >
                     {item.name}
                   </button>
@@ -173,7 +189,7 @@
     height: 100%;
     min-height: 0;
     overflow: hidden;
-    background: var(--bg-0);
+    background: var(--bg-1);
   }
 
   .activity-header {
@@ -220,11 +236,22 @@
     padding: 1.5rem;
   }
 
-  .loading-state, .empty-state {
+  .loading-state {
     color: var(--text-muted);
     font-size: 0.95rem;
     text-align: center;
     margin-top: 3rem;
+  }
+
+  .empty-state-container {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    text-align: center;
+    margin-top: 3rem;
+  }
+
+  .empty-state-container p {
+    margin: 0;
   }
 
   .activity-timeline {
@@ -260,10 +287,16 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.5rem 0.75rem;
-    background: var(--bg-1);
+    background: var(--bg-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm, 4px);
     font-size: 0.875rem;
+    cursor: pointer;
+  }
+
+  .activity-row:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .activity-time {
@@ -284,18 +317,15 @@
   }
 
   .kind-updated, .kind-installed {
-    color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 30%, transparent);
+    border-left: 3px solid var(--success);
   }
 
   .kind-removed, .kind-failed {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+    border-left: 3px solid var(--danger);
   }
 
   .kind-held {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+    border-left: 3px solid var(--warning);
   }
 
   .activity-name-btn {
@@ -322,7 +352,7 @@
   .activity-flavour-badge {
     font-size: 0.75rem;
     color: var(--text-muted);
-    background: var(--bg-2);
+    background: var(--bg-3);
     padding: 0.1rem 0.4rem;
     border-radius: var(--radius-sm, 4px);
   }
