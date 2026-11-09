@@ -588,11 +588,11 @@ async fn test_gap_integrity_modified_background_skips_manual_override_updates() 
     let integrity_report = verify_addon_integrity(&conn, &retail_addons, "addon-details").unwrap();
     assert_eq!(integrity_report.status, IntegrityStatus::Modified);
 
-    conn.execute(
-        "UPDATE addons SET integrity_status = 'modified' WHERE id = 'addon-details'",
-        [],
-    )
-    .unwrap();
+    // Nothing has stored the status. The sync itself has to notice the edit before it replaces anything.
+    let stored_before: Option<String> = conn
+        .query_row("SELECT integrity_status FROM addons WHERE id = 'addon-details'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored_before, None);
 
     let policy = Arc::new(NetworkPolicy::default());
     let data_dir = get_data_dir();
@@ -626,6 +626,10 @@ async fn test_gap_integrity_modified_background_skips_manual_override_updates() 
         "print('Details v1.0.0 user modified')",
         "Modified file must not be overwritten by background sync"
     );
+    let stored_after: Option<String> = conn
+        .query_row("SELECT integrity_status FROM addons WHERE id = 'addon-details'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored_after.as_deref(), Some("modified"), "the sync must record the edit it found");
 
     // 2. Manual sync with override_modified updates the addon
     let manual_report = run_sync_for_flavour_with_options(
@@ -880,11 +884,6 @@ async fn test_gap_modified_files_backup_keeps_user_edits_and_a_failed_backup_blo
     let baseline_manifest = generate_manifest_for_folders(&retail_addons, &["Details".to_string()]).unwrap();
     record_manifest(&conn, "addon-details", &baseline_manifest).unwrap();
     fs::write(details_dir.join("Details.lua"), "print('Details v1.0.0 user modified')").unwrap();
-    conn.execute(
-        "UPDATE addons SET integrity_status = 'modified' WHERE id = 'addon-details'",
-        [],
-    )
-    .unwrap();
 
     let policy = Arc::new(NetworkPolicy::default());
     let data_dir = get_data_dir();

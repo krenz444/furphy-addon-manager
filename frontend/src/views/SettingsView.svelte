@@ -11,7 +11,7 @@
   import ConfirmDialog from '../components/dialogs/ConfirmDialog.svelte';
   import UpdateModeSettings from '../components/settings/UpdateModeSettings.svelte';
   import WtfBackupPanel from '../components/settings/WtfBackupPanel.svelte';
-  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour, WholeWtfBackup } from '../lib/types';
+  import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour, WholeWtfBackup, WtfRestorePreview, JobRecord } from '../lib/types';
 
   interface Props {
     flavour: string;
@@ -906,7 +906,7 @@
           <div class="advanced-group">
             <h3>Backup & Transfer</h3>
             <WtfBackupPanel
-              activeFlavour={flavour}
+              activeFlavour={flavours.find((f) => f.id === flavour)?.label ?? flavour}
               {isGameActive}
               backups={wtfBackups}
               onBackupNow={async () => {
@@ -920,10 +920,24 @@
               }}
               onRestorePreview={async (backupId) => {
                 try {
-                  await invoke('wtf_restore_preview', { backup_id: backupId });
-                  onToast?.('info', `Previewed restore for ${backupId}`);
+                  return await invoke<WtfRestorePreview>('wtf_restore_preview', { backup_id: backupId });
                 } catch (err) {
                   onToast?.('error', `Failed to preview restore: ${err}`);
+                  return null;
+                }
+              }}
+              onRestoreConfirm={async (backupId) => {
+                try {
+                  const job = await invoke<JobRecord>('start_job', { kind: 'restore-wtf-all', flavour, params: { backup_id: backupId } });
+                  if (job?.error) {
+                    onToast?.('error', `WTF restore failed: ${job.error}`);
+                    return false;
+                  }
+                  onToast?.('success', 'WTF restored from the archive. It takes effect the next time the game starts.');
+                  return true;
+                } catch (err) {
+                  onToast?.('error', `WTF restore failed: ${err}`);
+                  return false;
                 }
               }}
               onDeleteBackup={async (backupId) => {

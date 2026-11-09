@@ -2,14 +2,15 @@ use std::sync::Arc;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use crate::engine::flavours::get_flavour_mapping;
+use crate::engine::flavours::{detect_all_installed_flavours, get_flavour_mapping};
+use crate::engine::integrity::refresh_integrity_status;
 use crate::engine::select::{select_cf_file, select_github_release, select_wago_release, select_wago_release_strict};
 use crate::logging::append_sync_log;
 use crate::net::curseforge::{create_cf_client, get_cf_files};
 use crate::net::github::{create_github_client, get_github_releases};
 use crate::net::policy::NetworkPolicy;
 use crate::net::wago::{create_wago_client, get_wago_releases_page, WagoSession};
-
+use crate::paths::detect_wow_root;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonCheckOutcome {
@@ -83,6 +84,12 @@ pub async fn run_check_for_flavour(
     let wago_session = WagoSession::new();
 
     let mapping = get_flavour_mapping(flavour, client_interface);
+
+    let wow_root = detect_wow_root(None).ok();
+    let addons_path = detect_all_installed_flavours(conn, wow_root.as_deref())
+        .into_iter()
+        .find(|f| f.id == flavour)
+        .map(|f| f.addons_path);
 
     let (client_build, update_mode): (Option<String>, String) = conn
         .query_row(
@@ -343,6 +350,11 @@ pub async fn run_check_for_flavour(
         let mut held_val = 0;
         let mut held_reason_val = None;
 
+        let integrity_now: Option<String> = addons_path
+            .as_deref()
+            .and_then(|p| refresh_integrity_status(conn, p, &a.id))
+            .or_else(|| a.integrity_status.clone());
+
         match outcome_status.as_str() {
             "Would-update" => {
                 would_update_count += 1;
@@ -366,7 +378,7 @@ pub async fn run_check_for_flavour(
                     origin: crate::engine::update_policy::SyncOrigin::Manual,
                     override_hold: false,
                     override_modified: false,
-                    integrity_status: a.integrity_status.as_deref(),
+                    integrity_status: integrity_now.as_deref(),
                     is_newer: true,
                     force: false,
                 };
@@ -396,7 +408,7 @@ pub async fn run_check_for_flavour(
             let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
         }
 
-        if a.integrity_status.as_deref() == Some("modified") {
+        if integrity_now.as_deref() == Some("modified") {
             modified_count += 1;
         }
 

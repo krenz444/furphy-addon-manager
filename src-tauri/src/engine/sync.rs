@@ -239,6 +239,9 @@ pub async fn run_sync_for_flavour_with_options(
             }
         }
 
+        // Compare the files on disk with the recorded manifest now, so an edit made since the last install is seen before anything is replaced.
+        let integrity_now: Option<String> = crate::engine::integrity::refresh_integrity_status(conn, addons_path, &a.id)
+            .or_else(|| a.integrity_status.clone());
         let p_ctx = crate::engine::update_policy::PolicyContext {
             addon_id: &a.id,
             name: &a.name,
@@ -253,7 +256,7 @@ pub async fn run_sync_for_flavour_with_options(
             origin,
             override_hold,
             override_modified,
-            integrity_status: a.integrity_status.as_deref(),
+            integrity_status: integrity_now.as_deref(),
             is_newer: true,
             force,
         };

@@ -1,12 +1,14 @@
 <script lang="ts">
-  import type { WholeWtfBackup } from '../../lib/types';
+  import type { WholeWtfBackup, WtfRestorePreview } from '../../lib/types';
+  import WtfRestoreDialog from '../dialogs/WtfRestoreDialog.svelte';
 
   interface Props {
     activeFlavour: string;
     isGameActive: boolean;
     backups: WholeWtfBackup[];
     onBackupNow: () => void;
-    onRestorePreview: (backupId: string) => void;
+    onRestorePreview: (backupId: string) => Promise<WtfRestorePreview | null>;
+    onRestoreConfirm: (backupId: string) => Promise<boolean>;
     onDeleteBackup: (backupId: string) => void;
   }
 
@@ -16,11 +18,15 @@
     backups,
     onBackupNow,
     onRestorePreview,
+    onRestoreConfirm,
     onDeleteBackup,
   }: Props = $props();
 
   let localMockGameRunning = $state<boolean | null>(null);
   let localBackups = $state<WholeWtfBackup[] | null>(null);
+  let activePreview = $state<WtfRestorePreview | null>(null);
+  let activeBackupId = $state<string | null>(null);
+  let isRestoring = $state(false);
 
   $effect(() => {
     const handleGameRunning = (e: Event) => {
@@ -46,11 +52,32 @@
   let effectiveIsGameActive = $derived(localMockGameRunning !== null ? localMockGameRunning : isGameActive);
   let effectiveBackups = $derived(localBackups !== null ? localBackups : backups);
 
-  function handleRestoreClick(backupId: string) {
+  async function handleRestoreClick(backupId: string) {
     if (effectiveIsGameActive) {
       return;
     }
-    onRestorePreview(backupId);
+    const preview = await onRestorePreview(backupId);
+    if (preview) {
+      activePreview = preview;
+      activeBackupId = backupId;
+    }
+  }
+
+  async function handleRestoreConfirm() {
+    if (!activeBackupId) return;
+    isRestoring = true;
+    try {
+      await onRestoreConfirm(activeBackupId);
+    } finally {
+      isRestoring = false;
+      activePreview = null;
+      activeBackupId = null;
+    }
+  }
+
+  function handleRestoreCancel() {
+    activePreview = null;
+    activeBackupId = null;
   }
 
   function formatBytes(bytes: number): string {
@@ -135,6 +162,17 @@
         </div>
       {/each}
     </div>
+  {/if}
+
+  {#if activePreview}
+    <WtfRestoreDialog
+      preview={activePreview}
+      flavourLabel={activeFlavour}
+      isGameActive={effectiveIsGameActive}
+      busy={isRestoring}
+      onConfirm={handleRestoreConfirm}
+      onCancel={handleRestoreCancel}
+    />
   {/if}
 </div>
 

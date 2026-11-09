@@ -325,6 +325,25 @@ pub fn zip_modified_files_backup(
     Ok(meta.len())
 }
 
+pub fn refresh_integrity_status(
+    conn: &rusqlite::Connection,
+    addons_path: &Path,
+    addon_id: &str,
+) -> Option<String> {
+    let report = verify_addon_integrity(conn, addons_path, addon_id).ok()?;
+    match report.status {
+        IntegrityStatus::Clean | IntegrityStatus::Modified | IntegrityStatus::Missing => {
+            let status_str = report.status.as_str();
+            let _ = conn.execute(
+                "UPDATE addons SET integrity_status = ?1 WHERE id = ?2",
+                rusqlite::params![status_str, addon_id],
+            );
+            Some(status_str.to_string())
+        }
+        IntegrityStatus::Unknown => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +547,69 @@ mod tests {
             reason: "extra_file".to_string(),
         }];
         assert!(zip_modified_files_backup(addons_root, "test-addon", &unsafe_diff, &backup_zip).is_err());
+    }
+
+    #[test]
+    fn test_refresh_integrity_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let addons_root = temp.path();
+        let addon_folder = addons_root.join("TestAddon");
+        std::fs::create_dir_all(&addon_folder).unwrap();
+
+        let lua_file = addon_folder.join("Core.lua");
+        std::fs::write(&lua_file, b"print('hello')").unwrap();
+
+        let conn = setup_test_db();
+
+        let unrecorded = refresh_integrity_status(&conn, addons_root, "test-addon");
+        assert_eq!(unrecorded, None);
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT integrity_status FROM addons WHERE id = 'test-addon'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col, None);
+
+        let manifest = generate_manifest_for_folders(addons_root, &["TestAddon".to_string()]).unwrap();
+        record_manifest(&conn, "test-addon", &manifest).unwrap();
+
+        let clean = refresh_integrity_status(&conn, addons_root, "test-addon");
+        assert_eq!(clean, Some("clean".to_string()));
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT integrity_status FROM addons WHERE id = 'test-addon'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col.as_deref(), Some("clean"));
+
+        std::fs::write(&lua_file, b"print('changed')").unwrap();
+
+        let modified = refresh_integrity_status(&conn, addons_root, "test-addon");
+        assert_eq!(modified, Some("modified".to_string()));
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT integrity_status FROM addons WHERE id = 'test-addon'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col.as_deref(), Some("modified"));
+
+        std::fs::remove_file(&lua_file).unwrap();
+
+        let missing = refresh_integrity_status(&conn, addons_root, "test-addon");
+        assert_eq!(missing, Some("missing".to_string()));
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT integrity_status FROM addons WHERE id = 'test-addon'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col.as_deref(), Some("missing"));
     }
 }
