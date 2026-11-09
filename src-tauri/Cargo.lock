@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "furphy-addon-manager"
-version = "2.0.27"
+version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

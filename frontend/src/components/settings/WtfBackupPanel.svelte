@@ -84,6 +84,10 @@
     </button>
   </div>
 
+  <p class="privacy-note" data-testid="wtf-privacy-note">
+    Archives stay on this PC in the Furphy data folder. They can hold character names and chat history, so check an archive before you share it.
+  </p>
+
   {#if effectiveIsGameActive}
     <div class="warning-callout" data-testid="wtf-wow-running-warning" role="alert">
       <p class="warning-lead">Restore cannot proceed while World of Warcraft is running. Exit the game first.</p>
@@ -158,6 +162,12 @@
   }
 
   .panel-subtext {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .privacy-note {
+    margin: 0 0 0.75rem;
     font-size: 0.8125rem;
     color: var(--text-muted);
   }

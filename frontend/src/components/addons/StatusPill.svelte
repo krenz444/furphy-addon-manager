@@ -33,9 +33,9 @@
     if (addon.error || addon.check_status === 'failed') return 'failed';
     if (addon.integrity_status === 'modified') return 'modified';
     if (addon.integrity_status === 'missing') return 'missing';
-    if (addon.held) return 'held';
     if (addon.pinned_file_id) return 'pinned';
     if (addon.ignore_updates) return 'ignored';
+    if (addon.held) return 'held';
     let hasActualUpdate = addon.update_version &&
       addon.update_version !== addon.version &&
       !(addon.update_file_id && addon.update_file_id === addon.file_id);

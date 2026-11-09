@@ -1,5 +1,14 @@
 # Furphy Addon Manager - changelog
 
+## 2.1.0: held updates, update controls, edit protection, an activity log and WTF backups
+
+- **An update built for a newer game version than yours is held back.** When an addon's newest file only supports a patch your game does not have yet, Furphy skips it and says why. A manual update asks you to Update anyway or Ignore for this WoW version. Test realms (PTR, Beta) are never held, and a game version Furphy cannot read never blocks an update.
+- **WoW Forever addons read the right .toc file.** Furphy looks for an addon's Camelot and Forever .toc files first, falls back to the Classic ones, and never to a Retail one. It reads a list of interface numbers and drops the load-condition tags from titles and dependencies.
+- **Choose how each addon and each game version updates.** The addon menu has a Release channel (Stable, Beta, Alpha) and an Install automatically switch. Under When updates are found, each game version can Install automatically or Only notify. Update now and Update all still install what the background check leaves alone.
+- **Furphy notices when you edit an addon's files.** The background check leaves an edited addon alone. A manual update asks first: Update anyway, or Update and keep my copy as a zip. If that backup cannot be written, the update does not run.
+- **Activity shows what changed and when.** Installs, updates, removals, rollbacks, failures and held updates are listed under day headings, with the reason for each failure. Furphy keeps the newest 500 entries or 90 days, and Clear history empties the list. Nothing leaves your PC.
+- **Back up and restore a whole WTF folder.** In Settings, Back up WTF now saves the WTF folder of one game version to an archive, even while World of Warcraft runs; settings the game has not saved yet are not included. Restore is refused while the game runs. Before it writes anything it takes a safety copy of the live folder, and it rolls back if the restore fails. Archives stay on this PC and can hold character names and chat history.
+
 ## 2.0.27: your 1.x addon list comes back, and updates leave an open window alone
 
 - **Upgraded from Furphy 1.x and found an empty list? It is restored.** Versions 2.0.0 to 2.0.25 imported from a temporary folder when 1.x updated itself, found nothing and never looked again. On start, if that first import brought in nothing and your 1.x folder still has addons, Furphy imports them once. Settings you changed in 2.x are kept, and a list that already has addons is never replaced.

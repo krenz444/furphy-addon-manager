@@ -395,7 +395,9 @@ impl JobRunner {
                         |r| r.get::<_, Option<String>>(0),
                     ).ok().flatten().unwrap_or_else(|| "auto".to_string());
 
-                    if update_mode.eq_ignore_ascii_case("notify") {
+                    if origin == crate::engine::update_policy::SyncOrigin::Background
+                        && update_mode.eq_ignore_ascii_case("notify")
+                    {
                         let _ = run_check_for_flavour(
                             conn,
                             &flv_info.id,

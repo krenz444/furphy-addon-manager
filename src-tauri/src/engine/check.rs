@@ -111,12 +111,11 @@ pub async fn run_check_for_flavour(
         ignored_until_build: Option<String>,
         auto_update: bool,
         integrity_status: Option<String>,
-        latest_game_versions: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until, ignored_until_build, auto_update, integrity_status, latest_game_versions \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until, ignored_until_build, auto_update, integrity_status \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -141,7 +140,6 @@ pub async fn run_check_for_flavour(
                 ignored_until_build: r.get(14)?,
                 auto_update: r.get::<_, Option<i32>>(15)?.unwrap_or(1) != 0,
                 integrity_status: r.get(16)?,
-                latest_game_versions: r.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -201,6 +199,7 @@ pub async fn run_check_for_flavour(
         let mut outcome_status = "Up-to-date".to_string();
         let mut upd_ver = None;
         let mut upd_file = None;
+        let mut targets: Vec<String> = Vec::new();
         let mut err_msg = None;
 
         match src {
@@ -211,6 +210,7 @@ pub async fn run_check_for_flavour(
                     match get_cf_files(&policy, &cf_client, pid, a.release_type, mapping.type_id).await {
                         Ok(files) => {
                             if let Some(chosen) = select_cf_file(&files, a.release_type, type_id, prefix) {
+                                targets = crate::engine::holdback::cf_file_targets(&chosen);
                                 let chosen_id_str = chosen.id.to_string();
                                 let chosen_ver = chosen.display_name.clone().or(chosen.file_name.clone());
 
@@ -268,6 +268,7 @@ pub async fn run_check_for_flavour(
                     }
 
                     if let Some(chosen) = found_selection {
+                        targets = crate::engine::holdback::wago_release_targets(&chosen, wago_field);
                         let chosen_ver = chosen.version.clone().or(chosen.name.clone());
                         let is_up_to_date = a.file_id.as_deref() == Some(&chosen.id)
                             || is_version_equivalent(a.version.as_deref(), chosen_ver.as_deref());
@@ -351,15 +352,12 @@ pub async fn run_check_for_flavour(
                     &format!("{}: Would update to {:?}", a.name, upd_ver),
                 );
 
-                let gv: Vec<String> = a.latest_game_versions.as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
                 let p_ctx = crate::engine::update_policy::PolicyContext {
                     addon_id: &a.id,
                     name: &a.name,
                     flavour,
                     client_build: client_build.as_deref(),
-                    target_game_versions: &gv,
+                    target_game_versions: &targets,
                     ignored_until_build: a.ignored_until_build.as_deref(),
                     ignore_updates: a.ignore_updates,
                     is_pinned: a.pinned_file_id.is_some(),
@@ -392,6 +390,10 @@ pub async fn run_check_for_flavour(
                 );
             }
             _ => {}
+        }
+
+        if !targets.is_empty() {
+            let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
         }
 
         if a.integrity_status.as_deref() == Some("modified") {

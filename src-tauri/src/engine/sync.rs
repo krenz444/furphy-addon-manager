@@ -45,6 +45,62 @@ pub struct SyncRunReport {
     pub results: Vec<AddonSyncResult>,
 }
 
+fn record_held_skip(
+    conn: &Connection,
+    flavour: &str,
+    addon_id: &str,
+    name: &str,
+    version: Option<&str>,
+    source: Option<&str>,
+    reason: &str,
+) {
+    let now_str = Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error, held, held_reason) \
+         VALUES (?1, ?2, NULL, NULL, 'held', NULL, 1, ?3)",
+        params![addon_id, now_str, reason],
+    );
+    let act_entry = crate::engine::activity::ActivityEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: now_str,
+        flavour: flavour.to_string(),
+        addon_id: addon_id.to_string(),
+        name: name.to_string(),
+        kind: "held".to_string(),
+        from_version: version.map(|v| v.to_string()),
+        to_version: None,
+        source: source.map(|s| s.to_string()),
+        job_id: None,
+        error: Some(reason.to_string()),
+    };
+    let _ = crate::engine::activity::record_activity(conn, &act_entry);
+}
+
+fn record_failed_activity(
+    conn: &Connection,
+    flavour: &str,
+    addon_id: &str,
+    name: &str,
+    version: Option<&str>,
+    source: Option<&str>,
+    error: &str,
+) {
+    let act_entry = crate::engine::activity::ActivityEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: Utc::now().to_rfc3339(),
+        flavour: flavour.to_string(),
+        addon_id: addon_id.to_string(),
+        name: name.to_string(),
+        kind: "failed".to_string(),
+        from_version: version.map(|v| v.to_string()),
+        to_version: None,
+        source: source.map(|s| s.to_string()),
+        job_id: None,
+        error: Some(error.to_string()),
+    };
+    let _ = crate::engine::activity::record_activity(conn, &act_entry);
+}
+
 pub async fn run_sync_for_flavour(
     conn: &mut Connection,
     wow_root: &Path,
@@ -131,12 +187,11 @@ pub async fn run_sync_for_flavour_with_options(
         ignored_until_build: Option<String>,
         auto_update: bool,
         integrity_status: Option<String>,
-        latest_game_versions: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted, ignored_until_build, auto_update, integrity_status, latest_game_versions \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted, ignored_until_build, auto_update, integrity_status \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -160,7 +215,6 @@ pub async fn run_sync_for_flavour_with_options(
                 ignored_until_build: r.get(13)?,
                 auto_update: r.get::<_, Option<i32>>(14)?.unwrap_or(1) != 0,
                 integrity_status: r.get(15)?,
-                latest_game_versions: r.get(16)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -185,15 +239,12 @@ pub async fn run_sync_for_flavour_with_options(
             }
         }
 
-        let gv: Vec<String> = a.latest_game_versions.as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         let p_ctx = crate::engine::update_policy::PolicyContext {
             addon_id: &a.id,
             name: &a.name,
             flavour,
             client_build: client_build.as_deref(),
-            target_game_versions: &gv,
+            target_game_versions: &[],
             ignored_until_build: a.ignored_until_build.as_deref(),
             ignore_updates: a.ignore_updates,
             is_pinned: a.pinned_file_id.is_some(),
@@ -209,26 +260,15 @@ pub async fn run_sync_for_flavour_with_options(
         let policy_action = crate::engine::update_policy::decide(&p_ctx);
         match policy_action {
             crate::engine::update_policy::PolicyAction::SkipHeld { reason } => {
-                let now_str = Utc::now().to_rfc3339();
-                let _ = conn.execute(
-                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error, held, held_reason) \
-                     VALUES (?1, ?2, NULL, NULL, 'held', NULL, 1, ?3)",
-                    params![a.id, now_str, reason],
+                record_held_skip(
+                    conn,
+                    flavour,
+                    &a.id,
+                    &a.name,
+                    a.version.as_deref(),
+                    a.source.as_deref(),
+                    &reason,
                 );
-                let act_entry = crate::engine::activity::ActivityEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    ts: now_str,
-                    flavour: flavour.to_string(),
-                    addon_id: a.id.clone(),
-                    name: a.name.clone(),
-                    kind: "held".to_string(),
-                    from_version: a.version.clone(),
-                    to_version: None,
-                    source: a.source.clone(),
-                    job_id: None,
-                    error: Some(reason.clone()),
-                };
-                let _ = crate::engine::activity::record_activity(conn, &act_entry);
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
@@ -405,6 +445,36 @@ pub async fn run_sync_for_flavour_with_options(
                             continue;
                         }
 
+                        let targets = crate::engine::holdback::cf_file_targets(&cf_file);
+                        let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
+                        if !force && !override_hold {
+                            if let Some(reason) = crate::engine::holdback::is_update_held_back(
+                                flavour,
+                                client_build.as_deref(),
+                                &targets,
+                                a.ignored_until_build.as_deref(),
+                            ) {
+                                record_held_skip(
+                                    conn,
+                                    flavour,
+                                    &a.id,
+                                    &a.name,
+                                    a.version.as_deref(),
+                                    a.source.as_deref(),
+                                    &reason,
+                                );
+                                results.push(AddonSyncResult {
+                                    addon_id: a.id.clone(),
+                                    name: a.name.clone(),
+                                    status: "Skipped".to_string(),
+                                    previous_version: a.version.clone(),
+                                    new_version: a.version.clone(),
+                                    error: Some(format!("Held back: {}", reason)),
+                                });
+                                continue;
+                            }
+                        }
+
                         chosen_file_id = Some(cf_id_str);
                         chosen_version = cf_file.display_name.clone().or(cf_file.file_name.clone());
                         chosen_file_name = cf_file.file_name.clone();
@@ -486,6 +556,36 @@ pub async fn run_sync_for_flavour_with_options(
                             });
                             append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
                             continue;
+                        }
+
+                        let targets = crate::engine::holdback::wago_release_targets(&wago_rel, wago_field);
+                        let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
+                        if !force && !override_hold {
+                            if let Some(reason) = crate::engine::holdback::is_update_held_back(
+                                flavour,
+                                client_build.as_deref(),
+                                &targets,
+                                a.ignored_until_build.as_deref(),
+                            ) {
+                                record_held_skip(
+                                    conn,
+                                    flavour,
+                                    &a.id,
+                                    &a.name,
+                                    a.version.as_deref(),
+                                    a.source.as_deref(),
+                                    &reason,
+                                );
+                                results.push(AddonSyncResult {
+                                    addon_id: a.id.clone(),
+                                    name: a.name.clone(),
+                                    status: "Skipped".to_string(),
+                                    previous_version: a.version.clone(),
+                                    new_version: a.version.clone(),
+                                    error: Some(format!("Held back: {}", reason)),
+                                });
+                                continue;
+                            }
                         }
 
                         chosen_file_id = Some(wago_rel.id.clone());
@@ -603,6 +703,7 @@ pub async fn run_sync_for_flavour_with_options(
                  VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
                 params![a.id, now_str, a.file_id, a.version, &err],
             );
+            record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &err);
             results.push(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
@@ -627,6 +728,7 @@ pub async fn run_sync_for_flavour_with_options(
                      VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
                     params![a.id, now_str, a.file_id, a.version, &emsg],
                 );
+                record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &emsg);
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
@@ -652,6 +754,7 @@ pub async fn run_sync_for_flavour_with_options(
                      VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
                     params![target_addon_id, now_str, a.file_id, a.version, &emsg],
                 );
+                record_failed_activity(conn, flavour, &target_addon_id, &target_addon_name, a.version.as_deref(), a.source.as_deref(), &emsg);
                 results.push(AddonSyncResult {
                     addon_id: target_addon_id.clone(),
                     name: target_addon_name.clone(),
@@ -750,6 +853,7 @@ pub async fn run_sync_for_flavour_with_options(
                  VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
                 params![target_addon_id, now_str, a.file_id, a.version, &emsg],
             );
+            record_failed_activity(conn, flavour, &target_addon_id, &target_addon_name, a.version.as_deref(), a.source.as_deref(), &emsg);
             results.push(AddonSyncResult {
                 addon_id: target_addon_id.clone(),
                 name: target_addon_name.clone(),
@@ -807,10 +911,41 @@ pub async fn run_sync_for_flavour_with_options(
 
         // Step 6: Atomic swap
         if backup_modified {
-            let backup_dir = data_dir.join("backups").join(flavour).join(&target_addon_id);
-            let _ = std::fs::create_dir_all(&backup_dir);
-            let backup_zip = backup_dir.join(format!("{}_modified.zip", Utc::now().format("%Y%m%d_%H%M%S")));
-            let _ = crate::engine::integrity::zip_modified_files_backup(addons_path, &target_addon_id, &[], &backup_zip);
+            let backup_res = match crate::engine::integrity::verify_addon_integrity(conn, addons_path, &target_addon_id) {
+                Ok(report) => {
+                    if !report.diffs.is_empty() {
+                        let backup_dir = data_dir.join("backups").join(flavour).join(&target_addon_id);
+                        let _ = std::fs::create_dir_all(&backup_dir);
+                        let backup_zip = backup_dir.join(format!("{}_modified.zip", Utc::now().format("%Y%m%d_%H%M%S")));
+                        crate::engine::integrity::zip_modified_files_backup(addons_path, &target_addon_id, &report.diffs, &backup_zip).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(e),
+            };
+
+            if let Err(e) = backup_res {
+                failed_count += 1;
+                let emsg = format!("Could not back up your modified files: {}", e);
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                     VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
+                    params![a.id, now_str, a.file_id, a.version, &emsg],
+                );
+                record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &emsg);
+                results.push(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Failed".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: None,
+                    error: Some(emsg.clone()),
+                });
+                append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, emsg));
+                continue;
+            }
         }
 
         let protected = match get_protected_folders(conn, flavour, Some(&target_addon_id)) {
@@ -834,6 +969,7 @@ pub async fn run_sync_for_flavour_with_options(
                      VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
                     params![a.id, now_str, a.file_id, a.version, &e],
                 );
+                record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &e);
                 results.push(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),

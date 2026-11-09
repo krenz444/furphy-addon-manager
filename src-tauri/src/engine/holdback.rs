@@ -135,6 +135,55 @@ pub fn clear_ignored_until_build(conn: &Connection, addon_id: &str) -> Result<()
     Ok(())
 }
 
+fn sanitize_targets(raw: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for entry in raw {
+        let trimmed = entry.trim();
+        if !trimmed.is_empty() && !targets.iter().any(|t: &String| t == trimmed) {
+            targets.push(trimmed.to_string());
+        }
+    }
+    targets
+}
+
+pub fn cf_file_targets(file: &crate::net::curseforge::CfFile) -> Vec<String> {
+    sanitize_targets(&file.game_versions)
+}
+
+pub fn wago_release_targets(rel: &crate::net::wago::WagoRelease, wago_field: &str) -> Vec<String> {
+    let list_opt = match wago_field.trim().to_ascii_lowercase().as_str() {
+        "retail" | "mainline" => rel.supported_retail_patches.as_ref(),
+        "classic" | "vanilla" | "classic_era" => rel.supported_classic_patches.as_ref(),
+        "forever" => rel.supported_forever_patches.as_ref(),
+        "bc" | "tbc" => rel.supported_bc_patches.as_ref(),
+        "wotlk" | "wrath" => rel.supported_wotlk_patches.as_ref(),
+        "cata" | "cataclysm" => rel.supported_cata_patches.as_ref(),
+        "mop" | "mists" => rel.supported_mop_patches.as_ref(),
+        _ => None,
+    };
+
+    match list_opt {
+        Some(list) => sanitize_targets(list),
+        None => Vec::new(),
+    }
+}
+
+pub fn store_latest_game_versions(conn: &Connection, addon_id: &str, targets: &[String]) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let json = serde_json::to_string(targets)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+    conn.execute(
+        "UPDATE addons SET latest_game_versions = ?2 WHERE id = ?1 AND (latest_game_versions IS NULL OR latest_game_versions != ?2)",
+        params![addon_id, json],
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +285,83 @@ mod tests {
         assert_eq!(get_ignored_until_build(&conn, "test-addon").unwrap(), None);
 
         assert_eq!(get_ignored_until_build(&conn, "nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_cf_file_targets_trimming_and_dedup() {
+        let json = r#"{
+            "id": 12345,
+            "releaseType": 1,
+            "gameVersions": [" 11.0.2 ", "11.0.2", "", "  ", "11.0.5", "11.0.2", "11.0.5 "]
+        }"#;
+        let file: crate::net::curseforge::CfFile = serde_json::from_str(json).unwrap();
+        let targets = cf_file_targets(&file);
+        assert_eq!(targets, vec!["11.0.2".to_string(), "11.0.5".to_string()]);
+    }
+
+    #[test]
+    fn test_wago_release_targets_retail_and_forever() {
+        let json = r#"{
+            "id": "wago-rel-1",
+            "supported_retail_patches": [" 11.0.2 ", "11.0.2", "11.0.5"],
+            "supported_forever_patches": ["1.15.2", " 1.15.2 "]
+        }"#;
+        let rel: crate::net::wago::WagoRelease = serde_json::from_str(json).unwrap();
+        let retail_targets = wago_release_targets(&rel, "retail");
+        assert_eq!(retail_targets, vec!["11.0.2".to_string(), "11.0.5".to_string()]);
+
+        let mainline_targets = wago_release_targets(&rel, "Mainline");
+        assert_eq!(mainline_targets, vec!["11.0.2".to_string(), "11.0.5".to_string()]);
+
+        let forever_targets = wago_release_targets(&rel, "Forever");
+        assert_eq!(forever_targets, vec!["1.15.2".to_string()]);
+    }
+
+    #[test]
+    fn test_wago_release_targets_unknown_field_and_missing_list() {
+        let json = r#"{
+            "id": "wago-rel-2"
+        }"#;
+        let rel_empty: crate::net::wago::WagoRelease = serde_json::from_str(json).unwrap();
+        assert_eq!(wago_release_targets(&rel_empty, "retail"), Vec::<String>::new());
+
+        let json_with_retail = r#"{
+            "id": "wago-rel-3",
+            "supported_retail_patches": ["11.0.2"]
+        }"#;
+        let rel_retail: crate::net::wago::WagoRelease = serde_json::from_str(json_with_retail).unwrap();
+        assert_eq!(wago_release_targets(&rel_retail, "unknown_field"), Vec::<String>::new());
+        assert_eq!(wago_release_targets(&rel_retail, "classic"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_store_latest_game_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            CREATE TABLE addons (
+                id TEXT PRIMARY KEY,
+                latest_game_versions TEXT
+            );
+            INSERT INTO addons (id, latest_game_versions) VALUES ('test-addon', NULL);
+        ").unwrap();
+
+        store_latest_game_versions(&conn, "test-addon", &[]).unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT latest_game_versions FROM addons WHERE id = 'test-addon'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, None);
+
+        let targets = vec!["11.0.2".to_string(), "11.0.5".to_string()];
+        store_latest_game_versions(&conn, "test-addon", &targets).unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT latest_game_versions FROM addons WHERE id = 'test-addon'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, Some(r#"["11.0.2","11.0.5"]"#.to_string()));
+
+        store_latest_game_versions(&conn, "test-addon", &targets).unwrap();
+        let stored_again: Option<String> = conn
+            .query_row("SELECT latest_game_versions FROM addons WHERE id = 'test-addon'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored_again, Some(r#"["11.0.2","11.0.5"]"#.to_string()));
     }
 }
