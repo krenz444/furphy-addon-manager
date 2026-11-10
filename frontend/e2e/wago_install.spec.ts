@@ -6,6 +6,14 @@ async function openWagoTab(page: Page) {
   await expect(page.locator('.addon-card').first()).toBeVisible();
 }
 
+// Some mock addons are already installed and show a badge instead of the button, so pin a card that has the button.
+async function installableCard(page: Page) {
+  const withButton = page.locator('.addon-card').filter({ has: page.locator('button.btn-install') }).first();
+  await expect(withButton).toBeVisible();
+  const title = (await withButton.locator('.card-title').first().innerText()).trim();
+  return page.locator('.addon-card').filter({ hasText: title }).first();
+}
+
 test.describe('Wago install outcome on the card', () => {
   test('a failed install shows its reason on the card with a Retry that works', async ({ page }) => {
     await openWagoTab(page);
@@ -13,7 +21,7 @@ test.describe('Wago install outcome on the card', () => {
       (window as unknown as { __furphyMock: { nextAddError?: string } }).__furphyMock.nextAddError = 'No compatible Wago release found for Retail';
     });
 
-    const card = page.locator('.addon-card').first();
+    const card = await installableCard(page);
     await card.locator('button.btn-install').click();
 
     const error = card.locator('[data-testid="wago-install-error"]');
@@ -27,7 +35,7 @@ test.describe('Wago install outcome on the card', () => {
 
   test('while installing the card says so in text and stays busy until the job answers', async ({ page }) => {
     await openWagoTab(page);
-    const card = page.locator('.addon-card').first();
+    const card = await installableCard(page);
     await card.locator('button.btn-install').click();
     // The mock answers within moments; whichever state we land in, a card never goes silent.
     await expect(card).toContainText(/Installing to|Installed|Retry/);

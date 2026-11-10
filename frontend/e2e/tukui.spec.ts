@@ -32,8 +32,8 @@ test.describe('Tukui tab', () => {
       mock.setMockTukui?.([
         {
           slug: 'elvui', name: 'ElvUI', author: 'Elv', version: '12.1.5', last_update: '2026-11-09',
-          supported_patches: ['12.1.5'], summary: 'A complete UI', web_url: null,
-          compatible: false, reason: 'Tukui lists 12.1.5 for this addon, not 1.60.x, the game version of WoW Forever.', installed: false,
+          supported_patches: ['1.15.9'], summary: 'A complete UI', web_url: null,
+          compatible: true, reason: null, installed: false,
         },
       ]);
     });
@@ -41,6 +41,6 @@ test.describe('Tukui tab', () => {
     await page.locator('#tab-tukui').click();
 
     await expect(page.locator('[data-testid="tukui-install-elvui"]')).toBeDisabled();
-    await expect(page.locator('[data-testid="tukui-reason-elvui"]')).toContainText('not 1.60.x');
+    await expect(page.locator('[data-testid="tukui-reason-elvui"]')).toContainText('not 12.x');
   });
 });

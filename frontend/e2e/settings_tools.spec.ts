@@ -70,6 +70,7 @@ test.describe('Interface size and IPv4', () => {
 
   test('the IPv4 toggle is saved through update_settings', async ({ page }) => {
     await openSettings(page);
+    await page.locator('.advanced-toggle').click();
     const toggle = page.locator('[data-testid="force-ipv4-toggle"]');
     await expect(toggle).not.toBeChecked();
     await expect(page.locator('.settings-view')).toContainText('Use IPv4 only for downloads');
@@ -90,6 +91,7 @@ test.describe('Battle.net discovery', () => {
       ]);
     });
     await page.locator('.sidebar-nav button').filter({ hasText: 'Settings' }).click();
+    await page.locator('.advanced-toggle').click();
     await expect(page.locator('[data-testid="bnet-panel"]')).toBeVisible();
     await expect(page.locator('[data-testid="bnet-row-wow"]')).toHaveCount(0);
 
@@ -110,6 +112,7 @@ test.describe('Battle.net discovery', () => {
       (window as unknown as { __furphyMock: { setMockBattlenet?: (list: unknown[]) => void } }).__furphyMock.setMockBattlenet?.([]);
     });
     await page.locator('.sidebar-nav button').filter({ hasText: 'Settings' }).click();
+    await page.locator('.advanced-toggle').click();
     await page.locator('[data-testid="bnet-detect"]').click();
     await expect(page.locator('[data-testid="bnet-panel"]')).toContainText('Battle.net has no World of Warcraft installs recorded on this PC.');
   });

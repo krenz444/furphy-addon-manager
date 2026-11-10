@@ -1,17 +1,19 @@
 <script lang="ts">
-  import type { WagoAddonItem } from '../../lib/types';
+  import type { InstallOutcome, WagoAddonItem } from '../../lib/types';
   import { invoke } from '../../lib/ipc';
 
   interface Props {
     addon: WagoAddonItem;
     destinationLabel: string;
     isInstalled: boolean;
-    onInstall: (slug: string) => void;
+    destinationReason?: string | null;
+    onInstall: (slug: string) => Promise<InstallOutcome> | void;
   }
 
-  let { addon, destinationLabel, isInstalled, onInstall }: Props = $props();
+  let { addon, destinationLabel, isInstalled, destinationReason = null, onInstall }: Props = $props();
 
   let isInstalling = $state(false);
+  let installError = $state<string | null>(null);
   let installTimeout: ReturnType<typeof setTimeout> | null = null;
 
   $effect(() => {
@@ -43,11 +45,28 @@
     });
   }
 
-  function handleInstallClick() {
-    if (isInstalling || isInstalled) return;
+  async function handleInstallClick() {
+    if (isInstalling || isInstalled || destinationReason) return;
     isInstalling = true;
-    onInstall(addon.slug);
+    installError = null;
+    const pending = onInstall(addon.slug);
 
+    if (pending && typeof (pending as Promise<InstallOutcome>).then === 'function') {
+      // The card stays busy until the install answers, and says what happened.
+      try {
+        const outcome = await pending;
+        if (outcome && outcome.ok === false) {
+          installError = outcome.message || 'The install failed.';
+        }
+      } catch (err) {
+        installError = err instanceof Error ? err.message : String(err);
+      } finally {
+        isInstalling = false;
+      }
+      return;
+    }
+
+    // An older caller that returns nothing: re-enable after 45 seconds as before.
     if (installTimeout) clearTimeout(installTimeout);
     installTimeout = setTimeout(() => {
       isInstalling = false;
@@ -136,14 +155,14 @@
           type="button"
           class="btn-install"
           class:busy={isInstalling}
-          disabled={isInstalling}
+          disabled={isInstalling || !!destinationReason}
           onclick={handleInstallClick}
           aria-label={`Install ${addon.name} to ${destinationLabel}`}
           title={`Install ${addon.name} to ${destinationLabel}`}
         >
           {#if isInstalling}
             <span class="btn-spinner" aria-hidden="true"></span>
-            <span>Installing…</span>
+            <span>Installing to {destinationLabel}…</span>
           {:else}
             <span>Install to {destinationLabel}</span>
           {/if}
@@ -151,9 +170,64 @@
       {/if}
     </div>
   </div>
+
+  {#if destinationReason && !isInstalled}
+    <div class="card-note" data-testid="wago-reason">{destinationReason}</div>
+  {/if}
+  {#if installError}
+    <div class="install-error" data-testid="wago-install-error" role="alert">
+      <span class="install-error-text">{installError}</span>
+      <button type="button" class="btn-retry" data-testid="wago-retry" onclick={handleInstallClick}>Retry</button>
+    </div>
+  {/if}
 </article>
 
 <style>
+  .card-note {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .install-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+    border-radius: var(--radius-sm, 4px);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+
+  .install-error-text {
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .btn-retry {
+    flex-shrink: 0;
+    background: var(--bg-3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.3rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn-retry:hover {
+    background: var(--border-hover);
+  }
+
+  .btn-retry:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
   .addon-card {
     background: var(--bg-1);
     border: 1px solid var(--border);

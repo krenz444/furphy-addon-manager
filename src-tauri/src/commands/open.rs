@@ -87,6 +87,8 @@ pub fn open_target(what: String, args: Option<serde_json::Value>) -> Result<(), 
                 "wago.io",
                 "github.com",
                 "raw.githubusercontent.com",
+                "tukui.org",
+                "www.tukui.org",
             ];
             if !allowed_hosts.contains(&host.as_str())
                 && !host.ends_with(".curseforge.com")

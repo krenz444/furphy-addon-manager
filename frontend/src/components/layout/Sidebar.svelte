@@ -37,7 +37,7 @@
   }: Props = $props();
 
   let visibleFlavours = $derived(
-    flavours.filter(f => showTestRealms || !['ptr', 'xptr', 'beta'].includes(f.id.toLowerCase()))
+    flavours.filter(f => showTestRealms || !['ptr', 'xptr', 'beta', 'classic_beta', 'classic_ptr', 'classic_era_ptr'].includes(f.id.toLowerCase()))
   );
 </script>
 

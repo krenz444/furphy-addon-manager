@@ -39,7 +39,7 @@ test.describe('Favourites', () => {
     await expect(page.locator('[data-testid="fav-toggle"][aria-pressed="true"]')).toHaveCount(2);
 
     // back to everything and sort by favourites first
-    await chip.click();
+    await page.getByRole('tab', { name: /^All \(/ }).click();
     const sortSelect = page.locator('select').filter({ has: page.locator('option[value="favourites"]') }).first();
     await sortSelect.selectOption('favourites');
     await expect(page.locator('[data-testid="fav-toggle"]').nth(0)).toHaveAttribute('aria-pressed', 'true');
@@ -71,7 +71,7 @@ test.describe('Groups', () => {
 
     await chip.click();
     await expect(page.locator('.addon-row')).toHaveCount(2);
-    await chip.click();
+    await page.getByRole('tab', { name: /^All \(/ }).click();
 
     // rename through the chip menu
     await page.locator('[data-testid^="group-menu-"]').first().click();
@@ -84,8 +84,8 @@ test.describe('Groups', () => {
     // delete asks first and keeps the addons
     await page.locator('[data-testid^="group-menu-"]').first().click();
     await page.getByRole('menuitem', { name: 'Delete group' }).click();
-    await expect(page.getByRole('dialog')).toBeVisible();
-    await page.getByRole('dialog').getByRole('button', { name: /delete/i }).click();
+    await expect(page.getByRole('alertdialog')).toBeVisible();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Confirm' }).click();
     await expect(page.locator('[data-testid^="chip-group-"]')).toHaveCount(0);
     await expect(page.locator('.addon-row').first()).toBeVisible();
   });

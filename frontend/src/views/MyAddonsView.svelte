@@ -3,9 +3,11 @@
   import StatusPill from '../components/addons/StatusPill.svelte';
   import RowMenu from '../components/addons/RowMenu.svelte';
   import UntrackedAddonsBanner from '../components/banners/UntrackedAddonsBanner.svelte';
-  import type { Addon } from '../lib/types';
+  import type { Addon, AddonGroup } from '../lib/types';
   import { formatCheckedAgo } from '../lib/timeAgo';
   import { BUSY_MESSAGE, NOTHING_TO_CHECK_MESSAGE } from '../lib/checkReport';
+  import { nextSelection, isEditableTarget } from '../lib/selection';
+  import { formatReleased, compareReleased } from '../lib/releaseDate';
 
   interface Props {
     addons: Addon[];
@@ -42,6 +44,14 @@
     onReinstall?: (addon: Addon) => void;
     onBulkSetChannel?: (addons: Addon[], channel: number) => void;
     onBulkSetAutoUpdate?: (addons: Addon[], autoUpdate: boolean) => void;
+    groups?: AddonGroup[];
+    onToggleFavourite?: (addon: Addon) => void;
+    onToggleGroup?: (addon: Addon, groupId: string, member: boolean) => void;
+    onRequestNewGroup?: (addon: Addon | null) => void;
+    onRequestRenameGroup?: (group: AddonGroup) => void;
+    onRequestDeleteGroup?: (group: AddonGroup) => void;
+    onCopyAddons?: (selectedIds: string[]) => void;
+    copyAvailable?: boolean;
   }
 
   let {
@@ -79,12 +89,25 @@
     onReinstall,
     onBulkSetChannel,
     onBulkSetAutoUpdate,
+    groups = [],
+    onToggleFavourite,
+    onToggleGroup,
+    onRequestNewGroup,
+    onRequestRenameGroup,
+    onRequestDeleteGroup,
+    onCopyAddons,
+    copyAvailable = false,
   }: Props = $props();
 
   let searchQuery = $state('');
-  let activeFilter = $state<'all' | 'updates' | 'needs_deps' | 'pinned' | 'ignored' | 'old_patch' | 'failed' | 'held' | 'modified'>('all');
-  let sortBy = $state<'name' | 'status' | 'updated'>('name');
+  let activeFilter = $state<string>('all');
+  let sortBy = $state<'name' | 'status' | 'updated' | 'released' | 'favourites'>('name');
   let selectedIds = $state<Set<string>>(new Set());
+  let anchorId = $state<string | null>(null);
+  let selectionMessage = $state('');
+  let prevSelectedCount = $state(0);
+  let openGroupMenuId = $state<string | null>(null);
+  let groupMenuTriggerEl = $state<HTMLElement | null>(null);
   let errorDialogAddon = $state<Addon | null>(null);
   let errorCopied = $state(false);
 
@@ -100,7 +123,12 @@
     let list = addons;
 
     // Filter chip
-    if (activeFilter === 'updates') {
+    if (activeFilter === 'favourites') {
+      list = list.filter(a => !!a.favourite);
+    } else if (activeFilter.startsWith('group:')) {
+      const gid = activeFilter.slice(6);
+      list = list.filter(a => a.group_ids?.includes(gid));
+    } else if (activeFilter === 'updates') {
       list = list.filter(isAddonUpdatable);
     } else if (activeFilter === 'needs_deps') {
       list = list.filter(a => !!(a.missing_deps && a.missing_deps.length > 0));
@@ -151,6 +179,19 @@
         const dateA = a.installed_at ?? '';
         const dateB = b.installed_at ?? '';
         return dateB.localeCompare(dateA);
+      } else if (sortBy === 'released') {
+        const cmp = compareReleased(a.released_at, b.released_at);
+        if (cmp !== 0) return cmp;
+        const nameA = a.name ?? a.id;
+        const nameB = b.name ?? b.id;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      } else if (sortBy === 'favourites') {
+        const favA = a.favourite ? 1 : 0;
+        const favB = b.favourite ? 1 : 0;
+        if (favA !== favB) return favB - favA;
+        const nameA = a.name ?? a.id;
+        const nameB = b.name ?? b.id;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
       }
       return 0;
     });
@@ -165,6 +206,7 @@
   let failedCount = $derived(addons.filter(a => !!a.error || a.check_status === 'failed').length);
   let heldCount = $derived(addons.filter(a => a.held).length);
   let modifiedCount = $derived(addons.filter(a => a.integrity_status === 'modified').length);
+  let favouritesCount = $derived(addons.filter(a => !!a.favourite).length);
 
   // Selection helpers
   let isAllSelected = $derived(
@@ -181,14 +223,79 @@
 
   function toggleSelectOne(id: string, e: MouseEvent) {
     e.stopPropagation();
-    const next = new Set(selectedIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    selectedIds = next;
+    const orderedIds = filteredAddons.map(a => a.id);
+    const res = nextSelection(selectedIds, orderedIds, anchorId, id, {
+      shift: e.shiftKey,
+      ctrl: e.ctrlKey || e.metaKey,
+    });
+    selectedIds = res.selected;
+    anchorId = res.anchor;
   }
+
+  function handleListKeydown(e: KeyboardEvent) {
+    if (errorDialogAddon) return;
+    if (isEditableTarget(e.target)) return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault();
+      selectedIds = new Set(filteredAddons.map(a => a.id));
+    } else if (e.key === 'Escape' && selectedIds.size > 0) {
+      e.preventDefault();
+      selectedIds = new Set();
+    }
+  }
+
+  function closeGroupMenu(restoreFocus = true) {
+    openGroupMenuId = null;
+    if (restoreFocus && groupMenuTriggerEl) {
+      groupMenuTriggerEl.focus();
+    }
+    groupMenuTriggerEl = null;
+  }
+
+  $effect(() => {
+    if (!openGroupMenuId) return;
+    function handleDocClick(e: MouseEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('.group-menu-popup') || target?.closest('.group-menu-btn')) {
+        return;
+      }
+      closeGroupMenu(false);
+    }
+    function handleDocKeydown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeGroupMenu(true);
+      }
+    }
+    document.addEventListener('click', handleDocClick);
+    document.addEventListener('keydown', handleDocKeydown, true);
+    return () => {
+      document.removeEventListener('click', handleDocClick);
+      document.removeEventListener('keydown', handleDocKeydown, true);
+    };
+  });
+
+  $effect(() => {
+    const count = selectedIds.size;
+    if (count !== prevSelectedCount) {
+      if (count === 0 && prevSelectedCount > 0) {
+        selectionMessage = 'Selection cleared';
+      } else if (count > 0) {
+        selectionMessage = `${count} selected`;
+      }
+      prevSelectedCount = count;
+    }
+  });
+
+  $effect(() => {
+    if (activeFilter.startsWith('group:')) {
+      const gid = activeFilter.slice(6);
+      if (!groups.some(g => g.id === gid)) {
+        activeFilter = 'all';
+      }
+    }
+  });
 
   function handleBulkUpdate() {
     const selected = addons.filter(a => selectedIds.has(a.id));
@@ -232,6 +339,10 @@
 </script>
 
 <div class="my-addons-view">
+  <div class="sr-only" role="status" aria-live="polite" data-testid="selection-live">
+    {selectionMessage}
+  </div>
+
   {#if (untrackedCount > 0 && !isUntrackedDismissed) || (missingDepsCount > 0 && !isDepsDismissed)}
     <div class="banners-stack">
       {#if untrackedCount > 0 && !isUntrackedDismissed}
@@ -339,6 +450,8 @@
           <option value="name">Sort: Name (A-Z)</option>
           <option value="status">Sort: Status</option>
           <option value="updated">Sort: Recently Updated</option>
+          <option value="released">Sort: Release date</option>
+          <option value="favourites">Sort: Favourites first</option>
         </select>
       </div>
 
@@ -363,6 +476,17 @@
         </button>
       </div>
 
+      {#if copyAvailable && onCopyAddons}
+        <button
+          type="button"
+          class="btn-secondary"
+          data-testid="copy-open"
+          onclick={() => onCopyAddons?.(Array.from(selectedIds))}
+        >
+          Copy to another game version...
+        </button>
+      {/if}
+
       <button
         type="button"
         class="btn-primary"
@@ -385,6 +509,105 @@
       >
         All ({addons.length})
       </button>
+
+      <button
+        type="button"
+        role="tab"
+        data-testid="chip-favourites"
+        aria-selected={activeFilter === 'favourites'}
+        class="filter-chip"
+        class:active={activeFilter === 'favourites'}
+        onclick={() => (activeFilter = 'favourites')}
+      >
+        Favourites ({favouritesCount})
+      </button>
+
+      {#each groups as group (group.id)}
+        {@const count = addons.filter(a => a.group_ids?.includes(group.id)).length}
+        <div
+          class="filter-chip group-chip"
+          class:active={activeFilter === `group:${group.id}`}
+          data-testid="chip-group-{group.id}"
+          role="tab"
+          aria-selected={activeFilter === `group:${group.id}`}
+          tabindex="0"
+          onclick={() => (activeFilter = `group:${group.id}`)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              activeFilter = `group:${group.id}`;
+            }
+          }}
+        >
+          <span class="group-chip-label">{group.name} ({count})</span>
+          <button
+            type="button"
+            class="group-menu-btn"
+            data-testid="group-menu-{group.id}"
+            aria-label="Group options for {group.name}"
+            aria-haspopup="true"
+            aria-expanded={openGroupMenuId === group.id}
+            onclick={(e) => {
+              e.stopPropagation();
+              if (openGroupMenuId === group.id) {
+                closeGroupMenu(false);
+              } else {
+                openGroupMenuId = group.id;
+                groupMenuTriggerEl = e.currentTarget as HTMLElement;
+              }
+            }}
+            onkeydown={(e) => {
+              if (e.key === ' ' || e.key === 'Enter') {
+                e.stopPropagation();
+              }
+            }}
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+              <circle cx="8" cy="3" r="1.5" />
+              <circle cx="8" cy="8" r="1.5" />
+              <circle cx="8" cy="13" r="1.5" />
+            </svg>
+          </button>
+
+          {#if openGroupMenuId === group.id}
+            <div
+              class="group-menu-popup"
+              role="menu"
+              tabindex="-1"
+              aria-label="Group options for {group.name}"
+              onclick={(e) => e.stopPropagation()}
+              onkeydown={(e) => {
+                if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+              }}
+            >
+              <button
+                type="button"
+                class="group-menu-item"
+                role="menuitem"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  closeGroupMenu(true);
+                  onRequestRenameGroup?.(group);
+                }}
+              >
+                Rename group
+              </button>
+              <button
+                type="button"
+                class="group-menu-item item-danger"
+                role="menuitem"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  closeGroupMenu(true);
+                  onRequestDeleteGroup?.(group);
+                }}
+              >
+                Delete group
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/each}
 
       {#if updatesCount > 0}
         <button
@@ -575,7 +798,15 @@
     </div>
   {/if}
 
-  <div class="list-wrapper">
+  <!-- Focusable so Ctrl+A and Escape reach the list when no control inside it has focus. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div
+    class="list-wrapper"
+    tabindex="0"
+    role="region"
+    aria-label="Addon list"
+    onkeydown={handleListKeydown}
+  >
     <div class="table-header">
       <div class="col-select">
         <input
@@ -587,6 +818,7 @@
       </div>
       <div class="col-name">Name</div>
       <div class="col-version">Version</div>
+      <div class="col-released" title="Release date of the installed version">Released</div>
       <div class="col-source">Source</div>
       <div class="col-status">Status</div>
       <div class="col-menu"></div>
@@ -621,6 +853,7 @@
           itemHeight={rowHeight}
         >
           {#snippet children({ item: addon })}
+            {@const rel = formatReleased(addon.released_at, new Date(now))}
             <div
               class="addon-row"
               class:selected={selectedIds.has(addon.id)}
@@ -650,6 +883,25 @@
               </div>
 
               <div class="col-name">
+                <button
+                  type="button"
+                  class="fav-toggle-btn"
+                  class:is-fav={addon.favourite}
+                  data-testid="fav-toggle"
+                  aria-label="Favourite {addon.name ?? addon.id}"
+                  aria-pressed={addon.favourite ? 'true' : 'false'}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    onToggleFavourite?.(addon);
+                  }}
+                  onkeydown={(e) => {
+                    if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+                  }}
+                >
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill={addon.favourite ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.5">
+                    <path d="M8 1.5l1.8 3.8 4.2.6-3 3 .7 4.2L8 11.1l-3.7 2 .7-4.2-3-3 4.2-.6L8 1.5z" />
+                  </svg>
+                </button>
                 <span class="addon-title">{addon.name ?? addon.id}</span>
                 {#if addon.error}
                   <button
@@ -672,6 +924,10 @@
 
               <div class="col-version font-mono">
                 {addon.version ?? '—'}
+              </div>
+
+              <div class="col-released font-mono" title={rel.title}>
+                {rel.text}
               </div>
 
               <div class="col-source">
@@ -708,6 +964,10 @@
               >
                 <RowMenu
                   {addon}
+                  groups={groups}
+                  groupIds={addon.group_ids ?? []}
+                  onToggleGroup={(groupId, member) => onToggleGroup?.(addon, groupId, member)}
+                  onNewGroup={() => onRequestNewGroup?.(addon)}
                   onUpdate={onUpdateAddon}
                   onInstallDeps={(a) => onInstallDeps?.(a.id)}
                   onIgnoreDeps={onIgnoreDeps}
@@ -1251,9 +1511,14 @@
     overflow: hidden;
   }
 
+  .list-wrapper:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+
   .table-header {
     display: grid;
-    grid-template-columns: 40px 1fr 140px 90px 160px 48px;
+    grid-template-columns: 40px 1fr 140px 96px 90px 160px 48px;
     align-items: center;
     padding: 0.5rem 1.25rem;
     background: var(--bg-0);
@@ -1272,7 +1537,7 @@
 
   .addon-row {
     display: grid;
-    grid-template-columns: 40px 1fr 140px 90px 160px 48px;
+    grid-template-columns: 40px 1fr 140px 96px 90px 160px 48px;
     align-items: center;
     padding: 0 1.25rem;
     height: 48px;
@@ -1314,6 +1579,33 @@
     padding-right: 1rem;
   }
 
+  .fav-toggle-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm, 4px);
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: color var(--fast);
+  }
+
+  .fav-toggle-btn:hover {
+    color: var(--accent);
+  }
+
+  .fav-toggle-btn.is-fav {
+    color: var(--accent);
+  }
+
+  .fav-toggle-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
   .addon-title {
     font-weight: 600;
     font-size: 0.875rem;
@@ -1338,6 +1630,14 @@
     text-overflow: ellipsis;
   }
 
+  .col-released {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .source-badge {
     font-size: 0.7rem;
     font-weight: 700;
@@ -1347,7 +1647,8 @@
     letter-spacing: 0.03em;
   }
 
-  .source-cf {
+  .source-cf,
+  .source-curseforge {
     background: rgba(241, 100, 54, 0.15);
     color: #ff7d52;
   }
@@ -1360,6 +1661,97 @@
   .source-github {
     background: rgba(255, 255, 255, 0.1);
     color: var(--text);
+  }
+
+  .source-tukui {
+    background: rgba(80, 160, 255, 0.15);
+    color: #60a5fa;
+  }
+
+  .source-zip {
+    background: rgba(160, 160, 160, 0.15);
+    color: var(--text-muted);
+  }
+
+  .group-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    position: relative;
+    user-select: none;
+  }
+
+  .group-chip-label {
+    cursor: pointer;
+  }
+
+  .group-menu-btn {
+    background: transparent;
+    border: none;
+    color: inherit;
+    opacity: 0.7;
+    cursor: pointer;
+    padding: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm, 4px);
+    line-height: 1;
+  }
+
+  .group-menu-btn:hover {
+    opacity: 1;
+    background: var(--bg-3);
+  }
+
+  .group-menu-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .group-menu-popup {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 6px);
+    padding: 4px;
+    min-width: 140px;
+    z-index: 1000;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .group-menu-item {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    text-align: left;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: calc(var(--radius, 6px) - 3px);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--fast), color var(--fast);
+  }
+
+  .group-menu-item:hover {
+    background: var(--bg-2);
+    color: var(--text);
+  }
+
+  .group-menu-item:focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .group-menu-item.item-danger {
+    color: var(--danger);
+  }
+
+  .group-menu-item.item-danger:hover {
+    background: var(--danger-tint);
   }
 
   .col-status {

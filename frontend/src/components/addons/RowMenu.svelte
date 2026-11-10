@@ -1,9 +1,13 @@
 <script lang="ts">
-  import type { Addon } from '../../lib/types';
+  import type { Addon, AddonGroup } from '../../lib/types';
   import ChannelSubmenu from './ChannelSubmenu.svelte';
 
   interface Props {
     addon: Addon;
+    groups?: AddonGroup[];
+    groupIds?: string[];
+    onToggleGroup?: (groupId: string, member: boolean) => void;
+    onNewGroup?: () => void;
     onUpdate?: (addon: Addon) => void;
     onInstallDeps?: (addon: Addon) => void;
     onIgnoreDeps?: (addon: Addon) => void;
@@ -22,6 +26,10 @@
 
   let {
     addon,
+    groups = [],
+    groupIds,
+    onToggleGroup,
+    onNewGroup,
     onUpdate,
     onInstallDeps,
     onIgnoreDeps,
@@ -40,22 +48,44 @@
 
   let isOpen = $state(false);
   let showChannelSubmenu = $state(false);
+  let showGroupSubmenu = $state(false);
   let menuRef = $state<HTMLDivElement | null>(null);
   let channelBtnRef = $state<HTMLButtonElement | null>(null);
+  let groupBtnRef = $state<HTMLButtonElement | null>(null);
+
+  let activeGroupIds = $derived(groupIds !== undefined ? groupIds : (addon.group_ids ?? []));
 
   function toggleMenu(e: MouseEvent) {
     e.stopPropagation();
     isOpen = !isOpen;
+    if (!isOpen) {
+      showChannelSubmenu = false;
+      showGroupSubmenu = false;
+    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && isOpen) {
-      isOpen = false;
+      if (showGroupSubmenu) {
+        showGroupSubmenu = false;
+        groupBtnRef?.focus();
+        e.stopPropagation();
+        return;
+      }
+      if (showChannelSubmenu) {
+        showChannelSubmenu = false;
+        channelBtnRef?.focus();
+        e.stopPropagation();
+        return;
+      }
+      closeMenu();
     }
   }
 
   function closeMenu() {
     isOpen = false;
+    showChannelSubmenu = false;
+    showGroupSubmenu = false;
   }
 
   $effect(() => {
@@ -145,11 +175,12 @@
           bind:this={channelBtnRef}
           onclick={(e) => {
             e.stopPropagation();
+            showGroupSubmenu = false;
             showChannelSubmenu = !showChannelSubmenu;
           }}
         >
           <span>Release channel</span>
-          <span class="submenu-arrow">▶</span>
+          <span class="submenu-arrow">◀</span>
         </button>
         {#if showChannelSubmenu}
           <div class="submenu-popover">
@@ -165,6 +196,81 @@
                 channelBtnRef?.focus();
               }}
             />
+          </div>
+        {/if}
+      </div>
+
+      <div class="submenu-container">
+        <button
+          type="button"
+          class="menu-item has-submenu"
+          role="menuitem"
+          data-testid="row-menu-groups"
+          aria-haspopup="true"
+          aria-expanded={showGroupSubmenu}
+          bind:this={groupBtnRef}
+          onclick={(e) => {
+            e.stopPropagation();
+            showChannelSubmenu = false;
+            showGroupSubmenu = !showGroupSubmenu;
+          }}
+          onkeydown={(e) => {
+            if (e.key === 'ArrowLeft') {
+              e.preventDefault();
+              showGroupSubmenu = true;
+            }
+          }}
+        >
+          <span>Add to group</span>
+          <span class="submenu-arrow">◀</span>
+        </button>
+        {#if showGroupSubmenu}
+          <div
+            class="submenu-popover group-submenu-popover"
+            role="menu"
+            tabindex="-1"
+            onkeydown={(e) => {
+              if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                showGroupSubmenu = false;
+                groupBtnRef?.focus();
+              }
+            }}
+          >
+            {#each groups as grp (grp.id)}
+              {@const isMember = activeGroupIds.includes(grp.id)}
+              <button
+                type="button"
+                class="menu-item group-option"
+                role="menuitemcheckbox"
+                data-testid="group-opt-{grp.id}"
+                aria-checked={isMember}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  closeMenu();
+                  onToggleGroup?.(grp.id, !isMember);
+                }}
+              >
+                <span class="checkbox-indicator">{isMember ? '✓ ' : '  '}</span>
+                <span class="group-name">{grp.name}</span>
+              </button>
+            {/each}
+            {#if groups.length > 0}
+              <div class="menu-divider" role="separator"></div>
+            {/if}
+            <button
+              type="button"
+              class="menu-item"
+              role="menuitem"
+              data-testid="group-new"
+              onclick={(e) => {
+                e.stopPropagation();
+                closeMenu();
+                onNewGroup?.();
+              }}
+            >
+              New group...
+            </button>
           </div>
         {/if}
       </div>
@@ -335,12 +441,47 @@
     color: var(--text-muted);
   }
 
+  /* The row menu sits at the right edge of the window, so submenus open to the left. */
   .submenu-popover {
     position: absolute;
-    left: 100%;
+    right: 100%;
     top: 0;
-    margin-left: 4px;
+    margin-right: 4px;
     z-index: 1001;
+  }
+
+  .group-submenu-popover {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px;
+    min-width: 170px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .group-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .checkbox-indicator {
+    width: 14px;
+    display: inline-block;
+    color: var(--accent);
+    font-weight: 600;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .group-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .menu-item {

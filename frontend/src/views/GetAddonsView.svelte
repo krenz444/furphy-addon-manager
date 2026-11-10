@@ -1,10 +1,12 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { invoke, isMockMode, wagoSearch } from '../lib/ipc';
-  import type { Addon, Flavour, WagoAddonItem, WagoSortOption } from '../lib/types';
+  import type { Addon, Flavour, InstallOutcome, WagoAddonItem, WagoSortOption } from '../lib/types';
   import { debounce } from '../lib/hooks/useDebounce';
   import WagoToolbar from '../components/addons/WagoToolbar.svelte';
   import WagoAddonCard from '../components/addons/WagoAddonCard.svelte';
+  import ZipPane from '../components/get/ZipPane.svelte';
+  import TukuiPane from '../components/get/TukuiPane.svelte';
   import WagoCardSkeleton from '../components/addons/WagoCardSkeleton.svelte';
   import WagoListFooter from '../components/addons/WagoListFooter.svelte';
   import InfiniteScrollTrigger from '../components/common/InfiniteScrollTrigger.svelte';
@@ -16,9 +18,11 @@
     initialSearchQuery?: string;
     installedAddons?: Addon[];
     onSelectFlavour?: (flavour: string) => void;
-    onInstallWago: (slug: string, targetFlavour?: string) => void;
-    onInstallCurseForge: (target: string, targetFlavour?: string) => void;
-    onInstallGitHub: (repoUrl: string, targetFlavour?: string) => void;
+    onInstallWago: (slug: string, targetFlavour?: string) => Promise<InstallOutcome> | void;
+    onInstallCurseForge: (target: string, targetFlavour?: string) => Promise<InstallOutcome> | void;
+    onInstallGitHub: (repoUrl: string, targetFlavour?: string) => Promise<InstallOutcome> | void;
+    onInstallTukui: (slug: string, targetFlavour?: string) => Promise<InstallOutcome>;
+    onInstallZip: (source: string, targetFlavour?: string) => Promise<InstallOutcome>;
   }
 
   let {
@@ -31,6 +35,8 @@
     onInstallWago,
     onInstallCurseForge,
     onInstallGitHub,
+    onInstallTukui,
+    onInstallZip,
   }: Props = $props();
 
   let activeFlavourObj = $derived(
@@ -41,7 +47,14 @@
     flavourLabel || activeFlavourObj?.label || flavour
   );
 
-  let activeTab = $state<'wago' | 'curseforge' | 'github'>('wago');
+  let activeTab = $state<'wago' | 'curseforge' | 'github' | 'tukui' | 'zip'>('wago');
+
+  // Said in words wherever an install button would otherwise be enabled for a game version that cannot take one.
+  let destinationReason = $derived(
+    activeFlavourObj && activeFlavourObj.installed === false
+      ? `${displayLabel} has no AddOns folder on this PC, so nothing can be installed there.`
+      : null
+  );
 
   // Wago tab state
   let wagoSearchQuery = $state('');
@@ -379,12 +392,16 @@
     }
   });
 
-  function handleCfInstall() {
+  async function handleCfInstall() {
     cfError = null;
     const raw = cfInput.trim();
     if (!raw) return;
 
-    onInstallCurseForge(raw);
+    const outcome = await onInstallCurseForge(raw);
+    if (outcome && outcome.ok === false) {
+      cfError = outcome.message;
+      return;
+    }
     cfInput = '';
   }
 
@@ -420,7 +437,7 @@
     }
   }
 
-  function handleGithubInstall() {
+  async function handleGithubInstall() {
     githubError = null;
     const raw = githubInput.trim();
     if (!raw) return;
@@ -428,7 +445,11 @@
       githubError = 'Please enter a valid GitHub repository URL (e.g. https://github.com/owner/repo).';
       return;
     }
-    onInstallGitHub(raw);
+    const outcome = await onInstallGitHub(raw);
+    if (outcome && outcome.ok === false) {
+      githubError = outcome.message;
+      return;
+    }
     githubInput = '';
   }
 
@@ -469,6 +490,28 @@
         onclick={() => (activeTab = 'github')}
       >
         GitHub Link
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-tukui"
+        aria-selected={activeTab === 'tukui'}
+        class="tab-btn"
+        class:active={activeTab === 'tukui'}
+        onclick={() => (activeTab = 'tukui')}
+      >
+        Tukui
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-zip"
+        aria-selected={activeTab === 'zip'}
+        class="tab-btn"
+        class:active={activeTab === 'zip'}
+        onclick={() => (activeTab = 'zip')}
+      >
+        From zip
       </button>
     </div>
 
@@ -543,6 +586,7 @@
                 {addon}
                 destinationLabel={displayLabel}
                 isInstalled={isAddonInstalled(addon.slug, addon.name)}
+                {destinationReason}
                 onInstall={(slug) => onInstallWago(slug, flavour)}
               />
             {/each}
@@ -670,6 +714,22 @@
           </div>
         </div>
       </div>
+
+    {:else if activeTab === 'tukui'}
+      <TukuiPane
+        {flavour}
+        {displayLabel}
+        {destinationReason}
+        onInstallTukui={(slug) => onInstallTukui(slug, flavour)}
+      />
+
+    {:else if activeTab === 'zip'}
+      <ZipPane
+        {flavour}
+        {displayLabel}
+        {destinationReason}
+        onInstallZip={(source) => onInstallZip(source, flavour)}
+      />
     {/if}
   </div>
 </div>

@@ -60,7 +60,7 @@ test.describe('Range selection in My Addons', () => {
 
   test('Ctrl+A inside a text field keeps its normal meaning and selects no rows', async ({ page }) => {
     await openList(page);
-    const search = page.getByPlaceholder(/search/i).first();
+    const search = page.getByPlaceholder(/Filter addons/i).first();
     await expect(search).toBeVisible();
     await search.fill('details');
     await search.focus();

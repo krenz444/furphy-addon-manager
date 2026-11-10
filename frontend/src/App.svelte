@@ -12,11 +12,25 @@
   import ConfirmDialog from './components/dialogs/ConfirmDialog.svelte';
   import HoldDialog from './components/dialogs/HoldDialog.svelte';
   import ModifiedDialog from './components/dialogs/ModifiedDialog.svelte';
+  import GroupNameDialog from './components/dialogs/GroupNameDialog.svelte';
+  import CopyAddonsDialog from './components/dialogs/CopyAddonsDialog.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import JobPanel from './components/jobs/JobPanel.svelte';
   import Toasts, { type ToastItem } from './components/jobs/Toasts.svelte';
   import AppUpdateBanner from './components/banners/AppUpdateBanner.svelte';
-  import type { Addon, Flavour, AppInfo, Freshness, JobRecord, PatchCompatStatus, AppUpdateInfo } from './lib/types';
+  import { initZoomFromSettings, handleZoomKey } from './lib/zoomControl';
+  import type {
+    Addon,
+    Flavour,
+    AppInfo,
+    Freshness,
+    JobRecord,
+    PatchCompatStatus,
+    AppUpdateInfo,
+    AddonGroup,
+    CopyItemResult,
+    InstallOutcome,
+  } from './lib/types';
   import {
     summarizeCheck,
     checkSuccessMessage,
@@ -43,6 +57,9 @@
   let updateBannerDismissed = $state<boolean>(false);
   let isInstallingAppUpdate = $state<boolean>(false);
 
+  // Groups State
+  let groups = $state<AddonGroup[]>([]);
+
   // Preference State
   let currentTheme = $state<string>('tokyo-rain');
   let density = $state<'comfortable' | 'compact'>('comfortable');
@@ -63,6 +80,18 @@
   let browseSearchQuery = $state<string>('');
   let addDialogOpen = $state<boolean>(false);
   let exportDialogOpen = $state<boolean>(false);
+
+  // Group Name Dialog State
+  let groupDialogOpen = $state<boolean>(false);
+  let groupDialogMode = $state<'create' | 'rename'>('create');
+  let groupDialogInitialName = $state<string>('');
+  let groupDialogError = $state<string | null>(null);
+  let groupDialogTargetGroup = $state<AddonGroup | null>(null);
+  let groupDialogTargetAddon = $state<Addon | null>(null);
+
+  // Copy Addons Dialog State
+  let copyDialogOpen = $state<boolean>(false);
+  let copyPreselectedIds = $state<string[]>([]);
 
   // Confirm Dialog State
   let confirmOpen = $state<boolean>(false);
@@ -203,6 +232,16 @@
     return false;
   }
 
+  async function refreshGroups() {
+    try {
+      const list = await invoke<AddonGroup[]>('list_groups');
+      groups = Array.isArray(list) ? list : [];
+    } catch (err) {
+      console.warn('Failed to load groups:', err);
+      groups = [];
+    }
+  }
+
   async function loadInitialData() {
     try {
       try {
@@ -219,13 +258,18 @@
       try {
         const s = await invoke<Record<string, any>>('get_settings');
         if (s) {
+          await initZoomFromSettings(s);
           if (s.activeFlavour && typeof s.activeFlavour === 'string') {
             activeFlavour = s.activeFlavour;
           }
           if (s.showTestRealms !== undefined) showTestRealms = Boolean(s.showTestRealms);
           if (s.hostTheme) currentTheme = s.hostTheme;
+        } else {
+          await initZoomFromSettings({});
         }
-      } catch {}
+      } catch {
+        await initZoomFromSettings({});
+      }
 
       try {
         const fl = await invoke<Flavour[]>('get_flavours');
@@ -249,6 +293,7 @@
         }
       } catch {}
 
+      await refreshGroups();
       await refreshFlavourData(activeFlavour);
     } catch (err) {
       console.error('Failed to load initial data:', err);
@@ -716,6 +761,162 @@
     await refreshFlavourData(activeFlavour);
   }
 
+  async function handleToggleFavourite(addon: Addon) {
+    const nextFav = !(addon.favourite ?? false);
+    try {
+      await invoke('set_favourite', { addon_id: addon.id, favourite: nextFav });
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to update favourite: ${errorText(err)}`);
+    }
+  }
+
+  async function handleToggleGroup(addon: Addon, groupId: string, member: boolean) {
+    try {
+      await invoke('set_addon_group', { addon_id: addon.id, group_id: groupId, member });
+      await refreshGroups();
+      await refreshFlavourData(activeFlavour);
+    } catch (err) {
+      addToast('error', `Failed to update group: ${errorText(err)}`);
+    }
+  }
+
+  function handleRequestNewGroup(addon: Addon | null) {
+    groupDialogMode = 'create';
+    groupDialogInitialName = '';
+    groupDialogError = null;
+    groupDialogTargetGroup = null;
+    groupDialogTargetAddon = addon;
+    groupDialogOpen = true;
+  }
+
+  function handleRequestRenameGroup(group: AddonGroup) {
+    groupDialogMode = 'rename';
+    groupDialogInitialName = group.name;
+    groupDialogError = null;
+    groupDialogTargetGroup = group;
+    groupDialogTargetAddon = null;
+    groupDialogOpen = true;
+  }
+
+  function handleRequestDeleteGroup(group: AddonGroup) {
+    confirmTitle = 'Delete Group';
+    confirmMessage = `Are you sure you want to delete the group "${group.name}"?`;
+    confirmDetail = 'The addons in this group will not be uninstalled or deleted.';
+    confirmDanger = true;
+    confirmAction = async () => {
+      try {
+        await invoke('delete_group', { group_id: group.id });
+        await refreshGroups();
+        await refreshFlavourData(activeFlavour);
+      } catch (err) {
+        addToast('error', `Failed to delete group: ${errorText(err)}`);
+      }
+      confirmOpen = false;
+    };
+    confirmOpen = true;
+  }
+
+  async function handleSaveGroupName(name: string) {
+    groupDialogError = null;
+    try {
+      if (groupDialogMode === 'create') {
+        const created = await invoke<AddonGroup>('create_group', { name });
+        if (groupDialogTargetAddon && created?.id) {
+          await invoke('set_addon_group', {
+            addon_id: groupDialogTargetAddon.id,
+            group_id: created.id,
+            member: true,
+          });
+        }
+        groupDialogOpen = false;
+        await refreshGroups();
+        await refreshFlavourData(activeFlavour);
+      } else if (groupDialogMode === 'rename' && groupDialogTargetGroup) {
+        await invoke('rename_group', { group_id: groupDialogTargetGroup.id, name });
+        groupDialogOpen = false;
+        await refreshGroups();
+        await refreshFlavourData(activeFlavour);
+      }
+    } catch (err) {
+      groupDialogError = errorText(err);
+    }
+  }
+
+  function handleOpenCopyAddons(selectedIds: string[] = []) {
+    copyPreselectedIds = selectedIds;
+    copyDialogOpen = true;
+  }
+
+  async function handleCopyRun(targetFlavour: string, addonIds: string[]): Promise<CopyItemResult[]> {
+    try {
+      runningJob = {
+        id: 'job-copy-' + Date.now(),
+        kind: 'copy-addons',
+        flavour: activeFlavour,
+        params: JSON.stringify({ target_flavour: targetFlavour, addon_ids: addonIds }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: false,
+        log_path: null,
+      };
+      activeJobPhase = 'Copying Addons';
+      currentJobAddon = `${addonIds.length} addons`;
+      jobLogs = [`[Copy] Copying ${addonIds.length} addons from ${activeFlavour} to ${targetFlavour}`];
+
+      const job = await invoke<JobRecord>('start_job', {
+        kind: 'copy-addons',
+        flavour: activeFlavour,
+        params: { target_flavour: targetFlavour, addon_ids: addonIds },
+      });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+
+      if (finishedJob.state === 'failed' || finishedJob.error) {
+        const inspection = inspectFinishedJob(finishedJob);
+        const errMsg = inspection.errorMessage || finishedJob.error || 'Copy addons failed';
+        throw new Error(errMsg);
+      }
+
+      let items: CopyItemResult[] = [];
+      if (finishedJob.results) {
+        try {
+          const parsed = typeof finishedJob.results === 'string' ? JSON.parse(finishedJob.results) : finishedJob.results;
+          if (parsed && Array.isArray(parsed.items)) {
+            items = parsed.items;
+          } else if (Array.isArray(parsed)) {
+            items = parsed;
+          }
+        } catch {}
+      }
+
+      setTimeout(() => {
+        if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+          runningJob = null;
+        }
+      }, 3000);
+
+      if (isGameActive && finishedJob.reload_needed) {
+        reloadNeeded = true;
+      }
+
+      await refreshFlavourData(targetFlavour);
+      return items;
+    } catch (err) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: errorText(err), finished_at: new Date().toISOString() };
+      }
+      throw new Error(errorText(err));
+    }
+  }
+
   async function handleUpdateAddon(addon: Addon) {
     try {
       runningJob = {
@@ -891,7 +1092,7 @@
     }
   }
 
-  async function handleAddAddon(target: string, destinationFlavour?: string) {
+  async function handleAddAddon(target: string, destinationFlavour?: string): Promise<InstallOutcome> {
     const targetFlavour = destinationFlavour || activeFlavour;
     try {
       runningJob = {
@@ -935,11 +1136,93 @@
       if (targetFlavour !== activeFlavour) {
         activeFlavour = targetFlavour;
       }
+
+      if (hasError) {
+        const inspection = inspectFinishedJob(finishedJob);
+        const failureMessage = inspection.errorMessage || finishedJob.error || 'Installation failed';
+        return { ok: false, message: failureMessage };
+      }
+      return { ok: true, message: 'Addon installed' };
     } catch (err) {
       if (runningJob) {
         runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
       }
       addToast('error', `Installation failed: ${err}`);
+      return { ok: false, message: errorText(err) };
+    }
+  }
+
+  async function handleInstallZip(source: string, destinationFlavour?: string): Promise<InstallOutcome> {
+    const targetFlavour = destinationFlavour || activeFlavour;
+    const flvLabel = flavours.find(f => f.id === targetFlavour)?.label || targetFlavour;
+    try {
+      runningJob = {
+        id: 'job-zip-' + Date.now(),
+        kind: 'install-zip',
+        flavour: targetFlavour,
+        params: JSON.stringify({ source }),
+        state: 'running',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: isGameActive,
+        log_path: null,
+      };
+      activeJobPhase = 'Installing Zip';
+      currentJobAddon = source;
+      jobLogs = [`[Zip] Installing from ${source} to ${targetFlavour}`];
+
+      const job = await invoke<JobRecord>('start_job', { kind: 'install-zip', flavour: targetFlavour, params: { source } });
+      const finishedJob: JobRecord = job || {
+        ...runningJob,
+        state: 'completed',
+        finished_at: new Date().toISOString(),
+      };
+      runningJob = finishedJob;
+
+      if (finishedJob.state === 'failed' || finishedJob.error) {
+        const inspection = inspectFinishedJob(finishedJob);
+        const failureMsg = inspection.errorMessage || finishedJob.error || 'Failed to install zip';
+        await refreshFlavourData(targetFlavour);
+        return { ok: false, message: failureMsg };
+      }
+
+      let parsed: any = null;
+      if (finishedJob.results) {
+        try {
+          parsed = typeof finishedJob.results === 'string' ? JSON.parse(finishedJob.results) : finishedJob.results;
+        } catch {}
+      }
+
+      let message = 'Installed zip addon';
+      if (parsed) {
+        const name = parsed.name || parsed.addon_id || 'addon';
+        const versionStr = parsed.version ? ` ${parsed.version}` : '';
+        const folders = Array.isArray(parsed.folders) && parsed.folders.length > 0 ? `: ${parsed.folders.join(', ')}` : '';
+        message = `Installed ${name}${versionStr} into ${flvLabel}${folders}`;
+        if (parsed.replaced) {
+          message += '. Replaced the previous copy.';
+        }
+      }
+
+      setTimeout(() => {
+        if (runningJob?.id === finishedJob.id && runningJob.state === 'completed' && !runningJob.error) {
+          runningJob = null;
+        }
+      }, 3000);
+
+      if (isGameActive && finishedJob.reload_needed) {
+        reloadNeeded = true;
+      }
+      await refreshFlavourData(targetFlavour);
+      return { ok: true, message };
+    } catch (err) {
+      if (runningJob) {
+        runningJob = { ...runningJob, state: 'failed', error: String(err), finished_at: new Date().toISOString() };
+      }
+      await refreshFlavourData(targetFlavour);
+      return { ok: false, message: errorText(err) };
     }
   }
 
@@ -1056,6 +1339,14 @@
   loadInitialData();
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (handleZoomKey(e)) {
+      e.preventDefault();
+    }
+  }}
+/>
+
 <div class="app-layout">
   <Sidebar
     {activeView}
@@ -1125,6 +1416,14 @@
           checkedAt={freshness?.checked_at ?? null}
           {isChecking}
           {isJobBusy}
+          {groups}
+          onToggleFavourite={handleToggleFavourite}
+          onToggleGroup={handleToggleGroup}
+          onRequestNewGroup={handleRequestNewGroup}
+          onRequestRenameGroup={handleRequestRenameGroup}
+          onRequestDeleteGroup={handleRequestDeleteGroup}
+          copyAvailable={flavours.some(f => f.installed && f.id !== activeFlavour)}
+          onCopyAddons={handleOpenCopyAddons}
           onCheckNow={handleCheckNow}
           onUpdateAddon={handleUpdateAddon}
           onUpdateAll={handleUpdateAll}
@@ -1169,6 +1468,8 @@
           onInstallWago={(slug, flv) => handleAddAddon(`https://addons.wago.io/addons/${slug}`, flv || activeFlavour)}
           onInstallCurseForge={(target, flv) => handleAddAddon(String(target), flv || activeFlavour)}
           onInstallGitHub={(repoUrl, flv) => handleAddAddon(repoUrl, flv || activeFlavour)}
+          onInstallTukui={(slug, flv) => handleAddAddon('tukui:' + slug, flv || activeFlavour)}
+          onInstallZip={handleInstallZip}
         />
       {:else if activeView === 'not_built_for_patch'}
         <NotBuiltForPatchView
@@ -1295,6 +1596,25 @@
     onUpdateAndZip={handleModifiedUpdateAndZip}
     onUpdateAnyway={handleModifiedUpdateAnyway}
     onSkip={() => (modifiedDialogOpen = false)}
+  />
+
+  <GroupNameDialog
+    open={groupDialogOpen}
+    mode={groupDialogMode}
+    initialName={groupDialogInitialName}
+    error={groupDialogError}
+    onSave={handleSaveGroupName}
+    onCancel={() => (groupDialogOpen = false)}
+  />
+
+  <CopyAddonsDialog
+    open={copyDialogOpen}
+    sourceFlavour={activeFlavour}
+    {flavours}
+    {addons}
+    preselectedIds={copyPreselectedIds}
+    onClose={() => (copyDialogOpen = false)}
+    onRun={handleCopyRun}
   />
 
   <ConfirmDialog

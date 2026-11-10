@@ -11,6 +11,10 @@
   import ConfirmDialog from '../components/dialogs/ConfirmDialog.svelte';
   import UpdateModeSettings from '../components/settings/UpdateModeSettings.svelte';
   import WtfBackupPanel from '../components/settings/WtfBackupPanel.svelte';
+  import BattlenetPanel from '../components/settings/BattlenetPanel.svelte';
+  import { matchesQuery } from '../lib/settingsSearch';
+  import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from '../lib/zoom';
+  import { getZoom, setZoom, onZoomChange } from '../lib/zoomControl';
   import type { DiagnosticItem, MigrationBackup, ScannedCandidateGroup, ThemeDef, AppUpdateInfo, Flavour, WholeWtfBackup, WtfRestorePreview, JobRecord } from '../lib/types';
 
   interface Props {
@@ -113,6 +117,98 @@
   let startWithWindows = $state(false);
   let autoAppUpdate = $state(true);
   let showTestRealms = $state(false);
+  let forceIpv4 = $state(false);
+
+  // Search state (Z05)
+  let searchQuery = $state('');
+  let matchingSectionCount = $state(5);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  let settingsViewEl = $state<HTMLDivElement | null>(null);
+
+  let searchStatusText = $derived.by(() => {
+    const q = searchQuery.trim();
+    if (q === '') return '';
+    if (matchingSectionCount === 0) return 'No settings match';
+    return `${matchingSectionCount} sections match`;
+  });
+
+  function clearSearch() {
+    searchQuery = '';
+    searchInputEl?.focus();
+  }
+
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      searchQuery = '';
+    }
+  }
+
+  // Zoom state (Z06)
+  let currentZoom = $state(getZoom());
+
+  $effect(() => {
+    return onZoomChange((z) => {
+      currentZoom = z;
+    });
+  });
+
+  function handleZoomSlider(e: Event) {
+    const val = Number((e.target as HTMLInputElement).value);
+    setZoom(val / 100);
+  }
+
+  function handleResetZoom() {
+    setZoom(1);
+  }
+
+  // Battle.net installs (Z09)
+  async function handleUseBnetRoot(flvId: string, rootPath: string): Promise<void> {
+    await setFlavourInstallPath(flvId, rootPath);
+    onFlavoursChange?.();
+  }
+
+  // Settings search effect (Z05)
+  $effect(() => {
+    const q = searchQuery.trim();
+    if (!settingsViewEl) return;
+
+    const sections = Array.from(settingsViewEl.querySelectorAll<HTMLElement>('.settings-content > section[data-settings-block]'));
+    const groups = Array.from(settingsViewEl.querySelectorAll<HTMLElement>('.advanced-body > [data-settings-block]'));
+
+    if (q === '') {
+      for (const section of sections) {
+        section.hidden = false;
+      }
+      for (const group of groups) {
+        group.hidden = false;
+      }
+      matchingSectionCount = sections.length;
+      return;
+    }
+
+    for (const group of groups) {
+      const match = matchesQuery(q, group.textContent || '');
+      group.hidden = !match;
+    }
+
+    let visibleSections = 0;
+    for (const section of sections) {
+      if (section.classList.contains('advanced-section')) {
+        const headerText = section.querySelector('.advanced-toggle')?.textContent || '';
+        const headerMatch = matchesQuery(q, headerText);
+        const hasVisibleGroups = groups.some((g) => !g.hidden);
+        const match = headerMatch || hasVisibleGroups;
+        section.hidden = !match;
+        if (match) visibleSections++;
+      } else {
+        const match = matchesQuery(q, section.textContent || '');
+        section.hidden = !match;
+        if (match) visibleSections++;
+      }
+    }
+
+    matchingSectionCount = visibleSections;
+  });
 
   // Advanced CurseForge
   let cfAdFilter = $state(true);
@@ -216,6 +312,8 @@
         if (s.adFilter !== undefined) cfAdFilter = Boolean(s.adFilter);
         if (s.cfFocus !== undefined) cfSearchOnly = Boolean(s.cfFocus);
         if (s.hasGithubToken !== undefined) hasGithubToken = Boolean(s.hasGithubToken);
+        if (s.forceIpv4 !== undefined) forceIpv4 = Boolean(s.forceIpv4);
+        if (s.uiZoom !== undefined) currentZoom = getZoom();
       }
     } catch {
       // Mock fallback
@@ -380,12 +478,37 @@
   loadInitialSettings();
 </script>
 
-<div class="settings-view">
+<div class="settings-view" bind:this={settingsViewEl}>
   <div class="settings-content">
     <h1 class="view-title">Settings</h1>
 
+    <!-- Search Settings (Z05) -->
+    <div class="settings-search-bar">
+      <label for="settings-search-input" class="settings-search-label">Search settings</label>
+      <input
+        id="settings-search-input"
+        type="search"
+        class="form-input settings-search-input"
+        data-testid="settings-search"
+        placeholder="Search settings"
+        bind:value={searchQuery}
+        bind:this={searchInputEl}
+        onkeydown={handleSearchKeydown}
+      />
+      <div class="sr-only" role="status" aria-live="polite">
+        {searchStatusText}
+      </div>
+    </div>
+
+    {#if matchingSectionCount === 0 && searchQuery.trim() !== ''}
+      <div class="settings-search-empty" data-testid="settings-search-empty">
+        <span>No settings match "{searchQuery}".</span>
+        <button type="button" class="btn-secondary btn-sm" onclick={clearSearch}>Clear</button>
+      </div>
+    {/if}
+
     <!-- 1. Updates Section -->
-    <section class="settings-card">
+    <section class="settings-card" data-settings-block>
       <h2 class="card-heading">Addon Updates</h2>
       <div class="setting-row">
         <label class="toggle-control">
@@ -467,7 +590,7 @@
     </section>
 
     <!-- 2. App Updates Section -->
-    <section class="settings-card">
+    <section class="settings-card" data-settings-block>
       <h2 class="card-heading">Furphy App Updates</h2>
       <div class="setting-row">
         <label class="toggle-control">
@@ -527,8 +650,36 @@
     </section>
 
     <!-- 3. Appearance: Density & 16-Theme Grid -->
-    <section class="settings-card">
+    <section class="settings-card" data-settings-block>
       <h2 class="card-heading">Appearance</h2>
+
+      <!-- Interface size (Zoom) -->
+      <div class="zoom-setting-section">
+        <span class="control-label">Interface size</span>
+        <div class="zoom-control-row">
+          <input
+            type="range"
+            class="zoom-range-input"
+            data-testid="zoom-slider"
+            aria-label="Interface size"
+            min={Math.round(ZOOM_MIN * 100)}
+            max={Math.round(ZOOM_MAX * 100)}
+            step={Math.round(ZOOM_STEP * 100)}
+            value={Math.round(currentZoom * 100)}
+            oninput={handleZoomSlider}
+          />
+          <span class="zoom-value-label font-mono" data-testid="zoom-value">{Math.round(currentZoom * 100)}%</span>
+          <button
+            type="button"
+            class="btn-secondary btn-sm"
+            data-testid="zoom-reset"
+            onclick={handleResetZoom}
+          >
+            Reset
+          </button>
+        </div>
+        <p class="setting-desc">Ctrl and + or -, Ctrl and 0 resets</p>
+      </div>
 
       <div class="setting-row">
         <span class="control-label">Table Spacing:</span>
@@ -578,7 +729,7 @@
     </section>
 
     <!-- 4. Addons Furphy isn't managing yet -->
-    <section class="settings-card">
+    <section class="settings-card" data-settings-block>
       <div class="card-header-row">
         <div>
           <h2 class="card-heading">Addons Furphy Isn’t Managing Yet</h2>
@@ -685,88 +836,104 @@
     </section>
 
     <!-- 5. Advanced Accordion -->
-    <section class="settings-card advanced-section">
+    <section class="settings-card advanced-section" data-settings-block>
       <button
         type="button"
         class="advanced-toggle"
         onclick={() => (advancedOpen = !advancedOpen)}
-        aria-expanded={advancedOpen}
+        aria-expanded={advancedOpen || searchQuery.trim() !== ''}
       >
-        <span class="toggle-icon">{advancedOpen ? '▼' : '►'}</span>
+        <span class="toggle-icon">{advancedOpen || searchQuery.trim() !== '' ? '▼' : '►'}</span>
         <h2 class="card-heading advanced-title">Advanced Settings</h2>
       </button>
 
-      {#if advancedOpen}
-        <div class="advanced-body">
-          <!-- CurseForge Pane Settings -->
-          <div class="advanced-group">
-            <h3>CurseForge Browser Pane</h3>
-            <label class="toggle-control">
-              <input
-                type="checkbox"
-                bind:checked={cfAdFilter}
-                onchange={() => updateSetting('adFilter', cfAdFilter)}
-              />
-              <span class="toggle-text">Filter ads and telemetry on embedded CurseForge pages</span>
-            </label>
-            <label class="toggle-control">
-              <input
-                type="checkbox"
-                bind:checked={cfSearchOnly}
-                onchange={() => updateSetting('cfFocus', cfSearchOnly)}
-              />
-              <span class="toggle-text">Focus mode: hide headers and navigation banners</span>
-            </label>
-          </div>
+      <div class="advanced-body" hidden={!advancedOpen && searchQuery.trim() === ''}>
+        <!-- CurseForge Pane Settings -->
+        <div class="advanced-group" data-settings-block>
+          <h3>CurseForge Browser Pane</h3>
+          <label class="toggle-control">
+            <input
+              type="checkbox"
+              bind:checked={cfAdFilter}
+              onchange={() => updateSetting('adFilter', cfAdFilter)}
+            />
+            <span class="toggle-text">Filter ads and telemetry on embedded CurseForge pages</span>
+          </label>
+          <label class="toggle-control">
+            <input
+              type="checkbox"
+              bind:checked={cfSearchOnly}
+              onchange={() => updateSetting('cfFocus', cfSearchOnly)}
+            />
+            <span class="toggle-text">Focus mode: hide headers and navigation banners</span>
+          </label>
+        </div>
 
-          <!-- GitHub Token -->
-          <div class="advanced-group">
-            <h3>GitHub Addon Access Token</h3>
-            <p class="setting-desc">
-              Recommended to prevent GitHub API rate limits (60 requests/hr) and support private repos.
-            </p>
-            <div class="token-status">
-              Status:
-              <strong class={hasGithubToken ? 'text-success' : 'text-muted'}>
-                {hasGithubToken ? 'Active token configured' : 'No token set'}
-              </strong>
-            </div>
-            <div class="token-form">
-              <input
-                type="password"
-                class="form-input"
-                placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-                bind:value={githubTokenInput}
-              />
-              <button type="button" class="btn-primary" onclick={saveGithubToken}>
-                Save Token
+        <!-- GitHub Token -->
+        <div class="advanced-group" data-settings-block>
+          <h3>GitHub Addon Access Token</h3>
+          <p class="setting-desc">
+            Recommended to prevent GitHub API rate limits (60 requests/hr) and support private repos.
+          </p>
+          <div class="token-status">
+            Status:
+            <strong class={hasGithubToken ? 'text-success' : 'text-muted'}>
+              {hasGithubToken ? 'Active token configured' : 'No token set'}
+            </strong>
+          </div>
+          <div class="token-form">
+            <input
+              type="password"
+              class="form-input"
+              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+              bind:value={githubTokenInput}
+            />
+            <button type="button" class="btn-primary" onclick={saveGithubToken}>
+              Save Token
+            </button>
+            {#if hasGithubToken}
+              <button type="button" class="btn-secondary" onclick={removeGithubToken}>
+                Remove
               </button>
-              {#if hasGithubToken}
-                <button type="button" class="btn-secondary" onclick={removeGithubToken}>
-                  Remove
-                </button>
-              {/if}
-            </div>
-            {#if githubTokenSuccess}
-              <div class="success-notice">{githubTokenSuccess}</div>
             {/if}
           </div>
+          {#if githubTokenSuccess}
+            <div class="success-notice">{githubTokenSuccess}</div>
+          {/if}
+        </div>
 
-          <!-- WoW Versions -->
-          <div class="advanced-group">
-            <h3>World of Warcraft Versions</h3>
-            <label class="toggle-control">
-              <input
-                type="checkbox"
-                bind:checked={showTestRealms}
-                onchange={() => updateSetting('showTestRealms', showTestRealms)}
-              />
-              <span class="toggle-text">Show test realms (PTR, XPTR, Beta clients) in version switcher</span>
-            </label>
-          </div>
+        <!-- Network (IPv4) -->
+        <div class="advanced-group" data-settings-block>
+          <h3>Network</h3>
+          <label class="toggle-control">
+            <input
+              type="checkbox"
+              data-testid="force-ipv4-toggle"
+              bind:checked={forceIpv4}
+              onchange={() => updateSetting('forceIpv4', forceIpv4)}
+            />
+            <span class="toggle-text">Use IPv4 only for downloads</span>
+          </label>
+          <p class="setting-desc">
+            Turn this on if downloads time out on a network with broken IPv6. Takes effect on the next download.
+          </p>
+        </div>
 
-          <!-- Game Version Install Paths -->
-          <div class="advanced-group">
+        <!-- WoW Versions -->
+        <div class="advanced-group" data-settings-block>
+          <h3>World of Warcraft Versions</h3>
+          <label class="toggle-control">
+            <input
+              type="checkbox"
+              bind:checked={showTestRealms}
+              onchange={() => updateSetting('showTestRealms', showTestRealms)}
+            />
+            <span class="toggle-text">Show test realms (PTR, XPTR, Beta clients) in version switcher</span>
+          </label>
+        </div>
+
+        <!-- Game Version Install Paths -->
+        <div class="advanced-group" data-settings-block>
             <h3>Game Version Install Paths</h3>
             <p class="setting-desc">
               Each World of Warcraft version can have its own decoupled installation directory. If an installation isn't detected automatically, specify its path below.
@@ -883,8 +1050,13 @@
             </div>
           </div>
 
+          <!-- Battle.net Installs -->
+          <div class="advanced-group" data-settings-block>
+            <BattlenetPanel {flavours} onUseRoot={handleUseBnetRoot} />
+          </div>
+
           <!-- Common App Folders -->
-          <div class="advanced-group">
+          <div class="advanced-group" data-settings-block>
             <h3>App Folders & Locations</h3>
             <div class="folder-btns">
               <button type="button" class="btn-secondary" onclick={() => openTarget('datafolder')}>
@@ -903,7 +1075,7 @@
           </div>
 
           <!-- Export & Import -->
-          <div class="advanced-group">
+          <div class="advanced-group" data-settings-block>
             <h3>Backup & Transfer</h3>
             <WtfBackupPanel
               activeFlavour={flavours.find((f) => f.id === flavour)?.label ?? flavour}
@@ -961,7 +1133,7 @@
           </div>
 
           <!-- Diagnostics -->
-          <div class="advanced-group">
+          <div class="advanced-group" data-settings-block>
             <h3>Diagnostics & Health</h3>
             <div class="diagnostics-bar">
               <button
@@ -995,7 +1167,7 @@
           </div>
 
           <!-- Migration Backups -->
-          <div class="advanced-group">
+          <div class="advanced-group" data-settings-block>
             <h3>Upgrade Safety Backups</h3>
             <div class="folder-btns">
               <button
@@ -1023,7 +1195,7 @@
           </div>
 
           <!-- Danger Zone: Uninstall -->
-          <div class="advanced-group danger-zone">
+          <div class="advanced-group danger-zone" data-settings-block>
             <h3>Uninstall</h3>
             <p class="setting-desc">
               Removes Furphy Addon Manager from your system. Your addons and SavedVariables are kept intact.
@@ -1033,7 +1205,6 @@
             </button>
           </div>
         </div>
-      {/if}
     </section>
   </div>
 </div>
@@ -1049,6 +1220,88 @@
 />
 
 <style>
+  [hidden] {
+    display: none !important;
+  }
+
+  .settings-search-bar {
+    position: sticky;
+    top: -1.5rem;
+    z-index: 10;
+    background: var(--bg-0);
+    padding: 0.5rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .settings-search-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .settings-search-input {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .settings-search-empty {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-1);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm, 4px);
+    padding: 1rem 1.25rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+
+  .zoom-setting-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .zoom-control-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .zoom-range-input {
+    flex: 1;
+    max-width: 260px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .zoom-range-input:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .zoom-value-label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 48px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
   .settings-view {
     height: 100%;
     overflow-y: auto;

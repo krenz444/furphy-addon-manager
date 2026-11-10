@@ -6,7 +6,7 @@
     activeFlavour: string;
     flavours?: Flavour[];
     onClose: () => void;
-    onAdd: (target: string, destinationFlavour?: string) => Promise<void>;
+    onAdd: (target: string, destinationFlavour?: string) => Promise<unknown>;
   }
 
   let { isOpen, activeFlavour, flavours = [], onClose, onAdd }: Props = $props();

@@ -59,6 +59,8 @@ test.describe('Install from a zip file or link', () => {
     await expect(page.locator('[data-testid="zip-result"]')).toBeVisible();
 
     await page.locator('.sidebar-nav button').filter({ hasText: 'My Addons' }).click();
+    // The mock list is long and virtualised, so narrow it to the new addon first.
+    await page.getByPlaceholder(/Filter addons/i).fill('BadgeProbe');
     await expect(page.locator('.source-badge.source-zip').first()).toBeVisible();
   });
 });
