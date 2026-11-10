@@ -9,3 +9,6 @@ pub mod update_control;
 pub mod integrity;
 pub mod activity;
 pub mod wtf_full;
+pub mod groups;
+pub mod tukui;
+pub mod battlenet;

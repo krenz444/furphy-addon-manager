@@ -53,6 +53,10 @@ pub struct AddonDto {
     pub held_reason: Option<String>,
     pub auto_update: bool,
     pub integrity_status: String,
+    pub released_at: Option<String>,
+    pub favourite: bool,
+    pub group_ids: Vec<String>,
+    pub tukui_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +124,8 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
              a.file_id, a.file_name, a.installed_at, a.adopted, a.ignore_updates, \
              a.pinned_file_id, a.release_type, a.wago_slug, a.repo, \
              c.update_version, c.update_file_id, c.status, c.error, a.latest_game_versions, a.ignored_deps, \
-             a.auto_update, a.integrity_status, c.held, c.held_reason \
+             a.auto_update, a.integrity_status, c.held, c.held_reason, \
+             a.released_at, a.favourite, a.tukui_slug \
              FROM addons a \
              LEFT JOIN check_results c ON a.id = c.addon_id \
              WHERE a.flavour = ?1 ORDER BY a.name COLLATE NOCASE ASC",
@@ -155,6 +160,9 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             let integrity_status: String = row.get::<_, Option<String>>(23).ok().flatten().unwrap_or_else(|| "clean".to_string());
             let held: bool = row.get::<_, Option<i32>>(24).ok().flatten().unwrap_or(0) != 0;
             let held_reason: Option<String> = row.get(25).ok().flatten();
+            let released_at: Option<String> = row.get::<_, Option<String>>(26).ok().flatten();
+            let favourite: bool = row.get::<_, Option<i32>>(27).ok().flatten().unwrap_or(0) != 0;
+            let tukui_slug: Option<String> = row.get::<_, Option<String>>(28).ok().flatten();
 
             Ok((
                 addon_id, flavour_id, name, author, source, version,
@@ -162,9 +170,13 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
                 ignore_updates, pinned_file_id, release_type, wago_slug,
                 repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
                 auto_update, integrity_status, held, held_reason,
+                released_at, favourite, tukui_slug,
             ))
         })
         .map_err(|e| e.to_string())?;
+
+    // One query for every addon's groups; a failure only means no group chips, never a failed list.
+    let mut group_map = crate::engine::groups::group_ids_by_addon(conn).unwrap_or_default();
 
     let mut result = Vec::new();
     for r in rows {
@@ -174,6 +186,7 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             ignore_updates, pinned_file_id, release_type, wago_slug,
             repo, update_version, update_file_id, check_status, error, latest_gv_json, ignored_deps_json,
             auto_update, integrity_status, held, held_reason,
+            released_at, favourite, tukui_slug,
         ) = r.map_err(|e| e.to_string())?;
 
         let mut folder_stmt = conn
@@ -226,6 +239,8 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             (update_version, update_file_id, check_status)
         };
 
+        let group_ids = group_map.remove(&addon_id).unwrap_or_default();
+
         result.push(AddonDto {
             id: addon_id,
             flavour: flavour_id,
@@ -255,6 +270,10 @@ pub fn fetch_addons_with_details(conn: &Connection, flavour: &str) -> Result<Vec
             held_reason,
             auto_update,
             integrity_status,
+            released_at,
+            favourite,
+            group_ids,
+            tukui_slug,
         });
     }
 

@@ -28,6 +28,7 @@ pub fn init_app(override_import_path: Option<PathBuf>) -> Result<(), Box<dyn std
     let db_path = paths::get_db_path();
     let mut conn = db::open_connection(&db_path)?;
     db::migrate::run_migrations(&mut conn)?;
+    net::ip_mode::init_from_settings(&conn);
 
     // 3. Crash recovery: recover interrupted folder swaps & sync installed flavours
     let installed = engine::flavours::detect_all_installed_flavours(&conn, wow_root_res.as_deref().ok());
@@ -328,6 +329,14 @@ pub fn run() {
             commands::wtf_full::wtf_backups_list,
             commands::wtf_full::wtf_restore_preview,
             commands::wtf_full::wtf_backup_delete,
+            commands::groups::set_favourite,
+            commands::groups::list_groups,
+            commands::groups::create_group,
+            commands::groups::rename_group,
+            commands::groups::delete_group,
+            commands::groups::set_addon_group,
+            commands::tukui::tukui_addons,
+            commands::battlenet::detect_battlenet_installs,
         ])
         .run(context);
 

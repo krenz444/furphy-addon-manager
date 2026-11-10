@@ -291,6 +291,65 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
 
+    if current_version < 8 {
+        let tx = conn.transaction()?;
+
+        let has_released_at: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'released_at'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_released_at {
+            tx.execute("ALTER TABLE addons ADD COLUMN released_at TEXT", [])?;
+        }
+
+        let has_favourite: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'favourite'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_favourite {
+            tx.execute("ALTER TABLE addons ADD COLUMN favourite INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
+        let has_tukui_slug: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'tukui_slug'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_tukui_slug {
+            tx.execute("ALTER TABLE addons ADD COLUMN tukui_slug TEXT", [])?;
+        }
+
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS addon_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_addon_groups_name ON addon_groups(name COLLATE NOCASE);
+
+            CREATE TABLE IF NOT EXISTS addon_group_members (
+                group_id TEXT NOT NULL,
+                addon_id TEXT NOT NULL,
+                PRIMARY KEY (group_id, addon_id),
+                FOREIGN KEY(group_id) REFERENCES addon_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_group_members_addon ON addon_group_members(addon_id);
+            "#,
+        )?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '8')",
+            [],
+        )?;
+
+        tx.commit()?;
+    }
+
     // Ensure all predefined flavours exist in flavours table
     for def in FLAVOUR_DEFS {
         conn.execute(
@@ -312,11 +371,11 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         // Verify flavours table
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM flavours", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, FLAVOUR_DEFS.len() as i64);
 
         // Verify foreign keys enabled
         let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
@@ -407,5 +466,89 @@ mod tests {
                 .unwrap();
             assert!(index_exists, "Expected index {} to exist", idx);
         }
+    }
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{}') ORDER BY name", table)).unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.flatten().collect()
+    }
+
+    fn object_names(conn: &Connection, kind: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap();
+        let rows = stmt.query_map(params![kind], |r| r.get::<_, String>(0)).unwrap();
+        rows.flatten().collect()
+    }
+
+    #[test]
+    fn test_migration_8_upgrades_a_version_7_database() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // Rewind to the version 7 shape: no groups, no version 8 columns.
+        conn.execute_batch(
+            "DROP TABLE addon_group_members;
+             DROP TABLE addon_groups;
+             ALTER TABLE addons DROP COLUMN released_at;
+             ALTER TABLE addons DROP COLUMN favourite;
+             ALTER TABLE addons DROP COLUMN tukui_slug;
+             UPDATE meta SET value = '7' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), 7);
+        assert!(!column_names(&conn, "addons").contains(&"favourite".to_string()));
+
+        conn.execute("INSERT INTO flavours (id, folder, label) VALUES ('probe', '_probe_', 'Probe') ON CONFLICT(id) DO NOTHING", []).unwrap();
+        conn.execute("INSERT INTO addons (id, flavour, name) VALUES ('keep-me', 'probe', 'Keep Me')", []).unwrap();
+
+        run_migrations(&mut conn).unwrap();
+        assert_eq!(get_schema_version(&conn).unwrap(), 8);
+
+        let cols = column_names(&conn, "addons");
+        for wanted in ["released_at", "favourite", "tukui_slug"] {
+            assert!(cols.contains(&wanted.to_string()), "addons.{} must exist after migration 8", wanted);
+        }
+        let favourite: i64 = conn.query_row("SELECT favourite FROM addons WHERE id = 'keep-me'", [], |r| r.get(0)).unwrap();
+        assert_eq!(favourite, 0, "an existing row gets the default");
+        let released: Option<String> = conn.query_row("SELECT released_at FROM addons WHERE id = 'keep-me'", [], |r| r.get(0)).unwrap();
+        assert!(released.is_none());
+
+        for table in ["addon_groups", "addon_group_members"] {
+            assert!(object_names(&conn, "table").contains(&table.to_string()), "table {} must exist", table);
+        }
+        for index in ["idx_addon_groups_name", "idx_group_members_addon"] {
+            assert!(object_names(&conn, "index").contains(&index.to_string()), "index {} must exist", index);
+        }
+    }
+
+    #[test]
+    fn test_migration_8_is_idempotent_and_matches_a_fresh_database() {
+        let mut upgraded = Connection::open_in_memory().unwrap();
+        run_migrations(&mut upgraded).unwrap();
+        run_migrations(&mut upgraded).unwrap();
+        assert_eq!(get_schema_version(&upgraded).unwrap(), 8);
+
+        // A database that went through the version 7 shape and back must end identical to a fresh one.
+        let mut rewound = Connection::open_in_memory().unwrap();
+        run_migrations(&mut rewound).unwrap();
+        rewound
+            .execute_batch(
+                "DROP TABLE addon_group_members;
+                 DROP TABLE addon_groups;
+                 ALTER TABLE addons DROP COLUMN released_at;
+                 ALTER TABLE addons DROP COLUMN favourite;
+                 ALTER TABLE addons DROP COLUMN tukui_slug;
+                 UPDATE meta SET value = '7' WHERE key = 'schema_version';",
+            )
+            .unwrap();
+        run_migrations(&mut rewound).unwrap();
+
+        for table in ["addons", "addon_groups", "addon_group_members"] {
+            assert_eq!(column_names(&upgraded, table), column_names(&rewound, table), "columns of {} differ", table);
+        }
+        assert_eq!(object_names(&upgraded, "index"), object_names(&rewound, "index"));
+        assert_eq!(object_names(&upgraded, "table"), object_names(&rewound, "table"));
     }
 }

@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS addons (
     ignored_until_build TEXT,
     auto_update INTEGER NOT NULL DEFAULT 1,
     integrity_status TEXT,
+    released_at TEXT,
+    favourite INTEGER NOT NULL DEFAULT 0,
+    tukui_slug TEXT,
     FOREIGN KEY(flavour) REFERENCES flavours(id)
 );
 
@@ -181,6 +184,21 @@ CREATE TABLE IF NOT EXISTS whole_wtf_backups (
     FOREIGN KEY(flavour) REFERENCES flavours(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS addon_groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS addon_group_members (
+    group_id TEXT NOT NULL,
+    addon_id TEXT NOT NULL,
+    PRIMARY KEY (group_id, addon_id),
+    FOREIGN KEY(group_id) REFERENCES addon_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY(addon_id) REFERENCES addons(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_addons_flavour ON addons(flavour);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_addon_id ON addon_folders(addon_id);
 CREATE INDEX IF NOT EXISTS idx_addon_folders_folder ON addon_folders(folder);
@@ -194,6 +212,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_flavour_state ON jobs(flavour, state);
 CREATE INDEX IF NOT EXISTS idx_addon_manifests_addon_id ON addon_manifests(addon_id);
 CREATE INDEX IF NOT EXISTS idx_activity_flavour_ts ON activity(flavour, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_whole_wtf_backups_flavour ON whole_wtf_backups(flavour, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_addon_groups_name ON addon_groups(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_group_members_addon ON addon_group_members(addon_id);
 "#;
 
 #[cfg(test)]
@@ -225,6 +245,8 @@ mod tests {
             "addon_manifests",
             "activity",
             "whole_wtf_backups",
+            "addon_groups",
+            "addon_group_members",
         ];
 
         for table in expected_tables {
@@ -252,6 +274,8 @@ mod tests {
             "idx_addon_manifests_addon_id",
             "idx_activity_flavour_ts",
             "idx_whole_wtf_backups_flavour",
+            "idx_addon_groups_name",
+            "idx_group_members_addon",
         ];
 
         for idx in expected_indexes {
@@ -314,5 +338,30 @@ mod tests {
         // backups addon_id must be SET NULL
         let bk_addon_id: Option<String> = conn.query_row("SELECT addon_id FROM backups WHERE id = 'bk-1'", [], |r| r.get(0)).unwrap();
         assert!(bk_addon_id.is_none());
+    }
+
+    #[test]
+    fn test_group_membership_cascades_and_unique_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+
+        conn.execute("INSERT INTO flavours (id, folder, label) VALUES ('retail', '_retail_', 'Retail')", []).unwrap();
+        conn.execute("INSERT INTO addons (id, flavour, name) VALUES ('a1', 'retail', 'One')", []).unwrap();
+        conn.execute("INSERT INTO addons (id, flavour, name) VALUES ('a2', 'retail', 'Two')", []).unwrap();
+        conn.execute("INSERT INTO addon_groups (id, name, created_at) VALUES ('g1', 'Raid', '2026-11-10T00:00:00Z')", []).unwrap();
+        conn.execute("INSERT INTO addon_group_members (group_id, addon_id) VALUES ('g1', 'a1')", []).unwrap();
+        conn.execute("INSERT INTO addon_group_members (group_id, addon_id) VALUES ('g1', 'a2')", []).unwrap();
+
+        let duplicate = conn.execute("INSERT INTO addon_groups (id, name, created_at) VALUES ('g2', 'RAID', '2026-11-10T00:00:00Z')", []);
+        assert!(duplicate.is_err(), "group names must be unique ignoring case");
+
+        conn.execute("DELETE FROM addons WHERE id = 'a1'", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM addon_group_members", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "deleting an addon removes its memberships");
+
+        conn.execute("DELETE FROM addon_groups WHERE id = 'g1'", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM addon_group_members", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "deleting a group removes its memberships");
     }
 }

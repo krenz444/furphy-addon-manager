@@ -16,6 +16,11 @@ import { initUpdateControlMock } from './mocks/updateControl';
 import { initIntegrityMock } from './mocks/integrity';
 import { initActivityMock } from './mocks/activity';
 import { initWtfFullMock } from './mocks/wtfFull';
+import { initGroupsMock } from './mocks/groups';
+import { initZipInstallMock } from './mocks/zipInstall';
+import { initTukuiMock } from './mocks/tukui';
+import { initBattlenetMock } from './mocks/battlenet';
+import { initCopyAddonsMock } from './mocks/copyAddons';
 
 export type MockCommandHandler = (cmd: string, args: Record<string, unknown>) => Promise<unknown> | unknown;
 export type MockJobHandler = (jobKind: string, flavour: string | null, params: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -214,11 +219,16 @@ function generateMockAddons(count: number = 200): Addon[] {
     });
   }
 
-  return addons.map((a) => ({
+  // Fixed reference day so release dates, and the sorts built on them, are the same on every run.
+  const releaseReferenceMs = Date.UTC(2026, 9, 31, 12, 0, 0);
+  return addons.map((a, index) => ({
     held: false,
     held_reason: null,
     auto_update: true,
     integrity_status: 'clean' as const,
+    favourite: false,
+    group_ids: [] as string[],
+    released_at: index % 5 === 4 ? null : new Date(releaseReferenceMs - ((index * 37) % 400) * 86400000).toISOString(),
     ...a,
   }));
 }
@@ -267,6 +277,11 @@ function installMockHook(): void {
   initIntegrityMock();
   initActivityMock();
   initWtfFullMock();
+  initGroupsMock();
+  initZipInstallMock();
+  initTukuiMock();
+  initBattlenetMock();
+  initCopyAddonsMock();
   const hook: FurphyMockHook = {
     failNextCheck(message = 'Provider unreachable') {
       mockNextCheck = 'fail';
@@ -587,6 +602,28 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
     case 'start_job': {
       const kind = args.kind as string;
       if (kind === 'check') return (await runMockCheck((args.flavour as string) || 'retail')) as T;
+      if (kind === 'add') {
+        // Steerable from Playwright: the next add fails with this text, then it is cleared.
+        const hook = (typeof window !== 'undefined' ? (window as unknown as { __furphyMock?: { nextAddError?: unknown } }).__furphyMock : undefined);
+        const failure = typeof hook?.nextAddError === 'string' ? hook.nextAddError : '';
+        if (hook && failure) {
+          hook.nextAddError = '';
+          const failed: JobRecord = {
+            id: `mock-job-${Date.now()}`,
+            kind,
+            flavour: (args.flavour as string) || 'retail',
+            params: JSON.stringify(args.params || {}),
+            state: 'failed',
+            started_at: new Date().toISOString(),
+            finished_at: new Date().toISOString(),
+            error: failure,
+            results: JSON.stringify([{ flavour: (args.flavour as string) || 'retail', updated: [], failed: [{ name: 'Addon', error: failure }] }]),
+            reload_needed: false,
+            log_path: 'mock/sync.log',
+          };
+          return failed as T;
+        }
+      }
       const job: JobRecord = {
         id: `mock-job-${Date.now()}`,
         kind,

@@ -6,3 +6,6 @@ pub mod github;
 pub mod policy;
 pub mod wago;
 pub mod wago_query;
+pub mod direct;
+pub mod tukui;
+pub mod ip_mode;

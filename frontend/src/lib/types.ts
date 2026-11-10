@@ -27,6 +27,52 @@ export interface Addon {
   held_reason?: string | null;
   auto_update?: boolean;
   integrity_status?: 'clean' | 'modified' | 'missing' | 'unknown';
+  released_at?: string | null;
+  favourite?: boolean;
+  group_ids?: string[];
+  tukui_slug?: string | null;
+}
+
+export interface AddonGroup {
+  id: string;
+  name: string;
+  sort_order: number;
+  member_count: number;
+}
+
+export interface TukuiAddon {
+  slug: string;
+  name: string;
+  author: string;
+  version: string;
+  last_update: string | null;
+  supported_patches: string[];
+  summary: string | null;
+  web_url: string | null;
+  compatible: boolean;
+  reason: string | null;
+  installed: boolean;
+}
+
+export interface BattlenetInstall {
+  product: string;
+  install_path: string;
+  flavour: string | null;
+  flavour_folder_exists: boolean;
+  current_path: string | null;
+}
+
+// Returned by the App install handlers so the card or pane that asked can show what happened.
+export interface InstallOutcome {
+  ok: boolean;
+  message: string;
+}
+
+export interface CopyItemResult {
+  addon_id: string;
+  name: string;
+  status: 'installed' | 'skipped' | 'failed' | string;
+  message: string;
 }
 
 export interface Flavour {

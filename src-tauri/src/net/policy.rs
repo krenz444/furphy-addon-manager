@@ -20,6 +20,10 @@ pub const DEFAULT_ALLOWED_HOSTS: &[&str] = &[
     "raw.githubusercontent.com",
     "codeload.github.com",
     "addon-radar.com",
+    "api.tukui.org",
+    "storage.tukui.org",
+    "tukui.org",
+    "www.tukui.org",
     "localhost",
     "127.0.0.1",
     "::1",
@@ -90,6 +94,7 @@ impl NetworkPolicy {
             "FURPHY_TEST_WAGO_BASEURL",
             "FURPHY_TEST_GITHUB_BASEURL",
             "FURPHY_TEST_CF_CATALOGUE_BASEURL",
+            "FURPHY_TEST_TUKUI_BASEURL",
         ];
         for env_var in &test_envs {
             if let Ok(val) = std::env::var(env_var) {
@@ -201,6 +206,13 @@ impl NetworkPolicy {
             Ok(self.other_limiter.acquire().await)
         }
     }
+
+    /// For a host the user typed (a direct zip link): no allow-list check, but the same circuit breaker and the
+    /// limiter of the hosts that are not on the list, so a slow or failing host is still held back.
+    pub async fn acquire_permit_user_url(&self, host_key: &str) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.breaker.assert_reachable(host_key)?;
+        Ok(self.other_limiter.acquire().await)
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +232,23 @@ mod tests {
         // Disallowed host
         assert!(policy.check_host_allowed("malicious.example.com").is_err());
         assert!(policy.check_host_allowed("api.curseforge.com").is_err()); // Never keyed API!
+    }
+
+    #[test]
+    fn test_tukui_hosts_are_allowed() {
+        let policy = NetworkPolicy::new();
+        for host in ["api.tukui.org", "storage.tukui.org", "tukui.org", "www.tukui.org"] {
+            assert!(policy.check_host_allowed(host).is_ok(), "{} should be allowed", host);
+        }
+        assert!(policy.check_host_allowed("tukui.example.com").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_user_url_permit_skips_the_allow_list_but_the_normal_permit_does_not() {
+        let policy = NetworkPolicy::new();
+        assert!(policy.acquire_permit("downloads.example.org").await.is_err());
+        let permit = policy.acquire_permit_user_url("downloads.example.org").await;
+        assert!(permit.is_ok());
     }
 
     #[tokio::test]
