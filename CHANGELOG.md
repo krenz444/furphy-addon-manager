@@ -1,5 +1,20 @@
 # Furphy Addon Manager - changelog
 
+## 2.2.0: zip installs, Tukui, favourites and groups, release dates and copying addons
+
+- **Install an addon from a zip file or link.** Get Addons has a From zip tab. Type or paste the path of a .zip on this PC, drop the file on the tab, or paste an https link, and pick the game version. Furphy looks for folders with a .toc file, refuses a zip without one, never overwrites a folder that already belongs to another addon, and stops a download over 200 MB. A zip addon has no update source, so checks never ask the network about it. Installing the same zip again replaces the previous copy.
+- **ElvUI and Tukui install from Tukui's own list.** Get Addons has a Tukui tab. Each card shows the version, the date and the game versions Tukui lists. The Install button is disabled, with the reason as text, when Tukui does not list your game version, and Furphy never installs a package built for another one. Installed Tukui addons are checked and updated like the rest and carry a Tukui badge.
+- **Favourites and groups.** A star on each row marks a favourite. The Favourites chip shows only those, and Sort has a Favourites first choice. Make named groups from the addon menu (Add to group), then filter by a group chip. Rename or delete a group from the small menu on its chip. Deleting a group never removes the addons in it, and an addon can be in several groups.
+- **A Released column and a sort by it.** My Addons shows the release date of the file that is installed now. Furphy fills it in when it installs or updates an addon and when a check finds the addon up to date, with no extra download. Addons that have not been through either yet show a hyphen.
+- **Select a range of addons.** Shift and click a checkbox to select everything between it and the last row you clicked, in the order shown. Ctrl+A selects every addon in the list and Escape clears the selection. In a text field Ctrl+A keeps its normal meaning.
+- **Search Settings.** A search box at the top of Settings hides the sections that do not match what you type, including the groups inside Advanced.
+- **Interface size and IPv4.** Settings has an Interface size slider from 80 to 150 percent. Ctrl and plus, Ctrl and minus and Ctrl and 0 do the same anywhere in the app. Advanced has a switch to use IPv4 only for downloads, for networks where IPv6 is broken.
+- **Find installs from Battle.net.** In Settings, under Advanced, the button reads the list of World of Warcraft installs that Battle.net recorded on this PC. It only reads, and only when you press it. Use this folder points a game version at that install.
+- **Copy addons to another game version.** My Addons has a Copy to another game version button. Pick the addons and the target. Each one goes through the normal install path for the target game version, so an addon with no release for it fails with the reason and the rest carry on. Addons already in the target are skipped, and settings and saved variables are never copied.
+- **Four more game versions.** Furphy recognises the Classic Beta, Classic PTR, Classic Era PTR and Anniversary folders when they exist. The three test realms stay hidden unless Show test realms is on.
+- **Install failures say why.** A failed install on the Wago card shows the reason with a Retry button. CurseForge and GitHub show it under the input. The messages name the game version, and a game version with no AddOns folder gets a visible reason and a disabled Install button.
+- **Submenus are no longer cut off.** Release channel and Add to group now open to the left of the addon menu. They used to open off the right edge of the window.
+
 ## 2.1.0: held updates, update controls, edit protection, an activity log and WTF backups
 
 - **An update built for a newer game version than yours is held back.** When an addon's newest file only supports a patch your game does not have yet, Furphy skips it and says why. A manual update asks you to Update anyway or Ignore for this WoW version. Test realms (PTR, Beta) are never held, and a game version Furphy cannot read never blocks an update.
