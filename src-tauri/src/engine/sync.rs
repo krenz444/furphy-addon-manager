@@ -157,6 +157,7 @@ pub async fn run_sync_for_flavour_with_options(
     let cf_client = create_cf_client().map_err(|e| e.to_string())?;
     let wago_client = create_wago_client().map_err(|e| e.to_string())?;
     let github_client = create_github_client().map_err(|e| e.to_string())?;
+    let tukui_client = crate::net::tukui::create_tukui_client().map_err(|e| e.to_string())?;
     let wago_session = WagoSession::new();
 
     let mapping = get_flavour_mapping(flavour, client_interface);
@@ -187,11 +188,12 @@ pub async fn run_sync_for_flavour_with_options(
         ignored_until_build: Option<String>,
         auto_update: bool,
         integrity_status: Option<String>,
+        tukui_slug: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted, ignored_until_build, auto_update, integrity_status \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, pinned_file_id, ignore_updates, release_type, adopted, ignored_until_build, auto_update, integrity_status, tukui_slug \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -215,6 +217,7 @@ pub async fn run_sync_for_flavour_with_options(
                 ignored_until_build: r.get(13)?,
                 auto_update: r.get::<_, Option<i32>>(14)?.unwrap_or(1) != 0,
                 integrity_status: r.get(15)?,
+                tukui_slug: r.get(16)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -346,8 +349,10 @@ pub async fn run_sync_for_flavour_with_options(
             continue;
         }
 
-        // If the addon has no remote provider configured (e.g. locally adopted addon without upstream source):
-        if a.project_id.is_none() && a.wago_slug.is_none() && a.repo.is_none() {
+        // If the addon has source = 'zip' or no remote provider configured (e.g. locally adopted addon without upstream source):
+        if a.source.as_deref() == Some("zip")
+            || (a.project_id.is_none() && a.wago_slug.is_none() && a.repo.is_none() && a.tukui_slug.is_none())
+        {
             up_to_date_count += 1;
             let now_str = Utc::now().to_rfc3339();
             let _ = conn.execute(
@@ -384,6 +389,7 @@ pub async fn run_sync_for_flavour_with_options(
         let mut chosen_file_id: Option<String> = None;
         let mut chosen_version: Option<String> = None;
         let mut chosen_file_name: Option<String> = None;
+        let mut chosen_released: Option<String> = None;
         let mut sync_error: Option<String> = None;
 
         let mut target_addon_id = a.id.clone();
@@ -481,12 +487,13 @@ pub async fn run_sync_for_flavour_with_options(
                         chosen_file_id = Some(cf_id_str);
                         chosen_version = cf_file.display_name.clone().or(cf_file.file_name.clone());
                         chosen_file_name = cf_file.file_name.clone();
+                        chosen_released = cf_file.date_created.clone();
 
                         if let Err(e) = download_cf_file(&policy, &cf_client, pid, &cf_file, &download_zip_path).await {
                             sync_error = Some(e);
                         }
                     } else if sync_error.is_none() {
-                        sync_error = Some("No compatible CurseForge file found".to_string());
+                        sync_error = Some(format!("No compatible CurseForge file found for {}", mapping.era_label));
                     }
                 } else {
                     sync_error = Some("CurseForge addon missing project ID".to_string());
@@ -594,6 +601,7 @@ pub async fn run_sync_for_flavour_with_options(
                         chosen_file_id = Some(wago_rel.id.clone());
                         chosen_version = wago_rel.version.clone().or(wago_rel.name.clone());
                         chosen_file_name = Some(format!("{}-{}.zip", slug, wago_rel.id));
+                        chosen_released = wago_rel.created_at.clone();
 
                         if let Some(dl_url) = wago_rel.url {
                             if let Err(e) = download_wago_release(&policy, &wago_client, &dl_url, wago_rel.size, &download_zip_path).await {
@@ -603,7 +611,7 @@ pub async fn run_sync_for_flavour_with_options(
                             sync_error = Some("Wago release has no download URL".to_string());
                         }
                     } else if sync_error.is_none() {
-                        sync_error = Some("No compatible Wago release found".to_string());
+                        sync_error = Some(format!("No compatible Wago release found for {}", mapping.era_label));
                     }
                 } else {
                     sync_error = Some("Wago addon missing slug".to_string());
@@ -639,6 +647,7 @@ pub async fn run_sync_for_flavour_with_options(
 
                                     chosen_file_id = Some(chosen.tag_name.clone());
                                     chosen_version = Some(chosen.tag_name.clone());
+                                    chosen_released = chosen.published_at.clone();
 
                                     // Pick best asset with .zip, else zipball
                                     let asset_opt = select_github_asset(&chosen, &repo, Some(flavour));
@@ -691,6 +700,66 @@ pub async fn run_sync_for_flavour_with_options(
                     }
                 } else {
                     sync_error = Some("GitHub addon missing repository".to_string());
+                }
+            }
+            "tukui" => {
+                if let Some(ref slug) = a.tukui_slug {
+                    match crate::engine::tukui::choose_tukui_release(
+                        &policy,
+                        &tukui_client,
+                        slug,
+                        flavour,
+                        &mapping.era_label,
+                        client_build.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(choice) => {
+                            if !force
+                                && (a.file_id.as_deref() == Some(&choice.version)
+                                    || a.version.as_deref() == Some(&choice.version))
+                            {
+                                up_to_date_count += 1;
+                                let now_str = Utc::now().to_rfc3339();
+                                let _ = conn.execute(
+                                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                                     VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                                    params![a.id, now_str],
+                                );
+                                results.push(AddonSyncResult {
+                                    addon_id: a.id.clone(),
+                                    name: a.name.clone(),
+                                    status: "Up-to-date".to_string(),
+                                    previous_version: a.version.clone(),
+                                    new_version: a.version.clone(),
+                                    error: None,
+                                });
+                                append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
+                                continue;
+                            }
+
+                            chosen_file_id = Some(choice.file_id.clone());
+                            chosen_version = Some(choice.version.clone());
+                            chosen_file_name = Some(choice.file_name.clone());
+                            chosen_released = choice.released.clone();
+
+                            if let Err(e) = crate::net::tukui::download_tukui_zip(
+                                &policy,
+                                &tukui_client,
+                                &choice.download_url,
+                                &download_zip_path,
+                            )
+                            .await
+                            {
+                                sync_error = Some(e);
+                            }
+                        }
+                        Err(e) => {
+                            sync_error = Some(e);
+                        }
+                    }
+                } else {
+                    sync_error = Some("Tukui addon missing slug".to_string());
                 }
             }
             _ => {
@@ -827,8 +896,8 @@ pub async fn run_sync_for_flavour_with_options(
                     ).ok();
 
                     let _ = conn.execute(
-                        "UPDATE addons SET source = ?1, project_id = ?2, wago_slug = ?3, wago_id = ?4, repo = ?5, name = ?6 WHERE id = ?7",
-                        params![a.source, a.project_id, a.wago_slug, a._wago_id, a.repo, target_addon_name, existing_id],
+                        "UPDATE addons SET source = ?1, project_id = ?2, wago_slug = ?3, wago_id = ?4, repo = ?5, name = ?6, tukui_slug = ?7 WHERE id = ?8",
+                        params![a.source, a.project_id, a.wago_slug, a._wago_id, a.repo, target_addon_name, a.tukui_slug, existing_id],
                     );
 
                     let _ = conn.execute("DELETE FROM addons WHERE id = ?1", params![target_addon_id]);
@@ -1000,6 +1069,10 @@ pub async fn run_sync_for_flavour_with_options(
                         .as_ref()
                         .map(|s| fl == s.to_ascii_lowercase())
                         .unwrap_or(false)
+                    || a.tukui_slug
+                        .as_ref()
+                        .map(|s| fl == s.to_ascii_lowercase())
+                        .unwrap_or(false)
             })
             .or_else(|| installed_folders.first());
 
@@ -1037,6 +1110,7 @@ pub async fn run_sync_for_flavour_with_options(
                     || target_addon_name.eq_ignore_ascii_case(&dep)
                     || target_norm == dep_norm
                     || a.wago_slug.as_ref().map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm).unwrap_or(false)
+                    || a.tukui_slug.as_ref().map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm).unwrap_or(false)
                     || a.repo.as_ref().map(|r| {
                         r.eq_ignore_ascii_case(&dep)
                             || r.split('/').last().map(|rn| rn.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(rn) == dep_norm).unwrap_or(false)
@@ -1067,6 +1141,8 @@ pub async fn run_sync_for_flavour_with_options(
                 target_addon_id
             ],
         );
+
+        crate::engine::released::store_released_at(conn, &target_addon_id, chosen_released.as_deref());
 
         let _ = conn.execute("DELETE FROM addon_folders WHERE addon_id = ?1", params![target_addon_id]);
         for f in &installed_folders {

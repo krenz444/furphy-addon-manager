@@ -420,6 +420,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
             WagoRelease {
                 id: "rel2".to_string(),
@@ -435,6 +436,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
             WagoRelease {
                 id: "rel3".to_string(),
@@ -450,6 +452,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
         ];
 
@@ -483,6 +486,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
             WagoRelease {
                 id: "odGeLVO6".to_string(),
@@ -498,6 +502,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
             WagoRelease {
                 id: "5wq3moZQ".to_string(),
@@ -513,6 +518,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
         ];
 
@@ -547,6 +553,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
             WagoRelease {
                 id: "rel_classic_fallback".to_string(),
@@ -562,6 +569,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
         ];
 
@@ -592,6 +600,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
         ];
 
@@ -611,6 +620,7 @@ mod tests {
                 supported_wotlk_patches: None,
                 supported_cata_patches: None,
                 supported_mop_patches: None,
+                created_at: None,
             },
         ];
 

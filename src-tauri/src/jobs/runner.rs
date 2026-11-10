@@ -21,6 +21,18 @@ use crate::net::curseforge::create_cf_client;
 use crate::net::policy::NetworkPolicy;
 use crate::paths::{get_data_dir, detect_wow_root};
 
+fn copy_result(
+    item: &crate::engine::copy_addons::CopyPlanItem,
+    status: &str,
+    message: String,
+) -> crate::engine::copy_addons::CopyItemResult {
+    crate::engine::copy_addons::CopyItemResult {
+        addon_id: item.addon_id.clone(),
+        name: item.name.clone(),
+        status: status.to_string(),
+        message,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRecord {
@@ -130,6 +142,7 @@ impl JobRunner {
                 let mutating_kinds = [
                     "sync", "install", "update-all-flavours", "adopt", "rollback", "remove",
                     "switch-source", "add-by-slug", "add", "import", "install-deps",
+                    "install-zip", "copy-addons",
                 ];
                 if mutating_kinds.contains(&kind) {
                     if let Ok(wow_root) = detect_wow_root(None) {
@@ -380,7 +393,7 @@ impl JobRunner {
                     .unwrap_or(false);
 
                 for flv_info in &installed_flavours {
-                    if !show_test_realms && matches!(flv_info.id.as_str(), "ptr" | "xptr" | "beta") {
+                    if !show_test_realms && crate::engine::flavours::is_test_realm(&flv_info.id) {
                         continue;
                     }
 
@@ -717,6 +730,126 @@ impl JobRunner {
 
                 let json = serde_json::to_string(&sync_rep).map_err(|e| e.to_string())?;
                 Ok((json, sync_rep.reload_needed, job_error))
+            }
+            "install-zip" => {
+                let flv = flavour.ok_or("Flavour is required for install-zip job")?;
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == flv)
+                    .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
+                let raw_source = params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing source parameter")?;
+
+                let source = crate::engine::zip_install::parse_zip_source(raw_source)?;
+                let report = crate::engine::zip_install::install_from_zip(
+                    conn,
+                    flv,
+                    &target_flv.addons_path,
+                    &data_dir,
+                    self.policy.clone(),
+                    source,
+                )
+                .await?;
+
+                let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
+                Ok((json, true, None))
+            }
+            "copy-addons" => {
+                let source_flv = flavour.ok_or("Flavour is required for copy-addons job")?;
+                let target_id = params
+                    .get("target_flavour")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing target_flavour parameter")?;
+                if target_id == source_flv {
+                    return Err("Choose a different game version to copy to".to_string());
+                }
+                let target_flv = installed_flavours
+                    .iter()
+                    .find(|f| f.id == target_id)
+                    .ok_or_else(|| format!("Game version '{}' is not installed", target_id))?;
+                let addon_ids: Vec<String> = params
+                    .get("addon_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                if addon_ids.is_empty() {
+                    return Err("Choose at least one addon to copy".to_string());
+                }
+
+                let plan = crate::engine::copy_addons::plan_copy(conn, source_flv, target_id, &addon_ids)?;
+                let flv_root = resolve_flavour_root(target_flv)?;
+                let mut items: Vec<crate::engine::copy_addons::CopyItemResult> = Vec::new();
+                let mut any_installed = false;
+
+                // Each addon goes through the same code as the add job, so the target game version's own strict file
+                // selection, install, manifest and activity rules apply unchanged. One failure never stops the rest.
+                for item in &plan {
+                    if let Some(reason) = &item.skip_reason {
+                        items.push(copy_result(item, "skipped", reason.clone()));
+                        continue;
+                    }
+                    let Some(add_target) = item.add_target.as_deref() else {
+                        items.push(copy_result(item, "failed", "Has no download source Furphy can use".to_string()));
+                        continue;
+                    };
+                    let Some(parsed) = parse_addon_target(add_target, None) else {
+                        items.push(copy_result(item, "failed", format!("Could not read the source of {}", item.name)));
+                        continue;
+                    };
+                    if crate::engine::deps::is_target_already_present(conn, target_id, &parsed) {
+                        items.push(copy_result(item, "skipped", format!("Already in {}", target_id)));
+                        continue;
+                    }
+                    let new_id = match create_addon_record(conn, target_id, parsed, Some(&item.name)) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            items.push(copy_result(item, "failed", e));
+                            continue;
+                        }
+                    };
+
+                    let outcome = run_sync_for_flavour(
+                        conn,
+                        &flv_root,
+                        target_id,
+                        &target_flv.folder,
+                        &target_flv.addons_path,
+                        &data_dir,
+                        target_flv.client_interface,
+                        self.policy.clone(),
+                        github_token.clone(),
+                        Some(&[new_id.clone()]),
+                        true,
+                    )
+                    .await;
+
+                    let failure: Option<String> = match outcome {
+                        Ok(report) => match report.results.iter().find(|r| r.addon_id == new_id) {
+                            Some(r) if matches!(r.status.as_str(), "Installed" | "Updated" | "Up-to-date") => {
+                                any_installed = true;
+                                let text = match r.new_version.as_deref() {
+                                    Some(v) if !v.is_empty() => format!("Installed {}", v),
+                                    _ => "Installed".to_string(),
+                                };
+                                items.push(copy_result(item, "installed", text));
+                                None
+                            }
+                            Some(r) => Some(r.error.clone().unwrap_or_else(|| format!("Not installed ({})", r.status))),
+                            None => Some("Not installed".to_string()),
+                        },
+                        Err(e) => Some(e),
+                    };
+                    if let Some(message) = failure {
+                        // A copy that did not install leaves no empty row behind in the target game version.
+                        let _ = remove_addon(conn, &new_id, target_id, &target_flv.addons_path);
+                        items.push(copy_result(item, "failed", message));
+                    }
+                }
+
+                let json = serde_json::json!({ "items": items }).to_string();
+                Ok((json, any_installed, None))
             }
             "install-deps" => {
                 let flv = flavour.ok_or("Flavour is required for install-deps job")?;

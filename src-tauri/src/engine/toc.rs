@@ -222,8 +222,8 @@ pub fn parse_toc_file(toc_path: &Path) -> TocMetadata {
 pub fn resolve_title_for_flavor(meta: &TocMetadata, flavour: &str) -> Option<String> {
     let target_game_type = match flavour.to_ascii_lowercase().as_str() {
         "retail" | "ptr" | "xptr" | "beta" => "mainline",
-        "classic_era" | "forever" => "vanilla",
-        "classic" => "vanilla",
+        "classic_era" | "classic_era_ptr" | "forever" => "vanilla",
+        "classic" | "classic_beta" | "classic_ptr" | "anniversary" => "vanilla",
         _ => "mainline",
     };
 
@@ -267,7 +267,7 @@ fn get_era_selector(flavour: &str, client_interface: Option<i32>) -> EraSelector
             x_flavor_tag: "Mainline",
             suffixes: &["_Mainline", "-Mainline"],
         },
-        "classic_era" => EraSelector {
+        "classic_era" | "classic_era_ptr" => EraSelector {
             x_flavor_tag: "Vanilla",
             suffixes: &["_Vanilla", "_Classic", "-Classic"],
         },
@@ -277,7 +277,7 @@ fn get_era_selector(flavour: &str, client_interface: Option<i32>) -> EraSelector
                 "_Camelot", "-Camelot", "_Forever", "-Forever", "_Vanilla", "_Classic", "-Classic",
             ],
         },
-        "classic" => {
+        "classic" | "classic_beta" | "classic_ptr" | "anniversary" => {
             let prog = resolve_classic_progression(client_interface);
             match prog.era_key.as_str() {
                 "tbc" => EraSelector {

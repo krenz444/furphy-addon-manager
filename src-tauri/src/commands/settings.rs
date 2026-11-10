@@ -50,6 +50,7 @@ pub fn update_settings(key: String, value: Value) -> Result<(), String> {
         rusqlite::params![key, json_str],
     )
     .map_err(|e| e.to_string())?;
+    crate::net::ip_mode::apply_setting(&key, &value);
     crate::db::export_v1::trigger_dual_write_if_v1_exists(&conn);
     Ok(())
 }

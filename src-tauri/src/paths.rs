@@ -16,6 +16,10 @@ pub const FLAVOUR_DEFS: &[FlavourDef] = &[
     FlavourDef { id: "ptr", folder: "_ptr_", label: "PTR", first_class: false },
     FlavourDef { id: "xptr", folder: "_xptr_", label: "PTR (2)", first_class: false },
     FlavourDef { id: "beta", folder: "_beta_", label: "Beta", first_class: false },
+    FlavourDef { id: "classic_beta", folder: "_classic_beta_", label: "Classic Beta", first_class: false },
+    FlavourDef { id: "classic_ptr", folder: "_classic_ptr_", label: "Classic PTR", first_class: false },
+    FlavourDef { id: "classic_era_ptr", folder: "_classic_era_ptr_", label: "Classic Era PTR", first_class: false },
+    FlavourDef { id: "anniversary", folder: "_anniversary_", label: "Anniversary", first_class: true },
 ];
 
 pub fn is_dev() -> bool {
@@ -163,6 +167,19 @@ pub fn get_v1_sync_folder(wow_root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_extra_game_version_folders_are_found_when_present() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["_retail_", "_classic_beta_", "_classic_era_ptr_", "_anniversary_"] {
+            fs::create_dir_all(root.path().join(folder).join("Interface").join("AddOns")).unwrap();
+        }
+        let ids: Vec<&str> = get_installed_flavours(root.path()).iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["retail", "classic_beta", "classic_era_ptr", "anniversary"]);
+        let live: Vec<&str> = FLAVOUR_DEFS.iter().filter(|d| d.first_class).map(|d| d.id).collect();
+        assert!(live.contains(&"anniversary"));
+        assert!(!live.contains(&"classic_beta"));
+    }
 
     #[test]
     fn test_validate_dev_wowroot_requires_spaces_and_parentheses() {

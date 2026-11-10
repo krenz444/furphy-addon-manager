@@ -9,6 +9,7 @@ use crate::logging::append_sync_log;
 use crate::net::curseforge::{create_cf_client, get_cf_files};
 use crate::net::github::{create_github_client, get_github_releases};
 use crate::net::policy::NetworkPolicy;
+use crate::net::tukui::create_tukui_client;
 use crate::net::wago::{create_wago_client, get_wago_releases_page, WagoSession};
 use crate::paths::detect_wow_root;
 
@@ -81,6 +82,7 @@ pub async fn run_check_for_flavour(
     let cf_client = create_cf_client().map_err(|e| e.to_string())?;
     let wago_client = create_wago_client().map_err(|e| e.to_string())?;
     let github_client = create_github_client().map_err(|e| e.to_string())?;
+    let tukui_client = create_tukui_client().map_err(|e| e.to_string())?;
     let wago_session = WagoSession::new();
 
     let mapping = get_flavour_mapping(flavour, client_interface);
@@ -118,11 +120,12 @@ pub async fn run_check_for_flavour(
         ignored_until_build: Option<String>,
         auto_update: bool,
         integrity_status: Option<String>,
+        tukui_slug: Option<String>,
     }
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until, ignored_until_build, auto_update, integrity_status \
+            "SELECT id, name, source, project_id, wago_slug, wago_id, repo, file_id, version, installed_tag, pinned_file_id, ignore_updates, release_type, github_rate_limited_until, ignored_until_build, auto_update, integrity_status, tukui_slug \
              FROM addons WHERE flavour = ?1 ORDER BY name COLLATE NOCASE ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -147,6 +150,7 @@ pub async fn run_check_for_flavour(
                 ignored_until_build: r.get(14)?,
                 auto_update: r.get::<_, Option<i32>>(15)?.unwrap_or(1) != 0,
                 integrity_status: r.get(16)?,
+                tukui_slug: r.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -202,7 +206,22 @@ pub async fn run_check_for_flavour(
             continue;
         }
 
-        let src = a.source.as_deref().unwrap_or("curseforge");
+        let src = match a.source.as_deref() {
+            Some(s) => s,
+            None => {
+                if a.tukui_slug.is_some() {
+                    "tukui"
+                } else if a.repo.is_some() {
+                    "github"
+                } else if a.wago_slug.is_some() {
+                    "wago"
+                } else if a.project_id.is_some() {
+                    "curseforge"
+                } else {
+                    "local"
+                }
+            }
+        };
         let mut outcome_status = "Up-to-date".to_string();
         let mut upd_ver = None;
         let mut upd_file = None;
@@ -235,6 +254,8 @@ pub async fn run_check_for_flavour(
                                     outcome_status = "Would-update".to_string();
                                     upd_file = Some(chosen_id_str);
                                     upd_ver = chosen_ver;
+                                } else if a.file_id.as_deref() == Some(&chosen_id_str) {
+                                    crate::engine::released::store_released_at(conn, &a.id, chosen.date_created.as_deref());
                                 }
                             }
                         }
@@ -283,6 +304,8 @@ pub async fn run_check_for_flavour(
                             outcome_status = "Would-update".to_string();
                             upd_file = Some(chosen.id);
                             upd_ver = chosen_ver;
+                        } else if a.file_id.as_deref() == Some(&chosen.id) {
+                            crate::engine::released::store_released_at(conn, &a.id, chosen.created_at.as_deref());
                         }
                     }
                 }
@@ -319,6 +342,8 @@ pub async fn run_check_for_flavour(
                                             outcome_status = "Would-update".to_string();
                                             upd_file = Some(chosen.tag_name.clone());
                                             upd_ver = Some(chosen.tag_name);
+                                        } else if is_same_file || is_same_tag {
+                                            crate::engine::released::store_released_at(conn, &a.id, chosen.published_at.as_deref());
                                         }
                                     }
 
@@ -344,6 +369,39 @@ pub async fn run_check_for_flavour(
                     }
                 }
             }
+            "tukui" => {
+                if let Some(ref slug) = a.tukui_slug {
+                    match crate::engine::tukui::choose_tukui_release(
+                        &policy,
+                        &tukui_client,
+                        slug,
+                        flavour,
+                        &mapping.era_label,
+                        client_build.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(chosen) => {
+                            let is_same_file = a.file_id.as_deref() == Some(&chosen.file_id);
+                            let is_same_ver = a.version.as_deref() == Some(&chosen.version)
+                                || is_version_equivalent(a.version.as_deref(), Some(&chosen.version));
+
+                            if !is_same_file && !is_same_ver {
+                                outcome_status = "Would-update".to_string();
+                                upd_file = Some(chosen.file_id.clone());
+                                upd_ver = Some(chosen.version);
+                            } else if is_same_file {
+                                crate::engine::released::store_released_at(conn, &a.id, chosen.released.as_deref());
+                            }
+                        }
+                        Err(e) => {
+                            outcome_status = "Failed".to_string();
+                            err_msg = Some(e);
+                        }
+                    }
+                }
+            }
+            "zip" | "local" | "adopted" => {}
             _ => {}
         }
 

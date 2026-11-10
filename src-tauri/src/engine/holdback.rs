@@ -52,7 +52,7 @@ pub fn is_update_held_back(
     ignored_until_build: Option<&str>,
 ) -> Option<String> {
     let flv = flavour.trim().to_ascii_lowercase();
-    if flv == "ptr" || flv == "xptr" || flv == "beta" {
+    if crate::engine::flavours::is_test_realm(&flv) {
         return None;
     }
 

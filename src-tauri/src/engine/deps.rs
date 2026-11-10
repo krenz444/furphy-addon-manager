@@ -325,6 +325,13 @@ pub fn is_target_already_present(conn: &Connection, flavour: &str, target: &Addo
                 |_| Ok(true),
             )
             .unwrap_or(false),
+        AddonTarget::Tukui(slug) => conn
+            .query_row(
+                "SELECT 1 FROM addons WHERE flavour = ?1 AND LOWER(tukui_slug) = LOWER(?2) LIMIT 1",
+                params![flavour, slug],
+                |_| Ok(true),
+            )
+            .unwrap_or(false),
     }
 }
 

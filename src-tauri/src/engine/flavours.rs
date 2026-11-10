@@ -19,7 +19,20 @@ pub const FLAVOUR_DEFS: &[FlavourDef] = &[
     FlavourDef { id: "ptr", folder: "_ptr_", label: "PTR", product: "wowt" },
     FlavourDef { id: "xptr", folder: "_xptr_", label: "PTR (2)", product: "wowxptr" },
     FlavourDef { id: "beta", folder: "_beta_", label: "Beta", product: "wow_beta" },
+    FlavourDef { id: "classic_beta", folder: "_classic_beta_", label: "Classic Beta", product: "wow_classic_beta" },
+    FlavourDef { id: "classic_ptr", folder: "_classic_ptr_", label: "Classic PTR", product: "wow_classic_ptr" },
+    FlavourDef { id: "classic_era_ptr", folder: "_classic_era_ptr_", label: "Classic Era PTR", product: "wow_classic_era_ptr" },
+    FlavourDef { id: "anniversary", folder: "_anniversary_", label: "Anniversary", product: "wow_anniversary" },
 ];
+
+/// Test realms: PTR and beta clients run ahead of the live game, so they are hidden unless "Show test realms" is on
+/// and the hold-back rules do not apply to them.
+pub fn is_test_realm(id: &str) -> bool {
+    matches!(
+        id.trim().to_ascii_lowercase().as_str(),
+        "ptr" | "xptr" | "beta" | "classic_beta" | "classic_ptr" | "classic_era_ptr"
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassicProgression {
@@ -136,7 +149,7 @@ pub fn get_flavour_mapping(flavour: &str, client_interface: Option<i32>) -> Flav
             era_label: "Retail".to_string(),
             era_key: "retail".to_string(),
         },
-        "classic_era" => FlavourMapping {
+        "classic_era" | "classic_era_ptr" => FlavourMapping {
             type_id: Some(67408),
             version_prefix: Some("1.15.".to_string()),
             wago_field: Some("classic".to_string()),
@@ -150,7 +163,7 @@ pub fn get_flavour_mapping(flavour: &str, client_interface: Option<i32>) -> Flav
             era_label: "WoW Forever".to_string(),
             era_key: "forever".to_string(),
         },
-        "classic" => {
+        "classic" | "classic_beta" | "classic_ptr" | "anniversary" => {
             let prog = resolve_classic_progression(client_interface);
             FlavourMapping {
                 type_id: prog.type_id,
@@ -487,6 +500,72 @@ mod tests {
         assert_eq!(convert_to_interface_number("11.0.2.56456"), Some(110002));
         assert_eq!(convert_to_interface_number("5.5.4.12345"), Some(50504));
         assert_eq!(convert_to_interface_number("4.4.2.55555"), Some(40402));
+    }
+
+    #[test]
+    fn the_four_extra_game_versions_are_defined_in_order_with_their_products() {
+        let ids: Vec<&str> = FLAVOUR_DEFS.iter().map(|d| d.id).collect();
+        assert_eq!(&ids[ids.len() - 5..], ["beta", "classic_beta", "classic_ptr", "classic_era_ptr", "anniversary"]);
+        let find = |id: &str| FLAVOUR_DEFS.iter().find(|d| d.id == id).unwrap();
+        for (id, folder, label, product) in [
+            ("classic_beta", "_classic_beta_", "Classic Beta", "wow_classic_beta"),
+            ("classic_ptr", "_classic_ptr_", "Classic PTR", "wow_classic_ptr"),
+            ("classic_era_ptr", "_classic_era_ptr_", "Classic Era PTR", "wow_classic_era_ptr"),
+            ("anniversary", "_anniversary_", "Anniversary", "wow_anniversary"),
+        ] {
+            let def = find(id);
+            assert_eq!((def.folder, def.label, def.product), (folder, label, product), "{}", id);
+        }
+    }
+
+    #[test]
+    fn test_realm_ids_are_exactly_the_ptr_and_beta_ones() {
+        for id in ["ptr", "xptr", "beta", "classic_beta", "classic_ptr", "classic_era_ptr", " PTR "] {
+            assert!(is_test_realm(id), "{} is a test realm", id);
+        }
+        for id in ["retail", "classic", "classic_era", "forever", "anniversary", ""] {
+            assert!(!is_test_realm(id), "{} is not a test realm", id);
+        }
+    }
+
+    #[test]
+    fn the_extra_game_versions_resolve_like_their_live_counterparts() {
+        let classic = get_flavour_mapping("classic", Some(50504));
+        for id in ["classic_beta", "classic_ptr", "anniversary"] {
+            let mapped = get_flavour_mapping(id, Some(50504));
+            assert_eq!(mapped.type_id, classic.type_id, "{}", id);
+            assert_eq!(mapped.version_prefix, classic.version_prefix, "{}", id);
+            assert_eq!(mapped.wago_field, classic.wago_field, "{}", id);
+            assert_eq!(mapped.era_key, classic.era_key, "{}", id);
+        }
+        // An anniversary client on the Burning Crusade rules resolves to those rules, never to retail.
+        assert_eq!(get_flavour_mapping("anniversary", Some(20505)).era_key, "tbc");
+
+        let era = get_flavour_mapping("classic_era", None);
+        let era_ptr = get_flavour_mapping("classic_era_ptr", None);
+        assert_eq!(era.type_id, era_ptr.type_id);
+        assert_eq!(era.version_prefix, era_ptr.version_prefix);
+        assert_eq!(era.wago_field, era_ptr.wago_field);
+
+        // The old game versions are unchanged.
+        assert_eq!(get_flavour_mapping("forever", None).type_id, Some(88568));
+        assert_eq!(get_flavour_mapping("retail", None).type_id, Some(517));
+    }
+
+    #[test]
+    fn detection_finds_a_classic_beta_folder_and_reads_its_build() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("_classic_beta_").join("Interface").join("AddOns")).unwrap();
+        std::fs::write(
+            root.path().join(".build.info"),
+            "Branch!STRING:0|Active!DEC:1|Product!STRING:0|Version!STRING:0\nus|1|wow_classic_beta|5.5.4.99999\n",
+        )
+        .unwrap();
+        let found = detect_installed_flavours_in_root(root.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "classic_beta");
+        assert_eq!(found[0].client_build.as_deref(), Some("5.5.4.99999"));
+        assert_eq!(found[0].client_interface, Some(50504));
     }
 
     #[test]

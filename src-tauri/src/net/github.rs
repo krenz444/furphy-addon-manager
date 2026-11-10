@@ -97,10 +97,12 @@ pub fn create_github_client() -> reqwest::Result<Client> {
         }
     });
 
-    Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(custom_redirect_policy)
-        .build()
+    crate::net::ip_mode::apply(
+        Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(custom_redirect_policy),
+    )
+    .build()
 }
 
 fn build_github_headers(

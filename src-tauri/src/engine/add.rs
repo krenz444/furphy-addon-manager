@@ -8,6 +8,7 @@ pub enum AddonTarget {
     CurseForge(i64),
     Wago(String),      // slug or id
     GitHub(String),    // "owner/repo"
+    Tukui(String),     // slug, e.g. "elvui"
 }
 
 /// Centralized identifier resolver for CurseForge IDs, slugs, and built-in aliases.
@@ -87,6 +88,15 @@ pub fn parse_addon_target(target: &str, catalogue: Option<&Catalogue>) -> Option
     }
 
     let lower = t.to_ascii_lowercase();
+
+    // 0. Tukui: "tukui:elvui" (what the Tukui tab of Get Addons sends)
+    if let Some(stripped) = lower.strip_prefix("tukui:") {
+        let slug = stripped.trim();
+        if !slug.is_empty() && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Some(AddonTarget::Tukui(slug.to_string()));
+        }
+        return None;
+    }
 
     // 1. Direct numeric ID -> CurseForge
     if let Ok(id) = t.parse::<i64>() {
@@ -292,12 +302,53 @@ pub fn create_addon_record(
             .map_err(|e| e.to_string())?;
             Ok(id)
         }
+        AddonTarget::Tukui(slug) => {
+            if let Ok(existing_id) = conn.query_row(
+                "SELECT id FROM addons WHERE flavour = ?1 AND tukui_slug = ?2 COLLATE NOCASE",
+                params![flavour, slug],
+                |r| r.get::<_, String>(0),
+            ) {
+                return Ok(existing_id);
+            }
+
+            let id = Uuid::new_v4().to_string();
+            let default_name = name.unwrap_or(&slug);
+            conn.execute(
+                "INSERT INTO addons (id, flavour, source, tukui_slug, name, installed_at, release_type, ignore_updates) \
+                 VALUES (?1, ?2, 'tukui', ?3, ?4, ?5, 1, 0)",
+                params![id, flavour, slug, default_name, now],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(id)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tukui_target_is_parsed_and_recorded_once_per_game_version() {
+        assert_eq!(parse_addon_target("tukui:elvui", None), Some(AddonTarget::Tukui("elvui".to_string())));
+        assert_eq!(parse_addon_target("  TUKUI:Tukui ", None), Some(AddonTarget::Tukui("tukui".to_string())));
+        assert_eq!(parse_addon_target("tukui:", None), None);
+        assert_eq!(parse_addon_target("tukui:el vui", None), None);
+        assert_eq!(parse_addon_target("tukui:../x", None), None);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate::run_migrations(&mut conn).unwrap();
+        let first = create_addon_record(&conn, "retail", AddonTarget::Tukui("elvui".to_string()), None).unwrap();
+        let again = create_addon_record(&conn, "retail", AddonTarget::Tukui("ELVUI".to_string()), None).unwrap();
+        assert_eq!(first, again, "the same slug in the same game version is one addon");
+        let other = create_addon_record(&conn, "forever", AddonTarget::Tukui("elvui".to_string()), None).unwrap();
+        assert_ne!(first, other);
+
+        let (source, slug, name): (String, String, String) = conn
+            .query_row("SELECT source, tukui_slug, name FROM addons WHERE id = ?1", params![first], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((source.as_str(), slug.as_str(), name.as_str()), ("tukui", "elvui", "elvui"));
+    }
 
     #[test]
     fn test_parse_addon_target_variants() {

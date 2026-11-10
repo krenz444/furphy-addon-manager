@@ -38,6 +38,9 @@ pub struct WagoRelease {
     pub supported_cata_patches: Option<Vec<String>>,
     #[serde(default)]
     pub supported_mop_patches: Option<Vec<String>>,
+    /// When the release was published (Wago `created_at`, e.g. 2026-11-08T20:38:49.000000Z).
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 pub struct WagoSession {
@@ -81,9 +84,7 @@ pub fn get_wago_base_url() -> String {
 }
 
 pub fn create_wago_client() -> reqwest::Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
+    crate::net::ip_mode::apply(Client::builder().timeout(Duration::from_secs(30))).build()
 }
 
 fn unescape_html(s: &str) -> String {
@@ -475,6 +476,7 @@ pub fn is_classic_flavour(flavour: &str) -> bool {
     matches!(
         f.as_str(),
         "classic" | "classic_era" | "forever" | "cata" | "wotlk" | "wrath" | "bc" | "tbc" | "mop" | "mists"
+            | "classic_beta" | "classic_ptr" | "classic_era_ptr" | "anniversary"
     )
 }
 
@@ -984,7 +986,10 @@ mod tests {
 
     #[test]
     fn test_is_classic_flavour() {
-        for flv in ["classic", "classic_era", "forever", "cata", "wotlk", "wrath", "bc", "tbc", "mop", "mists"] {
+        for flv in [
+            "classic", "classic_era", "forever", "cata", "wotlk", "wrath", "bc", "tbc", "mop", "mists",
+            "classic_beta", "classic_ptr", "classic_era_ptr", "anniversary",
+        ] {
             assert!(is_classic_flavour(flv), "{flv} should be recognized as classic");
             assert!(is_classic_flavour(&flv.to_uppercase()), "uppercase {flv} should match");
         }

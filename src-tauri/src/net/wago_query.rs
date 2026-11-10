@@ -21,7 +21,7 @@ impl WagoQueryParams {
     ) -> Self {
         let normalized_flavour = flavour.unwrap_or("retail").trim().to_lowercase();
         let game_version = match normalized_flavour.as_str() {
-            "classic_era" | "forever" | "classic" => "classic".to_string(),
+            "classic_era" | "forever" | "classic" | "classic_era_ptr" | "classic_beta" | "classic_ptr" | "anniversary" => "classic".to_string(),
             "cata" => "cata".to_string(),
             "wotlk" | "wrath" => "wotlk".to_string(),
             "tbc" | "bc" => "bc".to_string(),

@@ -60,9 +60,7 @@ pub fn get_cf_base_url() -> String {
 }
 
 pub fn create_cf_client() -> reqwest::Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
+    crate::net::ip_mode::apply(Client::builder().timeout(Duration::from_secs(30))).build()
 }
 
 fn build_cf_headers(base_url: &str) -> HeaderMap {
@@ -246,10 +244,12 @@ pub async fn get_cf_file_by_id(
 }
 
 pub fn create_cf_download_client() -> reqwest::Result<Client> {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
-        .build()
+    crate::net::ip_mode::apply(
+        Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300)),
+    )
+    .build()
 }
 
 pub async fn download_cf_file(

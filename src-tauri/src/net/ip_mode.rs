@@ -19,6 +19,13 @@ pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     }
 }
 
+/// Called when a setting is saved: forceIpv4 is the one setting here that must work at once, without a restart.
+pub fn apply_setting(key: &str, value: &serde_json::Value) {
+    if key == "forceIpv4" {
+        set_force_ipv4(value.as_bool().unwrap_or(false));
+    }
+}
+
 /// Reads the settings row `forceIpv4` (JSON text, `true` or `false`). A missing row, a read error or any other value means off.
 pub fn init_from_settings(conn: &rusqlite::Connection) {
     let on = conn
@@ -54,6 +61,21 @@ mod tests {
         set_force_ipv4(true);
         assert!(force_ipv4());
         set_force_ipv4(false);
+        assert!(!force_ipv4());
+    }
+
+    #[test]
+    fn saving_force_ipv4_takes_effect_at_once_and_other_keys_do_nothing() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_force_ipv4(false);
+        apply_setting("forceIpv4", &serde_json::json!(true));
+        assert!(force_ipv4());
+        apply_setting("uiZoom", &serde_json::json!(false));
+        assert!(force_ipv4(), "another key leaves the flag alone");
+        apply_setting("forceIpv4", &serde_json::json!("yes"));
+        assert!(!force_ipv4(), "a value that is not a bool means off");
+        apply_setting("forceIpv4", &serde_json::json!(true));
+        apply_setting("forceIpv4", &serde_json::json!(false));
         assert!(!force_ipv4());
     }
 
