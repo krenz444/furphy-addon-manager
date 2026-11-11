@@ -9,8 +9,9 @@ use windows_sys::Win32::Foundation::{BOOL, HWND};
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetWindowThreadProcessId,
-    SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_ALL, SW_RESTORE, SW_SHOW,
+    AllowSetForegroundWindow, BringWindowToTop, FlashWindowEx, GetForegroundWindow,
+    GetWindowThreadProcessId, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, ASFW_ANY,
+    FLASHWINFO, FLASHW_ALL, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
 };
 
 #[cfg(windows)]
@@ -267,6 +268,32 @@ pub fn load_window_bounds(conn: &Connection) -> Option<WindowBoundsDto> {
     serde_json::from_str(&val_str).ok()
 }
 
+/// Grants any background Furphy instance permission to take foreground focus.
+pub fn allow_set_foreground_window() {
+    #[cfg(windows)]
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+/// Shows, unminimizes, focuses, and raises the primary Tauri webview window.
+/// Call on the main UI thread (e.g. via `app_handle.run_on_main_thread` or tray handlers).
+pub fn show_and_focus_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    let window = app_handle
+        .get_webview_window("main")
+        .or_else(|| app_handle.webview_windows().values().next().cloned());
+    if let Some(window) = window {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(windows)]
+        if let Ok(hwnd) = window.hwnd() {
+            let _ = bring_window_to_front(hwnd.0 as isize);
+        }
+    }
+}
+
 /// Activates window, restores if minimized, brings to front, sets foreground.
 /// Flashes 3 times if Windows foreground lock prevents focus.
 pub fn bring_window_to_front(hwnd_raw: isize) -> Result<(), String> {
@@ -277,16 +304,34 @@ pub fn bring_window_to_front(hwnd_raw: isize) -> Result<(), String> {
             return Err("Invalid window handle".to_string());
         }
 
-        // Restore if minimized
-        ShowWindow(hwnd, SW_RESTORE);
+        // Preserve maximized state; only restore when actually minimized.
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+        SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
         BringWindowToTop(hwnd);
 
         let fore_hwnd = GetForegroundWindow();
         let fore_thread = GetWindowThreadProcessId(fore_hwnd, std::ptr::null_mut());
-        let current_thread = GetCurrentThreadId();
+        let window_thread = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let attach_thread = if window_thread != 0 {
+            window_thread
+        } else {
+            GetCurrentThreadId()
+        };
 
-        let attached = if fore_thread != 0 && fore_thread != current_thread {
-            AttachThreadInput(current_thread, fore_thread, 1) != 0
+        let attached = if fore_thread != 0 && fore_thread != attach_thread {
+            AttachThreadInput(attach_thread, fore_thread, 1) != 0
         } else {
             false
         };
@@ -294,7 +339,7 @@ pub fn bring_window_to_front(hwnd_raw: isize) -> Result<(), String> {
         let set_res: BOOL = SetForegroundWindow(hwnd);
 
         if attached {
-            AttachThreadInput(current_thread, fore_thread, 0);
+            AttachThreadInput(attach_thread, fore_thread, 0);
         }
 
         // Verify if it actually became foreground; else flash 3 times

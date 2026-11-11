@@ -383,7 +383,6 @@ pub fn setup_tray<R: tauri::Runtime>(
     scheduler: std::sync::Arc<crate::system::schedule::Scheduler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use tauri::Manager;
 
     let snapshot = {
         let snap_lock = scheduler.get_snapshot();
@@ -428,29 +427,13 @@ pub fn setup_tray<R: tauri::Runtime>(
                     return;
                 }
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                    #[cfg(windows)]
-                    if let Ok(hwnd) = window.hwnd() {
-                        let _ = crate::system::window::bring_window_to_front(hwnd.0 as isize);
-                    }
-                }
+                crate::system::window::show_and_focus_main_window(app);
             }
         })
         .on_menu_event(move |app, event| {
             match event.id().as_ref() {
                 "open" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
-                        #[cfg(windows)]
-                        if let Ok(hwnd) = window.hwnd() {
-                            let _ = crate::system::window::bring_window_to_front(hwnd.0 as isize);
-                        }
-                    }
+                    crate::system::window::show_and_focus_main_window(app);
                 }
                 "check" => {
                     sched_clone.trigger_cycle(true);

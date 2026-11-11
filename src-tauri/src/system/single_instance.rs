@@ -6,17 +6,27 @@ pub fn try_activate_existing_instance(args: &[String]) -> bool {
         r"\\.\pipe\FurphyAddonManager_SingleInstance"
     };
 
-    use std::io::Write;
-    let msg = if args.iter().any(|a| a == "--tray") {
-        "ping\n"
-    } else {
-        "show\n"
-    };
+    let is_tray = args.iter().any(|a| a == "--tray");
+    if !is_tray {
+        crate::system::window::allow_set_foreground_window();
+    }
 
-    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(pipe_name) {
-        let _ = file.write_all(msg.as_bytes());
-        let _ = file.flush();
-        return true;
+    use std::io::Write;
+    let msg = if is_tray { "ping\n" } else { "show\n" };
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    for attempt in 0..30 {
+        match std::fs::OpenOptions::new().write(true).open(pipe_name) {
+            Ok(mut file) => {
+                let _ = file.write_all(msg.as_bytes());
+                let _ = file.flush();
+                return true;
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < 29 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return false,
+        }
     }
     false
 }
@@ -50,22 +60,24 @@ pub fn start_single_instance_listener<R: tauri::Runtime>(app_handle: tauri::AppH
             };
 
             if server.connect().await.is_ok() {
-                let mut reader = tokio::io::BufReader::new(server);
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.is_ok() {
-                    let cmd = line.trim();
-                    if cmd == "show" {
-                        use tauri::Manager;
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                            if let Ok(hwnd) = window.hwnd() {
-                                let _ = crate::system::window::bring_window_to_front(hwnd.0 as isize);
-                            }
+                let handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(server);
+                    let mut line = String::new();
+                    let read_res = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        reader.read_line(&mut line),
+                    )
+                    .await;
+                    if let Ok(Ok(_)) = read_res {
+                        if line.trim() == "show" {
+                            let handle_for_main = handle.clone();
+                            let _ = handle.run_on_main_thread(move || {
+                                crate::system::window::show_and_focus_main_window(&handle_for_main);
+                            });
                         }
                     }
-                }
+                });
             }
         }
     });

@@ -172,6 +172,30 @@ pub fn run() {
         std::process::exit(0);
     }
 
+    let _single_instance_guard = if !is_cli && !is_stateless_cli {
+        match system::window::acquire_single_instance_mutex() {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                // Another instance already owns the mutex (it may still be starting up its pipe).
+                let mut activated = false;
+                for _ in 0..25 {
+                    if system::single_instance::try_activate_existing_instance(&args) {
+                        activated = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if !activated && !args.iter().any(|a| a == "--tray") {
+                    let _ = system::window::activate_existing_instance();
+                }
+                std::process::exit(0);
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     if !is_stateless_cli {
         if let Err(e) = init_app(import_arg) {
             eprintln!("[FATAL] App initialization failed: {}", e);

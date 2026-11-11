@@ -270,7 +270,19 @@ pub fn run_install(silent: bool, relaunch_tray: bool, target_dir_override: Optio
     if silent && relaunch_tray && !is_test && !is_dev() {
         let dest_exe = install_dir.join(format!("{}.exe", APP_TITLE));
         if dest_exe.exists() {
-            match std::process::Command::new(&dest_exe).arg("--tray").spawn() {
+            use std::os::windows::process::CommandExt;
+            use std::process::Stdio;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            match std::process::Command::new(&dest_exe)
+                .arg("--tray")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+                .spawn()
+            {
                 Ok(_) if result.is_ok() => append_app_log("INFO", "Restarted Furphy in the tray after the update"),
                 Ok(_) => append_app_log("WARN", "Update failed; restarted the installed version in the tray"),
                 Err(e) => append_app_log("WARN", &format!("Could not restart Furphy in the tray: {}", e)),
