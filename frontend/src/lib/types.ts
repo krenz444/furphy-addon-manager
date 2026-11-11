@@ -115,6 +115,48 @@ export interface JobRecord {
   log_path: string | null;
 }
 
+export interface JobProgressTallies {
+  checked: number;
+  updated: number;
+  failed: number;
+  up_to_date: number;
+  updates_found: number;
+}
+
+export interface JobProgressStep {
+  total: number;
+  index: number;
+  addon: string | null;
+  phase: string;
+  bytes_done?: number | null;
+  bytes_total?: number | null;
+  tallies: JobProgressTallies;
+}
+
+export interface QueuedJobDto {
+  queue_id: string;
+  kind: string;
+  flavour: string | null;
+  target_label: string | null;
+  queued_at: string;
+  position: number;
+}
+
+export interface JobProgressEvent {
+  job_id: string;
+  kind: string;
+  flavour: string | null;
+  step: JobProgressStep;
+  percent: number;
+  message: string | null;
+}
+
+export interface JobQueueSnapshot {
+  active_job: JobRecord | null;
+  active_progress: JobProgressEvent | null;
+  queued_jobs: QueuedJobDto[];
+}
+
 export interface WtfSnapshot {
   id: string;
   addon_id: string;
@@ -172,6 +214,8 @@ export interface AppState {
   active_flavour: string;
   freshness: Freshness;
   running_job: JobRecord | null;
+  active_progress?: JobProgressEvent | null;
+  queued_jobs?: QueuedJobDto[];
   untracked_count: number;
   is_game_active: boolean;
   app_info: AppInfo;

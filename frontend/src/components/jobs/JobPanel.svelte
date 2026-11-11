@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { describeJobTitle } from '../../lib/checkReport';
   import type { JobRecord } from '../../lib/types';
 
   interface Props {
@@ -214,7 +215,7 @@
             <span class="addon-name">{failedCount} addon{failedCount === 1 ? '' : 's'} failed</span>
           {:else}
             <span class="phase-name success-text">Complete:</span>
-            <span class="addon-name">{job.kind} finished successfully</span>
+            <span class="addon-name">{describeJobTitle(job.kind, job.flavour, undefined, null, 'queued')} finished successfully</span>
           {/if}
         </div>
 

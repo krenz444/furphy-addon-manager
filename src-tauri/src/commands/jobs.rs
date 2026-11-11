@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use serde_json::Value;
 use crate::db::open_connection;
+use crate::jobs::progress::JobQueueSnapshot;
 use crate::jobs::runner::{JobRecord, JobRunner};
 use crate::paths::get_db_path;
 
@@ -45,7 +46,7 @@ pub async fn start_job(
 }
 
 #[tauri::command]
-pub fn list_jobs() -> Result<Vec<JobRecord>, String> {
+pub fn list_jobs(runner: tauri::State<'_, Arc<JobRunner>>) -> Result<Vec<JobRecord>, String> {
     let db_path = get_db_path();
     let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let mut stmt = conn
@@ -77,6 +78,11 @@ pub fn list_jobs() -> Result<Vec<JobRecord>, String> {
     for r in rows {
         out.push(r.map_err(|e| e.to_string())?);
     }
+    if let Some(active) = runner.queue_snapshot().active_job {
+        if !out.iter().any(|j| j.id == active.id) {
+            out.insert(0, active);
+        }
+    }
     Ok(out)
 }
 
@@ -105,4 +111,9 @@ pub fn get_job(id: String) -> Result<JobRecord, String> {
         },
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_job_queue_status(runner: tauri::State<'_, Arc<JobRunner>>) -> JobQueueSnapshot {
+    runner.queue_snapshot()
 }

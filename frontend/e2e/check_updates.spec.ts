@@ -122,26 +122,37 @@ test.describe('Furphy check for updates', () => {
     expect(await checkCalls(page)).toBe(2);
   });
 
-  test('6 A busy runner gets a plain message, shows the job that holds it, and recovers once it is free', async ({ page }) => {
+  test('6 A busy runner queues checks cleanly in FIFO order and runs them once free', async ({ page }) => {
+    await setCheckDelay(page, 2200);
     await busyNext(page);
+    const bar = page.locator('section.job-status-bar');
+    await expect(bar).toHaveClass(/is-running/);
+    await expect(bar.locator('.status-title')).toHaveText('Updating all game versions');
+
     const check = page.locator('.btn-check');
-    await check.click();
-
-    await expect(page.locator('.toast.toast-info')).toContainText(BUSY);
-    // The refresh after the refusal reports the job that occupies the runner, labelled as that job, not as our check.
-    const panel = page.locator('.job-panel');
-    await expect(panel).toContainText('Updating');
-    await expect(panel).toContainText('Running in the background');
-    await expect(panel).not.toContainText('Job Failed');
-    await expect(panel).not.toContainText('Contacting repositories');
     await expect(check).toHaveAttribute('aria-disabled', 'true');
-    await expect(check).toHaveAttribute('title', BUSY);
-
-    // The mock forgets that job after one report, like a background job that finished unseen.
+    // aria-disabled="true" remains clickable in the DOM (so queued clicks reach the app),
+    // whereas Playwright's default click() waits for aria-disabled to clear.
     await check.click({ force: true });
-    await expect(page.locator('.toast.toast-success')).toContainText(/Checked \d+ addons/);
-    expect(await checkCalls(page)).toBe(2);
+
+    await expect(page.locator('.toast.toast-info')).toContainText('Queued behind Updating all game versions');
+    const toggle = bar.locator('.queue-toggle-btn');
+    await expect(toggle).toHaveText('Queued (1)');
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
+      await toggle.click();
+    }
+    await expect(bar.locator('#job-status-queue-list')).toContainText('#1');
+    await expect(bar.locator('#job-status-queue-list')).toContainText('Check for updates (Retail)');
+    await expect(page.locator('.job-panel')).toHaveCount(0);
+
+    // Speed up the queued check once its queue entry is verified.
+    await setCheckDelay(page, 150);
+
+    // Queued check automatically runs right after the background job completes.
+    await expect(page.locator('.toast.toast-success')).toContainText(/Checked \d+ addons/, { timeout: 10000 });
+    expect(await checkCalls(page)).toBe(1);
     await expect(check).toHaveAttribute('aria-disabled', 'false');
+    await expect(bar).toHaveClass(/is-done/);
   });
 
   test('7 A partial failure names the addons that could not be checked', async ({ page }) => {

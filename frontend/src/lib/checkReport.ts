@@ -104,3 +104,147 @@ export function errorText(err: unknown): string {
   if (isRecord(err) && typeof err.message === 'string') return err.message;
   return 'Unknown error';
 }
+
+export interface FlavourLabelLike {
+  id: string;
+  label?: string;
+}
+
+const DEFAULT_FLAVOUR_LABELS: Record<string, string> = {
+  retail: 'Retail',
+  classic: 'Classic',
+  classic_era: 'Classic Era',
+  bcc: 'Classic TBC',
+  ptr: 'PTR',
+  beta: 'Beta',
+};
+
+export function formatFlavourLabel(
+  flavour: string | null | undefined,
+  flavours?: readonly FlavourLabelLike[],
+): string | null {
+  if (!flavour) return null;
+  const found = flavours?.find((f) => f.id === flavour);
+  if (found?.label) return found.label;
+  if (DEFAULT_FLAVOUR_LABELS[flavour]) return DEFAULT_FLAVOUR_LABELS[flavour];
+  return flavour
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+export function describeJobTitle(
+  kind: string,
+  flavour: string | null | undefined,
+  flavours?: readonly FlavourLabelLike[],
+  targetLabel?: string | null,
+  mode: 'active' | 'queued' = 'active',
+): string {
+  const flv = formatFlavourLabel(flavour, flavours);
+  const withFlv = (base: string) => (flv ? `${base} (${flv})` : base);
+
+  if (mode === 'queued') {
+    switch (kind) {
+      case 'check':
+        return withFlv('Check for updates');
+      case 'update-all-flavours':
+        return 'Update all game versions';
+      case 'sync':
+      case 'update-all':
+        return withFlv('Update all');
+      case 'update':
+        return withFlv(targetLabel ? `Update ${targetLabel}` : 'Update addon');
+      case 'install':
+      case 'install_zip':
+        return withFlv(targetLabel ? `Install ${targetLabel}` : 'Install addon');
+      case 'install_dependencies':
+        return withFlv(targetLabel ? `Install libraries for ${targetLabel}` : 'Install missing libraries');
+      case 'uninstall':
+        return withFlv(targetLabel ? `Remove ${targetLabel}` : 'Remove addons');
+      case 'rollback':
+        return withFlv(targetLabel ? `Rollback ${targetLabel}` : 'Rollback addon');
+      case 'copy-addons':
+        return withFlv('Copy addons');
+      case 'backup-wtf':
+        return withFlv('Backup WTF');
+      case 'restore-wtf-all':
+        return withFlv('Restore WTF');
+      default:
+        return withFlv(kind.replace(/[_-]+/g, ' '));
+    }
+  }
+
+  switch (kind) {
+    case 'check':
+      return flv ? `Checking ${flv} addons` : 'Checking addons';
+    case 'update-all-flavours':
+      return 'Updating all game versions';
+    case 'sync':
+    case 'update-all':
+      return flv ? `Updating ${flv} addons` : 'Updating addons';
+    case 'update':
+      return targetLabel ? `Updating ${targetLabel}` : withFlv('Updating addon');
+    case 'install':
+    case 'install_zip':
+      return targetLabel ? `Installing ${targetLabel}` : withFlv('Installing addon');
+    case 'install_dependencies':
+      return targetLabel ? `Installing libraries for ${targetLabel}` : withFlv('Installing missing libraries');
+    case 'uninstall':
+      return targetLabel ? `Removing ${targetLabel}` : withFlv('Removing addons');
+    case 'rollback':
+      return targetLabel ? `Rolling back ${targetLabel}` : withFlv('Rolling back addon');
+    case 'copy-addons':
+      return flv ? `Copying addons to ${flv}` : 'Copying addons';
+    case 'backup-wtf':
+      return withFlv('Backing up WTF');
+    case 'restore-wtf-all':
+      return withFlv('Restoring WTF');
+    default:
+      return withFlv(kind.replace(/[_-]+/g, ' '));
+  }
+}
+
+export function describeQueuedBehind(
+  activeKind: string | null | undefined,
+  activeFlavour: string | null | undefined,
+  flavours?: readonly FlavourLabelLike[],
+): string {
+  if (!activeKind) return 'Queued in task runner';
+  return `Queued behind ${describeJobTitle(activeKind, activeFlavour, flavours, null, 'active')}`;
+}
+
+export function jobHasActionableErrors(resultsJson: string | null | undefined, state?: string | null, error?: string | null): boolean {
+  if (state === 'failed' || (typeof error === 'string' && error.length > 0)) return true;
+  if (!resultsJson) return false;
+  try {
+    const parsed: unknown = JSON.parse(resultsJson);
+    const hasRowError = (row: unknown): boolean => {
+      if (!isRecord(row)) return false;
+      if (typeof row.error === 'string' && row.error.length > 0) return true;
+      if (row.success === false) return true;
+      return row.status === 'failed' || row.status === 'Failed' || row.status === 'error';
+    };
+    if (Array.isArray(parsed)) {
+      return parsed.some((item) => {
+        if (hasRowError(item)) return true;
+        if (!isRecord(item)) return false;
+        if (Array.isArray(item.failed) && item.failed.length > 0) return true;
+        if (Array.isArray(item.results) && item.results.some(hasRowError)) return true;
+        return false;
+      });
+    }
+    if (isRecord(parsed)) {
+      if (typeof parsed.failed === 'number' && parsed.failed > 0) return true;
+      if (typeof parsed.failed_count === 'number' && parsed.failed_count > 0) return true;
+      if (Array.isArray(parsed.failed) && parsed.failed.length > 0) return true;
+      if (Array.isArray(parsed.failed_items) && parsed.failed_items.length > 0) return true;
+      if (Array.isArray(parsed.outcomes) && parsed.outcomes.some(hasRowError)) return true;
+      if (Array.isArray(parsed.results) && parsed.results.some(hasRowError)) return true;
+      if (Array.isArray(parsed.addons) && parsed.addons.some(hasRowError)) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}

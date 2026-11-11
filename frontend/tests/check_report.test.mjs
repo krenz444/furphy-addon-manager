@@ -7,6 +7,10 @@ import {
   checkFailureMessage,
   isRunnerBusyError,
   errorText,
+  formatFlavourLabel,
+  describeJobTitle,
+  describeQueuedBehind,
+  jobHasActionableErrors,
 } from '../src/lib/checkReport.ts';
 
 const NOW = Date.parse('2026-11-07T12:00:00Z');
@@ -169,4 +173,88 @@ test('isRunnerBusyError: matches the runner rejection and nothing else', () => {
   assert.equal(isRunnerBusyError('Error: Another job (x) is currently running'), true);
   assert.equal(isRunnerBusyError("Job failed: Flavour 'retail' is not installed"), false);
   assert.equal(isRunnerBusyError('Database error: locked'), false);
+});
+
+test('formatFlavourLabel: maps known slugs, prefers configured labels, handles blanks', () => {
+  assert.equal(formatFlavourLabel(null), null);
+  assert.equal(formatFlavourLabel('retail'), 'Retail');
+  assert.equal(formatFlavourLabel('classic_era'), 'Classic Era');
+  assert.equal(formatFlavourLabel('wow_forever'), 'Wow Forever');
+  assert.equal(formatFlavourLabel('forever'), 'Forever');
+  assert.equal(
+    formatFlavourLabel('retail', [{ id: 'retail', label: 'Dragonflight / Live' }]),
+    'Dragonflight / Live',
+  );
+  assert.equal(formatFlavourLabel('custom_realm'), 'Custom Realm');
+});
+
+test('describeJobTitle: formats active and queued titles cleanly across job kinds', () => {
+  assert.equal(describeJobTitle('check', 'retail'), 'Checking Retail addons');
+  assert.equal(describeJobTitle('check', null), 'Checking addons');
+  assert.equal(describeJobTitle('update-all-flavours', null), 'Updating all game versions');
+  assert.equal(describeJobTitle('sync', 'classic'), 'Updating Classic addons');
+  assert.equal(describeJobTitle('update', 'retail', undefined, 'Details!'), 'Updating Details!');
+  assert.equal(describeJobTitle('backup-wtf', 'retail'), 'Backing up WTF (Retail)');
+
+  assert.equal(describeJobTitle('check', 'retail', undefined, null, 'queued'), 'Check for updates (Retail)');
+  assert.equal(
+    describeJobTitle('update-all-flavours', null, undefined, null, 'queued'),
+    'Update all game versions',
+  );
+  assert.equal(describeJobTitle('sync', 'retail', undefined, null, 'queued'), 'Update all (Retail)');
+  assert.equal(describeJobTitle('backup-wtf', 'classic', undefined, null, 'queued'), 'Backup WTF (Classic)');
+});
+
+test('describeQueuedBehind: names the active blocker or falls back cleanly', () => {
+  assert.equal(describeQueuedBehind(null, null), 'Queued in task runner');
+  assert.equal(
+    describeQueuedBehind('update-all-flavours', null),
+    'Queued behind Updating all game versions',
+  );
+  assert.equal(describeQueuedBehind('sync', 'classic'), 'Queued behind Updating Classic addons');
+});
+
+test('jobHasActionableErrors: detects failures across states, errors, and parsed results', () => {
+  assert.equal(jobHasActionableErrors(null, 'completed', null), false);
+  assert.equal(jobHasActionableErrors(null, 'failed', null), true);
+  assert.equal(jobHasActionableErrors(null, 'completed', '1 addon failed'), true);
+  assert.equal(jobHasActionableErrors('not json', 'completed', null), false);
+
+  assert.equal(jobHasActionableErrors(JSON.stringify([{ failed: [] }]), 'completed', null), false);
+  assert.equal(
+    jobHasActionableErrors(JSON.stringify([{ failed: ['Details!'] }]), 'completed', null),
+    true,
+  );
+  assert.equal(
+    jobHasActionableErrors(
+      JSON.stringify({ failed_count: 0, outcomes: [{ name: 'ElvUI', status: 'Up-to-date' }] }),
+      'completed',
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    jobHasActionableErrors(
+      JSON.stringify({ failed_count: 1, outcomes: [{ name: 'DBM', status: 'Failed' }] }),
+      'completed',
+      null,
+    ),
+    true,
+  );
+  assert.equal(
+    jobHasActionableErrors(
+      JSON.stringify({ outcomes: [{ name: 'DBM', status: 'failed' }] }),
+      'completed',
+      null,
+    ),
+    true,
+  );
+  assert.equal(
+    jobHasActionableErrors(
+      JSON.stringify({ results: [{ name: 'WeakAuras', error: 'HTTP 429' }] }),
+      'completed',
+      null,
+    ),
+    true,
+  );
 });

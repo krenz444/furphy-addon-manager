@@ -3,13 +3,12 @@ use std::sync::Arc;
 use serde_json::Value;
 use crate::db::export_v1::export_to_v1;
 use crate::db::repo::{get_addons_by_flavour, get_installed_flavours_db};
-use crate::jobs::runner::{JobError, JobRunner};
+use crate::jobs::runner::JobRunner;
 use crate::net::policy::NetworkPolicy;
 use crate::paths::{detect_wow_root, get_db_path};
 
-pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
-    // If no CLI flags present, return Ok(false) to launch GUI
-    let is_cli = args.iter().any(|a| {
+pub fn is_cli_command(args: &[String]) -> bool {
+    args.iter().any(|a| {
         a == "--check"
             || a == "--sync"
             || a == "--status"
@@ -19,9 +18,12 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
             || a == "--protocol"
             || a == "--sign-file"
             || a == "--add"
-    });
+    })
+}
 
-    if !is_cli {
+pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
+    // If no CLI flags present, return Ok(false) to launch GUI
+    if !is_cli_command(args) {
         return Ok(false);
     }
 
@@ -265,11 +267,8 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
                     }
                     return Ok(true);
                 }
-                Err(JobError::Busy(id)) => {
-                    eprintln!("Operation busy: job {} currently running", id);
-                    return Err(1);
-                }
                 Err(e) => {
+                    crate::logging::append_app_log("ERROR", &format!("CLI add failed for flavour {}: {}", flv, e));
                     eprintln!("Add failed for flavour {}: {}", flv, e);
                     return Err(1);
                 }
@@ -301,11 +300,8 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
                         .unwrap_or(Value::Null);
                     reports.push(val);
                 }
-                Err(JobError::Busy(id)) => {
-                    eprintln!("Operation busy: job {} currently running", id);
-                    return Err(1);
-                }
                 Err(e) => {
+                    crate::logging::append_app_log("ERROR", &format!("CLI check failed for flavour {}: {}", flv.id, e));
                     eprintln!("Check failed for flavour {}: {}", flv.id, e);
                     return Err(1);
                 }
@@ -351,11 +347,8 @@ pub async fn handle_cli_args(args: &[String]) -> Result<bool, i32> {
                         .unwrap_or(Value::Null);
                     reports.push(val);
                 }
-                Err(JobError::Busy(id)) => {
-                    eprintln!("Operation busy: job {} currently running", id);
-                    return Err(1);
-                }
                 Err(e) => {
+                    crate::logging::append_app_log("ERROR", &format!("CLI sync failed for flavour {}: {}", flv.id, e));
                     eprintln!("Sync failed for flavour {}: {}", flv.id, e);
                     return Err(1);
                 }
@@ -460,5 +453,14 @@ mod tests {
             "--add".to_string(),
         ];
         assert_eq!(handle_cli_args(&args).await, Err(2));
+    }
+
+    #[test]
+    fn test_is_cli_command_distinguishes_gui_and_cli_flags() {
+        assert!(!is_cli_command(&["furphy.exe".to_string()]));
+        assert!(!is_cli_command(&["furphy.exe".to_string(), "--tray".to_string()]));
+        assert!(is_cli_command(&["furphy.exe".to_string(), "--check".to_string()]));
+        assert!(is_cli_command(&["furphy.exe".to_string(), "--sync".to_string()]));
+        assert!(is_cli_command(&["furphy.exe".to_string(), "--tray-selftest".to_string(), "m.json".to_string()]));
     }
 }

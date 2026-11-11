@@ -1,12 +1,15 @@
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use crate::db::export_v1::export_to_v1;
 use crate::engine::archive::extract_addon_archive;
 use crate::engine::backups::{cleanup_orphaned_backups, create_backup_zip, record_and_prune_backup};
+use crate::engine::check::ProgressSink;
 use crate::engine::flavours::get_flavour_mapping;
 use crate::engine::ownership::{check_folder_ownership_conflicts, get_protected_folders};
 use crate::engine::select::{select_cf_file, select_github_asset, select_github_release, select_wago_release, select_wago_release_strict};
@@ -14,6 +17,7 @@ use crate::engine::staging::prepare_flavour_staging_dir;
 use crate::engine::swap::execute_atomic_swap;
 use crate::engine::toc::{find_primary_toc, parse_toc_file, strip_wow_formatting};
 use crate::engine::wtf::take_wtf_snapshot;
+use crate::jobs::progress::{JobProgressStep, ProgressTallies};
 use crate::logging::append_sync_log;
 use crate::net::curseforge::{create_cf_client, download_cf_file, get_cf_file_by_id, get_cf_files, CfFile};
 use crate::net::github::{create_github_client, download_github_asset, get_github_releases};
@@ -21,6 +25,8 @@ use crate::net::policy::NetworkPolicy;
 use crate::net::wago::{create_wago_client, download_wago_release, get_wago_releases_page, WagoRelease, WagoSession};
 use crate::paths::get_v1_sync_folder;
 use crate::system::game::is_wow_running;
+
+const SYNC_CONCURRENCY: usize = 6;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +157,50 @@ pub async fn run_sync_for_flavour_with_options(
     override_modified: bool,
     backup_modified: bool,
 ) -> Result<SyncRunReport, String> {
+    run_sync_for_flavour_with_options_and_hooks(
+        conn,
+        wow_root,
+        flavour,
+        flavour_folder,
+        addons_path,
+        data_dir,
+        client_interface,
+        policy,
+        github_token,
+        only_addon_ids,
+        force,
+        origin,
+        override_hold,
+        override_modified,
+        backup_modified,
+        Arc::new(WagoSession::new()),
+        false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_sync_for_flavour_with_options_and_hooks(
+    conn: &mut Connection,
+    wow_root: &Path,
+    flavour: &str,
+    flavour_folder: &str,
+    addons_path: &Path,
+    data_dir: &Path,
+    client_interface: Option<i32>,
+    policy: Arc<NetworkPolicy>,
+    github_token: Option<String>,
+    only_addon_ids: Option<&[String]>,
+    force: bool,
+    origin: crate::engine::update_policy::SyncOrigin,
+    override_hold: bool,
+    override_modified: bool,
+    backup_modified: bool,
+    wago_session: Arc<WagoSession>,
+    skip_v1_export: bool,
+    on_progress: Option<ProgressSink>,
+) -> Result<SyncRunReport, String> {
     let started_at = Utc::now().to_rfc3339();
     append_sync_log(Some(flavour), "INFO", "Starting addon sync...");
 
@@ -158,7 +208,6 @@ pub async fn run_sync_for_flavour_with_options(
     let wago_client = create_wago_client().map_err(|e| e.to_string())?;
     let github_client = create_github_client().map_err(|e| e.to_string())?;
     let tukui_client = crate::net::tukui::create_tukui_client().map_err(|e| e.to_string())?;
-    let wago_session = WagoSession::new();
 
     let mapping = get_flavour_mapping(flavour, client_interface);
 
@@ -171,6 +220,7 @@ pub async fn run_sync_for_flavour_with_options(
         .unwrap_or((None, "auto".to_string()));
 
     // 1. Fetch addons for this flavour
+    #[derive(Clone)]
     struct SyncRow {
         id: String,
         name: String,
@@ -222,12 +272,20 @@ pub async fn run_sync_for_flavour_with_options(
         })
         .map_err(|e| e.to_string())?;
 
-    let mut addons = Vec::new();
+    let mut selected_addons = Vec::new();
     for r in rows {
-        addons.push(r.map_err(|e| e.to_string())?);
+        let row = r.map_err(|e| e.to_string())?;
+        if let Some(only_ids) = only_addon_ids {
+            if !only_ids.contains(&row.id) {
+                continue;
+            }
+        }
+        selected_addons.push(row);
     }
+    drop(stmt);
 
-    let mut results = Vec::new();
+    let total_addons = selected_addons.len();
+    let mut results_slots: Vec<Option<AddonSyncResult>> = vec![None; total_addons];
     let mut updated_count = 0;
     let mut up_to_date_count = 0;
     let mut failed_count = 0;
@@ -235,13 +293,114 @@ pub async fn run_sync_for_flavour_with_options(
 
     let staging_root = prepare_flavour_staging_dir(data_dir, flavour).map_err(|e| e.to_string())?;
 
-    for a in &addons {
-        if let Some(ref only_ids) = only_addon_ids {
-            if !only_ids.contains(&a.id) {
-                continue;
+    struct SyncProgressState {
+        total: usize,
+        processed: usize,
+        tallies: ProgressTallies,
+    }
+
+    let progress_state = Arc::new(StdMutex::new(SyncProgressState {
+        total: total_addons,
+        processed: 0,
+        tallies: ProgressTallies::default(),
+    }));
+
+    let emit_active = {
+        let on_progress = on_progress.clone();
+        let progress_state = Arc::clone(&progress_state);
+        move |addon: Option<String>, phase: &str, bytes_done: Option<u64>, bytes_total: Option<u64>| {
+            if let Some(ref cb) = on_progress {
+                let (total, index, tallies) = {
+                    let st = progress_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let idx = if st.total == 0 {
+                        0
+                    } else {
+                        (st.processed + 1).min(st.total)
+                    };
+                    (st.total, idx, st.tallies.clone())
+                };
+                cb(JobProgressStep {
+                    total,
+                    index,
+                    addon,
+                    phase: phase.to_string(),
+                    bytes_done,
+                    bytes_total,
+                    tallies,
+                });
             }
         }
+    };
 
+    let finish_item = |delta_updated: usize,
+                       delta_up_to_date: usize,
+                       delta_failed: usize,
+                       addon: Option<String>,
+                       phase: &str| {
+        let (total, index, tallies) = {
+            let mut st = progress_state.lock().unwrap_or_else(|e| e.into_inner());
+            st.processed += 1;
+            st.tallies.checked += 1;
+            st.tallies.updated += delta_updated;
+            st.tallies.up_to_date += delta_up_to_date;
+            st.tallies.failed += delta_failed;
+            (st.total, st.processed, st.tallies.clone())
+        };
+        if let Some(ref cb) = on_progress {
+            cb(JobProgressStep {
+                total,
+                index,
+                addon,
+                phase: phase.to_string(),
+                bytes_done: None,
+                bytes_total: None,
+                tallies,
+            });
+        }
+    };
+
+    if total_addons > 0 {
+        if let Some(ref cb) = on_progress {
+            cb(JobProgressStep {
+                total: total_addons,
+                index: 0,
+                addon: None,
+                phase: "checking".to_string(),
+                bytes_done: None,
+                bytes_total: None,
+                tallies: ProgressTallies::default(),
+            });
+        }
+    }
+
+    enum PreparedOutcome {
+        UpToDate,
+        Held {
+            reason: String,
+            targets: Vec<String>,
+        },
+        Failed(String),
+        ReadyToInstall {
+            chosen_file_id: Option<String>,
+            chosen_version: Option<String>,
+            chosen_file_name: Option<String>,
+            chosen_released: Option<String>,
+            targets: Vec<String>,
+            extract_dir: PathBuf,
+            candidate_folders: Vec<String>,
+        },
+    }
+
+    struct SyncFetchResult {
+        idx: usize,
+        previous_folders: Vec<String>,
+        outcome: PreparedOutcome,
+    }
+
+    let sem = Arc::new(Semaphore::new(SYNC_CONCURRENCY));
+    let mut join_set: JoinSet<SyncFetchResult> = JoinSet::new();
+
+    for (idx, a) in selected_addons.iter().enumerate() {
         // Compare the files on disk with the recorded manifest now, so an edit made since the last install is seen before anything is replaced.
         let integrity_now: Option<String> = crate::engine::integrity::refresh_integrity_status(conn, addons_path, &a.id)
             .or_else(|| a.integrity_status.clone());
@@ -275,7 +434,7 @@ pub async fn run_sync_for_flavour_with_options(
                     a.source.as_deref(),
                     &reason,
                 );
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Skipped".to_string(),
@@ -283,13 +442,14 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: a.version.clone(),
                     error: Some(format!("Held back: {}", reason)),
                 });
+                finish_item(0, 0, 0, Some(a.name.clone()), "done");
                 continue;
             }
             crate::engine::update_policy::PolicyAction::SkipDisabledAutoUpdate
             | crate::engine::update_policy::PolicyAction::SkipNotifyOnly
             | crate::engine::update_policy::PolicyAction::SkipModified { .. }
             | crate::engine::update_policy::PolicyAction::PromptModified { .. } => {
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Skipped".to_string(),
@@ -297,11 +457,12 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: a.version.clone(),
                     error: None,
                 });
+                finish_item(0, 0, 0, Some(a.name.clone()), "done");
                 continue;
             }
             crate::engine::update_policy::PolicyAction::Pinned => {
                 up_to_date_count += 1;
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Up-to-date".to_string(),
@@ -309,10 +470,11 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: a.version.clone(),
                     error: None,
                 });
+                finish_item(0, 1, 0, Some(a.name.clone()), "up_to_date");
                 continue;
             }
             crate::engine::update_policy::PolicyAction::Ignored => {
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Ignored".to_string(),
@@ -320,11 +482,12 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: a.version.clone(),
                     error: None,
                 });
+                finish_item(0, 0, 0, Some(a.name.clone()), "done");
                 continue;
             }
             crate::engine::update_policy::PolicyAction::UpToDate => {
                 up_to_date_count += 1;
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Up-to-date".to_string(),
@@ -332,13 +495,14 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: a.version.clone(),
                     error: None,
                 });
+                finish_item(0, 1, 0, Some(a.name.clone()), "up_to_date");
                 continue;
             }
             crate::engine::update_policy::PolicyAction::Install => {}
         }
 
         if a.ignore_updates && !force && only_addon_ids.is_none() {
-            results.push(AddonSyncResult {
+            results_slots[idx] = Some(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
                 status: "Ignored".to_string(),
@@ -346,6 +510,7 @@ pub async fn run_sync_for_flavour_with_options(
                 new_version: a.version.clone(),
                 error: None,
             });
+            finish_item(0, 0, 0, Some(a.name.clone()), "done");
             continue;
         }
 
@@ -360,7 +525,7 @@ pub async fn run_sync_for_flavour_with_options(
                  VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
                 params![a.id, now_str],
             );
-            results.push(AddonSyncResult {
+            results_slots[idx] = Some(AddonSyncResult {
                 addon_id: a.id.clone(),
                 name: a.name.clone(),
                 status: "Up-to-date".to_string(),
@@ -369,10 +534,11 @@ pub async fn run_sync_for_flavour_with_options(
                 error: None,
             });
             append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date (local/adopted)", a.name));
+            finish_item(0, 1, 0, Some(a.name.clone()), "up_to_date");
             continue;
         }
 
-        // Retrieve existing folders for this addon
+        // Retrieve existing folders for this addon before concurrent remote fetch
         let mut fstmt = conn
             .prepare("SELECT folder FROM addon_folders WHERE addon_id = ?1 AND flavour = ?2")
             .map_err(|e| e.to_string())?;
@@ -380,439 +546,477 @@ pub async fn run_sync_for_flavour_with_options(
             .query_map(params![a.id, flavour], |fr| fr.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         let previous_folders: Vec<String> = frows.flatten().collect();
+        drop(fstmt);
 
-        let src = a.source.as_deref().unwrap_or("curseforge");
-        let safe_id = a.id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
-        let download_zip_path = staging_root.join(format!("{}.zip", safe_id));
-        let extract_dir = staging_root.join(&safe_id);
+        let a_clone = a.clone();
+        let mapping_clone = mapping.clone();
+        let policy_clone = Arc::clone(&policy);
+        let cf_client_clone = cf_client.clone();
+        let wago_client_clone = wago_client.clone();
+        let wago_session_clone = Arc::clone(&wago_session);
+        let github_client_clone = github_client.clone();
+        let tukui_client_clone = tukui_client.clone();
+        let github_token_clone = github_token.clone();
+        let flavour_owned = flavour.to_string();
+        let client_build_clone = client_build.clone();
+        let staging_root_clone = staging_root.clone();
+        let sem_clone = Arc::clone(&sem);
+        let emit_task = emit_active.clone();
 
-        let mut chosen_file_id: Option<String> = None;
-        let mut chosen_version: Option<String> = None;
-        let mut chosen_file_name: Option<String> = None;
-        let mut chosen_released: Option<String> = None;
-        let mut sync_error: Option<String> = None;
+        join_set.spawn(async move {
+            let _permit = sem_clone.acquire_owned().await.ok();
 
-        let mut target_addon_id = a.id.clone();
-        let mut target_addon_name = a.name.clone();
-        let mut prev_backup_file_id = a.file_id.clone();
-        let mut prev_backup_version = a.version.clone();
+            let src = a_clone.source.as_deref().unwrap_or("curseforge");
+            let safe_id = a_clone.id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let slot_name = format!("{}_{}", safe_id, idx);
+            let download_zip_path = staging_root_clone.join(format!("{}.zip", slot_name));
+            let extract_dir = staging_root_clone.join(&slot_name);
 
-        // Step 1: Query and download
-        match src {
-            "curseforge" => {
-                if let Some(pid) = a.project_id {
-                    let type_id = mapping.type_id.unwrap_or(517);
-                    let prefix = mapping.version_prefix.as_deref().unwrap_or("12.");
+            emit_task(Some(a_clone.name.clone()), "checking", None, None);
 
-                    let target_file: Option<CfFile> = if let Some(ref pin) = a.pinned_file_id {
-                        if let Ok(fid) = pin.parse::<i64>() {
-                            get_cf_file_by_id(&policy, &cf_client, pid, fid).await.unwrap_or(None)
-                        } else {
-                            None
-                        }
-                    } else {
-                        match get_cf_files(&policy, &cf_client, pid, a.release_type, mapping.type_id).await {
-                            Ok(files) => select_cf_file(&files, a.release_type, type_id, prefix),
-                            Err(e) => {
-                                sync_error = Some(e);
+            let mut chosen_file_id: Option<String> = None;
+            let mut chosen_version: Option<String> = None;
+            let mut chosen_file_name: Option<String> = None;
+            let mut chosen_released: Option<String> = None;
+            let mut targets: Vec<String> = Vec::new();
+            let mut sync_error: Option<String> = None;
+            let mut early_outcome: Option<PreparedOutcome> = None;
+
+            match src {
+                "curseforge" => {
+                    if let Some(pid) = a_clone.project_id {
+                        let type_id = mapping_clone.type_id.unwrap_or(517);
+                        let prefix = mapping_clone.version_prefix.as_deref().unwrap_or("12.");
+
+                        let target_file: Option<CfFile> = if let Some(ref pin) = a_clone.pinned_file_id {
+                            if let Ok(fid) = pin.parse::<i64>() {
+                                get_cf_file_by_id(&policy_clone, &cf_client_clone, pid, fid).await.unwrap_or(None)
+                            } else {
                                 None
                             }
-                        }
-                    };
-
-                    if let Some(cf_file) = target_file {
-                        let cf_id_str = cf_file.id.to_string();
-                        let is_already_current_or_newer = if let Some(ref curr_fid) = a.file_id {
-                            if curr_fid == &cf_id_str {
-                                true
-                            } else if let Ok(c_id) = curr_fid.parse::<i64>() {
-                                c_id >= cf_file.id
-                            } else {
-                                false
-                            }
                         } else {
-                            false
+                            match get_cf_files(&policy_clone, &cf_client_clone, pid, a_clone.release_type, mapping_clone.type_id).await {
+                                Ok(files) => select_cf_file(&files, a_clone.release_type, type_id, prefix),
+                                Err(e) => {
+                                    sync_error = Some(e);
+                                    None
+                                }
+                            }
                         };
 
-                        if !force && is_already_current_or_newer {
-                            up_to_date_count += 1;
-                            let now_str = Utc::now().to_rfc3339();
-                            let _ = conn.execute(
-                                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-                                 VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
-                                params![a.id, now_str],
-                            );
-                            results.push(AddonSyncResult {
-                                addon_id: a.id.clone(),
-                                name: a.name.clone(),
-                                status: "Up-to-date".to_string(),
-                                previous_version: a.version.clone(),
-                                new_version: a.version.clone(),
-                                error: None,
-                            });
-                            append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
-                            continue;
-                        }
-
-                        let targets = crate::engine::holdback::cf_file_targets(&cf_file);
-                        let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
-                        if !force && !override_hold {
-                            if let Some(reason) = crate::engine::holdback::is_update_held_back(
-                                flavour,
-                                client_build.as_deref(),
-                                &targets,
-                                a.ignored_until_build.as_deref(),
-                            ) {
-                                record_held_skip(
-                                    conn,
-                                    flavour,
-                                    &a.id,
-                                    &a.name,
-                                    a.version.as_deref(),
-                                    a.source.as_deref(),
-                                    &reason,
-                                );
-                                results.push(AddonSyncResult {
-                                    addon_id: a.id.clone(),
-                                    name: a.name.clone(),
-                                    status: "Skipped".to_string(),
-                                    previous_version: a.version.clone(),
-                                    new_version: a.version.clone(),
-                                    error: Some(format!("Held back: {}", reason)),
-                                });
-                                continue;
-                            }
-                        }
-
-                        chosen_file_id = Some(cf_id_str);
-                        chosen_version = cf_file.display_name.clone().or(cf_file.file_name.clone());
-                        chosen_file_name = cf_file.file_name.clone();
-                        chosen_released = cf_file.date_created.clone();
-
-                        if let Err(e) = download_cf_file(&policy, &cf_client, pid, &cf_file, &download_zip_path).await {
-                            sync_error = Some(e);
-                        }
-                    } else if sync_error.is_none() {
-                        sync_error = Some(format!("No compatible CurseForge file found for {}", mapping.era_label));
-                    }
-                } else {
-                    sync_error = Some("CurseForge addon missing project ID".to_string());
-                }
-            }
-            "wago" => {
-                if let Some(ref slug) = a.wago_slug {
-                    let wago_field = mapping.wago_field.as_deref().unwrap_or("retail");
-                    let target_release: Option<WagoRelease> = if let Some(ref pin) = a.pinned_file_id {
-                        // For pinned, page up to 10
-                        let mut found = None;
-                        for page in 1..=10 {
-                            if let Ok((rel_page, has_next)) = get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
-                                if let Some(r) = rel_page.iter().find(|rel| &rel.id == pin) {
-                                    found = Some(r.clone());
-                                    break;
-                                }
-                                if !has_next {
-                                    break;
+                        if let Some(cf_file) = target_file {
+                            let cf_id_str = cf_file.id.to_string();
+                            let is_already_current_or_newer = if let Some(ref curr_fid) = a_clone.file_id {
+                                if curr_fid == &cf_id_str {
+                                    true
+                                } else if let Ok(c_id) = curr_fid.parse::<i64>() {
+                                    c_id >= cf_file.id
+                                } else {
+                                    false
                                 }
                             } else {
-                                break;
+                                false
+                            };
+
+                            if !force && is_already_current_or_newer {
+                                early_outcome = Some(PreparedOutcome::UpToDate);
+                            } else {
+                                targets = crate::engine::holdback::cf_file_targets(&cf_file);
+                                if !force && !override_hold {
+                                    if let Some(reason) = crate::engine::holdback::is_update_held_back(
+                                        &flavour_owned,
+                                        client_build_clone.as_deref(),
+                                        &targets,
+                                        a_clone.ignored_until_build.as_deref(),
+                                    ) {
+                                        early_outcome = Some(PreparedOutcome::Held { reason, targets: targets.clone() });
+                                    }
+                                }
+                                if early_outcome.is_none() {
+                                    chosen_file_id = Some(cf_id_str);
+                                    chosen_version = cf_file.display_name.clone().or(cf_file.file_name.clone());
+                                    chosen_file_name = cf_file.file_name.clone();
+                                    chosen_released = cf_file.date_created.clone();
+                                    emit_task(Some(a_clone.name.clone()), "downloading", None, None);
+                                    if let Err(e) = download_cf_file(&policy_clone, &cf_client_clone, pid, &cf_file, &download_zip_path).await {
+                                        sync_error = Some(e);
+                                    }
+                                }
                             }
+                        } else if sync_error.is_none() {
+                            sync_error = Some(format!("No compatible CurseForge file found for {}", mapping_clone.era_label));
                         }
-                        found
                     } else {
-                        // Multi-page search: prioritize strict flavour match across all pages first
-                        let mut all_releases = Vec::new();
-                        let mut chosen = None;
-                        for page in 1..=10 {
-                            match get_wago_releases_page(&policy, &wago_client, &wago_session, slug, page).await {
-                                Ok((rel_page, has_next)) => {
-                                    if let Some(sel) = select_wago_release_strict(&rel_page, a.release_type, wago_field) {
-                                        chosen = Some(sel);
+                        sync_error = Some("CurseForge addon missing project ID".to_string());
+                    }
+                }
+                "wago" => {
+                    if let Some(ref slug) = a_clone.wago_slug {
+                        let wago_field = mapping_clone.wago_field.as_deref().unwrap_or("retail");
+                        let target_release: Option<WagoRelease> = if let Some(ref pin) = a_clone.pinned_file_id {
+                            let mut found = None;
+                            for page in 1..=10 {
+                                if let Ok((rel_page, has_next)) = get_wago_releases_page(&policy_clone, &wago_client_clone, &wago_session_clone, slug, page).await {
+                                    if let Some(r) = rel_page.iter().find(|rel| &rel.id == pin) {
+                                        found = Some(r.clone());
                                         break;
                                     }
-                                    all_releases.extend(rel_page);
                                     if !has_next {
                                         break;
                                     }
-                                }
-                                Err(e) => {
-                                    sync_error = Some(e);
+                                } else {
                                     break;
                                 }
                             }
-                        }
-                        if chosen.is_none() && sync_error.is_none() && !all_releases.is_empty() {
-                            chosen = select_wago_release(&all_releases, a.release_type, wago_field);
-                        }
-                        chosen
-                    };
-
-                    if let Some(wago_rel) = target_release {
-                        if !force && a.file_id.as_deref() == Some(&wago_rel.id) {
-                            up_to_date_count += 1;
-                            let now_str = Utc::now().to_rfc3339();
-                            let _ = conn.execute(
-                                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-                                 VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
-                                params![a.id, now_str],
-                            );
-                            results.push(AddonSyncResult {
-                                addon_id: a.id.clone(),
-                                name: a.name.clone(),
-                                status: "Up-to-date".to_string(),
-                                previous_version: a.version.clone(),
-                                new_version: a.version.clone(),
-                                error: None,
-                            });
-                            append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
-                            continue;
-                        }
-
-                        let targets = crate::engine::holdback::wago_release_targets(&wago_rel, wago_field);
-                        let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
-                        if !force && !override_hold {
-                            if let Some(reason) = crate::engine::holdback::is_update_held_back(
-                                flavour,
-                                client_build.as_deref(),
-                                &targets,
-                                a.ignored_until_build.as_deref(),
-                            ) {
-                                record_held_skip(
-                                    conn,
-                                    flavour,
-                                    &a.id,
-                                    &a.name,
-                                    a.version.as_deref(),
-                                    a.source.as_deref(),
-                                    &reason,
-                                );
-                                results.push(AddonSyncResult {
-                                    addon_id: a.id.clone(),
-                                    name: a.name.clone(),
-                                    status: "Skipped".to_string(),
-                                    previous_version: a.version.clone(),
-                                    new_version: a.version.clone(),
-                                    error: Some(format!("Held back: {}", reason)),
-                                });
-                                continue;
-                            }
-                        }
-
-                        chosen_file_id = Some(wago_rel.id.clone());
-                        chosen_version = wago_rel.version.clone().or(wago_rel.name.clone());
-                        chosen_file_name = Some(format!("{}-{}.zip", slug, wago_rel.id));
-                        chosen_released = wago_rel.created_at.clone();
-
-                        if let Some(dl_url) = wago_rel.url {
-                            if let Err(e) = download_wago_release(&policy, &wago_client, &dl_url, wago_rel.size, &download_zip_path).await {
-                                sync_error = Some(e);
-                            }
+                            found
                         } else {
-                            sync_error = Some("Wago release has no download URL".to_string());
-                        }
-                    } else if sync_error.is_none() {
-                        sync_error = Some(format!("No compatible Wago release found for {}", mapping.era_label));
-                    }
-                } else {
-                    sync_error = Some("Wago addon missing slug".to_string());
-                }
-            }
-            "github" => {
-                if let Some(ref repo) = a.repo {
-                    let parts: Vec<&str> = repo.split('/').collect();
-                    if parts.len() == 2 {
-                        match get_github_releases(&policy, &github_client, parts[0], parts[1], github_token.as_deref()).await {
-                            Ok(releases) => {
-                                let pin_ref = a.pinned_file_id.as_deref();
-                                if let Some(chosen) = select_github_release(&releases, a.release_type, pin_ref, Some(flavour)) {
-                                    if !force && (a.file_id.as_deref() == Some(&chosen.tag_name) || a.version.as_deref() == Some(&chosen.tag_name)) {
-                                        up_to_date_count += 1;
-                                        let now_str = Utc::now().to_rfc3339();
-                                        let _ = conn.execute(
-                                            "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-                                             VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
-                                            params![a.id, now_str],
-                                        );
-                                        results.push(AddonSyncResult {
-                                            addon_id: a.id.clone(),
-                                            name: a.name.clone(),
-                                            status: "Up-to-date".to_string(),
-                                            previous_version: a.version.clone(),
-                                            new_version: a.version.clone(),
-                                            error: None,
-                                        });
-                                        append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
-                                        continue;
+                            // Multi-page search: prioritize strict flavour match across all pages first (ADR-323)
+                            let mut all_releases = Vec::new();
+                            let mut chosen = None;
+                            for page in 1..=10 {
+                                match get_wago_releases_page(&policy_clone, &wago_client_clone, &wago_session_clone, slug, page).await {
+                                    Ok((rel_page, has_next)) => {
+                                        if let Some(sel) = select_wago_release_strict(&rel_page, a_clone.release_type, wago_field) {
+                                            chosen = Some(sel);
+                                            break;
+                                        }
+                                        all_releases.extend(rel_page);
+                                        if !has_next {
+                                            break;
+                                        }
                                     }
+                                    Err(e) => {
+                                        sync_error = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                            if chosen.is_none() && sync_error.is_none() && !all_releases.is_empty() {
+                                chosen = select_wago_release(&all_releases, a_clone.release_type, wago_field);
+                            }
+                            chosen
+                        };
 
-                                    chosen_file_id = Some(chosen.tag_name.clone());
-                                    chosen_version = Some(chosen.tag_name.clone());
-                                    chosen_released = chosen.published_at.clone();
+                        if let Some(wago_rel) = target_release {
+                            if !force && a_clone.file_id.as_deref() == Some(&wago_rel.id) {
+                                early_outcome = Some(PreparedOutcome::UpToDate);
+                            } else {
+                                targets = crate::engine::holdback::wago_release_targets(&wago_rel, wago_field);
+                                if !force && !override_hold {
+                                    if let Some(reason) = crate::engine::holdback::is_update_held_back(
+                                        &flavour_owned,
+                                        client_build_clone.as_deref(),
+                                        &targets,
+                                        a_clone.ignored_until_build.as_deref(),
+                                    ) {
+                                        early_outcome = Some(PreparedOutcome::Held { reason, targets: targets.clone() });
+                                    }
+                                }
+                                if early_outcome.is_none() {
+                                    chosen_file_id = Some(wago_rel.id.clone());
+                                    chosen_version = wago_rel.version.clone().or(wago_rel.name.clone());
+                                    chosen_file_name = Some(format!("{}-{}.zip", slug, wago_rel.id));
+                                    chosen_released = wago_rel.created_at.clone();
 
-                                    // Pick best asset with .zip, else zipball
-                                    let asset_opt = select_github_asset(&chosen, &repo, Some(flavour));
-                                    let is_zipball = asset_opt.is_none();
-                                    let dl_url = asset_opt
-                                        .map(|ast| ast.url.clone())
-                                        .or(chosen.zipball_url.clone());
-
-                                    if let Some(url) = dl_url {
-                                        let target_dl_path = if is_zipball {
-                                            staging_root.join(format!("{}_raw.zip", safe_id))
-                                        } else {
-                                            download_zip_path.clone()
-                                        };
-                                        let expected_digest = asset_opt.and_then(|ast| ast.digest.as_deref());
-                                        if let Err(e) = download_github_asset(
-                                            &policy,
-                                            &github_client,
-                                            &url,
-                                            github_token.as_deref(),
-                                            expected_digest,
-                                            &target_dl_path,
-                                        )
-                                        .await
-                                        {
+                                    if let Some(dl_url) = wago_rel.url {
+                                        emit_task(
+                                            Some(a_clone.name.clone()),
+                                            "downloading",
+                                            None,
+                                            wago_rel.size.map(|s| s as u64),
+                                        );
+                                        if let Err(e) = download_wago_release(&policy_clone, &wago_client_clone, &dl_url, wago_rel.size, &download_zip_path).await {
                                             sync_error = Some(e);
-                                        } else if is_zipball {
-                                            let repo_name = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
-                                            if let Err(e) = crate::engine::archive::normalize_github_zipball(
-                                                &target_dl_path,
-                                                repo_name,
-                                                &download_zip_path,
-                                            ) {
-                                                sync_error = Some(format!("Failed normalizing GitHub zipball: {}", e));
+                                        }
+                                    } else {
+                                        sync_error = Some("Wago release has no download URL".to_string());
+                                    }
+                                }
+                            }
+                        } else if sync_error.is_none() {
+                            sync_error = Some(format!("No compatible Wago release found for {}", mapping_clone.era_label));
+                        }
+                    } else {
+                        sync_error = Some("Wago addon missing slug".to_string());
+                    }
+                }
+                "github" => {
+                    if let Some(ref repo) = a_clone.repo {
+                        let parts: Vec<&str> = repo.split('/').collect();
+                        if parts.len() == 2 {
+                            match get_github_releases(&policy_clone, &github_client_clone, parts[0], parts[1], github_token_clone.as_deref()).await {
+                                Ok(releases) => {
+                                    let pin_ref = a_clone.pinned_file_id.as_deref();
+                                    if let Some(chosen) = select_github_release(&releases, a_clone.release_type, pin_ref, Some(&flavour_owned)) {
+                                        if !force && (a_clone.file_id.as_deref() == Some(&chosen.tag_name) || a_clone.version.as_deref() == Some(&chosen.tag_name)) {
+                                            early_outcome = Some(PreparedOutcome::UpToDate);
+                                        } else {
+                                            chosen_file_id = Some(chosen.tag_name.clone());
+                                            chosen_version = Some(chosen.tag_name.clone());
+                                            chosen_released = chosen.published_at.clone();
+
+                                            let asset_opt = select_github_asset(&chosen, repo, Some(&flavour_owned));
+                                            let is_zipball = asset_opt.is_none();
+                                            let dl_url = asset_opt
+                                                .map(|ast| ast.url.clone())
+                                                .or(chosen.zipball_url.clone());
+
+                                            if let Some(url) = dl_url {
+                                                let target_dl_path = if is_zipball {
+                                                    staging_root_clone.join(format!("{}_raw.zip", slot_name))
+                                                } else {
+                                                    download_zip_path.clone()
+                                                };
+                                                let expected_digest = asset_opt.and_then(|ast| ast.digest.as_deref());
+                                                emit_task(Some(a_clone.name.clone()), "downloading", None, None);
+                                                if let Err(e) = download_github_asset(
+                                                    &policy_clone,
+                                                    &github_client_clone,
+                                                    &url,
+                                                    github_token_clone.as_deref(),
+                                                    expected_digest,
+                                                    &target_dl_path,
+                                                )
+                                                .await
+                                                {
+                                                    sync_error = Some(e);
+                                                } else if is_zipball {
+                                                    let repo_name = parts[1].strip_suffix(".git").unwrap_or(parts[1]).to_string();
+                                                    let zip_out = download_zip_path.clone();
+                                                    match tokio::task::spawn_blocking(move || {
+                                                        crate::engine::archive::normalize_github_zipball(
+                                                            &target_dl_path,
+                                                            &repo_name,
+                                                            &zip_out,
+                                                        )
+                                                    })
+                                                    .await
+                                                    {
+                                                        Ok(Ok(())) => {}
+                                                        Ok(Err(e)) => {
+                                                            sync_error = Some(format!("Failed normalizing GitHub zipball: {}", e));
+                                                        }
+                                                        Err(e) => {
+                                                            sync_error = Some(format!("GitHub zipball task error: {}", e));
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                sync_error = Some("No download asset or zipball available".to_string());
                                             }
                                         }
                                     } else {
-                                        sync_error = Some("No download asset or zipball available".to_string());
+                                        sync_error = Some("No compatible GitHub release found".to_string());
                                     }
-                                } else {
-                                    sync_error = Some("No compatible GitHub release found".to_string());
+                                }
+                                Err((e, _)) => {
+                                    sync_error = Some(e);
                                 }
                             }
-                            Err((e, _)) => {
+                        } else {
+                            sync_error = Some(format!("Invalid GitHub repository format: '{}'", repo));
+                        }
+                    } else {
+                        sync_error = Some("GitHub addon missing repository".to_string());
+                    }
+                }
+                "tukui" => {
+                    if let Some(ref slug) = a_clone.tukui_slug {
+                        match crate::engine::tukui::choose_tukui_release(
+                            &policy_clone,
+                            &tukui_client_clone,
+                            slug,
+                            &flavour_owned,
+                            &mapping_clone.era_label,
+                            client_build_clone.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(choice) => {
+                                if !force
+                                    && (a_clone.file_id.as_deref() == Some(&choice.version)
+                                        || a_clone.version.as_deref() == Some(&choice.version))
+                                {
+                                    early_outcome = Some(PreparedOutcome::UpToDate);
+                                } else {
+                                    chosen_file_id = Some(choice.file_id.clone());
+                                    chosen_version = Some(choice.version.clone());
+                                    chosen_file_name = Some(choice.file_name.clone());
+                                    chosen_released = choice.released.clone();
+
+                                    emit_task(Some(a_clone.name.clone()), "downloading", None, None);
+                                    if let Err(e) = crate::net::tukui::download_tukui_zip(
+                                        &policy_clone,
+                                        &tukui_client_clone,
+                                        &choice.download_url,
+                                        &download_zip_path,
+                                    )
+                                    .await
+                                    {
+                                        sync_error = Some(e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
                                 sync_error = Some(e);
                             }
                         }
                     } else {
-                        sync_error = Some(format!("Invalid GitHub repository format: '{}'", repo));
+                        sync_error = Some("Tukui addon missing slug".to_string());
                     }
-                } else {
-                    sync_error = Some("GitHub addon missing repository".to_string());
+                }
+                _ => {
+                    sync_error = Some(format!("Unknown source '{}'", src));
                 }
             }
-            "tukui" => {
-                if let Some(ref slug) = a.tukui_slug {
-                    match crate::engine::tukui::choose_tukui_release(
-                        &policy,
-                        &tukui_client,
-                        slug,
-                        flavour,
-                        &mapping.era_label,
-                        client_build.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(choice) => {
-                            if !force
-                                && (a.file_id.as_deref() == Some(&choice.version)
-                                    || a.version.as_deref() == Some(&choice.version))
-                            {
-                                up_to_date_count += 1;
-                                let now_str = Utc::now().to_rfc3339();
-                                let _ = conn.execute(
-                                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-                                     VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
-                                    params![a.id, now_str],
-                                );
-                                results.push(AddonSyncResult {
-                                    addon_id: a.id.clone(),
-                                    name: a.name.clone(),
-                                    status: "Up-to-date".to_string(),
-                                    previous_version: a.version.clone(),
-                                    new_version: a.version.clone(),
-                                    error: None,
-                                });
-                                append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
-                                continue;
-                            }
 
-                            chosen_file_id = Some(choice.file_id.clone());
-                            chosen_version = Some(choice.version.clone());
-                            chosen_file_name = Some(choice.file_name.clone());
-                            chosen_released = choice.released.clone();
-
-                            if let Err(e) = crate::net::tukui::download_tukui_zip(
-                                &policy,
-                                &tukui_client,
-                                &choice.download_url,
-                                &download_zip_path,
-                            )
-                            .await
-                            {
-                                sync_error = Some(e);
-                            }
-                        }
-                        Err(e) => {
-                            sync_error = Some(e);
-                        }
-                    }
-                } else {
-                    sync_error = Some("Tukui addon missing slug".to_string());
+            let outcome = if let Some(early) = early_outcome {
+                early
+            } else if let Some(err) = sync_error {
+                PreparedOutcome::Failed(err)
+            } else {
+                // Step 2: Safe extraction off the async worker pool
+                let zip_for_extract = download_zip_path.clone();
+                let dir_for_extract = extract_dir.clone();
+                match tokio::task::spawn_blocking(move || extract_addon_archive(&zip_for_extract, &dir_for_extract)).await {
+                    Ok(Ok(candidate_folders)) => PreparedOutcome::ReadyToInstall {
+                        chosen_file_id,
+                        chosen_version,
+                        chosen_file_name,
+                        chosen_released,
+                        targets,
+                        extract_dir,
+                        candidate_folders,
+                    },
+                    Ok(Err(e)) => PreparedOutcome::Failed(format!("Archive extraction error: {}", e)),
+                    Err(e) => PreparedOutcome::Failed(format!("Archive extraction task failed: {}", e)),
                 }
-            }
-            _ => {
-                sync_error = Some(format!("Unknown source '{}'", src));
-            }
-        }
+            };
 
-        if let Some(err) = sync_error {
-            failed_count += 1;
-            let now_str = Utc::now().to_rfc3339();
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
-                 VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
-                params![a.id, now_str, a.file_id, a.version, &err],
-            );
-            record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &err);
-            results.push(AddonSyncResult {
-                addon_id: a.id.clone(),
-                name: a.name.clone(),
-                status: "Failed".to_string(),
-                previous_version: a.version.clone(),
-                new_version: None,
-                error: Some(err.clone()),
-            });
-            append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, err));
-            continue;
-        }
+            SyncFetchResult {
+                idx,
+                previous_folders,
+                outcome,
+            }
+        });
+    }
 
-        // Step 2: Safe extraction
-        let candidate_folders = match extract_addon_archive(&download_zip_path, &extract_dir) {
-            Ok(c) => c,
-            Err(e) => {
+    while let Some(joined) = join_set.join_next().await {
+        let fetched = match joined {
+            Ok(res) => res,
+            Err(join_err) => {
                 failed_count += 1;
-                let emsg = format!("Archive extraction error: {}", e);
+                append_sync_log(Some(flavour), "ERROR", &format!("Sync worker panicked: {}", join_err));
+                finish_item(0, 0, 1, None, "failed");
+                continue;
+            }
+        };
+
+        let idx = fetched.idx;
+        let a = &selected_addons[idx];
+        let previous_folders = fetched.previous_folders;
+
+        let (
+            chosen_file_id,
+            mut chosen_version,
+            chosen_file_name,
+            chosen_released,
+            extract_dir,
+            candidate_folders,
+        ) = match fetched.outcome {
+            PreparedOutcome::UpToDate => {
+                up_to_date_count += 1;
+                let now_str = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
+                     VALUES (?1, ?2, NULL, NULL, 'up_to_date', NULL)",
+                    params![a.id, now_str],
+                );
+                results_slots[idx] = Some(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Up-to-date".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: None,
+                });
+                append_sync_log(Some(flavour), "INFO", &format!("{}: Up-to-date", a.name));
+                finish_item(0, 1, 0, Some(a.name.clone()), "up_to_date");
+                continue;
+            }
+            PreparedOutcome::Held { reason, targets } => {
+                let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
+                record_held_skip(
+                    conn,
+                    flavour,
+                    &a.id,
+                    &a.name,
+                    a.version.as_deref(),
+                    a.source.as_deref(),
+                    &reason,
+                );
+                results_slots[idx] = Some(AddonSyncResult {
+                    addon_id: a.id.clone(),
+                    name: a.name.clone(),
+                    status: "Skipped".to_string(),
+                    previous_version: a.version.clone(),
+                    new_version: a.version.clone(),
+                    error: Some(format!("Held back: {}", reason)),
+                });
+                finish_item(0, 0, 0, Some(a.name.clone()), "done");
+                continue;
+            }
+            PreparedOutcome::Failed(err) => {
+                failed_count += 1;
                 let now_str = Utc::now().to_rfc3339();
                 let _ = conn.execute(
                     "INSERT OR REPLACE INTO check_results (addon_id, checked_at, update_file_id, update_version, status, error) \
                      VALUES (?1, ?2, ?3, ?4, 'failed', ?5)",
-                    params![a.id, now_str, a.file_id, a.version, &emsg],
+                    params![a.id, now_str, a.file_id, a.version, &err],
                 );
-                record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &emsg);
-                results.push(AddonSyncResult {
+                record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &err);
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Failed".to_string(),
                     previous_version: a.version.clone(),
                     new_version: None,
-                    error: Some(emsg.clone()),
+                    error: Some(err.clone()),
                 });
-                append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, emsg));
+                append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, err));
+                finish_item(0, 0, 1, Some(a.name.clone()), "failed");
                 continue;
             }
+            PreparedOutcome::ReadyToInstall {
+                chosen_file_id,
+                chosen_version,
+                chosen_file_name,
+                chosen_released,
+                targets,
+                extract_dir,
+                candidate_folders,
+            } => {
+                if !targets.is_empty() {
+                    let _ = crate::engine::holdback::store_latest_game_versions(conn, &a.id, &targets);
+                }
+                (
+                    chosen_file_id,
+                    chosen_version,
+                    chosen_file_name,
+                    chosen_released,
+                    extract_dir,
+                    candidate_folders,
+                )
+            }
         };
+
+        emit_active(Some(a.name.clone()), "installing", None, None);
+
+        let src = a.source.as_deref().unwrap_or("curseforge");
+        let mut target_addon_id = a.id.clone();
+        let mut target_addon_name = a.name.clone();
+        let mut prev_backup_file_id = a.file_id.clone();
+        let mut prev_backup_version = a.version.clone();
 
         // Step 3: Ownership conflict check
         let mut conflicts = match check_folder_ownership_conflicts(conn, flavour, &candidate_folders, Some(&target_addon_id)) {
@@ -827,7 +1031,7 @@ pub async fn run_sync_for_flavour_with_options(
                     params![target_addon_id, now_str, a.file_id, a.version, &emsg],
                 );
                 record_failed_activity(conn, flavour, &target_addon_id, &target_addon_name, a.version.as_deref(), a.source.as_deref(), &emsg);
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: target_addon_id.clone(),
                     name: target_addon_name.clone(),
                     status: "Failed".to_string(),
@@ -835,6 +1039,7 @@ pub async fn run_sync_for_flavour_with_options(
                     new_version: None,
                     error: Some(emsg),
                 });
+                finish_item(0, 0, 1, Some(a.name.clone()), "failed");
                 continue;
             }
         };
@@ -844,9 +1049,9 @@ pub async fn run_sync_for_flavour_with_options(
             let mut existing_addon_id_to_replace: Option<String> = None;
 
             if a.file_id.is_none() {
-                let mut stmt_find_owners = conn.prepare(
-                    "SELECT DISTINCT addon_id FROM addon_folders WHERE flavour = ?1 AND folder = ?2 COLLATE NOCASE"
-                ).ok();
+                let mut stmt_find_owners = conn
+                    .prepare("SELECT DISTINCT addon_id FROM addon_folders WHERE flavour = ?1 AND folder = ?2 COLLATE NOCASE")
+                    .ok();
                 if let Some(ref mut stmt) = stmt_find_owners {
                     let mut owners = std::collections::HashSet::new();
                     for folder in &candidate_folders {
@@ -861,15 +1066,14 @@ pub async fn run_sync_for_flavour_with_options(
 
                     if owners.len() == 1 {
                         let conflicting_id = owners.into_iter().next().unwrap();
-                        let mut stmt_owned = conn.prepare(
-                            "SELECT folder FROM addon_folders WHERE flavour = ?1 AND addon_id = ?2"
-                        ).ok();
+                        let mut stmt_owned = conn
+                            .prepare("SELECT folder FROM addon_folders WHERE flavour = ?1 AND addon_id = ?2")
+                            .ok();
                         if let Some(ref mut s_owned) = stmt_owned {
                             if let Ok(owned_rows) = s_owned.query_map(params![flavour, conflicting_id], |r| r.get::<_, String>(0)) {
                                 let owned_folders: Vec<String> = owned_rows.flatten().collect();
-                                let all_owned_in_candidates = !owned_folders.is_empty() && owned_folders.iter().all(|of| {
-                                    candidate_folders.iter().any(|cf| cf.eq_ignore_ascii_case(of))
-                                });
+                                let all_owned_in_candidates = !owned_folders.is_empty()
+                                    && owned_folders.iter().all(|of| candidate_folders.iter().any(|cf| cf.eq_ignore_ascii_case(of)));
 
                                 if all_owned_in_candidates {
                                     can_adopt_existing = true;
@@ -889,15 +1093,26 @@ pub async fn run_sync_for_flavour_with_options(
                         &format!("Upgrading existing addon {} to {} (source: {})", existing_id, target_addon_name, src),
                     );
 
-                    let existing_backup_info: Option<(Option<String>, Option<String>)> = conn.query_row(
-                        "SELECT file_id, version FROM addons WHERE id = ?1",
-                        params![existing_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    ).ok();
+                    let existing_backup_info: Option<(Option<String>, Option<String>)> = conn
+                        .query_row(
+                            "SELECT file_id, version FROM addons WHERE id = ?1",
+                            params![existing_id],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .ok();
 
                     let _ = conn.execute(
                         "UPDATE addons SET source = ?1, project_id = ?2, wago_slug = ?3, wago_id = ?4, repo = ?5, name = ?6, tukui_slug = ?7 WHERE id = ?8",
-                        params![a.source, a.project_id, a.wago_slug, a._wago_id, a.repo, target_addon_name, a.tukui_slug, existing_id],
+                        params![
+                            a.source,
+                            a.project_id,
+                            a.wago_slug,
+                            a._wago_id,
+                            a.repo,
+                            target_addon_name,
+                            a.tukui_slug,
+                            existing_id
+                        ],
                     );
 
                     let _ = conn.execute("DELETE FROM addons WHERE id = ?1", params![target_addon_id]);
@@ -926,7 +1141,7 @@ pub async fn run_sync_for_flavour_with_options(
                 params![target_addon_id, now_str, a.file_id, a.version, &emsg],
             );
             record_failed_activity(conn, flavour, &target_addon_id, &target_addon_name, a.version.as_deref(), a.source.as_deref(), &emsg);
-            results.push(AddonSyncResult {
+            results_slots[idx] = Some(AddonSyncResult {
                 addon_id: target_addon_id.clone(),
                 name: target_addon_name.clone(),
                 status: "Failed".to_string(),
@@ -935,6 +1150,7 @@ pub async fn run_sync_for_flavour_with_options(
                 error: Some(emsg.clone()),
             });
             append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", target_addon_name, emsg));
+            finish_item(0, 0, 1, Some(target_addon_name), "failed");
             continue;
         }
 
@@ -955,7 +1171,7 @@ pub async fn run_sync_for_flavour_with_options(
             "pre-update",
         );
 
-        // Step 5: Backup outgoing version
+        // Step 5: Backup outgoing version in blocking pool
         if !previous_folders.is_empty() {
             let target_safe_id = target_addon_id.replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], "_");
             let backup_dir = data_dir.join("backups").join(flavour).join(&target_safe_id);
@@ -967,7 +1183,14 @@ pub async fn run_sync_for_flavour_with_options(
             let backup_file = backup_dir.join(format!("{}.zip", safe_file_id));
             let kind = if a.adopted { "pre-adopt" } else { "update" };
 
-            if let Ok(size) = create_backup_zip(addons_path, &previous_folders, &backup_file) {
+            let addons_path_buf = addons_path.to_path_buf();
+            let prev_folders_clone = previous_folders.clone();
+            let backup_file_clone = backup_file.clone();
+            if let Ok(Ok(size)) = tokio::task::spawn_blocking(move || {
+                create_backup_zip(&addons_path_buf, &prev_folders_clone, &backup_file_clone)
+            })
+            .await
+            {
                 let _ = record_and_prune_backup(
                     conn,
                     &target_addon_id,
@@ -1007,7 +1230,7 @@ pub async fn run_sync_for_flavour_with_options(
                     params![a.id, now_str, a.file_id, a.version, &emsg],
                 );
                 record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &emsg);
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Failed".to_string(),
@@ -1016,6 +1239,7 @@ pub async fn run_sync_for_flavour_with_options(
                     error: Some(emsg.clone()),
                 });
                 append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed: {}", a.name, emsg));
+                finish_item(0, 0, 1, Some(a.name.clone()), "failed");
                 continue;
             }
         }
@@ -1042,7 +1266,7 @@ pub async fn run_sync_for_flavour_with_options(
                     params![a.id, now_str, a.file_id, a.version, &e],
                 );
                 record_failed_activity(conn, flavour, &a.id, &a.name, a.version.as_deref(), a.source.as_deref(), &e);
-                results.push(AddonSyncResult {
+                results_slots[idx] = Some(AddonSyncResult {
                     addon_id: a.id.clone(),
                     name: a.name.clone(),
                     status: "Failed".to_string(),
@@ -1051,6 +1275,7 @@ pub async fn run_sync_for_flavour_with_options(
                     error: Some(e.clone()),
                 });
                 append_sync_log(Some(flavour), "ERROR", &format!("{}: Failed swap: {}", a.name, e));
+                finish_item(0, 0, 1, Some(a.name.clone()), "failed");
                 continue;
             }
         };
@@ -1058,7 +1283,6 @@ pub async fn run_sync_for_flavour_with_options(
         // Step 7: Parse installed .toc files across all installed folders to collect required deps and identify primary title/version
         let mut required_deps: Vec<String> = Vec::new();
 
-        // Find primary folder that best matches addon identity (e.g. name or slug)
         let primary_folder = installed_folders
             .iter()
             .find(|f| {
@@ -1100,21 +1324,34 @@ pub async fn run_sync_for_flavour_with_options(
                 for dep in toc_meta.required_deps {
                     let dep_norm = crate::engine::deps::normalize_dep_slug(&dep);
 
-                    // Comprehensive internal submodule detection
                     let is_internal = installed_folders.iter().any(|f| {
                         f.eq_ignore_ascii_case(&dep)
                             || crate::engine::deps::normalize_dep_slug(f) == dep_norm
                             || crate::engine::deps::get_dependency_alias(f).map(|a| a == dep_norm).unwrap_or(false)
-                            || crate::engine::deps::get_dependency_alias(&dep).map(|a| a == crate::engine::deps::normalize_dep_slug(f)).unwrap_or(false)
+                            || crate::engine::deps::get_dependency_alias(&dep)
+                                .map(|a| a == crate::engine::deps::normalize_dep_slug(f))
+                                .unwrap_or(false)
                     })
-                    || target_addon_name.eq_ignore_ascii_case(&dep)
-                    || target_norm == dep_norm
-                    || a.wago_slug.as_ref().map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm).unwrap_or(false)
-                    || a.tukui_slug.as_ref().map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm).unwrap_or(false)
-                    || a.repo.as_ref().map(|r| {
-                        r.eq_ignore_ascii_case(&dep)
-                            || r.split('/').last().map(|rn| rn.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(rn) == dep_norm).unwrap_or(false)
-                    }).unwrap_or(false);
+                        || target_addon_name.eq_ignore_ascii_case(&dep)
+                        || target_norm == dep_norm
+                        || a.wago_slug
+                            .as_ref()
+                            .map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm)
+                            .unwrap_or(false)
+                        || a.tukui_slug
+                            .as_ref()
+                            .map(|s| s.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(s) == dep_norm)
+                            .unwrap_or(false)
+                        || a.repo
+                            .as_ref()
+                            .map(|r| {
+                                r.eq_ignore_ascii_case(&dep)
+                                    || r.split('/')
+                                        .last()
+                                        .map(|rn| rn.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(rn) == dep_norm)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
 
                     if !is_internal && !required_deps.iter().any(|d| d.eq_ignore_ascii_case(&dep) || crate::engine::deps::normalize_dep_slug(d) == dep_norm) {
                         required_deps.push(dep);
@@ -1160,7 +1397,13 @@ pub async fn run_sync_for_flavour_with_options(
         );
 
         let _ = conn.execute("UPDATE addons SET integrity_status = 'clean' WHERE id = ?1", params![target_addon_id]);
-        if let Ok(manifest) = crate::engine::integrity::generate_manifest_for_folders(addons_path, &installed_folders) {
+        let addons_path_for_manifest = addons_path.to_path_buf();
+        let installed_for_manifest = installed_folders.clone();
+        if let Ok(Ok(manifest)) = tokio::task::spawn_blocking(move || {
+            crate::engine::integrity::generate_manifest_for_folders(&addons_path_for_manifest, &installed_for_manifest)
+        })
+        .await
+        {
             let _ = crate::engine::integrity::record_manifest(conn, &target_addon_id, &manifest);
         }
 
@@ -1185,7 +1428,7 @@ pub async fn run_sync_for_flavour_with_options(
         }
 
         let outcome_status = if a.file_id.is_none() { "Installed" } else { "Updated" };
-        results.push(AddonSyncResult {
+        results_slots[idx] = Some(AddonSyncResult {
             addon_id: target_addon_id.clone(),
             name: target_addon_name.clone(),
             status: outcome_status.to_string(),
@@ -1199,15 +1442,33 @@ pub async fn run_sync_for_flavour_with_options(
             "INFO",
             &format!("{}: {} to {:?}", target_addon_name, outcome_status, chosen_version),
         );
+        finish_item(1, 0, 0, Some(target_addon_name), "done");
     }
+
+    let results: Vec<AddonSyncResult> = results_slots.into_iter().flatten().collect();
 
     // Cleanup orphaned backups older than 30 days (Round 49)
     let _ = cleanup_orphaned_backups(conn, 30);
 
-    // Dual-write: update v1 folder if exists (D-03)
-    let v1_dir = get_v1_sync_folder(wow_root);
-    if v1_dir.exists() {
-        let _ = export_to_v1(conn, &v1_dir);
+    // Dual-write: update v1 folder if exists (D-03), unless runner handles v1 export at job end
+    if !skip_v1_export {
+        let v1_dir = get_v1_sync_folder(wow_root);
+        if v1_dir.exists() {
+            let _ = export_to_v1(conn, &v1_dir);
+        }
+    }
+
+    if let Some(ref cb) = on_progress {
+        let st = progress_state.lock().unwrap_or_else(|e| e.into_inner());
+        cb(JobProgressStep {
+            total: st.total,
+            index: st.total,
+            addon: None,
+            phase: "done".to_string(),
+            bytes_done: None,
+            bytes_total: None,
+            tallies: st.tallies.clone(),
+        });
     }
 
     let finished_at = Utc::now().to_rfc3339();

@@ -304,6 +304,41 @@ mod tests {
         let _ = child.wait();
         assert!(res.is_ok(), "{:?}", res);
     }
+
+    #[tokio::test]
+    async fn install_update_with_guard_rejects_when_job_starts_during_download() {
+        let _lock = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_test_updater = std::env::var_os("FURPHY_TEST_UPDATER");
+        std::env::set_var("FURPHY_TEST_UPDATER", "1");
+
+        let status = AppUpdateStatus {
+            status: "available".into(),
+            current_version: "2.2.0".into(),
+            update_version: Some("2.2.1".into()),
+            has_update: true,
+            download_url: Some("https://example.com/setup.exe".into()),
+            ..Default::default()
+        };
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let guard_fn: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = std::sync::Arc::new(move || {
+            let n = calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            n >= 1 // False before download, true after download
+        });
+
+        let res = install_update_with_guard(&status, false, true, Some(guard_fn)).await;
+
+        if let Some(v) = old_test_updater {
+            std::env::set_var("FURPHY_TEST_UPDATER", v);
+        } else {
+            std::env::remove_var("FURPHY_TEST_UPDATER");
+        }
+
+        assert!(res.is_err(), "Expected post-download busy check to reject update install");
+        assert!(res.unwrap_err().contains("addon job is currently running"));
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    }
 }
 
 /// Loads persisted updater state from database
@@ -482,8 +517,23 @@ pub async fn install_update(
     is_runner_busy: bool,
     is_window_open: bool,
 ) -> Result<(), String> {
+    install_update_with_guard(status, is_runner_busy, is_window_open, None).await
+}
+
+/// Installs the update and re-checks `busy_check` after downloading/verifying
+/// so a job started during the download window prevents spawning the installer.
+pub async fn install_update_with_guard(
+    status: &AppUpdateStatus,
+    is_runner_busy: bool,
+    is_window_open: bool,
+    busy_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+) -> Result<(), String> {
+    let check_busy_now = || -> bool {
+        is_runner_busy || busy_check.as_ref().map(|f| f()).unwrap_or(false)
+    };
+
     // 1. Job-running guard (§2.K, §5.4): NEVER install during an active job
-    if is_runner_busy {
+    if check_busy_now() {
         return Err("Cannot install app update while an addon job is currently running.".to_string());
     }
 
@@ -509,6 +559,9 @@ pub async fn install_update(
             if sha.contains("bad") || sha.contains("tamper") {
                 return Err(format!("Integrity verification failed: expected sha256 '{}', mock tamper detected", sha));
             }
+        }
+        if busy_check.as_ref().map(|f| f()).unwrap_or(false) {
+            return Err("Cannot install app update while an addon job is currently running.".to_string());
         }
         if !is_window_open {
             let names = vec![format!("Furphy v{}", status.update_version.as_deref().unwrap_or(""))];
@@ -539,6 +592,12 @@ pub async fn install_update(
     // Verify integrity (§7, §5.4)
     verify_artifact_integrity(&bytes, status.sha256.as_deref(), status.signature.as_deref())?;
 
+    // Re-check runner busy state after download & verification to close the TOCTOU window
+    if busy_check.as_ref().map(|f| f()).unwrap_or(false) {
+        append_app_log("WARN", "Aborted app update install: an addon job started during installer download");
+        return Err("Cannot install app update while an addon job is currently running.".to_string());
+    }
+
     // Write temporary installer
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir.join(format!(
@@ -547,6 +606,13 @@ pub async fn install_update(
     ));
 
     fs::write(&installer_path, &bytes).map_err(|e| format!("Failed saving installer executable: {}", e))?;
+
+    // Final check immediately prior to spawning installer process
+    if busy_check.as_ref().map(|f| f()).unwrap_or(false) {
+        let _ = fs::remove_file(&installer_path);
+        append_app_log("WARN", "Aborted app update install before spawn: an addon job became active");
+        return Err("Cannot install app update while an addon job is currently running.".to_string());
+    }
 
     // Execute installer
     #[cfg(windows)]

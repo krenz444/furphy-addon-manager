@@ -1,18 +1,38 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use crate::logging::append_app_log;
 
 const CONNECTIVITY_BREAKER_THRESHOLD: u32 = 3;
+const DEFAULT_BREAKER_COOLDOWN: Duration = Duration::from_secs(60);
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
+struct HostState {
+    failure_streak: u32,
+    opened_at: Option<Instant>,
+}
+
 pub struct HostBreaker {
-    failure_streak: Mutex<HashMap<String, u32>>,
+    hosts: Mutex<HashMap<String, HostState>>,
+    cooldown: Duration,
+}
+
+impl Default for HostBreaker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HostBreaker {
     pub fn new() -> Self {
+        Self::with_cooldown(DEFAULT_BREAKER_COOLDOWN)
+    }
+
+    pub fn with_cooldown(cooldown: Duration) -> Self {
         Self {
-            failure_streak: Mutex::new(HashMap::new()),
+            hosts: Mutex::new(HashMap::new()),
+            cooldown,
         }
     }
 
@@ -27,18 +47,38 @@ impl HostBreaker {
         host_or_url.to_ascii_lowercase()
     }
 
+    /// Half-open decay: once the cooldown window elapses after tripping,
+    /// lowers the streak to `threshold - 1` so one probe attempt is allowed
+    /// and a subsequent failure immediately re-opens the circuit.
+    fn apply_cooldown_decay(&self, state: &mut HostState) {
+        if state.failure_streak >= CONNECTIVITY_BREAKER_THRESHOLD {
+            if let Some(opened_at) = state.opened_at {
+                if opened_at.elapsed() >= self.cooldown {
+                    state.failure_streak = CONNECTIVITY_BREAKER_THRESHOLD.saturating_sub(1);
+                    state.opened_at = None;
+                }
+            }
+        }
+    }
+
     pub fn is_open(&self, host_key: &str) -> bool {
         let key = Self::get_host_key(host_key);
-        let guard = self.failure_streak.lock().unwrap();
-        guard.get(&key).copied().unwrap_or(0) >= CONNECTIVITY_BREAKER_THRESHOLD
+        let mut guard = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = guard.get_mut(&key) else {
+            return false;
+        };
+        self.apply_cooldown_decay(state);
+        state.failure_streak >= CONNECTIVITY_BREAKER_THRESHOLD
     }
 
     pub fn assert_reachable(&self, host_key: &str) -> Result<(), String> {
         let key = Self::get_host_key(host_key);
         if self.is_open(&key) {
             Err(format!(
-                "Skipped: {} did not answer {} requests in a row, so this run stops asking it. Check your internet connection.",
-                key, CONNECTIVITY_BREAKER_THRESHOLD
+                "Skipped: {} did not answer {} requests in a row (cooldown {}s), so this run temporarily pauses asking it. Check your internet connection.",
+                key,
+                CONNECTIVITY_BREAKER_THRESHOLD,
+                self.cooldown.as_secs()
             ))
         } else {
             Ok(())
@@ -47,24 +87,37 @@ impl HostBreaker {
 
     pub fn register_success(&self, host_key: &str) {
         let key = Self::get_host_key(host_key);
-        let mut guard = self.failure_streak.lock().unwrap();
-        guard.insert(key, 0);
+        let mut guard = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(
+            key,
+            HostState {
+                failure_streak: 0,
+                opened_at: None,
+            },
+        );
     }
 
     pub fn register_connectivity_failure(&self, host_key: &str) {
         let key = Self::get_host_key(host_key);
-        let mut guard = self.failure_streak.lock().unwrap();
-        let current = guard.entry(key.clone()).or_insert(0);
-        *current += 1;
-        let streak = *current;
-        if streak == CONNECTIVITY_BREAKER_THRESHOLD {
-            append_app_log(
-                "WARN",
-                &format!(
-                    "{} did not answer {} requests in a row - skipping it for the rest of this run (it is tried again on the next run)",
-                    key, streak
-                ),
-            );
+        let mut guard = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let state = guard.entry(key.clone()).or_default();
+        self.apply_cooldown_decay(state);
+
+        let was_open = state.failure_streak >= CONNECTIVITY_BREAKER_THRESHOLD;
+        state.failure_streak += 1;
+        if state.failure_streak >= CONNECTIVITY_BREAKER_THRESHOLD {
+            state.opened_at = Some(Instant::now());
+            if !was_open {
+                append_app_log(
+                    "WARN",
+                    &format!(
+                        "{} did not answer {} requests in a row - skipping it for {}s before retrying",
+                        key,
+                        state.failure_streak,
+                        self.cooldown.as_secs()
+                    ),
+                );
+            }
         }
     }
 
@@ -100,5 +153,39 @@ mod tests {
         breaker.register_http_response(host);
         assert!(!breaker.is_open(host));
         assert!(breaker.assert_reachable(host).is_ok());
+    }
+
+    #[test]
+    fn test_host_breaker_half_open_cooldown_decay_and_retrip() {
+        let breaker = HostBreaker::with_cooldown(Duration::from_millis(25));
+        let host = "https://addons.wago.io/api/test";
+
+        for _ in 0..3 {
+            breaker.register_connectivity_failure(host);
+        }
+        assert!(breaker.is_open(host));
+        assert!(breaker.assert_reachable(host).is_err());
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // Cooldown expired -> transitions to half-open
+        assert!(!breaker.is_open(host));
+        assert!(breaker.assert_reachable(host).is_ok());
+
+        // A single failed half-open probe immediately re-trips the breaker
+        breaker.register_connectivity_failure(host);
+        assert!(breaker.is_open(host));
+        assert!(breaker.assert_reachable(host).is_err());
+
+        // After another cooldown, a successful response fully resets the streak
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!breaker.is_open(host));
+        breaker.register_success(host);
+        breaker.register_connectivity_failure(host);
+        assert!(!breaker.is_open(host));
+        breaker.register_connectivity_failure(host);
+        assert!(!breaker.is_open(host));
+        breaker.register_connectivity_failure(host);
+        assert!(breaker.is_open(host));
     }
 }

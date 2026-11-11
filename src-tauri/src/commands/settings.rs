@@ -366,11 +366,13 @@ pub async fn app_update_install(
     let db_path = get_db_path();
     let conn = open_connection(&db_path).map_err(|e| e.to_string())?;
 
-    let is_busy = runner.is_busy().await;
+    let runner_arc = runner.inner().clone();
+    let is_busy = runner_arc.is_busy().await;
+    let busy_check: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || runner_arc.is_busy_sync());
     let status = crate::update::app_update::load_app_update_state(&conn)
         .ok_or_else(|| "No update state found. Check for updates first.".to_string())?;
 
-    match crate::update::app_update::install_update(&status, is_busy, true).await {
+    match crate::update::app_update::install_update_with_guard(&status, is_busy, true, Some(busy_check)).await {
         Ok(_) => Ok(()),
         Err(e) => {
             let mut err_status = status.clone();

@@ -29,6 +29,12 @@
     onImportList: () => void;
     onRequestUninstall: () => void;
     onToast?: (type: 'info' | 'success' | 'warning' | 'error', message: string) => void;
+    onRunJob?: (req: {
+      kind: string;
+      flavour: string | null;
+      params?: Record<string, unknown>;
+      label?: string;
+    }) => Promise<JobRecord>;
     onUntrackedChange?: () => void;
     onFlavoursChange?: () => void;
   }
@@ -45,6 +51,7 @@
     onImportList,
     onRequestUninstall,
     onToast,
+    onRunJob,
     onUntrackedChange,
     onFlavoursChange,
   }: Props = $props();
@@ -1083,8 +1090,14 @@
               backups={wtfBackups}
               onBackupNow={async () => {
                 try {
-                  await invoke('start_job', { kind: 'backup-wtf', flavour, params: {} });
-                  onToast?.('success', 'WTF backup initiated');
+                  const job = onRunJob
+                    ? await onRunJob({ kind: 'backup-wtf', flavour, params: {}, label: 'WTF backup' })
+                    : await invoke<JobRecord>('start_job', { kind: 'backup-wtf', flavour, params: {} });
+                  if (job?.error) {
+                    onToast?.('error', `WTF backup failed: ${job.error}`);
+                  } else {
+                    onToast?.('success', 'WTF backup initiated');
+                  }
                   await loadWtfBackups();
                 } catch (err) {
                   onToast?.('error', `WTF backup failed: ${err}`);
@@ -1100,7 +1113,9 @@
               }}
               onRestoreConfirm={async (backupId) => {
                 try {
-                  const job = await invoke<JobRecord>('start_job', { kind: 'restore-wtf-all', flavour, params: { backup_id: backupId } });
+                  const job = onRunJob
+                    ? await onRunJob({ kind: 'restore-wtf-all', flavour, params: { backup_id: backupId }, label: 'WTF restore' })
+                    : await invoke<JobRecord>('start_job', { kind: 'restore-wtf-all', flavour, params: { backup_id: backupId } });
                   if (job?.error) {
                     onToast?.('error', `WTF restore failed: ${job.error}`);
                     return false;

@@ -1,25 +1,30 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use chrono::Utc;
 use rusqlite::{params, Connection, Result as SqlResult};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use uuid::Uuid;
 use crate::engine::add::{create_addon_record, parse_addon_target, AddonTarget};
 use crate::engine::adopt::adopt_candidate_group;
-use crate::engine::check::run_check_for_flavour;
+use crate::engine::check::{run_check_for_flavour_with_session_and_progress, ProgressSink};
 use crate::engine::flavours::detect_all_installed_flavours;
 use crate::engine::import_list::import_addon_list;
 use crate::engine::remove::remove_addon;
 use crate::engine::rollback::rollback_addon;
 use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
 use crate::engine::switch_source::switch_addon_source;
-use crate::engine::sync::run_sync_for_flavour;
+use crate::engine::sync::run_sync_for_flavour_with_options_and_hooks;
+pub use crate::jobs::progress::{
+    compute_progress_percent, JobProgressEvent, JobProgressStep, JobQueueSnapshot, JobRecord,
+    ProgressTallies, QueuedJobDto,
+};
 use crate::net::catalogue::load_or_refresh_catalogue;
 use crate::net::curseforge::create_cf_client;
 use crate::net::policy::NetworkPolicy;
-use crate::paths::{get_data_dir, detect_wow_root};
+use crate::net::wago::WagoSession;
+use crate::paths::{detect_wow_root, get_data_dir};
 
 fn copy_result(
     item: &crate::engine::copy_addons::CopyPlanItem,
@@ -34,21 +39,6 @@ fn copy_result(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobRecord {
-    pub id: String,
-    pub kind: String,
-    pub flavour: Option<String>,
-    pub params: Option<String>,
-    pub state: String, // "running", "completed", "failed"
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub error: Option<String>,
-    pub results: Option<String>,
-    pub reload_needed: bool,
-    pub log_path: Option<String>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
     #[error("Another job ({0}) is currently running")]
@@ -59,29 +49,262 @@ pub enum JobError {
     Database(#[from] rusqlite::Error),
 }
 
+struct QueuedEntry {
+    queue_id: String,
+    kind: String,
+    flavour: Option<String>,
+    target_label: Option<String>,
+    queued_at: String,
+    notify: Arc<Notify>,
+}
+
+struct QueueState {
+    active_job: Option<JobRecord>,
+    active_progress: Option<JobProgressEvent>,
+    queue: VecDeque<QueuedEntry>,
+    last_interactive_finished_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn build_snapshot_locked(st: &QueueState) -> JobQueueSnapshot {
+    let queued_jobs = st
+        .queue
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| QueuedJobDto {
+            queue_id: entry.queue_id.clone(),
+            kind: entry.kind.clone(),
+            flavour: entry.flavour.clone(),
+            target_label: entry.target_label.clone(),
+            queued_at: entry.queued_at.clone(),
+            position: idx + 1,
+        })
+        .collect();
+
+    JobQueueSnapshot {
+        active_job: st.active_job.clone(),
+        active_progress: st.active_progress.clone(),
+        queued_jobs,
+    }
+}
+
+pub type JobEventSink = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+fn emit_event<T: serde::Serialize>(
+    event_sink: &StdMutex<Option<JobEventSink>>,
+    event: &str,
+    payload: &T,
+) {
+    let sink = event_sink
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(cb) = sink {
+        if let Ok(val) = serde_json::to_value(payload) {
+            cb(event, val);
+        }
+    }
+}
+
+fn is_background_params(params_val: &Value) -> bool {
+    params_val
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("background"))
+}
+
+fn extract_target_label(params_val: &Value) -> Option<String> {
+    if let Some(lbl) = params_val.get("target_label").and_then(|v| v.as_str()) {
+        if !lbl.is_empty() {
+            return Some(lbl.to_string());
+        }
+    }
+    if let Some(name) = params_val.get("addon_name").and_then(|v| v.as_str()) {
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    if let Some(target) = params_val.get("target").and_then(|v| v.as_str()) {
+        if !target.is_empty() {
+            return Some(target.to_string());
+        }
+    }
+    if let Some(aid) = params_val.get("addon_id").and_then(|v| v.as_str()) {
+        if !aid.is_empty() {
+            return Some(aid.to_string());
+        }
+    }
+    if let Some(only) = params_val.get("only").and_then(|v| v.as_array()) {
+        if only.len() == 1 {
+            if let Some(first) = only[0].as_str() {
+                return Some(first.to_string());
+            }
+        } else if only.len() > 1 {
+            return Some(format!("{} addons", only.len()));
+        }
+    }
+    None
+}
+
+/// RAII guard for a caller waiting in the FIFO queue; removes the entry on cancellation/drop
+/// and wakes the new front waiter if no job is currently active.
+struct QueueWaitGuard {
+    state: Arc<StdMutex<QueueState>>,
+    event_sink: Arc<StdMutex<Option<JobEventSink>>>,
+    queue_id: String,
+    acquired: bool,
+}
+
+impl Drop for QueueWaitGuard {
+    fn drop(&mut self) {
+        if self.acquired {
+            return;
+        }
+        let (removed, next_notify, snapshot) = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let prev_len = st.queue.len();
+            st.queue.retain(|e| e.queue_id != self.queue_id);
+            let removed = st.queue.len() != prev_len;
+            let next_notify = if st.active_job.is_none() {
+                st.queue.front().map(|e| Arc::clone(&e.notify))
+            } else {
+                None
+            };
+            let snapshot = if removed {
+                Some(build_snapshot_locked(&st))
+            } else {
+                None
+            };
+            (removed, next_notify, snapshot)
+        };
+
+        if removed {
+            if let Some(snap) = snapshot {
+                emit_event(&self.event_sink, "job:queue-updated", &snap);
+            }
+            if let Some(notify) = next_notify {
+                notify.notify_one();
+            }
+        }
+    }
+}
+
+/// RAII guard owning the active job slot; ensures errors, panics, or dropped futures
+/// always clear active state, wake the next queued waiter, and emit completion events.
+struct ActiveJobGuard {
+    state: Arc<StdMutex<QueueState>>,
+    event_sink: Arc<StdMutex<Option<JobEventSink>>>,
+    is_background: bool,
+    completed: bool,
+}
+
+impl ActiveJobGuard {
+    fn complete(mut self, final_record: &JobRecord) {
+        self.completed = true;
+        let (next_notify, snapshot) = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.active_job = None;
+            st.active_progress = None;
+            if !self.is_background {
+                st.last_interactive_finished_at = Some(Utc::now());
+            }
+            let next_notify = st.queue.front().map(|e| Arc::clone(&e.notify));
+            let snapshot = build_snapshot_locked(&st);
+            (next_notify, snapshot)
+        };
+
+        emit_event(&self.event_sink, "job:finished", final_record);
+        emit_event(&self.event_sink, "job:queue-updated", &snapshot);
+        if let Some(notify) = next_notify {
+            notify.notify_one();
+        }
+    }
+}
+
+impl Drop for ActiveJobGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let (aborted_record, next_notify, snapshot) = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let aborted = st.active_job.take().map(|mut rec| {
+                rec.state = "failed".to_string();
+                rec.finished_at = Some(Utc::now().to_rfc3339());
+                rec.error = Some("Job interrupted or panicked".to_string());
+                rec
+            });
+            st.active_progress = None;
+            if !self.is_background {
+                st.last_interactive_finished_at = Some(Utc::now());
+            }
+            let next_notify = st.queue.front().map(|e| Arc::clone(&e.notify));
+            let snapshot = build_snapshot_locked(&st);
+            (aborted, next_notify, snapshot)
+        };
+
+        if let Some(rec) = aborted_record {
+            emit_event(&self.event_sink, "job:finished", &rec);
+        }
+        emit_event(&self.event_sink, "job:queue-updated", &snapshot);
+        if let Some(notify) = next_notify {
+            notify.notify_one();
+        }
+    }
+}
+
 pub struct JobRunner {
-    active_job_id: Mutex<Option<String>>,
+    state: Arc<StdMutex<QueueState>>,
     policy: Arc<NetworkPolicy>,
+    wago_session: Arc<WagoSession>,
+    event_sink: Arc<StdMutex<Option<JobEventSink>>>,
 }
 
 impl JobRunner {
     pub fn new(policy: Arc<NetworkPolicy>) -> Self {
         Self {
-            active_job_id: Mutex::new(None),
+            state: Arc::new(StdMutex::new(QueueState {
+                active_job: None,
+                active_progress: None,
+                queue: VecDeque::new(),
+                last_interactive_finished_at: None,
+            })),
             policy,
+            wago_session: Arc::new(WagoSession::new()),
+            event_sink: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    pub fn set_event_sink(&self, sink: JobEventSink) {
+        let mut guard = self.event_sink.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(sink);
+    }
+
+    pub fn queue_snapshot(&self) -> JobQueueSnapshot {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        build_snapshot_locked(&st)
+    }
+
+    pub fn has_pending_kind(&self, kind: &str) -> bool {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let active_matches = st
+            .active_job
+            .as_ref()
+            .is_some_and(|j| j.kind == kind);
+        active_matches || st.queue.iter().any(|e| e.kind == kind)
+    }
+
+    pub fn last_interactive_finished_at(&self) -> Option<chrono::DateTime<Utc>> {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.last_interactive_finished_at
     }
 
     pub async fn is_busy(&self) -> bool {
-        self.active_job_id.lock().await.is_some()
+        self.is_busy_sync()
     }
 
     pub fn is_busy_sync(&self) -> bool {
-        if let Ok(guard) = self.active_job_id.try_lock() {
-            guard.is_some()
-        } else {
-            true
-        }
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.active_job.is_some() || !st.queue.is_empty()
     }
 
     pub fn recover_unfinished_jobs(conn: &Connection) -> SqlResult<()> {
@@ -93,6 +316,153 @@ impl JobRunner {
         Ok(())
     }
 
+    fn emit_progress_event(&self, evt: JobProgressEvent) {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.active_job.as_ref().is_some_and(|j| j.id == evt.job_id) {
+                st.active_progress = Some(evt.clone());
+            }
+        }
+        emit_event(&self.event_sink, "job:progress", &evt);
+    }
+
+    fn make_progress_sink(
+        &self,
+        job_id: String,
+        kind: String,
+        flavour: Option<String>,
+        flavour_slice: Option<(usize, usize, String)>,
+    ) -> ProgressSink {
+        let state = Arc::clone(&self.state);
+        let event_sink = Arc::clone(&self.event_sink);
+        Arc::new(move |step: JobProgressStep| {
+            let local_pct = compute_progress_percent(&step);
+            let (percent, message) = if let Some((flv_idx, flv_total, ref label)) = flavour_slice {
+                let total_f = flv_total.max(1) as f64;
+                let scaled = (((flv_idx as f64) + (local_pct as f64 / 100.0)) / total_f * 100.0)
+                    .round()
+                    .clamp(0.0, 100.0) as u8;
+                let msg = match step.addon.as_deref() {
+                    Some(addon_name) => format!("{} ({}/{}) · {}", label, flv_idx + 1, flv_total, addon_name),
+                    None => format!("{} ({}/{})", label, flv_idx + 1, flv_total),
+                };
+                (scaled, Some(msg))
+            } else {
+                (local_pct, step.addon.clone())
+            };
+
+            let evt = JobProgressEvent {
+                job_id: job_id.clone(),
+                kind: kind.clone(),
+                flavour: flavour.clone(),
+                step,
+                percent,
+                message,
+            };
+
+            {
+                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                if st.active_job.as_ref().is_some_and(|j| j.id == evt.job_id) {
+                    st.active_progress = Some(evt.clone());
+                }
+            }
+            emit_event(&event_sink, "job:progress", &evt);
+        })
+    }
+
+    async fn acquire_slot(
+        &self,
+        job_id: String,
+        kind: &str,
+        flavour: Option<&str>,
+        params_val: &Value,
+    ) -> (ActiveJobGuard, JobRecord) {
+        let is_background = is_background_params(params_val);
+        let started_at = Utc::now().to_rfc3339();
+        let params_json = serde_json::to_string(params_val).ok();
+        let log_path = get_data_dir().join("sync.log").to_string_lossy().to_string();
+        let provisional_record = JobRecord {
+            id: job_id,
+            kind: kind.to_string(),
+            flavour: flavour.map(|s| s.to_string()),
+            params: params_json,
+            state: "running".to_string(),
+            started_at,
+            finished_at: None,
+            error: None,
+            results: None,
+            reload_needed: false,
+            log_path: Some(log_path),
+        };
+
+        let (wait_opt, initial_snapshot) = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.active_job.is_none() && st.queue.is_empty() {
+                let mut rec = provisional_record.clone();
+                rec.started_at = Utc::now().to_rfc3339();
+                st.active_job = Some(rec.clone());
+                st.active_progress = None;
+                return (
+                    ActiveJobGuard {
+                        state: Arc::clone(&self.state),
+                        event_sink: Arc::clone(&self.event_sink),
+                        is_background,
+                        completed: false,
+                    },
+                    rec,
+                );
+            }
+
+            let queue_id = Uuid::new_v4().to_string();
+            let notify = Arc::new(Notify::new());
+            st.queue.push_back(QueuedEntry {
+                queue_id: queue_id.clone(),
+                kind: kind.to_string(),
+                flavour: flavour.map(|s| s.to_string()),
+                target_label: extract_target_label(params_val),
+                queued_at: Utc::now().to_rfc3339(),
+                notify: Arc::clone(&notify),
+            });
+            let snap = build_snapshot_locked(&st);
+            ((queue_id, notify), snap)
+        };
+
+        let (queue_id, notify) = wait_opt;
+        let mut wait_guard = QueueWaitGuard {
+            state: Arc::clone(&self.state),
+            event_sink: Arc::clone(&self.event_sink),
+            queue_id: queue_id.clone(),
+            acquired: false,
+        };
+        emit_event(&self.event_sink, "job:queue-updated", &initial_snapshot);
+
+        loop {
+            notify.notified().await;
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let is_front = st
+                .queue
+                .front()
+                .is_some_and(|e| e.queue_id == queue_id);
+            if st.active_job.is_none() && is_front {
+                st.queue.pop_front();
+                let mut rec = provisional_record.clone();
+                rec.started_at = Utc::now().to_rfc3339();
+                st.active_job = Some(rec.clone());
+                st.active_progress = None;
+                wait_guard.acquired = true;
+                return (
+                    ActiveJobGuard {
+                        state: Arc::clone(&self.state),
+                        event_sink: Arc::clone(&self.event_sink),
+                        is_background,
+                        completed: false,
+                    },
+                    rec,
+                );
+            }
+        }
+    }
+
     pub async fn run_job(
         &self,
         conn: &mut Connection,
@@ -101,19 +471,73 @@ impl JobRunner {
         params_val: Value,
     ) -> Result<JobRecord, JobError> {
         let job_id = Uuid::new_v4().to_string();
+        let (guard, active_record) = self.acquire_slot(job_id, kind, flavour, &params_val).await;
+        self.execute_with_guard(conn, guard, active_record, kind, flavour, params_val)
+            .await
+    }
 
-        // 1. Acquire lock
-        {
-            let mut guard = self.active_job_id.lock().await;
-            if let Some(ref running_id) = *guard {
-                return Err(JobError::Busy(running_id.clone()));
-            }
-            *guard = Some(job_id.clone());
-        }
-
+    pub async fn run_job_coalesced_if_idle(
+        &self,
+        conn: &mut Connection,
+        kind: &str,
+        flavour: Option<&str>,
+        params_val: Value,
+    ) -> Result<Option<JobRecord>, JobError> {
+        let is_background = is_background_params(&params_val);
+        let job_id = Uuid::new_v4().to_string();
         let started_at = Utc::now().to_rfc3339();
         let params_json = serde_json::to_string(&params_val).ok();
         let log_path = get_data_dir().join("sync.log").to_string_lossy().to_string();
+
+        let active_record = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.active_job.is_some() || !st.queue.is_empty() {
+                return Ok(None);
+            }
+            let rec = JobRecord {
+                id: job_id,
+                kind: kind.to_string(),
+                flavour: flavour.map(|s| s.to_string()),
+                params: params_json,
+                state: "running".to_string(),
+                started_at,
+                finished_at: None,
+                error: None,
+                results: None,
+                reload_needed: false,
+                log_path: Some(log_path),
+            };
+            st.active_job = Some(rec.clone());
+            st.active_progress = None;
+            rec
+        };
+
+        let guard = ActiveJobGuard {
+            state: Arc::clone(&self.state),
+            event_sink: Arc::clone(&self.event_sink),
+            is_background,
+            completed: false,
+        };
+
+        let rec = self
+            .execute_with_guard(conn, guard, active_record, kind, flavour, params_val)
+            .await?;
+        Ok(Some(rec))
+    }
+
+    async fn execute_with_guard(
+        &self,
+        conn: &mut Connection,
+        guard: ActiveJobGuard,
+        active_record: JobRecord,
+        kind: &str,
+        flavour: Option<&str>,
+        params_val: Value,
+    ) -> Result<JobRecord, JobError> {
+        let job_id = active_record.id.clone();
+        let started_at = active_record.started_at.clone();
+        let params_json = active_record.params.clone();
+        let log_path = active_record.log_path.clone().unwrap_or_default();
 
         conn.execute(
             "INSERT INTO jobs (id, kind, flavour, params, state, started_at, reload_needed, log_path) \
@@ -121,14 +545,12 @@ impl JobRunner {
             params![job_id, kind, flavour, params_json, started_at, log_path],
         )?;
 
-        // 2. Execute job
-        let exec_res = self.execute_internal(conn, kind, flavour, &params_val).await;
+        emit_event(&self.event_sink, "job:queue-updated", &self.queue_snapshot());
+        emit_event(&self.event_sink, "job:started", &active_record);
 
-        // 3. Release lock and finalize DB
-        {
-            let mut guard = self.active_job_id.lock().await;
-            *guard = None;
-        }
+        let exec_res = self
+            .execute_internal(conn, &job_id, kind, flavour, &params_val)
+            .await;
 
         let finished_at = Utc::now().to_rfc3339();
         match exec_res {
@@ -142,7 +564,7 @@ impl JobRunner {
                 let mutating_kinds = [
                     "sync", "install", "update-all-flavours", "adopt", "rollback", "remove",
                     "switch-source", "add-by-slug", "add", "import", "install-deps",
-                    "install-zip", "copy-addons",
+                    "install-zip", "copy-addons", "reinstall",
                 ];
                 if mutating_kinds.contains(&kind) {
                     if let Ok(wow_root) = detect_wow_root(None) {
@@ -159,7 +581,7 @@ impl JobRunner {
                     [],
                 );
 
-                Ok(JobRecord {
+                let final_record = JobRecord {
                     id: job_id,
                     kind: kind.to_string(),
                     flavour: flavour.map(|s| s.to_string()),
@@ -171,7 +593,9 @@ impl JobRunner {
                     results: Some(results_json),
                     reload_needed,
                     log_path: Some(log_path),
-                })
+                };
+                guard.complete(&final_record);
+                Ok(final_record)
             }
             Err(e) => {
                 conn.execute(
@@ -184,6 +608,20 @@ impl JobRunner {
                     [],
                 );
 
+                let failed_record = JobRecord {
+                    id: job_id,
+                    kind: kind.to_string(),
+                    flavour: flavour.map(|s| s.to_string()),
+                    params: params_json,
+                    state: "failed".to_string(),
+                    started_at,
+                    finished_at: Some(finished_at),
+                    error: Some(e.clone()),
+                    results: None,
+                    reload_needed: false,
+                    log_path: Some(log_path),
+                };
+                guard.complete(&failed_record);
                 Err(JobError::Execution(e))
             }
         }
@@ -192,6 +630,7 @@ impl JobRunner {
     async fn execute_internal(
         &self,
         conn: &mut Connection,
+        job_id: &str,
         kind: &str,
         flavour: Option<&str>,
         params: &Value,
@@ -226,12 +665,20 @@ impl JobRunner {
                     .find(|f| f.id == flv)
                     .ok_or_else(|| format!("Flavour '{}' is not installed", flv))?;
 
-                let report = run_check_for_flavour(
+                let sink = self.make_progress_sink(
+                    job_id.to_string(),
+                    kind.to_string(),
+                    Some(flv.to_string()),
+                    None,
+                );
+                let report = run_check_for_flavour_with_session_and_progress(
                     conn,
                     flv,
                     target_flv.client_interface,
                     self.policy.clone(),
                     github_token,
+                    Arc::clone(&self.wago_session),
+                    Some(sink),
                 )
                 .await?;
 
@@ -321,7 +768,13 @@ impl JobRunner {
                 let override_modified = params.get("override_modified").and_then(|v| v.as_bool()).unwrap_or(false);
                 let backup_modified = params.get("backup_modified").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                let report = crate::engine::sync::run_sync_for_flavour_with_options(
+                let sink = self.make_progress_sink(
+                    job_id.to_string(),
+                    kind.to_string(),
+                    Some(flv.to_string()),
+                    None,
+                );
+                let report = run_sync_for_flavour_with_options_and_hooks(
                     conn,
                     &flv_root,
                     flv,
@@ -337,6 +790,9 @@ impl JobRunner {
                     override_hold,
                     override_modified,
                     backup_modified,
+                    Arc::clone(&self.wago_session),
+                    true,
+                    Some(sink),
                 )
                 .await?;
 
@@ -376,6 +832,7 @@ impl JobRunner {
             "update-all-flavours" => {
                 let mut all_reports = Vec::new();
                 let mut any_reload = false;
+                let mut flavour_errors: Vec<String> = Vec::new();
 
                 let origin = match params.get("origin").and_then(|v| v.as_str()) {
                     Some(s) if s.eq_ignore_ascii_case("background") => crate::engine::update_policy::SyncOrigin::Background,
@@ -392,36 +849,56 @@ impl JobRunner {
                     .and_then(|v: String| serde_json::from_str(&v).ok())
                     .unwrap_or(false);
 
+                let mut eligible = Vec::new();
                 for flv_info in &installed_flavours {
                     if !show_test_realms && crate::engine::flavours::is_test_realm(&flv_info.id) {
                         continue;
                     }
-
                     let flv_root = match resolve_flavour_root(flv_info) {
                         Ok(r) => r,
                         Err(_) => continue,
                     };
+                    let update_mode = conn
+                        .query_row(
+                            "SELECT update_mode FROM flavours WHERE id = ?1",
+                            rusqlite::params![flv_info.id],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "auto".to_string());
+                    eligible.push((flv_info, flv_root, update_mode));
+                }
 
-                    let update_mode = conn.query_row(
-                        "SELECT update_mode FROM flavours WHERE id = ?1",
-                        rusqlite::params![flv_info.id],
-                        |r| r.get::<_, Option<String>>(0),
-                    ).ok().flatten().unwrap_or_else(|| "auto".to_string());
+                let total_flavours = eligible.len();
+                for (flv_idx, (flv_info, flv_root, update_mode)) in eligible.into_iter().enumerate() {
+                    let flv_sink = self.make_progress_sink(
+                        job_id.to_string(),
+                        kind.to_string(),
+                        Some(flv_info.id.clone()),
+                        Some((flv_idx, total_flavours, flv_info.label.clone())),
+                    );
 
                     if origin == crate::engine::update_policy::SyncOrigin::Background
                         && update_mode.eq_ignore_ascii_case("notify")
                     {
-                        let _ = run_check_for_flavour(
+                        if let Err(e) = run_check_for_flavour_with_session_and_progress(
                             conn,
                             &flv_info.id,
                             flv_info.client_interface,
                             self.policy.clone(),
                             github_token.clone(),
-                        ).await;
+                            Arc::clone(&self.wago_session),
+                            Some(flv_sink),
+                        )
+                        .await
+                        {
+                            flavour_errors.push(format!("{}: {}", flv_info.label, e));
+                        }
                         continue;
                     }
 
-                    let report = crate::engine::sync::run_sync_for_flavour_with_options(
+                    match run_sync_for_flavour_with_options_and_hooks(
                         conn,
                         &flv_root,
                         &flv_info.id,
@@ -437,26 +914,60 @@ impl JobRunner {
                         false,
                         false,
                         false,
+                        Arc::clone(&self.wago_session),
+                        true,
+                        Some(flv_sink),
                     )
-                    .await?;
-
-                    if report.reload_needed {
-                        any_reload = true;
+                    .await
+                    {
+                        Ok(report) => {
+                            if report.reload_needed {
+                                any_reload = true;
+                            }
+                            all_reports.push(report);
+                        }
+                        Err(e) => {
+                            flavour_errors.push(format!("{}: {}", flv_info.label, e));
+                            self.emit_progress_event(JobProgressEvent {
+                                job_id: job_id.to_string(),
+                                kind: kind.to_string(),
+                                flavour: Some(flv_info.id.clone()),
+                                step: JobProgressStep {
+                                    total: total_flavours,
+                                    index: flv_idx + 1,
+                                    addon: Some(flv_info.label.clone()),
+                                    phase: "failed".to_string(),
+                                    bytes_done: None,
+                                    bytes_total: None,
+                                    tallies: ProgressTallies {
+                                        failed: flavour_errors.len(),
+                                        ..ProgressTallies::default()
+                                    },
+                                },
+                                percent: (((flv_idx + 1) as f64 / total_flavours.max(1) as f64) * 100.0)
+                                    .round()
+                                    .clamp(0.0, 100.0) as u8,
+                                message: Some(format!("{}: {}", flv_info.label, e)),
+                            });
+                        }
                     }
-                    all_reports.push(report);
                 }
 
                 let total_failed: usize = all_reports.iter().map(|r| r.failed).sum();
-                let job_error = if total_failed > 0 {
-                    let mut failed_msgs = Vec::new();
-                    for r in &all_reports {
-                        for res in &r.results {
-                            if res.status == "Failed" {
-                                failed_msgs.push(format!("{}: {}", res.name, res.error.as_deref().unwrap_or("Unknown error")));
-                            }
+                let mut failed_msgs = Vec::new();
+                for ferr in &flavour_errors {
+                    failed_msgs.push(ferr.clone());
+                }
+                for r in &all_reports {
+                    for res in &r.results {
+                        if res.status == "Failed" {
+                            failed_msgs.push(format!("{}: {}", res.name, res.error.as_deref().unwrap_or("Unknown error")));
                         }
                     }
-                    Some(format!("{} addon(s) failed: {}", total_failed, failed_msgs.join("; ")))
+                }
+                let total_err_count = total_failed + flavour_errors.len();
+                let job_error = if total_err_count > 0 {
+                    Some(format!("{} issue(s) occurred: {}", total_err_count, failed_msgs.join("; ")))
                 } else {
                     None
                 };
@@ -688,7 +1199,13 @@ impl JobRunner {
                 let addon_id = create_addon_record(conn, flv, parsed, None)?;
 
                 // Immediately sync the newly added addon
-                let sync_rep = run_sync_for_flavour(
+                let sink = self.make_progress_sink(
+                    job_id.to_string(),
+                    kind.to_string(),
+                    Some(flv.to_string()),
+                    None,
+                );
+                let sync_rep = run_sync_for_flavour_with_options_and_hooks(
                     conn,
                     &flv_root,
                     flv,
@@ -700,6 +1217,13 @@ impl JobRunner {
                     github_token.clone(),
                     Some(&[addon_id.clone()]),
                     true,
+                    crate::engine::update_policy::SyncOrigin::Manual,
+                    false,
+                    false,
+                    false,
+                    Arc::clone(&self.wago_session),
+                    true,
+                    Some(sink),
                 )
                 .await?;
 
@@ -810,7 +1334,7 @@ impl JobRunner {
                         }
                     };
 
-                    let outcome = run_sync_for_flavour(
+                    let outcome = run_sync_for_flavour_with_options_and_hooks(
                         conn,
                         &flv_root,
                         target_id,
@@ -822,6 +1346,13 @@ impl JobRunner {
                         github_token.clone(),
                         Some(&[new_id.clone()]),
                         true,
+                        crate::engine::update_policy::SyncOrigin::Manual,
+                        false,
+                        false,
+                        false,
+                        Arc::clone(&self.wago_session),
+                        true,
+                        None,
                     )
                     .await;
 
@@ -949,7 +1480,13 @@ impl JobRunner {
                     .and_then(|v| v.as_str())
                     .ok_or("Missing addon_id parameter for reinstall")?;
 
-                let report = crate::engine::sync::run_sync_for_flavour_with_options(
+                let sink = self.make_progress_sink(
+                    job_id.to_string(),
+                    kind.to_string(),
+                    Some(flv.to_string()),
+                    None,
+                );
+                let report = run_sync_for_flavour_with_options_and_hooks(
                     conn,
                     &flv_root,
                     flv,
@@ -965,6 +1502,9 @@ impl JobRunner {
                     true,
                     true,
                     false,
+                    Arc::clone(&self.wago_session),
+                    true,
+                    Some(sink),
                 )
                 .await?;
 
@@ -1107,24 +1647,298 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_job_lock_busy() {
+    async fn test_job_queue_fifo_and_snapshot() {
+        let policy = Arc::new(NetworkPolicy::new());
+        let runner = Arc::new(JobRunner::new(policy));
+
+        // 1. Acquire initial active slot
+        let (guard_a, rec_a) = runner
+            .acquire_slot(
+                "job-a".to_string(),
+                "check",
+                Some("retail"),
+                &Value::Null,
+            )
+            .await;
+
+        assert_eq!(rec_a.id, "job-a");
+        assert!(runner.is_busy().await);
+        assert!(runner.is_busy_sync());
+        assert!(runner.has_pending_kind("check"));
+        assert!(!runner.has_pending_kind("sync"));
+
+        let snap0 = runner.queue_snapshot();
+        assert_eq!(snap0.active_job.as_ref().map(|j| j.id.as_str()), Some("job-a"));
+        assert!(snap0.queued_jobs.is_empty());
+
+        let execution_order = Arc::new(StdMutex::new(Vec::<&'static str>::new()));
+
+        // 2. Queue Worker B first, then Worker C (strict FIFO)
+        let r_b = Arc::clone(&runner);
+        let order_b = Arc::clone(&execution_order);
+        let handle_b = tokio::spawn(async move {
+            let (guard_b, _) = r_b
+                .acquire_slot(
+                    "job-b".to_string(),
+                    "sync",
+                    Some("retail"),
+                    &serde_json::json!({ "target_label": "Details!" }),
+                )
+                .await;
+            order_b.lock().unwrap().push("B");
+            drop(guard_b);
+        });
+
+        // Wait until B is visibly queued at position 1 before spawning C
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runner.queue_snapshot().queued_jobs.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Worker B did not enqueue in time");
+
+        let r_c = Arc::clone(&runner);
+        let order_c = Arc::clone(&execution_order);
+        let handle_c = tokio::spawn(async move {
+            let (guard_c, _) = r_c
+                .acquire_slot(
+                    "job-c".to_string(),
+                    "scan",
+                    Some("classic_era"),
+                    &Value::Null,
+                )
+                .await;
+            order_c.lock().unwrap().push("C");
+            drop(guard_c);
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runner.queue_snapshot().queued_jobs.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Worker C did not enqueue in time");
+
+        let snap = runner.queue_snapshot();
+        assert_eq!(snap.queued_jobs.len(), 2);
+        assert_eq!(snap.queued_jobs[0].kind, "sync");
+        assert_eq!(snap.queued_jobs[0].flavour.as_deref(), Some("retail"));
+        assert_eq!(snap.queued_jobs[0].target_label.as_deref(), Some("Details!"));
+        assert_eq!(snap.queued_jobs[0].position, 1);
+        assert_eq!(snap.queued_jobs[1].kind, "scan");
+        assert_eq!(snap.queued_jobs[1].flavour.as_deref(), Some("classic_era"));
+        assert_eq!(snap.queued_jobs[1].position, 2);
+        assert!(runner.has_pending_kind("sync"));
+        assert!(runner.has_pending_kind("scan"));
+
+        // Coalesced background job skips immediately without stacking
+        let mut conn_bg = Connection::open_in_memory().unwrap();
+        conn_bg.execute_batch(INITIAL_SCHEMA).unwrap();
+        let skipped = runner
+            .run_job_coalesced_if_idle(
+                &mut conn_bg,
+                "update-all-flavours",
+                None,
+                serde_json::json!({ "origin": "background" }),
+            )
+            .await
+            .unwrap();
+        assert!(skipped.is_none(), "coalesced job must return Ok(None) when queue is busy");
+        assert_eq!(runner.queue_snapshot().queued_jobs.len(), 2);
+
+        // 3. Drop active guard A -> wakes B, then C in FIFO order
+        drop(guard_a);
+        handle_b.await.unwrap();
+        handle_c.await.unwrap();
+
+        assert_eq!(*execution_order.lock().unwrap(), vec!["B", "C"]);
+        assert!(!runner.is_busy().await);
+        assert!(!runner.is_busy_sync());
+        assert!(runner.queue_snapshot().active_job.is_none());
+        assert!(runner.queue_snapshot().queued_jobs.is_empty());
+        assert!(runner.last_interactive_finished_at().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_raii_guard_release_on_failure_panic_and_wait_cancel() {
+        let policy = Arc::new(NetworkPolicy::new());
+        let runner = Arc::new(JobRunner::new(policy));
+        let events = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let events_capture = Arc::clone(&events);
+        runner.set_event_sink(Arc::new(move |ev, _val| {
+            events_capture.lock().unwrap().push(ev.to_string());
+        }));
+
+        // 1. Failed execution inside run_job releases slot cleanly
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        let err = runner
+            .run_job(&mut conn, "totally-invalid-kind", None, Value::Null)
+            .await
+            .expect_err("invalid kind must fail");
+        assert!(matches!(err, JobError::Execution(_)));
+        assert!(!runner.is_busy().await);
+        assert!(runner.last_interactive_finished_at().is_some());
+        {
+            let logged = events.lock().unwrap();
+            assert!(logged.contains(&"job:queue-updated".to_string()));
+            assert!(logged.contains(&"job:started".to_string()));
+            assert!(logged.contains(&"job:finished".to_string()));
+        }
+
+        // 2. Panic while holding ActiveJobGuard drops guard and wakes next waiter
+        let (guard_panic, _) = runner
+            .acquire_slot("job-panic".to_string(), "check", Some("retail"), &Value::Null)
+            .await;
+
+        // Also enqueue a waiter that gets cancelled before acquiring, plus one real waiter after it
+        let r_cancel = Arc::clone(&runner);
+        let cancel_handle = tokio::spawn(async move {
+            let _ = r_cancel
+                .acquire_slot("job-cancel".to_string(), "sync", Some("retail"), &Value::Null)
+                .await;
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runner.queue_snapshot().queued_jobs.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let r_after = Arc::clone(&runner);
+        let after_handle = tokio::spawn(async move {
+            let (g, rec) = r_after
+                .acquire_slot("job-after".to_string(), "scan", Some("retail"), &Value::Null)
+                .await;
+            assert_eq!(rec.id, "job-after");
+            drop(g);
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runner.queue_snapshot().queued_jobs.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Abort the first queued waiter before freeing active slot
+        cancel_handle.abort();
+        let _ = cancel_handle.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snap = runner.queue_snapshot();
+                if snap.queued_jobs.len() == 1 && snap.queued_jobs[0].kind == "scan" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = guard_panic;
+            panic!("simulated panic during active job");
+        }));
+        assert!(caught.is_err());
+
+        after_handle.await.unwrap();
+        assert!(!runner.is_busy().await);
+        assert!(runner.queue_snapshot().active_job.is_none());
+        assert!(runner.queue_snapshot().queued_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_job_coalesced_if_idle_executes_when_free_and_preserves_interactive_ts() {
         let policy = Arc::new(NetworkPolicy::new());
         let runner = JobRunner::new(policy);
 
-        // Simulate an active job lock
-        {
-            let mut guard = runner.active_job_id.lock().await;
-            *guard = Some("running-job-123".to_string());
-        }
+        assert!(runner.last_interactive_finished_at().is_none());
 
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(INITIAL_SCHEMA).unwrap();
 
-        let res = runner.run_job(&mut conn, "check", Some("retail"), Value::Null).await;
-        match res {
-            Err(JobError::Busy(id)) => assert_eq!(id, "running-job-123"),
-            other => panic!("Expected JobError::Busy, got {:?}", other),
-        }
+        // Background job when idle runs (here returning Execution err on invalid kind, or verify empty valid kind)
+        // Run valid check-like noop? Wait: verify background flag doesn't bump last_interactive_finished_at even on error
+        let res = runner
+            .run_job_coalesced_if_idle(
+                &mut conn,
+                "invalid-bg-kind",
+                None,
+                serde_json::json!({ "origin": "background" }),
+            )
+            .await;
+        assert!(matches!(res, Err(JobError::Execution(_))));
+        assert!(
+            runner.last_interactive_finished_at().is_none(),
+            "background jobs must not overwrite last_interactive_finished_at"
+        );
+        assert!(!runner.is_busy_sync());
+
+        // Interactive run on clean install-deps succeeds and records last_interactive_finished_at
+        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join("furphy test wow (coalesced idle)");
+        let _ = std::fs::create_dir_all(temp.join("_retail_").join("Interface").join("AddOns"));
+        std::env::set_var("FURPHY_DEV_WOWROOT", temp.to_str().unwrap());
+
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed, client_build, client_interface) \
+             VALUES ('retail', '_retail_', 'Retail', 1, '11.0.2', '110002')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO addons (id, flavour, name, required_deps) VALUES ('addon-bg', 'retail', 'Clean', '[]')",
+            [],
+        )
+        .unwrap();
+
+        // Background coalesced runs Ok(Some) when idle without setting interactive timestamp
+        let bg_rec = runner
+            .run_job_coalesced_if_idle(
+                &mut conn,
+                "install-deps",
+                Some("retail"),
+                serde_json::json!({ "addon_id": "addon-bg", "origin": "background" }),
+            )
+            .await
+            .unwrap();
+        assert!(bg_rec.is_some());
+        assert!(runner.last_interactive_finished_at().is_none());
+
+        // Interactive run DOES set last_interactive_finished_at
+        let user_rec = runner
+            .run_job(
+                &mut conn,
+                "install-deps",
+                Some("retail"),
+                serde_json::json!({ "addon_id": "addon-bg" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(user_rec.state, "completed");
+        assert!(runner.last_interactive_finished_at().is_some());
+
+        std::env::remove_var("FURPHY_DEV_WOWROOT");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[tokio::test]

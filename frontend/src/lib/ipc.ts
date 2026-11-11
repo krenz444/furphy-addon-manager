@@ -1,9 +1,23 @@
 import { isTauri, invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { handleMockInvoke } from './mockIpc';
 import { withCamelAliases } from './ipcArgs';
-import type { Flavour, JobRecord } from './types';
+import type { Flavour, JobProgressEvent, JobQueueSnapshot, JobRecord } from './types';
 
 export type JobDto = JobRecord;
+
+export const MOCK_JOB_EVENT_NAME = 'furphy-mock-job-event';
+
+export interface MockJobEventDetail {
+  type: 'job:queue-updated' | 'job:started' | 'job:progress' | 'job:finished';
+  payload: JobQueueSnapshot | JobRecord | JobProgressEvent;
+}
+
+export interface JobEventHandlers {
+  onQueueUpdated?: (snapshot: JobQueueSnapshot) => void;
+  onStarted?: (job: JobRecord) => void;
+  onProgress?: (event: JobProgressEvent) => void;
+  onFinished?: (job: JobRecord) => void;
+}
 
 let mockIgnoredDeps: Record<string, string[]> = {};
 let mockIgnoredUntracked: Record<string, string[]> = {};
@@ -99,24 +113,6 @@ export async function deleteUntrackedAddon(flavour: string, folders: string[]): 
 export async function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   let res: T;
   if (isMockMode()) {
-    if (cmd === 'install_dependencies') {
-      const addonId = (args.addon_id as string | null) ?? null;
-      const flv = (args.flavour as string) || 'retail';
-      return {
-        id: `mock-job-${Date.now()}`,
-        kind: 'install_dependencies',
-        flavour: flv,
-        params: JSON.stringify({ addon_id: addonId }),
-        state: 'completed',
-        started_at: new Date().toISOString(),
-        finished_at: new Date().toISOString(),
-        error: null,
-        results: JSON.stringify([{ addon_id: addonId ?? 'all', installed_deps: ['Ace3', 'LibSharedMedia-3.0'] }]),
-        reload_needed: false,
-        log_path: 'mock/dependencies.log',
-      } as T;
-    }
-
     res = await handleMockInvoke<T>(cmd, args);
 
     // Provide missing_deps fixture in mock mode if absent
@@ -186,6 +182,55 @@ export async function installDependencies(flavour: string, addonId?: string): Pr
     addonId: addonId ?? null,
     addon_id: addonId ?? null,
   });
+}
+
+export async function getJobQueueStatus(): Promise<JobQueueSnapshot> {
+  return invoke<JobQueueSnapshot>('get_job_queue_status');
+}
+
+export async function listenJobEvents(handlers: JobEventHandlers): Promise<() => void> {
+  if (isMockMode()) {
+    if (typeof window === 'undefined') {
+      return () => {};
+    }
+    const listener = (evt: Event) => {
+      const detail = (evt as CustomEvent<MockJobEventDetail>).detail;
+      if (!detail) return;
+      if (detail.type === 'job:queue-updated') {
+        handlers.onQueueUpdated?.(detail.payload as JobQueueSnapshot);
+      } else if (detail.type === 'job:started') {
+        handlers.onStarted?.(detail.payload as JobRecord);
+      } else if (detail.type === 'job:progress') {
+        handlers.onProgress?.(detail.payload as JobProgressEvent);
+      } else if (detail.type === 'job:finished') {
+        handlers.onFinished?.(detail.payload as JobRecord);
+      }
+    };
+    window.addEventListener(MOCK_JOB_EVENT_NAME, listener);
+    return () => {
+      window.removeEventListener(MOCK_JOB_EVENT_NAME, listener);
+    };
+  }
+
+  let disposed = false;
+  const unlisteners: Array<() => void> = [];
+  const { listen } = await import('@tauri-apps/api/event');
+  const registered = await Promise.all([
+    listen<JobQueueSnapshot>('job:queue-updated', (e) => handlers.onQueueUpdated?.(e.payload)),
+    listen<JobRecord>('job:started', (e) => handlers.onStarted?.(e.payload)),
+    listen<JobProgressEvent>('job:progress', (e) => handlers.onProgress?.(e.payload)),
+    listen<JobRecord>('job:finished', (e) => handlers.onFinished?.(e.payload)),
+  ]);
+
+  if (disposed) {
+    for (const unlisten of registered) unlisten();
+    return () => {};
+  }
+  unlisteners.push(...registered);
+  return () => {
+    disposed = true;
+    for (const unlisten of unlisteners) unlisten();
+  };
 }
 
 export async function setFlavourInstallPath(flavour: string, path: string): Promise<Flavour> {

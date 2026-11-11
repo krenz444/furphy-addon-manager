@@ -1324,6 +1324,11 @@
     background: var(--accent-hover);
   }
 
+  .btn-update-all:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
   /* Banners stack container */
   .banners-stack {
     display: flex;

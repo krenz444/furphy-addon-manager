@@ -161,32 +161,40 @@ pub fn run() {
         }
     }
 
-    if let Err(e) = init_app(import_arg) {
-        eprintln!("[FATAL] App initialization failed: {}", e);
-        if paths::is_dev() {
-            panic!("Dev startup aborted: {}", e);
+    let is_cli = cli::is_cli_command(&args);
+    let is_stateless_cli = args
+        .iter()
+        .any(|a| a == "--sign-file" || a == "--tray-selftest" || a == "--protocol");
+
+    // ADR-320 #4: Activate existing GUI instance BEFORE init_app / recover_unfinished_jobs
+    // so a second GUI launch never corrupts an active job or folder swap in the running instance.
+    if !is_cli && system::single_instance::try_activate_existing_instance(&args) {
+        std::process::exit(0);
+    }
+
+    if !is_stateless_cli {
+        if let Err(e) = init_app(import_arg) {
+            eprintln!("[FATAL] App initialization failed: {}", e);
+            if paths::is_dev() {
+                panic!("Dev startup aborted: {}", e);
+            }
+            std::process::exit(2);
         }
-        std::process::exit(2);
     }
 
     // Handle CLI arguments
-    let rt = tokio::runtime::Runtime::new().expect("Failed creating Tokio runtime");
-    match rt.block_on(cli::handle_cli_args(&args)) {
-        Ok(true) => {
-            // CLI command completed
-            std::process::exit(0);
+    if is_cli {
+        let rt = tokio::runtime::Runtime::new().expect("Failed creating Tokio runtime");
+        match rt.block_on(cli::handle_cli_args(&args)) {
+            Ok(true) => {
+                // CLI command completed
+                std::process::exit(0);
+            }
+            Err(code) => {
+                std::process::exit(code);
+            }
+            Ok(false) => {}
         }
-        Err(code) => {
-            std::process::exit(code);
-        }
-        Ok(false) => {
-            // Proceed to GUI
-        }
-    }
-
-    // Single-instance enforcement for GUI
-    if system::single_instance::try_activate_existing_instance(&args) {
-        std::process::exit(0);
     }
 
     let mut context = tauri::generate_context!();
@@ -195,7 +203,7 @@ pub fn run() {
         context.config_mut().product_name = Some("Furphy Dev".to_string());
     }
 
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
 
     let run_result = tauri::Builder::default()
         .setup(|app| {
@@ -221,6 +229,10 @@ pub fn run() {
                 policy.load_fallback_from_db(&conn);
             }
             let runner = std::sync::Arc::new(jobs::runner::JobRunner::new(policy.clone()));
+            let event_handle = app.handle().clone();
+            runner.set_event_sink(std::sync::Arc::new(move |ev, payload| {
+                let _ = event_handle.emit(ev, payload);
+            }));
             let initial_state = {
                 if let Ok(conn) = db::open_connection(&db_path) {
                     system::schedule::Scheduler::load_persisted_tray_state(&conn).unwrap_or_default()
@@ -229,11 +241,19 @@ pub fn run() {
                 }
             };
             let scheduler = std::sync::Arc::new(
-                system::schedule::Scheduler::new(runner.clone(), initial_state).with_window_probe({
-                    let handle = app.handle().clone();
-                    move || handle.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(false)
-                }),
+                system::schedule::Scheduler::new(runner.clone(), initial_state)
+                    .with_window_probe({
+                        let handle = app.handle().clone();
+                        move || handle.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(false)
+                    })
+                    .with_tray_updater({
+                        let tray_handle = app.handle().clone();
+                        move |snapshot| {
+                            system::tray::update_tray_display(&tray_handle, snapshot);
+                        }
+                    }),
             );
+            system::schedule::register_live_scheduler(&scheduler);
             system::single_instance::start_single_instance_listener(app.handle().clone());
             if let Err(e) = system::tray::setup_tray(app.handle(), scheduler.clone()) {
                 logging::append_app_log("ERROR", &format!("setup_tray failed: {}", e));
@@ -284,6 +304,7 @@ pub fn run() {
             commands::jobs::start_job,
             commands::jobs::list_jobs,
             commands::jobs::get_job,
+            commands::jobs::get_job_queue_status,
             commands::wtf::list_wtf_snapshots,
             commands::wtf::preview_wtf_restore,
             commands::wtf::restore_wtf_snapshot,

@@ -11,8 +11,9 @@ use crate::system::notify::{
 };
 use crate::system::power::apply_game_mode_power;
 use crate::system::tray_status::{
-    compute_core, make_tooltip, TrayStateSnapshot, ICON_BUSY, ICON_NORMAL, ICON_UPDATED,
-    STATUS_CHECKING, STATUS_DONE_UPDATED, STATUS_FINISHING, STATUS_IDLE, STATUS_UPDATING,
+    compute_core, make_tooltip, TrayStateSnapshot, ICON_BUSY, ICON_FAILED, ICON_NORMAL,
+    ICON_UPDATED, STATUS_CHECKING, STATUS_DONE_UPDATED, STATUS_FINISHING, STATUS_IDLE,
+    STATUS_UPDATING,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +58,7 @@ pub fn get_tray_menu_items(status_text: &str) -> Vec<String> {
     vec![
         "Open Furphy Addon Manager".to_string(),
         status_text.to_string(),
-        "Check for updates now".to_string(),
+        "Update all now".to_string(),
         "-".to_string(),
         "Start with Windows".to_string(),
         "Update addons in the background".to_string(),
@@ -276,7 +277,7 @@ pub fn build_tray_menu<R: tauri::Runtime>(
 
     let open_item = MenuItemBuilder::with_id("open", "Open Furphy Addon Manager").build(app)?;
     let status_item = MenuItemBuilder::with_id("status", status_text).enabled(false).build(app)?;
-    let check_item = MenuItemBuilder::with_id("check", "Check for updates now").build(app)?;
+    let check_item = MenuItemBuilder::with_id("check", "Update all now").build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let startup_item = CheckMenuItemBuilder::with_id("startup", "Start with Windows")
         .checked(run_at_startup)
@@ -305,12 +306,75 @@ pub fn build_tray_menu<R: tauri::Runtime>(
         .build()
 }
 
+fn read_tray_menu_flags() -> (bool, bool) {
+    let db_path = crate::paths::get_db_path();
+    let bg = if let Ok(conn) = crate::db::open_connection(&db_path) {
+        crate::system::schedule::Scheduler::are_background_updates_enabled(&conn)
+    } else {
+        true
+    };
+    let autostart = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
+    (autostart, bg)
+}
+
+pub fn build_tray_icon_for_variant(icon_variant: &str) -> Option<tauri::image::Image<'static>> {
+    let base = tauri::image::Image::from_bytes(TRAY_ICON_PNG).ok()?;
+    let width = base.width();
+    let height = base.height();
+    let mut rgba = base.rgba().to_vec();
+
+    let badge_color: Option<[u8; 4]> = match icon_variant {
+        ICON_BUSY => Some([245, 158, 11, 255]),    // Amber dot during active cycle
+        ICON_UPDATED => Some([16, 185, 129, 255]), // Emerald dot after updates installed
+        ICON_FAILED => Some([239, 68, 68, 255]),   // Red dot when updates failed
+        _ => None,
+    };
+
+    if let Some(fill) = badge_color {
+        let cx = width as i32 - 7;
+        let cy = height as i32 - 7;
+        let border = [17, 24, 39, 255];
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let dx = x - cx;
+                let dy = y - cy;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq <= 25 {
+                    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+                    if idx + 4 <= rgba.len() {
+                        let px = if dist_sq <= 16 { fill } else { border };
+                        rgba[idx..idx + 4].copy_from_slice(&px);
+                    }
+                }
+            }
+        }
+    }
+
+    Some(tauri::image::Image::new_owned(rgba, width, height))
+}
+
+pub fn refresh_tray_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    core_text: &str,
+) {
+    if let Some(tray) = app.tray_by_id("tray") {
+        let (run_at_startup, background_updates) = read_tray_menu_flags();
+        if let Ok(menu) = build_tray_menu(app, core_text, run_at_startup, background_updates) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
 pub fn update_tray_display<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     snapshot: &TrayStateSnapshot,
 ) {
     if let Some(tray) = app.tray_by_id("tray") {
         let _ = tray.set_tooltip(Some(make_tooltip(&snapshot.core_text)));
+        if let Some(icon) = build_tray_icon_for_variant(&snapshot.icon_variant) {
+            let _ = tray.set_icon(Some(icon));
+        }
+        refresh_tray_menu(app, &snapshot.core_text);
     }
 }
 
@@ -323,32 +387,27 @@ pub fn setup_tray<R: tauri::Runtime>(
 
     let snapshot = {
         let snap_lock = scheduler.get_snapshot();
-        let guard = snap_lock.blocking_lock();
-        guard.clone()
-    };
-
-    let (run_at_startup, background_updates) = {
-        let db_path = crate::paths::get_db_path();
-        if let Ok(conn) = crate::db::open_connection(&db_path) {
-            let bg = crate::system::schedule::Scheduler::are_background_updates_enabled(&conn);
-            let autostart = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
-            (autostart, bg)
+        if tokio::runtime::Handle::try_current().is_ok() {
+            snap_lock.try_lock().map(|g| g.clone()).unwrap_or_default()
         } else {
-            (false, true)
+            snap_lock.blocking_lock().clone()
         }
     };
+
+    let (run_at_startup, background_updates) = read_tray_menu_flags();
 
     let menu = build_tray_menu(app, &snapshot.core_text, run_at_startup, background_updates)?;
     let tooltip = make_tooltip(&snapshot.core_text);
 
     let sched_clone = scheduler.clone();
+    let sched_menu_clone = scheduler.clone();
     let mut builder = TrayIconBuilder::with_id("tray")
         .tooltip(&tooltip)
         .menu(&menu)
         .show_menu_on_left_click(false);
 
-    let icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)
-        .ok()
+    let icon = build_tray_icon_for_variant(&snapshot.icon_variant)
+        .or_else(|| tauri::image::Image::from_bytes(TRAY_ICON_PNG).ok().map(|img| tauri::image::Image::new_owned(img.rgba().to_vec(), img.width(), img.height())))
         .or_else(|| app.default_window_icon().cloned())
         .or_else(|| tauri::image::Image::from_app_icon_resource(32).ok());
     if let Some(icon) = icon {
@@ -394,7 +453,7 @@ pub fn setup_tray<R: tauri::Runtime>(
                     }
                 }
                 "check" => {
-                    sched_clone.trigger_cycle(false);
+                    sched_clone.trigger_cycle(true);
                 }
                 "startup" => {
                     let current = crate::system::autostart::is_autostart_enabled(None).unwrap_or(false);
@@ -402,6 +461,17 @@ pub fn setup_tray<R: tauri::Runtime>(
                         let _ = crate::commands::system::autostart_disable();
                     } else {
                         let _ = crate::commands::system::autostart_enable();
+                    }
+                    let core_text = {
+                        let snap_lock = sched_menu_clone.get_snapshot();
+                        if tokio::runtime::Handle::try_current().is_ok() {
+                            snap_lock.try_lock().map(|g| g.core_text.clone()).unwrap_or_default()
+                        } else {
+                            snap_lock.blocking_lock().core_text.clone()
+                        }
+                    };
+                    if !core_text.is_empty() {
+                        refresh_tray_menu(app, &core_text);
                     }
                 }
                 "background" => {
@@ -441,7 +511,7 @@ mod tests {
         assert_eq!(items.len(), 10);
         assert_eq!(items[0], "Open Furphy Addon Manager");
         assert_eq!(items[1], "Background updates on - next check 12:00");
-        assert_eq!(items[2], "Check for updates now");
+        assert_eq!(items[2], "Update all now");
         assert_eq!(items[3], "-");
         assert_eq!(items[4], "Start with Windows");
         assert_eq!(items[5], "Update addons in the background");
@@ -449,6 +519,21 @@ mod tests {
         assert_eq!(items[7], "Uninstall Furphy Addon Manager...");
         assert_eq!(items[8], "-");
         assert_eq!(items[9], "Quit");
+    }
+
+    #[test]
+    fn test_build_tray_icon_for_variant_all_states() {
+        let normal = build_tray_icon_for_variant(ICON_NORMAL).expect("normal icon");
+        let busy = build_tray_icon_for_variant(ICON_BUSY).expect("busy icon");
+        let updated = build_tray_icon_for_variant(ICON_UPDATED).expect("updated icon");
+        let failed = build_tray_icon_for_variant(ICON_FAILED).expect("failed icon");
+
+        assert_eq!(normal.width(), 32);
+        assert_eq!(normal.height(), 32);
+        assert_ne!(normal.rgba(), busy.rgba());
+        assert_ne!(normal.rgba(), updated.rgba());
+        assert_ne!(normal.rgba(), failed.rgba());
+        assert_ne!(busy.rgba(), updated.rgba());
     }
 
     #[tokio::test]
@@ -463,6 +548,7 @@ mod tests {
         assert_eq!(marker.click_outcome, "launch");
         assert_eq!(marker.menu_items.len(), 10);
         assert_eq!(marker.menu_items[1], marker.menu_status_text);
+        assert_eq!(marker.menu_items[2], "Update all now");
         assert!(marker.tooltip_history.iter().any(|t| t.contains("Checking addons")));
         assert!(marker.tooltip_history.iter().any(|t| t.contains("Updating Details")));
         assert!(marker.tooltip_history.last().unwrap().contains("Updated 1 addon at"));

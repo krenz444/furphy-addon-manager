@@ -242,7 +242,7 @@ async fn test_acceptance_tray_selftest_cycle_and_marker() {
     assert_eq!(marker.menu_items.len(), 10);
     assert_eq!(marker.menu_items[0], "Open Furphy Addon Manager");
     assert_eq!(marker.menu_items[1], marker.menu_status_text);
-    assert_eq!(marker.menu_items[2], "Check for updates now");
+    assert_eq!(marker.menu_items[2], "Update all now");
     assert_eq!(marker.menu_items[3], "-");
     assert_eq!(marker.menu_items[4], "Start with Windows");
     assert_eq!(marker.menu_items[5], "Update addons in the background");

@@ -4,6 +4,9 @@ import type {
   AppInfo,
   AppState,
   JobRecord,
+  JobProgressEvent,
+  JobProgressTallies,
+  JobQueueSnapshot,
   WtfSnapshot,
   VersionItem,
   ScannedCandidateGroup,
@@ -251,8 +254,12 @@ interface FurphyMockHook {
   partialFailureNextCheck(): void;
   setCheckedAt(iso: string | null, flavour?: string): void;
   setCheckDelay(ms: number): void;
+  setJobDelay(ms: number): void;
+  queueBehindActive(kind?: string, flavour?: string | null, delayMs?: number): Promise<JobRecord>;
+  emitBackgroundJob(kind?: string, flavour?: string | null, delayMs?: number): Promise<JobRecord>;
   noUpdates(on: boolean): void;
   staleRunningJobOnce(kind: string): void;
+  nextAddError?: string;
   readonly checkCalls: number;
 }
 
@@ -261,12 +268,233 @@ const mockCheckedAt: Record<string, string | null> = {
   retail: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
 };
 let mockCheckDelayMs = 400;
+let mockJobDelayMs = 40;
 let mockCheckCalls = 0;
 let mockNextCheck: 'ok' | 'fail' | 'busy' | 'partial' = 'ok';
 let mockNextCheckError = 'Provider unreachable';
 let mockNoUpdates = false;
 let mockStaleJobKind: string | null = null;
 let mockHookInstalled = false;
+
+interface MockQueuedEntry {
+  queue_id: string;
+  kind: string;
+  flavour: string | null;
+  target_label: string | null;
+  queued_at: string;
+  execute: (jobId: string, startedAt: string) => Promise<JobRecord>;
+  resolve: (job: JobRecord) => void;
+  reject: (err: unknown) => void;
+}
+
+let mockActiveJob: JobRecord | null = null;
+let mockActiveProgress: JobProgressEvent | null = null;
+const mockPendingQueue: MockQueuedEntry[] = [];
+let mockRunnerLoopActive = false;
+let mockQueueSeq = 0;
+
+function emitMockJobEvent(
+  type: 'job:queue-updated' | 'job:started' | 'job:progress' | 'job:finished',
+  payload: JobQueueSnapshot | JobRecord | JobProgressEvent,
+): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent('furphy-mock-job-event', {
+      detail: { type, payload },
+    }),
+  );
+}
+
+function buildQueueSnapshot(): JobQueueSnapshot {
+  return {
+    active_job: mockActiveJob ? { ...mockActiveJob } : null,
+    active_progress: mockActiveProgress
+      ? {
+          ...mockActiveProgress,
+          step: {
+            ...mockActiveProgress.step,
+            tallies: { ...mockActiveProgress.step.tallies },
+          },
+        }
+      : null,
+    queued_jobs: mockPendingQueue.map((entry, idx) => ({
+      queue_id: entry.queue_id,
+      kind: entry.kind,
+      flavour: entry.flavour,
+      target_label: entry.target_label,
+      queued_at: entry.queued_at,
+      position: idx + 1,
+    })),
+  };
+}
+
+function emitMockProgress(
+  job: JobRecord,
+  index: number,
+  total: number,
+  phase: string,
+  addon: string | null,
+  tallies: JobProgressTallies,
+  message: string | null = null,
+): void {
+  const percent = total > 0 ? Math.min(100, Math.round((index / total) * 100)) : 0;
+  const ev: JobProgressEvent = {
+    job_id: job.id,
+    kind: job.kind,
+    flavour: job.flavour,
+    step: {
+      total,
+      index,
+      addon,
+      phase,
+      bytes_done: null,
+      bytes_total: null,
+      tallies,
+    },
+    percent,
+    message,
+  };
+  mockActiveProgress = ev;
+  emitMockJobEvent('job:progress', ev);
+}
+
+function enqueueMockJob(
+  kind: string,
+  flavour: string | null,
+  targetLabel: string | null,
+  execute: (jobId: string, startedAt: string) => Promise<JobRecord>,
+): Promise<JobRecord> {
+  return new Promise<JobRecord>((resolve, reject) => {
+    mockQueueSeq += 1;
+    mockPendingQueue.push({
+      queue_id: `mock-q-${mockQueueSeq}`,
+      kind,
+      flavour,
+      target_label: targetLabel,
+      queued_at: new Date().toISOString(),
+      execute,
+      resolve,
+      reject,
+    });
+    if (mockRunnerLoopActive) {
+      emitMockJobEvent('job:queue-updated', buildQueueSnapshot());
+    } else {
+      void drainMockJobQueue();
+    }
+  });
+}
+
+async function drainMockJobQueue(): Promise<void> {
+  if (mockRunnerLoopActive) return;
+  mockRunnerLoopActive = true;
+  try {
+    while (mockPendingQueue.length > 0) {
+      const next = mockPendingQueue.shift()!;
+      const startedAt = new Date().toISOString();
+      const jobId = next.kind === 'check' ? `mock-check-${Date.now()}-${mockQueueSeq}` : `mock-job-${Date.now()}-${mockQueueSeq}`;
+      const runningRecord: JobRecord = {
+        id: jobId,
+        kind: next.kind,
+        flavour: next.flavour,
+        params: null,
+        state: 'running',
+        started_at: startedAt,
+        finished_at: null,
+        error: null,
+        results: null,
+        reload_needed: false,
+        log_path: null,
+      };
+      mockActiveJob = runningRecord;
+      mockActiveProgress = null;
+      emitMockJobEvent('job:started', { ...runningRecord });
+      emitMockJobEvent('job:queue-updated', buildQueueSnapshot());
+
+      try {
+        const result = await next.execute(jobId, startedAt);
+        mockActiveJob = null;
+        mockActiveProgress = null;
+        emitMockJobEvent('job:finished', { ...result });
+        emitMockJobEvent('job:queue-updated', buildQueueSnapshot());
+        next.resolve(result);
+      } catch (err) {
+        const finishedAt = new Date().toISOString();
+        const errMsg = err instanceof Error ? err.message : typeof err === 'string' ? err : 'Job failed';
+        const failedRecord: JobRecord = {
+          ...runningRecord,
+          state: 'failed',
+          finished_at: finishedAt,
+          error: errMsg,
+        };
+        mockActiveJob = null;
+        mockActiveProgress = null;
+        emitMockJobEvent('job:finished', { ...failedRecord });
+        emitMockJobEvent('job:queue-updated', buildQueueSnapshot());
+        next.reject(err);
+      }
+    }
+  } finally {
+    mockRunnerLoopActive = false;
+  }
+}
+
+function startBackgroundMockJob(
+  kind: string = 'update-all-flavours',
+  flavour: string | null = null,
+  delayMs: number = Math.max(mockJobDelayMs, 650),
+): Promise<JobRecord> {
+  return enqueueMockJob(kind, flavour, null, async (jobId, startedAt) => {
+    const running: JobRecord = {
+      id: jobId,
+      kind,
+      flavour,
+      params: '{}',
+      state: 'running',
+      started_at: startedAt,
+      finished_at: null,
+      error: null,
+      results: null,
+      reload_needed: false,
+      log_path: null,
+    };
+    const steps = 3;
+    const stepDelay = Math.max(20, Math.floor(delayMs / steps));
+    const tallies: JobProgressTallies = {
+      checked: 0,
+      updated: 0,
+      failed: 0,
+      up_to_date: 0,
+      updates_found: 0,
+    };
+    for (let i = 1; i <= steps; i += 1) {
+      await new Promise((r) => setTimeout(r, stepDelay));
+      tallies.checked = i;
+      emitMockProgress(
+        running,
+        i,
+        steps,
+        kind === 'check' ? 'checking' : 'updating',
+        `Step ${i}`,
+        { ...tallies },
+        `Processing ${i} of ${steps}`,
+      );
+    }
+    const now = new Date().toISOString();
+    return {
+      id: jobId,
+      kind,
+      flavour,
+      params: '{}',
+      state: 'completed',
+      started_at: startedAt,
+      finished_at: now,
+      error: null,
+      results: JSON.stringify([{ flavour: flavour ?? 'retail', updated: [], failed: [] }]),
+      reload_needed: false,
+      log_path: 'mock/sync.log',
+    };
+  });
+}
 
 // Installed on the first mock call, so it only exists in mock mode.
 function installMockHook(): void {
@@ -288,7 +516,11 @@ function installMockHook(): void {
       mockNextCheckError = message;
     },
     busyNextCheck() {
-      mockNextCheck = 'busy';
+      // Queue/run a realistic active background job so callers cleanly enqueue behind it.
+      if (!mockActiveJob) {
+        void startBackgroundMockJob('update-all-flavours', null, Math.max(mockCheckDelayMs, 650));
+      }
+      mockNextCheck = 'ok';
     },
     partialFailureNextCheck() {
       mockNextCheck = 'partial';
@@ -298,6 +530,15 @@ function installMockHook(): void {
     },
     setCheckDelay(ms) {
       mockCheckDelayMs = ms;
+    },
+    setJobDelay(ms) {
+      mockJobDelayMs = ms;
+    },
+    queueBehindActive(kind = 'update-all-flavours', flavour = null, delayMs) {
+      return startBackgroundMockJob(kind, flavour, delayMs ?? Math.max(mockJobDelayMs, 650));
+    },
+    emitBackgroundJob(kind = 'update-all-flavours', flavour = null, delayMs) {
+      return startBackgroundMockJob(kind, flavour, delayMs ?? Math.max(mockJobDelayMs, 500));
     },
     noUpdates(on) {
       mockNoUpdates = on;
@@ -338,22 +579,65 @@ function mockAddonsFor(flavour: string): Addon[] {
   return rows.map((a) => ({ ...a, update_version: null, update_file_id: null, check_status: 'up_to_date' }));
 }
 
-async function runMockCheck(flavour: string): Promise<JobRecord> {
+async function runMockCheck(flavour: string, jobId?: string, startedAt?: string): Promise<JobRecord> {
   mockCheckCalls += 1;
   const behaviour = mockNextCheck;
   mockNextCheck = 'ok';
-  // Long enough for a test to observe the busy state.
-  await new Promise((r) => setTimeout(r, mockCheckDelayMs));
-  // Tauri rejects with a plain string, so the mock does too. The real runner is busy because a job is
-  // running, and the refresh that follows reports that job.
-  if (behaviour === 'busy') {
-    mockStaleJobKind = 'update-all-flavours';
-    throw 'Another job (mock-bg-1) is currently running';
+  const addons = mockAddonsFor(flavour);
+  const resolvedJobId = jobId ?? `mock-check-${Date.now()}`;
+  const resolvedStartedAt = startedAt ?? new Date().toISOString();
+  const runningStub: JobRecord = {
+    id: resolvedJobId,
+    kind: 'check',
+    flavour,
+    params: '{}',
+    state: 'running',
+    started_at: resolvedStartedAt,
+    finished_at: null,
+    error: null,
+    results: null,
+    reload_needed: false,
+    log_path: null,
+  };
+  const stepTotal = addons.length > 0 ? Math.min(4, addons.length) : 0;
+  if (stepTotal > 0) {
+    const intervalMs = Math.max(15, Math.floor(mockCheckDelayMs / stepTotal));
+    const tallies: JobProgressTallies = {
+      checked: 0,
+      updated: 0,
+      failed: 0,
+      up_to_date: 0,
+      updates_found: 0,
+    };
+    emitMockProgress(runningStub, 0, stepTotal, 'checking', null, { ...tallies }, 'Starting update check');
+    for (let i = 1; i <= stepTotal; i += 1) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      const sampleIdx = Math.min(addons.length - 1, Math.floor(((i - 1) * addons.length) / stepTotal));
+      const sampleAddon = addons[sampleIdx];
+      tallies.checked = i;
+      if (sampleAddon?.update_version && !sampleAddon.ignore_updates && !sampleAddon.pinned_file_id) {
+        tallies.updates_found += 1;
+      } else {
+        tallies.up_to_date += 1;
+      }
+      emitMockProgress(
+        runningStub,
+        i,
+        stepTotal,
+        'checking',
+        sampleAddon?.name ?? null,
+        { ...tallies },
+        sampleAddon ? `Checking ${sampleAddon.name}` : `Step ${i} of ${stepTotal}`,
+      );
+    }
+  } else {
+    await new Promise((r) => setTimeout(r, mockCheckDelayMs));
   }
+
   if (behaviour === 'fail') throw mockNextCheckError;
 
   let toFail = behaviour === 'partial' ? 2 : 0;
-  const outcomes: MockCheckOutcome[] = mockAddonsFor(flavour).map((a) => {
+  const outcomes: MockCheckOutcome[] = addons.map((a) => {
     let status: MockCheckOutcome['status'] = 'Up-to-date';
     if (a.ignore_updates) status = 'Ignored';
     else if (a.pinned_file_id) status = 'Pinned';
@@ -376,12 +660,12 @@ async function runMockCheck(flavour: string): Promise<JobRecord> {
   mockCheckedAt[flavour] = now;
 
   return {
-    id: `mock-check-${Date.now()}`,
+    id: resolvedJobId,
     kind: 'check',
     flavour,
     params: '{}',
     state: 'completed',
-    started_at: now,
+    started_at: resolvedStartedAt,
     finished_at: now,
     error: failed.length
       ? `${failed.length} addon(s) failed: ${failed.map((o) => `${o.name}: ${o.error}`).join('; ')}`
@@ -436,6 +720,8 @@ export function getMockSettings(): Record<string, unknown> {
 export function getMockState(flavour: string = 'retail'): AppState {
   const filtered = mockAddonsFor(flavour);
   const updatesCount = filtered.filter((a) => a.update_version && !a.ignore_updates && !a.pinned_file_id).length;
+  const staleJob = takeStaleJob(flavour);
+  const snapshot = buildQueueSnapshot();
   return {
     addons: filtered,
     flavours: MOCK_FLAVOURS,
@@ -446,7 +732,9 @@ export function getMockState(flavour: string = 'retail'): AppState {
       updates_count: updatesCount,
       last_error: null,
     },
-    running_job: takeStaleJob(flavour),
+    running_job: staleJob ?? snapshot.active_job,
+    active_progress: staleJob ? null : snapshot.active_progress,
+    queued_jobs: snapshot.queued_jobs,
     untracked_count: 2,
     is_game_active: false,
     app_info: {
@@ -463,18 +751,7 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
   // Artificial micro-delay for realistic UI feedback
   await new Promise((r) => setTimeout(r, 10));
 
-  if (cmd === 'start_job') {
-    const kind = args?.kind as string;
-    if (mockJobRegistry.has(kind)) {
-      return (await mockJobRegistry.get(kind)!(
-        kind,
-        (args?.flavour as string) || null,
-        (args?.params as Record<string, unknown>) || {}
-      )) as T;
-    }
-  }
-
-  if (mockRegistry.has(cmd)) {
+  if (cmd !== 'start_job' && mockRegistry.has(cmd)) {
     return (await mockRegistry.get(cmd)!(cmd, args || {})) as T;
   }
 
@@ -499,6 +776,8 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
       const flv = (args.flavour as string) || 'retail';
       const filtered = mockAddonsFor(flv);
       const updatesCount = filtered.filter((a) => a.update_version && !a.ignore_updates && !a.pinned_file_id).length;
+      const staleJob = takeStaleJob(flv);
+      const snapshot = buildQueueSnapshot();
       const state: AppState = {
         addons: filtered,
         flavours: MOCK_FLAVOURS,
@@ -509,7 +788,9 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
           updates_count: updatesCount,
           last_error: null,
         },
-        running_job: takeStaleJob(flv),
+        running_job: staleJob ?? snapshot.active_job,
+        active_progress: staleJob ? null : snapshot.active_progress,
+        queued_jobs: snapshot.queued_jobs,
         untracked_count: 2,
         is_game_active: false,
         app_info: {
@@ -520,6 +801,10 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
         },
       };
       return state as T;
+    }
+
+    case 'get_job_queue_status': {
+      return buildQueueSnapshot() as T;
     }
 
     case 'set_ignore': {
@@ -599,45 +884,120 @@ export async function handleMockInvoke<T>(cmd: string, args: Record<string, unkn
       return 2 as T;
     }
 
+    case 'install_dependencies': {
+      const addonId = (args.addon_id as string | null) ?? null;
+      const flv = (args.flavour as string) || 'retail';
+      return (await enqueueMockJob('install_dependencies', flv, addonId, async (jobId, startedAt) => {
+        if (mockJobDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, mockJobDelayMs));
+        }
+        const now = new Date().toISOString();
+        return {
+          id: jobId,
+          kind: 'install_dependencies',
+          flavour: flv,
+          params: JSON.stringify({ addon_id: addonId }),
+          state: 'completed',
+          started_at: startedAt,
+          finished_at: now,
+          error: null,
+          results: JSON.stringify([{ addon_id: addonId ?? 'all', installed_deps: ['Ace3', 'LibSharedMedia-3.0'] }]),
+          reload_needed: false,
+          log_path: 'mock/dependencies.log',
+        };
+      })) as T;
+    }
+
     case 'start_job': {
       const kind = args.kind as string;
-      if (kind === 'check') return (await runMockCheck((args.flavour as string) || 'retail')) as T;
-      if (kind === 'add') {
-        // Steerable from Playwright: the next add fails with this text, then it is cleared.
-        const hook = (typeof window !== 'undefined' ? (window as unknown as { __furphyMock?: { nextAddError?: unknown } }).__furphyMock : undefined);
-        const failure = typeof hook?.nextAddError === 'string' ? hook.nextAddError : '';
-        if (hook && failure) {
-          hook.nextAddError = '';
-          const failed: JobRecord = {
-            id: `mock-job-${Date.now()}`,
-            kind,
-            flavour: (args.flavour as string) || 'retail',
-            params: JSON.stringify(args.params || {}),
-            state: 'failed',
-            started_at: new Date().toISOString(),
-            finished_at: new Date().toISOString(),
-            error: failure,
-            results: JSON.stringify([{ flavour: (args.flavour as string) || 'retail', updated: [], failed: [{ name: 'Addon', error: failure }] }]),
-            reload_needed: false,
-            log_path: 'mock/sync.log',
-          };
-          return failed as T;
+      const flv = (args.flavour as string) || (kind === 'update-all-flavours' ? null : 'retail');
+      const rawParams = (args.params as Record<string, unknown>) || {};
+      const targetLabel =
+        (typeof rawParams.addon_id === 'string' && rawParams.addon_id) ||
+        (typeof rawParams.addon_name === 'string' && rawParams.addon_name) ||
+        (typeof rawParams.target === 'string' && rawParams.target) ||
+        null;
+
+      return (await enqueueMockJob(kind, flv, targetLabel, async (jobId, startedAt) => {
+        if (kind === 'check') {
+          return await runMockCheck(flv || 'retail', jobId, startedAt);
         }
-      }
-      const job: JobRecord = {
-        id: `mock-job-${Date.now()}`,
-        kind,
-        flavour: (args.flavour as string) || 'retail',
-        params: JSON.stringify(args.params || {}),
-        state: 'completed',
-        started_at: new Date().toISOString(),
-        finished_at: new Date().toISOString(),
-        error: null,
-        results: JSON.stringify([{ flavour: 'retail', updated: ['Details! Damage Meter'], failed: [] }]),
-        reload_needed: false,
-        log_path: 'mock/sync.log',
-      };
-      return job as T;
+
+        if (mockJobRegistry.has(kind)) {
+          if (mockJobDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, mockJobDelayMs));
+          }
+          const customResult = await mockJobRegistry.get(kind)!(kind, flv, rawParams);
+          if (customResult && typeof customResult === 'object') {
+            return customResult as JobRecord;
+          }
+        }
+
+        if (kind === 'add') {
+          // Steerable from Playwright: the next add fails with this text, then it is cleared.
+          const hook = (typeof window !== 'undefined' ? (window as unknown as { __furphyMock?: { nextAddError?: unknown } }).__furphyMock : undefined);
+          const failure = typeof hook?.nextAddError === 'string' ? hook.nextAddError : '';
+          if (hook && failure) {
+            hook.nextAddError = '';
+            const now = new Date().toISOString();
+            return {
+              id: jobId,
+              kind,
+              flavour: flv || 'retail',
+              params: JSON.stringify(rawParams),
+              state: 'failed',
+              started_at: startedAt,
+              finished_at: now,
+              error: failure,
+              results: JSON.stringify([{ flavour: flv || 'retail', updated: [], failed: [{ name: 'Addon', error: failure }] }]),
+              reload_needed: false,
+              log_path: 'mock/sync.log',
+            };
+          }
+        }
+
+        if (mockJobDelayMs > 0) {
+          const runningStub: JobRecord = {
+            id: jobId,
+            kind,
+            flavour: flv,
+            params: JSON.stringify(rawParams),
+            state: 'running',
+            started_at: startedAt,
+            finished_at: null,
+            error: null,
+            results: null,
+            reload_needed: false,
+            log_path: null,
+          };
+          const tallies: JobProgressTallies = {
+            checked: 0,
+            updated: 0,
+            failed: 0,
+            up_to_date: 0,
+            updates_found: 0,
+          };
+          emitMockProgress(runningStub, 1, 2, 'running', targetLabel, { ...tallies }, 'Preparing');
+          await new Promise((r) => setTimeout(r, mockJobDelayMs));
+          tallies.updated = 1;
+          emitMockProgress(runningStub, 2, 2, 'completed', targetLabel, { ...tallies }, 'Finishing');
+        }
+
+        const now = new Date().toISOString();
+        return {
+          id: jobId,
+          kind,
+          flavour: flv,
+          params: JSON.stringify(rawParams),
+          state: 'completed',
+          started_at: startedAt,
+          finished_at: now,
+          error: null,
+          results: JSON.stringify([{ flavour: flv || 'retail', updated: ['Details! Damage Meter'], failed: [] }]),
+          reload_needed: false,
+          log_path: 'mock/sync.log',
+        };
+      })) as T;
     }
 
     case 'list_jobs':

@@ -91,16 +91,48 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Restore safety copies kept after a successful restore: the way back from the last restores, without filling the disk.
+/// Restore safety copies kept per flavour after a successful restore: the way back from the last restores, without filling the disk.
 const SAFETY_SNAPSHOTS_KEPT: usize = 2;
 
-/// Removes the oldest `wtf_safety_*` folders in `backups_dir` until `keep` remain. The folder names carry a sortable timestamp.
-fn prune_safety_snapshots(backups_dir: &Path, keep: usize) {
+fn sanitize_flavour_for_filename(flavour: &str) -> String {
+    let cleaned: String = flavour
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn prune_safety_snapshots_with_prefix(
+    backups_dir: &Path,
+    prefix: &str,
+    require_digit_suffix: bool,
+    keep: usize,
+) {
     let mut dirs: Vec<PathBuf> = match fs::read_dir(backups_dir) {
         Ok(entries) => entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_dir() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("wtf_safety_")).unwrap_or(false))
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix(prefix))
+                        .map(|rest| {
+                            !require_digit_suffix
+                                || rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        })
+                        .unwrap_or(false)
+            })
             .collect(),
         Err(_) => return,
     };
@@ -109,6 +141,18 @@ fn prune_safety_snapshots(backups_dir: &Path, keep: usize) {
         let oldest = dirs.remove(0);
         let _ = fs::remove_dir_all(&oldest);
     }
+}
+
+/// Removes the oldest `wtf_safety_<flavour>_*` folders in `backups_dir` until `keep` remain.
+fn prune_safety_snapshots_for_flavour(backups_dir: &Path, flavour: &str, keep: usize) {
+    let prefix = format!("wtf_safety_{}_", sanitize_flavour_for_filename(flavour));
+    prune_safety_snapshots_with_prefix(backups_dir, &prefix, true, keep);
+}
+
+/// Removes the oldest `wtf_safety_*` folders in `backups_dir` until `keep` remain. The folder names carry a sortable timestamp.
+#[cfg_attr(not(test), allow(dead_code))]
+fn prune_safety_snapshots(backups_dir: &Path, keep: usize) {
+    prune_safety_snapshots_with_prefix(backups_dir, "wtf_safety_", false, keep);
 }
 
 fn rollback_from_safety(safety_dir: &Path, wtf_root: &Path) -> std::io::Result<()> {
@@ -431,9 +475,23 @@ pub fn restore_whole_wtf(
     fs::create_dir_all(&wtf_root)
         .map_err(|e| format!("Failed to create WTF root directory '{}': {}", wtf_root.display(), e))?;
 
-    // Pre-safety snapshot: copy live WTF to <data_dir>/backups/wtf_safety_<timestamp>/
+    // Pre-safety snapshot: copy live WTF to <data_dir>/backups/wtf_safety_<flavour>_<timestamp>/
+    let safe_flavour = sanitize_flavour_for_filename(flavour);
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string();
-    let safety_dir = data_dir.join("backups").join(format!("wtf_safety_{}", timestamp));
+    let backups_dir = data_dir.join("backups");
+    let mut safety_dir = backups_dir.join(format!("wtf_safety_{}_{}", safe_flavour, timestamp));
+    if safety_dir.exists() {
+        for seq in 1..=999 {
+            let candidate = backups_dir.join(format!(
+                "wtf_safety_{}_{}_{:03}",
+                safe_flavour, timestamp, seq
+            ));
+            if !candidate.exists() {
+                safety_dir = candidate;
+                break;
+            }
+        }
+    }
 
     if wtf_root.exists() {
         copy_dir_recursive(&wtf_root, &safety_dir)
@@ -456,7 +514,7 @@ pub fn restore_whole_wtf(
         "INFO",
         &format!("Successfully restored whole WTF backup '{}' for flavour '{}'", backup_id, flavour),
     );
-    prune_safety_snapshots(&data_dir.join("backups"), SAFETY_SNAPSHOTS_KEPT);
+    prune_safety_snapshots_for_flavour(&backups_dir, flavour, SAFETY_SNAPSHOTS_KEPT);
 
     Ok(())
 }
@@ -606,6 +664,29 @@ mod tests {
         assert_eq!(content, b"SET portal \"US\"\n");
     }
 
+    struct ScopedWowRunningEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl ScopedWowRunningEnv {
+        fn set(val: &str) -> Self {
+            let guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("FURPHY_TEST_WOW_RUNNING").ok();
+            std::env::set_var("FURPHY_TEST_WOW_RUNNING", val);
+            Self { _guard: guard, prev }
+        }
+    }
+
+    impl Drop for ScopedWowRunningEnv {
+        fn drop(&mut self) {
+            match self.prev {
+                Some(ref v) => std::env::set_var("FURPHY_TEST_WOW_RUNNING", v),
+                None => std::env::remove_var("FURPHY_TEST_WOW_RUNNING"),
+            }
+        }
+    }
+
     #[test]
     fn test_restore_refused_while_wow_running() {
         let temp = tempfile::tempdir().unwrap();
@@ -624,10 +705,8 @@ mod tests {
 
         let record = backup_whole_wtf(&conn, &wow_root, "_retail_", "retail", &data_dir, None, 5).unwrap();
 
-        let _guard = crate::system::game::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("FURPHY_TEST_WOW_RUNNING", "1");
+        let _env = ScopedWowRunningEnv::set("1");
         let res = restore_whole_wtf(&conn, &wow_root, "_retail_", "retail", &record.id, &data_dir);
-        std::env::remove_var("FURPHY_TEST_WOW_RUNNING");
 
         assert!(res.is_err());
         let err = res.unwrap_err();
@@ -636,6 +715,7 @@ mod tests {
 
     #[test]
     fn test_restore_overwrites_archived_files_only() {
+        let _env = ScopedWowRunningEnv::set("0");
         let temp = tempfile::tempdir().unwrap();
         let wow_root = temp.path().join("WoW");
         let data_dir = temp.path().join("Data");
@@ -684,6 +764,7 @@ mod tests {
 
     #[test]
     fn test_restore_traversal_path_rejected() {
+        let _env = ScopedWowRunningEnv::set("0");
         let temp = tempfile::tempdir().unwrap();
         let wow_root = temp.path().join("WoW");
         let data_dir = temp.path().join("Data");
@@ -762,5 +843,74 @@ mod tests {
         for (idx, p) in paths[2..].iter().enumerate() {
             assert!(Path::new(p).exists(), "Backup index {} ({}) should exist", idx + 2, p);
         }
+    }
+
+    #[test]
+    fn test_flavour_safety_snapshots_isolated_during_rapid_restore_and_prune() {
+        let _env = ScopedWowRunningEnv::set("0");
+        let temp = tempfile::tempdir().unwrap();
+        let wow_root = temp.path().join("WoW");
+        let data_dir = temp.path().join("Data");
+
+        let retail_wtf = wow_root.join("_retail_").join("WTF");
+        let forever_wtf = wow_root.join("_classic_era_").join("WTF");
+        fs::create_dir_all(&retail_wtf).unwrap();
+        fs::create_dir_all(&forever_wtf).unwrap();
+        fs::write(retail_wtf.join("Config.wtf"), b"SET portal \"US\"\n").unwrap();
+        fs::write(forever_wtf.join("Config.wtf"), b"SET portal \"EU\"\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(INITIAL_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('retail', '_retail_', 'Retail', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('classic', '_classic_era_', 'Classic', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO flavours (id, folder, label, installed) VALUES ('classic_era', '_classic_era_', 'Forever', 1)",
+            [],
+        )
+        .unwrap();
+
+        let retail_bak = backup_whole_wtf(&conn, &wow_root, "_retail_", "retail", &data_dir, Some("r"), 5).unwrap();
+        let classic_bak = backup_whole_wtf(&conn, &wow_root, "_classic_era_", "classic", &data_dir, Some("c"), 5).unwrap();
+        let era_bak = backup_whole_wtf(&conn, &wow_root, "_classic_era_", "classic_era", &data_dir, Some("e"), 5).unwrap();
+
+        // One classic_era safety snapshot + 3 rapid retail + 1 classic safety snapshot
+        restore_whole_wtf(&conn, &wow_root, "_classic_era_", "classic_era", &era_bak.id, &data_dir).unwrap();
+        restore_whole_wtf(&conn, &wow_root, "_classic_era_", "classic", &classic_bak.id, &data_dir).unwrap();
+        for _ in 0..3 {
+            restore_whole_wtf(&conn, &wow_root, "_retail_", "retail", &retail_bak.id, &data_dir).unwrap();
+        }
+        // Classic restore 3 times should NOT prune classic_era's safety snapshot
+        for _ in 0..2 {
+            restore_whole_wtf(&conn, &wow_root, "_classic_era_", "classic", &classic_bak.id, &data_dir).unwrap();
+        }
+
+        let entries: Vec<String> = fs::read_dir(data_dir.join("backups"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+
+        let retail_count = entries.iter().filter(|n| n.starts_with("wtf_safety_retail_")).count();
+        let classic_count = entries
+            .iter()
+            .filter(|n| {
+                n.strip_prefix("wtf_safety_classic_")
+                    .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            })
+            .count();
+        let era_count = entries.iter().filter(|n| n.starts_with("wtf_safety_classic_era_")).count();
+
+        assert_eq!(retail_count, SAFETY_SNAPSHOTS_KEPT);
+        assert_eq!(classic_count, SAFETY_SNAPSHOTS_KEPT);
+        assert_eq!(era_count, 1, "classic prune must not delete classic_era snapshots: {:?}", entries);
     }
 }

@@ -11,6 +11,7 @@ use crate::engine::flavours::{detect_all_installed_flavours, sync_installed_flav
 use crate::engine::ignore::set_ignore_updates;
 use crate::engine::pin::{pin_addon, unpin_addon};
 use crate::engine::scan::{scan_untracked_addons, ScannedCandidateGroup};
+use crate::jobs::progress::{JobProgressEvent, QueuedJobDto};
 use crate::jobs::runner::{JobRecord, JobRunner};
 use crate::paths::{detect_wow_root, get_db_path, is_dev};
 use crate::system::game::is_wow_running;
@@ -84,6 +85,10 @@ pub struct AppStateDto {
     pub active_flavour: String,
     pub freshness: FreshnessDto,
     pub running_job: Option<JobRecord>,
+    #[serde(default)]
+    pub active_progress: Option<JobProgressEvent>,
+    #[serde(default)]
+    pub queued_jobs: Vec<QueuedJobDto>,
     pub untracked_count: usize,
     pub is_game_active: bool,
     pub app_info: AppInfoDto,
@@ -325,7 +330,7 @@ pub fn get_app_info() -> Result<AppInfoDto, String> {
 }
 
 #[tauri::command]
-pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
+pub fn get_state(runner: State<'_, Arc<JobRunner>>, flavour: Option<String>) -> Result<AppStateDto, String> {
     let db_path = get_db_path();
     let mut conn = open_connection(&db_path).map_err(|e| e.to_string())?;
     let wow_root = detect_wow_root(None).ok();
@@ -380,8 +385,9 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
         last_error,
     };
 
-    // Running job
-    let running_job = conn
+    // Running job & live queue state
+    let queue_snap = runner.queue_snapshot();
+    let db_running_job = conn
         .query_row(
             "SELECT id, kind, flavour, params, state, started_at, finished_at, error, results, reload_needed, log_path \
              FROM jobs WHERE state = 'running' ORDER BY started_at DESC LIMIT 1",
@@ -403,6 +409,9 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
             },
         )
         .ok();
+    let running_job = queue_snap.active_job.or(db_running_job);
+    let active_progress = queue_snap.active_progress;
+    let queued_jobs = queue_snap.queued_jobs;
 
     // Untracked count: count ONLY identifiable groups per §2.E
     let untracked_count = if let Some(target_flv) = installed.iter().find(|f| f.id == active_flavour) {
@@ -427,6 +436,8 @@ pub fn get_state(flavour: Option<String>) -> Result<AppStateDto, String> {
         active_flavour,
         freshness,
         running_job,
+        active_progress,
+        queued_jobs,
         untracked_count,
         is_game_active,
         app_info,

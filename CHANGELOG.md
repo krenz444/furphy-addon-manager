@@ -1,5 +1,14 @@
 # Furphy Addon Manager - changelog
 
+## 2.2.1: queued jobs, live task status bar, and quieter background updates
+
+- **Colliding actions queue instead of failing with "Another job is currently running".** Starting a check, update, install, adopt, remove, rollback, copy, or dependency job while another task is running now waits in order behind it instead of returning a busy error. Clicking the active check or install waits in line and shows a queued notice with the active task's name.
+- **Persistent task status bar at the top of the window.** A top banner stays visible across every tab, showing whether Furphy is idle, running a task (with live phase, current addon, step counts, tallies, and progress bar), or has tasks waiting in line (`Queued (N)` expandable list), plus quick summary, Log, and Dismiss controls once finished.
+- **Faster addon checks and updates.** Checks and addon downloads run with bounded concurrency and reuse the active Wago session across runs while keeping database writes sequential and safe.
+- **Automatic background cycles stay out of the way.** Tray checks no longer fire 90 seconds after every startup or PC wake when they already ran recently; they wait until the window closes, any running or queued work finishes, and 60 seconds after interactive tasks complete.
+- **Tray menu "Update all now" always runs immediately.** Renamed `"Check for updates now"` to `"Update all now"` to match what it does (updates across all installed game versions), and clicking it now runs a manual cycle even when automatic background updates are switched off.
+- **Additional race and safety hardening.** Per-flavour WTF restore safety folders no longer collide across rapid restores, host connectivity circuit breakers reset after a 60-second cooldown, second-instance activation runs before database startup recovery, and Tray status badge dots update live for busy, updated, and failed states.
+
 ## 2.2.0: zip installs, Tukui, favourites and groups, release dates and copying addons
 
 - **Install an addon from a zip file or link.** Get Addons has a From zip tab. Type or paste the path of a .zip on this PC, drop the file on the tab, or paste an https link, and pick the game version. Furphy looks for folders with a .toc file, refuses a zip without one, never overwrites a folder that already belongs to another addon, and stops a download over 200 MB. A zip addon has no update source, so checks never ask the network about it. Installing the same zip again replaces the previous copy.
